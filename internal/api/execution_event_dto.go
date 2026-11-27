@@ -19,9 +19,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// SubmitExecutionEventRequest is the internal worker submission DTO.
-// Unknown JSON fields are ignored by Go's standard decoder; route handlers can opt into
-// strict decoding later by using json.Decoder.DisallowUnknownFields.
 type SubmitExecutionEventRequest struct {
 	Type        string                           `json:"type"`
 	Severity    string                           `json:"severity,omitempty"`
@@ -36,7 +33,6 @@ type SubmitExecutionEventRequest struct {
 	Truncation  *events.ExecutionEventTruncation `json:"truncation,omitempty"`
 }
 
-// ToStoreEvent converts a submission DTO to the store-facing event contract.
 func (r SubmitExecutionEventRequest) ToStoreEvent(namespace, streamType, streamID string) (*store.ExecutionEvent, error) {
 	typ := events.NormalizeExecutionEventType(r.Type)
 	if typ == "" {
@@ -64,7 +60,6 @@ func (r SubmitExecutionEventRequest) ToStoreEvent(namespace, streamType, streamI
 	}, nil
 }
 
-// ExecutionEventResponse is the public API representation of an execution event.
 type ExecutionEventResponse struct {
 	ID                string                           `json:"id"`
 	Namespace         string                           `json:"namespace"`
@@ -93,14 +88,12 @@ type ExecutionEventResponse struct {
 	CreatedAt         time.Time                        `json:"createdAt"`
 }
 
-// SubmitExecutionEventResponse is returned after an event append succeeds.
 type SubmitExecutionEventResponse struct {
 	ID        string    `json:"id"`
 	Seq       int64     `json:"seq"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
-// ListExecutionEventsResponse is the API response for listing one event stream.
 type ListExecutionEventsResponse struct {
 	Namespace  string                   `json:"namespace"`
 	StreamType string                   `json:"streamType"`
@@ -110,16 +103,12 @@ type ListExecutionEventsResponse struct {
 	Events     []ExecutionEventResponse `json:"events"`
 }
 
-// SessionExecutionEventResponse is the public representation of a task-derived
-// session event. Seq is the session-level cursor; taskSeq is the source task
-// stream sequence.
 type SessionExecutionEventResponse struct {
 	ExecutionEventResponse
 	TaskSeq      int64  `json:"taskSeq"`
 	TaskStreamID string `json:"taskStreamID"`
 }
 
-// ListSessionExecutionEventsResponse is the API response for an aggregated session stream.
 type ListSessionExecutionEventsResponse struct {
 	Namespace  string                          `json:"namespace"`
 	StreamType string                          `json:"streamType"`
@@ -129,8 +118,6 @@ type ListSessionExecutionEventsResponse struct {
 	Events     []SessionExecutionEventResponse `json:"events"`
 }
 
-// NewExecutionEventResponse converts a store event to an API DTO and intentionally
-// omits store-only fields such as ExecutionEvent.Usage.
 func NewExecutionEventResponse(event store.ExecutionEvent) ExecutionEventResponse {
 	var response ExecutionEventResponse
 	fillExecutionEventResponse(&response, &event)
@@ -174,7 +161,6 @@ func fillExecutionEventResponse(response *ExecutionEventResponse, event *store.E
 	}
 }
 
-// NewListExecutionEventsResponse builds a list DTO from store events.
 func NewListExecutionEventsResponse(namespace, streamType, streamID string, afterSeq, latestSeq int64, storeEvents []store.ExecutionEvent) ListExecutionEventsResponse {
 	responses := make([]ExecutionEventResponse, len(storeEvents))
 	for i := range storeEvents {
@@ -190,12 +176,10 @@ func NewListExecutionEventsResponse(namespace, streamType, streamID string, afte
 	}
 }
 
-// NewSessionExecutionEventResponse converts an aggregated store event to a session DTO.
 func NewSessionExecutionEventResponse(event store.SessionExecutionEvent) SessionExecutionEventResponse {
 	return newSessionExecutionEventResponse(&event)
 }
 
-// NewListSessionExecutionEventsResponse builds a session timeline DTO.
 func NewListSessionExecutionEventsResponse(namespace, sessionName string, afterSeq, latestSeq int64, storeEvents []store.SessionExecutionEvent) ListSessionExecutionEventsResponse {
 	responses := make([]SessionExecutionEventResponse, len(storeEvents))
 	for i := range storeEvents {
@@ -351,9 +335,6 @@ func intField(body map[string]any, keys ...string) int {
 	return 0
 }
 
-// boundedJSONNumberInt accepts integral JSON decimal/exponent encodings
-// without constructing arbitrary-precision values. Values outside the
-// platform int range clamp, while negative and fractional values remain zero.
 func boundedJSONNumberInt(number json.Number) int {
 	raw := number.String()
 	if raw == "" || raw[0] == '-' {

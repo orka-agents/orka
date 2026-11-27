@@ -18,7 +18,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// fakeResultStore implements the ResultStore interface for testing.
 type fakeResultStore struct {
 	data map[string][]byte
 }
@@ -165,7 +164,6 @@ func TestFetchTaskOutputTool_Execute(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tool := &FetchTaskOutputTool{}
 
-			// Special case: test missing tool context
 			if tt.name == "missing tool context" {
 				result, err := tool.Execute(context.Background(), json.RawMessage(tt.args))
 				if err != nil {
@@ -210,7 +208,6 @@ func TestFetchTaskOutputTool_Execute(t *testing.T) {
 				}
 			}
 
-			// Verify success structure
 			var res ChatToolResult
 			if err := json.Unmarshal([]byte(result), &res); err != nil {
 				t.Fatalf("failed to parse result: %v", err)

@@ -8,9 +8,6 @@ import (
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
-// Native template references are an explicit operator selection. Upstream
-// templates have no Kubernetes labels, annotations or Ready condition. The
-// Actor's native wakeup probe gates router ingress after each ResumeActor.
 func validateNativeSubstrateRoutableTemplate(ctx context.Context, cfg SubstrateConfig, request *ExecutionWorkspaceRequest) error {
 	cfg = cfg.WithDefaults()
 	ctx, cancel := context.WithTimeout(ctx, cfg.ClaimTimeout)
@@ -34,12 +31,6 @@ func validateNativeSubstrateRoutableTemplate(ctx context.Context, cfg SubstrateC
 	return nil
 }
 
-// nativeSubstrateTemplateSuspendUnsupported reports whether Substrate cannot
-// suspend an Actor of this template. A VOLUMES snapshot captures only
-// durable-directory mounts; with none, the worker refuses the checkpoint before
-// it stops the workload, and Substrate then records the Actor as crashed while
-// its sandbox may keep running. Such an Actor holds no data a suspend would
-// keep, so it is stopped by deleting it.
 func nativeSubstrateTemplateSuspendUnsupported(template *ateapipb.ActorTemplate) bool {
 	if template.GetSnapshotConfig().GetPreferredFidelity() != ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES {
 		return false

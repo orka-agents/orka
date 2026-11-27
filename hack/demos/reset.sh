@@ -25,10 +25,6 @@ log "Cleaning up demo security resources"
 kubectl delete repositoryscans -n "${DEMO_NAMESPACE}" -l "$(demo_label_selector)" --ignore-not-found >/dev/null 2>&1 || true
 delete_repository_scans_by_name_prefix "${DEMO_SECURITY_SCAN_PREFIX}"
 
-# Demo 70 (Agent Substrate) normally runs on its OWN kind cluster, torn down
-# via `make demo-substrate-down`. This selector-scoped delete only matters if
-# the demo was pointed at a shared cluster; Substrate Actors are reaped by the
-# controller when the owning Tasks are removed.
 log "Cleaning up Agent Substrate demo resources"
 substrate_namespace="${DEMO_SUBSTRATE_NAMESPACE:-default}"
 kubectl delete tasks -n "${substrate_namespace}" \

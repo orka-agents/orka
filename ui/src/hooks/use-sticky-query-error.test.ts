@@ -10,11 +10,9 @@ describe('useStickyQueryError', () => {
     })
     expect(result.current).toBe(failure)
 
-    // Polling again clears `error` while nothing has loaded.
     rerender({ data: undefined, error: null, errorUpdatedAt: 100 })
     expect(result.current).toBe(failure)
 
-    // A successful load ends it.
     rerender({ data: { items: [] }, error: null, errorUpdatedAt: 100 })
     expect(result.current).toBeNull()
   })
@@ -23,7 +21,6 @@ describe('useStickyQueryError', () => {
     const { result, rerender } = renderHook((state: { data: unknown; error: Error | null; errorUpdatedAt: number }) => useStickyQueryError(state), {
       initialProps: { data: undefined, error: new Error('old'), errorUpdatedAt: 100 },
     })
-    // A different query (e.g. another namespace) has its own error timestamp.
     rerender({ data: undefined, error: null, errorUpdatedAt: 0 })
     expect(result.current).toBeNull()
   })

@@ -13,8 +13,6 @@ for command in helm jq kubectl openssl python3; do
   command -v "${command}" >/dev/null 2>&1 || fail "missing required command: ${command}"
 done
 
-# Generate actual certificates. A Kustomize Service certificate cannot pass
-# the packaged chart's admission requests.
 mkdir "${test_root}/tls"
 live_acp_release_chart_tls "${test_root}/tls"
 openssl verify -CAfile "${test_root}/tls/ca.crt" -verify_hostname orka-webhook.orka-system.svc \
@@ -61,8 +59,6 @@ jq -e '
   and ([.. | objects | keys[] | select(. == "token" or . == "controllerToken" or . == "capabilitySecret" or . == "secret")] | length == 0)
 ' "${test_root}/values.json" >/dev/null
 
-# Render the actual chart from an archive with the helper's values. This
-# catches mismatched value keys, Deployment names, and worker digest wiring.
 helm package "${root}/cmd/build/helmify/static" --destination "${test_root}" >/dev/null
 archives=("${test_root}"/orka-*.tgz)
 [[ "${#archives[@]}" == 1 ]] || fail "expected exactly one test chart archive"
@@ -121,7 +117,6 @@ for mutation in \
     fail "recovery accepted changed storage, task identity, attempt, or worker execution"
   fi
 done
-# Empty evidence must never qualify, even if both inputs happen to agree.
 printf '{}\n' >"${test_root}/empty.json"
 if live_acp_release_chart_assert_recovery "${test_root}/empty.json" "${test_root}/empty.json" 2>/dev/null; then
   fail "recovery accepted empty evidence"
@@ -151,8 +146,6 @@ if live_acp_release_chart_assert_mode_rejection "${test_root}/mode-before.json" 
 fi
 printf '%s\n' 'ok - mode rejection requires the expected guard and unchanged release state'
 
-# Exercise real kubectl namespace resolution against a local Kubernetes API
-# fixture, including resources that inherit Helm's release namespace.
 (
   chart_work_dir="${test_root}/stable-state"
   mkdir "${chart_work_dir}"
@@ -243,8 +236,6 @@ PY
 )
 printf '%s\n' 'ok - state observation preserves explicit namespaces and defaults inherited namespaces without editing kubeconfig'
 
-# A local HTTP server stands in for kubectl port-forward. Check the real curl
-# and PID cleanup path without creating a cluster or using provider access.
 mkdir "${test_root}/bin" "${test_root}/api"
 cat >"${test_root}/bin/kubectl" <<'PY'
 #!/usr/bin/env python3
@@ -297,7 +288,6 @@ chmod +x "${test_root}/bin/kubectl"
 )
 printf '%s\n' 'ok - authenticated result comparison rejects changed data and stops its port-forward'
 
-# Guard failures occur before any command can touch an unrelated cluster.
 kubectl() { fail "unowned context reached kubectl"; }
 if LIVE_ACP_KIND_CREATED=0 LIVE_ACP_CONTEXT=production live_acp_kind_deploy_release_chart >"${test_root}/guard.log" 2>&1; then
   fail "helper accepted an unowned context"

@@ -12,9 +12,6 @@ const (
 	elfMachineAARCH6 = 0xb7
 )
 
-// elfArch reports whether the first bytes of a file are an ELF header and, if
-// so, which supported architecture the e_machine field names. Unknown
-// machines return an empty arch with isELF true so the caller can reject them.
 func elfArch(r io.Reader) (arch string, isELF bool, err error) {
 	var header [elfHeaderBytes]byte
 	n, readErr := io.ReadFull(r, header[:])

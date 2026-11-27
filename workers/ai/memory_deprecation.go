@@ -14,8 +14,6 @@ import (
 	"github.com/orka-agents/orka/internal/aitools"
 )
 
-// warnDeprecatedMemoryTool runs only at an enabled built-in call site. Log only
-// the known tool name, never the model's arguments or memory/transcript content.
 func warnDeprecatedMemoryTool(name string, deprecated []string) {
 	if !slices.Contains(aitools.MemoryToolNames(), name) || !slices.Contains(deprecated, name) {
 		return

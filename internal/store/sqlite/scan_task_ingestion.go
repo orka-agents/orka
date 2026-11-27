@@ -64,8 +64,6 @@ func (s *Store) GetScanTaskIngestion(ctx context.Context, task store.ScanTaskIde
 	return ingestion, nil
 }
 
-// securityNow is the clock of the security writes a scan ingestion step makes:
-// the step's time inside a preview or commit, and the wall clock otherwise.
 func (s *Store) securityNow() time.Time {
 	if s.securityClock != nil {
 		return s.securityClock().UTC()
@@ -73,7 +71,6 @@ func (s *Store) securityNow() time.Time {
 	return time.Now().UTC()
 }
 
-// PreviewScanTaskIngestion runs steps in a transaction it always rolls back.
 func (s *Store) PreviewScanTaskIngestion(ctx context.Context, preview store.ScanIngestionPreview) ([]store.ScanIngestionReadResult, error) {
 	if strings.TrimSpace(preview.Namespace) == "" || strings.TrimSpace(preview.RepositoryScan) == "" {
 		return nil, store.ValidationErrorf("scan ingestion preview requires a namespace and repository scan")
@@ -92,8 +89,6 @@ func (s *Store) PreviewScanTaskIngestion(ctx context.Context, preview store.Scan
 	return (&Store{db: s.db, securityTx: tx}).runScanIngestionSteps(ctx, preview.At, preview.Steps, false)
 }
 
-// CommitScanTaskIngestion applies an ingestion computed against ExpectedRun
-// while the run and every recorded read are unchanged.
 func (s *Store) CommitScanTaskIngestion(ctx context.Context, commit store.ScanTaskIngestionCommit) (bool, error) {
 	return writeOperation(ctx, s, "CommitScanTaskIngestion", nil, func(ctx context.Context) (bool, error) {
 		return s.securityWriteStore(ctx).commitScanTaskIngestionWrite(ctx, commit)
@@ -168,9 +163,6 @@ func sameScanRunIdentity(a, b store.ScanRun) bool {
 		a.RepositoryScanUID == b.RepositoryScanUID && a.RepositoryScanGeneration == b.RepositoryScanGeneration
 }
 
-// validateScanIngestionSteps requires one operation per step, inside the
-// ingestion's namespace and, where a step names one, its repository scan. A
-// commit also requires the observed result of every read.
 func validateScanIngestionSteps(namespace, repositoryScan string, steps []store.ScanIngestionStep, commit bool) error {
 	for i, step := range steps {
 		namespaces, scans, operations := scanIngestionStepScope(step)
@@ -237,9 +229,6 @@ func ptrField[T any](value *T, field func(*T) string) string {
 	return field(value)
 }
 
-// runScanIngestionSteps runs steps on a transaction-scoped store, giving step
-// i the time at plus i nanoseconds. With compare set, each read must return
-// its Expect.
 func (s *Store) runScanIngestionSteps(ctx context.Context, at time.Time, steps []store.ScanIngestionStep, compare bool) ([]store.ScanIngestionReadResult, error) {
 	if s.securityTx == nil {
 		return nil, fmt.Errorf("scan ingestion steps require a transaction")

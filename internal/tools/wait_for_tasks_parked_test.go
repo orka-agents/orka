@@ -107,8 +107,6 @@ func TestWaitForTasksClearsAnEarlierPollsWaitState(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
 	}
-	// The first poll sees the child parked; by the second it has resumed into
-	// a continuation that finished without a wait of its own.
 	childReads := 0
 	c := newFakeClientWithInterceptorFuncs(interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -160,7 +158,6 @@ func TestWaitForTasksReportsAMissingContinuationAsAFinalChainError(t *testing.T)
 			},
 		},
 	}
-	// The continuation was deleted while its predecessor remains.
 	started := time.Now()
 	out, err := NewWaitForTasksTool(newFakeClient(child)).Execute(context.Background(), json.RawMessage(`{"tasks":["child"],"timeout":"30s"}`))
 	if err != nil {
@@ -202,8 +199,6 @@ func TestWaitForTasksReportsAReplacedContinuationAsAFinalChainError(t *testing.T
 	}
 }
 
-// resumedWaitChild returns a child that parked and resumed into child-next,
-// and that continuation.
 func resumedWaitChild() (*corev1alpha1.Task, *corev1alpha1.Task) {
 	child := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: testNamespace, UID: "uid-child"},
@@ -225,8 +220,6 @@ func resumedWaitChild() (*corev1alpha1.Task, *corev1alpha1.Task) {
 	return child, next
 }
 
-// runWaitForTasksWithPolicyReader waits on "child" through cache while the
-// tool context supplies authoritative as the uncached reader.
 func runWaitForTasksWithPolicyReader(t *testing.T, cache client.Client, authoritative client.Reader, timeout string) WaitForTasksResult {
 	t.Helper()
 	previous := waitForTasksPollInterval
@@ -246,9 +239,7 @@ func runWaitForTasksWithPolicyReader(t *testing.T, cache client.Client, authorit
 
 func TestWaitForTasksFollowsAContinuationOnlyTheAuthoritativeReaderSees(t *testing.T) {
 	for name, cached := range map[string]func(child *corev1alpha1.Task) []client.Object{
-		// The cache has not observed the continuation at all.
 		"missing from the cache": func(child *corev1alpha1.Task) []client.Object { return []client.Object{child} },
-		// The cache still holds another Task under the continuation's name.
 		"stale in the cache": func(child *corev1alpha1.Task) []client.Object {
 			return []client.Object{child, &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{Name: "child-next", Namespace: testNamespace, UID: "uid-older"},
@@ -272,7 +263,6 @@ func TestWaitForTasksFollowsAContinuationOnlyTheAuthoritativeReaderSees(t *testi
 func TestWaitForTasksConfirmsABrokenChainOnlyFromAnAuthoritativeRead(t *testing.T) {
 	child, _ := resumedWaitChild()
 
-	// The authoritative reader agrees the continuation is gone: final.
 	result := runWaitForTasksWithPolicyReader(t, newFakeClient(child.DeepCopy()), newFakeClient(child.DeepCopy()), "5s")
 	got := result.Results[0]
 	if !result.Completed || got.Phase != taskPhaseErrorString || !strings.Contains(got.Result, "continuation chain is broken") {
@@ -298,7 +288,6 @@ func TestWaitForTasksConfirmsABrokenChainOnlyFromAnAuthoritativeRead(t *testing.
 		"the Task was replaced by a new one": newFakeClient(replaced),
 	} {
 		t.Run(name, func(t *testing.T) {
-			// Many cached polls miss the continuation; none of them is proof.
 			result := runWaitForTasksWithPolicyReader(t, newFakeClient(child.DeepCopy()), authoritative, "200ms")
 			got := result.Results[0]
 			if result.Completed || strings.Contains(got.Result, "continuation chain is broken") {

@@ -28,8 +28,6 @@ const testE2EPromptWriteAmbiguityMarker = "ORKA_E2E_WS_LC_AMBIGUOUS_OK"
 func TestRedactedPromptErrorDetailStripsC1ControlsBeforeRedaction(t *testing.T) {
 	t.Parallel()
 	const key = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
-	// A C1 control (U+0085) and a C0 control inside the credential must not
-	// split the token past the redactor.
 	err := errors.New("upstream rejected api_key=" + key[:12] + "\u0085" + key[12:24] + "\x01" + key[24:] + " for the model")
 	got := redactedPromptErrorDetail(err)
 	for _, fragment := range []string{key[:12], key[12:24], key[24:]} {
@@ -45,8 +43,6 @@ func TestRedactedPromptErrorDetailStripsC1ControlsBeforeRedaction(t *testing.T) 
 func TestRedactedPromptErrorDetailReassemblesLineWrappedCredential(t *testing.T) {
 	t.Parallel()
 	const key = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
-	// A credential wrapped across a line break must reassemble into one
-	// contiguous token for the redactor, not survive as two fragments.
 	err := errors.New("upstream rejected " + key[:11] + "\n" + key[11:] + " for the model")
 	got := redactedPromptErrorDetail(err)
 	if strings.Contains(got, key[:11]) || strings.Contains(got, key[11:]) || !strings.Contains(got, "[REDACTED]") {
@@ -57,8 +53,6 @@ func TestRedactedPromptErrorDetailReassemblesLineWrappedCredential(t *testing.T)
 func TestRedactedPromptErrorDetailStripsFormatRunesBeforeRedaction(t *testing.T) {
 	t.Parallel()
 	const key = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
-	// A zero-width space (U+200B, category Cf) inside the credential must
-	// not split the token past the redactor.
 	err := errors.New("upstream rejected api_key=" + key[:12] + "\u200b" + key[12:] + " for the model")
 	got := redactedPromptErrorDetail(err)
 	if strings.Contains(got, key[:12]) || strings.Contains(got, key[12:]) || !strings.Contains(got, "[REDACTED]") {
@@ -116,8 +110,6 @@ func TestE2EPromptWriteAmbiguityIsOneShotPerOperation(t *testing.T) {
 	if err != nil || !consumed {
 		t.Fatal("distinct operation did not receive its own ambiguity fault")
 	}
-	// RuntimeSession state may be discarded and recreated inside the same
-	// supervisor. The one-shot decision belongs to the external recorder.
 	consumed, err = server.consumeE2EPromptWriteAmbiguityLocked(context.Background(), request, testE2EPromptWriteAmbiguityMarker)
 	if err != nil || consumed {
 		t.Fatal("runtime Session recreation reset the process-local ambiguity ledger")
@@ -266,8 +258,6 @@ func TestSettledPromptDoesNotBlockNextIdleTurn(t *testing.T) {
 	if err := original.Validate(); err != nil {
 		t.Fatalf("first prompt replay: %v", err)
 	}
-	// Simulate completed workspace validation. This replay test does not need
-	// the Linux-only process-freeze proof used by the workspace endpoint.
 	server.mu.Lock()
 	state := server.sessions[create.RuntimeSessionID]
 	state.descriptor.State = harnessv2.RuntimeSessionStateIdle
@@ -988,8 +978,6 @@ func newUpstreamFailureFixture(t *testing.T) upstreamFailureFixture {
 
 func (f upstreamFailureFixture) recordInference(t *testing.T, status int, detail string) {
 	t.Helper()
-	// The real handler begins in-flight accounting at route authorization
-	// and releases it when it returns.
 	testBeginInferenceRequest(f.proxy)
 	defer f.proxy.releaseInferenceRequest(providerRequestInference)
 	seq := testAllocateInferenceSeq(f.proxy)
@@ -1014,8 +1002,6 @@ func (f upstreamFailureFixture) settleCompleted(t *testing.T) (harnessv2.Event, 
 
 func TestUndrainedInferenceRequestFailsCompletedSettlement(t *testing.T) {
 	fixture := newUpstreamFailureFixture(t)
-	// An earlier inference succeeded, but one admitted request is still in
-	// flight when the child settles and never resolves within the grace.
 	fixture.recordInference(t, http.StatusOK, "")
 	fixture.proxy.mu.Lock()
 	fixture.proxy.inflightInference++
@@ -1038,9 +1024,6 @@ func TestUndrainedInferenceRequestFailsCompletedSettlement(t *testing.T) {
 
 func TestUndrainedMetadataRequestKeepsCompletedSettlement(t *testing.T) {
 	fixture := newUpstreamFailureFixture(t)
-	// The final inference resolved, but a metadata request (GET /models,
-	// count_tokens) is still in flight; its outcome never feeds prompt
-	// classification, so settlement must not fail closed on it.
 	fixture.recordInference(t, http.StatusOK, "")
 	fixture.proxy.mu.Lock()
 	fixture.proxy.inflight++
@@ -1105,9 +1088,6 @@ func TestProviderUpstreamFailureOnlyMapsToTerminalFailure(t *testing.T) {
 }
 
 func TestProviderUpstreamFinalFailureAfterSuccessMapsToTerminalFailure(t *testing.T) {
-	// A tool-call round succeeds, then the follow-up inference is rate
-	// limited: the agent may render that error as assistant text and settle
-	// end_turn, but the prompt must fail.
 	fixture := newUpstreamFailureFixture(t)
 	for _, status := range []int{http.StatusOK, http.StatusTooManyRequests} {
 		fixture.recordInference(t, status, "rate limit exceeded")
@@ -1147,9 +1127,6 @@ func TestProviderUpstreamSuccessKeepsPromptCompleted(t *testing.T) {
 	})
 }
 
-// A completed answer is stored as the Task's result, so a credential-shaped
-// value the session does not know gets the pattern redaction streamed text
-// gets, not only the exact-value replacement.
 func TestCompletedResultIsPatternRedacted(t *testing.T) {
 	server, cfg, _ := newTestServer(t, "immediate")
 	fence := cfg.Fence
@@ -1374,7 +1351,6 @@ func TestWorkspaceDeltaPathAllowedRecursiveGlobs(t *testing.T) {
 		path     string
 		patterns []string
 	}{
-		// `**` must span multiple directory levels, gitignore-style.
 		{path: "src/pkg/util/helpers.go", patterns: []string{"src/**/*.go"}},
 		{path: "src/one.go", patterns: []string{"src/**/*.go"}},
 		{path: "main.go", patterns: []string{"**/*.go"}},
@@ -1402,8 +1378,6 @@ func TestWorkspaceDeltaPathAllowedRecursiveGlobs(t *testing.T) {
 			t.Errorf("expected %q to not match %v", tt.path, tt.patterns)
 		}
 	}
-	// Multiple ** segments over a long non-matching path must complete without
-	// backtracking blowup.
 	hostile := strings.Repeat("a/", 512) + "z.txt"
 	if workspaceDeltaPathAllowed(hostile, []string{"**/b/**/c/**/d/**/e/**/*.go"}) {
 		t.Fatal("hostile path unexpectedly matched")
@@ -1622,8 +1596,6 @@ func TestProviderUpstreamFailureTerminalEventRedactsCredentials(t *testing.T) {
 	}
 }
 
-// testBeginInferenceRequest mirrors the in-flight inference accounting that
-// authorizeRequest performs for an inference-class route.
 func testBeginInferenceRequest(s *providerProxySession) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1636,7 +1608,6 @@ func testBeginInferenceRequest(s *providerProxySession) {
 func TestPromptStateKeepsUntaggedTextAfterNamedMessages(t *testing.T) {
 	var state promptState
 	state.appendAssistantText("Reviewing the change.", "", "msg_progress", 1<<20)
-	// codex-acp sends a /review result without a message ID.
 	state.appendAssistantText("Review: ", "", "", 1<<20)
 	state.appendAssistantText("no issues found.", "", "", 1<<20)
 	if got, _ := state.terminalResultText(); got != "Review: no issues found." {
@@ -1646,7 +1617,6 @@ func TestPromptStateKeepsUntaggedTextAfterNamedMessages(t *testing.T) {
 	if got, _ := state.terminalResultText(); got != "Final." {
 		t.Fatalf("terminalResultText() = %q, want the later named message", got)
 	}
-	// A warning in the middle of a named message does not drop its start.
 	state.appendAssistantText("Warning: slow\n\n", "", "", 1<<20)
 	state.appendAssistantText(" Done.", "", "msg_final", 1<<20)
 	if got, _ := state.terminalResultText(); got != "Final. Done." {

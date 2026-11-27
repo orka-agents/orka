@@ -18,8 +18,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// consolidationGrants allows the listed verb/resource pairs in the test
-// namespace and records every check the policy makes.
 type consolidationGrants struct {
 	allowed map[string]bool
 	checked []string

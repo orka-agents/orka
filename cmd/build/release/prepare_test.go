@@ -27,11 +27,8 @@ func testGit(t *testing.T, dir string, args ...string) string {
 
 func initTestGitRemoteAndCheckout(t *testing.T, root, remote, checkout string) {
 	t.Helper()
-	// Disable receive-pack housekeeping before any push into the bare fixture.
-	// Detached maintenance can otherwise outlive Git and race TempDir cleanup.
 	testGit(t, root, "init", "--bare", remote)
 	testGit(t, root, "--git-dir", remote, "config", "--local", "receive.autogc", "false")
-	// Clone persists this setting before fetching; it also covers later commits and fetches.
 	testGit(t, root, "clone", "--config", "maintenance.auto=false", remote, checkout)
 }
 
@@ -487,7 +484,6 @@ func TestExactChartPublicationPreservesSiteRepairsIndexAndRetries(t *testing.T) 
 		}
 		result := runCommand(spec)
 		if result.err == nil && slices.Equal(spec.args, []string{"git", "init", "--quiet"}) {
-			// Keep publishChart's scratch checkouts isolated from background maintenance too.
 			testGit(t, spec.dir, "config", "--local", "maintenance.auto", "false")
 		}
 		return result, true

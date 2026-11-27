@@ -129,7 +129,6 @@ func TestCompatRouterRoutesUsingAuthenticatedCredential(t *testing.T) {
 	router, err := NewCompatRouter(compatRouterTokenClient(t, identities), routes)
 	require.NoError(t, err)
 	t.Cleanup(router.Close)
-	// Configuration is frozen, not a caller-controlled mutable routing table.
 	routes["team-a"] = "http://unused.invalid"
 	entry := httptest.NewServer(router)
 	t.Cleanup(entry.Close)
@@ -216,7 +215,6 @@ func TestCompatRouterDenialsNeverReachInstallation(t *testing.T) {
 				}
 				req := httptest.NewRequest(method, path+tc.query, strings.NewReader(`{}`))
 				if tc.token != "" {
-					// Use the parent test's credential names.
 					parent, _, _ := strings.Cut(t.Name(), "/")
 					req.Header.Set(AuthHeader, BearerPrefix+parent+tc.token)
 				}

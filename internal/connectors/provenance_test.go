@@ -60,7 +60,6 @@ func TestRequesterStampBindsUIDAndRequester(t *testing.T) {
 	if RequesterStamp(key, "", requester.Issuer, requester.Subject) != "" {
 		t.Fatal("a stamp needs a UID to bind")
 	}
-	// Tasks the API did not stamp are left alone; a missing key is an error.
 	plain := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: "tenant", UID: "plain-uid"}, Spec: corev1alpha1.TaskSpec{RequestedBy: requester}}
 	if err := SealRequesterStamp(context.Background(), c, key, plain); err != nil || plain.Annotations[labels.AnnotationRequestedByStamp] != "" {
 		t.Fatalf("unstamped task: err = %v annotations = %v", err, plain.Annotations)

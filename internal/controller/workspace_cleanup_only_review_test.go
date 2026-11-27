@@ -117,7 +117,6 @@ func TestExternalWorkspaceCleanupOnlyRetiresExactExistingRuntime(t *testing.T) {
 	if err := f.r.Get(ctx, client.ObjectKeyFromObject(&pod), &corev1.Pod{}); err != nil {
 		t.Fatalf("core deleted provider compute during cleanup-only retirement: %v", err)
 	}
-	// The provider removes its exact native runtime. Core only observes it.
 	if err := f.r.Delete(ctx, &pod, deleteCurrentObjectPreconditions(&pod)...); err != nil {
 		t.Fatal(err)
 	}

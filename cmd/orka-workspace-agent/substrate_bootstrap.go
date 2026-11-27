@@ -108,9 +108,6 @@ func (s *workspaceAgentServer) handleSubstrateBootstrap(w http.ResponseWriter, r
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// The caller holds s.mu and has verified the request signature and sealed
-// process challenge. Reading the existing credential never rotates it or
-// replays any workspace operation.
 func (s *workspaceAgentServer) recoverSubstrateBootstrap(w http.ResponseWriter, request []byte) {
 	token, err := handoffToken()
 	if err != nil {

@@ -23,12 +23,10 @@ import (
 	"github.com/orka-agents/orka/internal/tracing"
 )
 
-// CreateContainerTaskTool creates a container-type Task CR.
 type CreateContainerTaskTool struct {
 	k8sClient client.Client
 }
 
-// NewCreateContainerTaskTool creates a container task tool for coordinator agents.
 func NewCreateContainerTaskTool(k8sClient client.Client) *CreateContainerTaskTool {
 	return &CreateContainerTaskTool{k8sClient: k8sClient}
 }
@@ -59,9 +57,6 @@ func (t *CreateContainerTaskTool) Parameters() json.RawMessage {
 
 func (t *CreateContainerTaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	tc := GetToolContext(ctx)
-	// Route to the coordinator path when the chat-executor hooks are absent.
-	// Worker-side ToolContexts only set Client/Namespace/Tenant/TaskID and
-	// leave the chat-only function fields nil; calling them would panic.
 	if tc == nil || tc.CheckTaskLimit == nil || tc.GenerateTaskName == nil || tc.TaskLabels == nil || tc.IncrementTasks == nil {
 		return t.executeCoordination(ctx, args)
 	}
@@ -233,8 +228,6 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 			return classifyChatK8sErr(err)
 		}
 	}
-	// The owned child inherits requestedBy; the seal binds it to the child's
-	// UID so connector-backed execution can trust it, as delegate_task does.
 	sealTaskCreate(ctx, GetToolContext(ctx), task)
 	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(task.Spec.Schedule)})
 }
@@ -273,11 +266,6 @@ func validateContainerTaskWorkspace(task *corev1alpha1.Task) *ChatToolError {
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeContainer {
 		return nil
 	}
-	// Mirror the Job builder's validateContainerPublicationWorkspace gates
-	// against the effective (post-inheritance) workspace. The tool schema never
-	// exposes these fields, so their only source here is a prior_task workspace
-	// copied from an agent Task; created Tasks carrying them would be rejected
-	// by the Job builder after creation.
 	if field := unsupportedContainerWorkspaceField(task.Spec.Workspace); field != "" {
 		return &ChatToolError{
 			Type: "unsupported_container_workspace_field",
@@ -315,10 +303,6 @@ func validateContainerTaskWorkspace(task *corev1alpha1.Task) *ChatToolError {
 	}
 }
 
-// unsupportedContainerWorkspaceField returns the first workspace field the Job
-// builder's validateContainerPublicationWorkspace rejects for container Tasks:
-// clean-room publication and policy fields supported only on agent Tasks. Keep
-// this list in sync with internal/controller/job_builder.go.
 func unsupportedContainerWorkspaceField(workspace *corev1alpha1.WorkspaceConfig) string {
 	switch {
 	case workspace == nil:

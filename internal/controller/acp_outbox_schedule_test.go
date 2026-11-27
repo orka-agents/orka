@@ -33,9 +33,6 @@ func TestACPOutboxScheduleNext(t *testing.T) {
 	}
 }
 
-// An enqueue can wake a pass before a scheduled retry is due. That pass
-// claims nothing and must keep the retry's deadline rather than fall back to
-// the idle interval.
 func TestACPOutboxScheduleKeepsARetryAcrossAnEarlyPass(t *testing.T) {
 	start := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 	idle := 10 * time.Second
@@ -52,8 +49,6 @@ func TestACPOutboxScheduleKeepsARetryAcrossAnEarlyPass(t *testing.T) {
 	}
 }
 
-// A batch can schedule several retries. When the earliest is claimed and
-// delivered, the later deadline is still outstanding.
 func TestACPOutboxScheduleKeepsLaterRetriesOfABatch(t *testing.T) {
 	start := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 	idle := 10 * time.Second
@@ -62,18 +57,16 @@ func TestACPOutboxScheduleKeepsLaterRetriesOfABatch(t *testing.T) {
 		"a": start.Add(time.Second), "b": start.Add(4 * time.Second),
 	}}
 	schedule.observe(batch, nil)
-	retryA := acpOutboxPass{claimedAt: start.Add(time.Second), claimed: []string{"a"}} // delivered
+	retryA := acpOutboxPass{claimedAt: start.Add(time.Second), claimed: []string{"a"}}
 	schedule.observe(retryA, nil)
 	if got := schedule.next(retryA.claimedAt, retryA, nil, idle); !got.Equal(start.Add(4 * time.Second)) {
 		t.Fatalf("after the earliest retry succeeded: next = %s, want b's retry %s", got, start.Add(4*time.Second))
 	}
-	retryB := acpOutboxPass{claimedAt: start.Add(4 * time.Second), claimed: []string{"b"}} // delivered
+	retryB := acpOutboxPass{claimedAt: start.Add(4 * time.Second), claimed: []string{"b"}}
 	schedule.observe(retryB, nil)
 	if got := schedule.next(retryB.claimedAt, retryB, nil, idle); !got.Equal(retryB.claimedAt.Add(idle)) {
 		t.Fatalf("after every retry settled: next = %s, want the idle interval", got)
 	}
-	// A due deadline a non-full pass did not return belongs to a projection
-	// that is no longer pending, and is dropped.
 	schedule.observe(acpOutboxPass{claimedAt: start, retries: map[string]time.Time{"gone": start.Add(time.Second)}}, nil)
 	late := acpOutboxPass{claimedAt: start.Add(2 * time.Second)}
 	schedule.observe(late, nil)
@@ -82,7 +75,6 @@ func TestACPOutboxScheduleKeepsLaterRetriesOfABatch(t *testing.T) {
 	}
 }
 
-// countingOutboxStore records claims; it never has a projection to deliver.
 type countingOutboxStore struct {
 	store.OutboxProjectionStore
 	mu     sync.Mutex
@@ -102,9 +94,6 @@ func (s *countingOutboxStore) claimCount() int {
 	return s.claims
 }
 
-// Every claim takes the controller-epoch mutation interlock, so an idle
-// projector claims once at start and then only on the idle interval, while an
-// enqueue wakes it to claim at once.
 func TestACPOutboxProjectorClaimsOnEnqueueNotEveryTick(t *testing.T) {
 	epochs, _ := settledDeliveryTestEpochs(t)
 	claims := &countingOutboxStore{}
@@ -132,7 +121,7 @@ func TestACPOutboxProjectorClaimsOnEnqueueNotEveryTick(t *testing.T) {
 		}
 	}
 	waitForClaims("start", 1)
-	time.Sleep(200 * time.Millisecond) // ten ticks
+	time.Sleep(200 * time.Millisecond)
 	if got := claims.claimCount(); got != 1 {
 		t.Fatalf("an idle projector claimed %d times over ten ticks, want once", got)
 	}
@@ -140,7 +129,6 @@ func TestACPOutboxProjectorClaimsOnEnqueueNotEveryTick(t *testing.T) {
 	waitForClaims("enqueue wakeup", 2)
 }
 
-// enqueueOutboxStore accepts one new projection.
 type enqueueOutboxStore struct {
 	store.OutboxProjectionStore
 }
@@ -170,8 +158,6 @@ func TestEnqueuedTerminalProjectionWakesProjectors(t *testing.T) {
 	}
 }
 
-// A Session turn's finalization, and a resumed finalization, activate its
-// terminal projection through the store; both wake the projector.
 func TestSessionTurnFinalizationWakesProjectors(t *testing.T) {
 	ctx := context.Background()
 	s, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "finalize-wake.db"))
@@ -210,8 +196,6 @@ func TestSessionTurnFinalizationWakesProjectors(t *testing.T) {
 	expectWake("resumed turn finalization")
 }
 
-// partialBatchOutboxStore claims two projections that cannot be delivered.
-// Completing the first commits its retry; completing the second fails.
 type partialBatchOutboxStore struct {
 	store.OutboxProjectionStore
 	claimed bool
@@ -235,9 +219,6 @@ func (s *partialBatchOutboxStore) CompleteOutboxProjection(_ context.Context, re
 	return &store.OutboxProjection{ID: request.ID, State: request.NewState, AvailableAt: request.AvailableAt}, nil
 }
 
-// A batch that fails after committing a retry still reports that retry, and
-// the empty claim that follows keeps its deadline rather than falling back
-// to the idle interval.
 func TestACPOutboxKeepsRetriesCommittedBeforeABatchFails(t *testing.T) {
 	epochs, _ := settledDeliveryTestEpochs(t)
 	projector := &ACPOutboxProjector{
@@ -272,7 +253,6 @@ func TestACPOutboxScheduleKeepsDeadlinesAcrossAFailedPass(t *testing.T) {
 	start := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 	var schedule acpOutboxSchedule
 	schedule.observe(acpOutboxPass{claimedAt: start, claimed: []string{"a"}, retries: map[string]time.Time{"a": start.Add(4 * time.Second)}}, nil)
-	// A failed pass after a's deadline settles and prunes nothing.
 	schedule.observe(acpOutboxPass{claimedAt: start.Add(5 * time.Second), retries: map[string]time.Time{"b": start.Add(6 * time.Second)}}, errors.New("unavailable"))
 	if len(schedule.retries) != 2 {
 		t.Fatalf("retries = %v, want both deadlines kept across the failed pass", schedule.retries)

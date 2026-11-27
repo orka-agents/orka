@@ -25,7 +25,6 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-// CreatePRMonitorTool creates a scheduled AI task that monitors GitHub PRs.
 type CreatePRMonitorTool struct{}
 
 var prMonitorRequiredTools = []string{

@@ -63,8 +63,6 @@ func preDispatchValues(values []any) map[string]any {
 	return out
 }
 
-// Each milestone keeps its first time and is reported as the step since the
-// previous one; the report removes the record so a Task logs once.
 func TestACPPreDispatchTimingsReportsEachStepOnce(t *testing.T) {
 	created := time.Date(2026, 11, 18, 18, 29, 17, 0, time.UTC)
 	clock := &steppingClock{now: created.Add(300 * time.Millisecond)}
@@ -79,7 +77,6 @@ func TestACPPreDispatchTimingsReportsEachStepOnce(t *testing.T) {
 	clock.Advance(4 * time.Second)
 	timings.mark(task, acpPreDispatchQueued)
 	clock.Advance(time.Second)
-	// A later pass reaching an earlier milestone again keeps the first time.
 	timings.mark(task, acpPreDispatchStatusInitialized)
 	timings.mark(task, acpPreDispatchScanned)
 	clock.Advance(200 * time.Millisecond)
@@ -172,9 +169,6 @@ func TestACPDispatchPoolRetirementDue(t *testing.T) {
 	}
 }
 
-// A wakeup scan still publishes coordinator capacity, which retirement and
-// scale-down read as a guard, but leaves idle and stopped pools to the next
-// retiring scan; a retiring scan reaps both.
 func TestReapIdlePoolsWithoutRetirementRefreshesCapacityOnly(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -275,9 +269,6 @@ func TestEffectiveTaskMaxConcurrentReconciles(t *testing.T) {
 	}
 }
 
-// Concurrent reconciles of two Tasks in one namespace ensure the same trusted
-// Service grant; the reconcile that loses the create accepts the identical
-// object instead of failing, and still refuses a foreign one.
 func TestTrustedServiceGrantCreateAcceptsConcurrentIdenticalCreate(t *testing.T) {
 	scheme := newTestScheme()
 	desiredRole := func() *rbacv1.Role {
@@ -293,8 +284,6 @@ func TestTrustedServiceGrantCreateAcceptsConcurrentIdenticalCreate(t *testing.T)
 			Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: "worker", Namespace: "tasks"}},
 		}
 	}
-	// The other reconcile's objects exist, but this reconcile's first read
-	// missed them.
 	raced := func(objects ...client.Object) client.Client {
 		missed := map[string]bool{}
 		return interceptor.NewClient(fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(), interceptor.Funcs{
@@ -325,11 +314,6 @@ func TestTrustedServiceGrantCreateAcceptsConcurrentIdenticalCreate(t *testing.T)
 	}
 }
 
-// The Queued status write is watch-visible before it returns, so a dispatcher
-// scan, and even the start report, can run while the queue pass is still in
-// the write. The queued milestone must already be recorded then, ahead of
-// scanned, and the queue pass must leave no record behind for the reported
-// Task.
 func TestQueueACPRuntimeTaskRecordsQueuedBeforeTheStatusWriteIsVisible(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -362,8 +346,6 @@ func TestQueueACPRuntimeTaskRecordsQueuedBeforeTheStatusWriteIsVisible(t *testin
 				written.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued {
 				return nil
 			}
-			// The committed Queued status reaches the dispatcher before the
-			// write returns: it scans, reserves, and starts the Task.
 			interleaved = true
 			visible := written.DeepCopy()
 			acpPreDispatch.mark(visible, acpPreDispatchScanned)
@@ -397,7 +379,6 @@ func TestQueueACPRuntimeTaskRecordsQueuedBeforeTheStatusWriteIsVisible(t *testin
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
-	// The Task's first reconcile observed it before any execution.
 	acpPreDispatch.mark(bound, acpPreDispatchObserved)
 	if _, err := reconciler.queueACPRuntimeTask(ctx, bound, agent); err != nil {
 		t.Fatal(err)
@@ -427,10 +408,6 @@ func TestQueueACPRuntimeTaskRecordsQueuedBeforeTheStatusWriteIsVisible(t *testin
 	}
 }
 
-// A Task's record is created only before it has an execution. Marks from
-// later stages that run after its start reported, such as a dispatcher scan
-// of the still-Reserved Task or a queue pass of the executing Task, update
-// nothing and never recreate a record that nothing would report.
 func TestACPPreDispatchTimingsLateMarksNeverRecreateAReportedRecord(t *testing.T) {
 	created := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
 	clock := &steppingClock{now: created}
@@ -449,8 +426,6 @@ func TestACPPreDispatchTimingsLateMarksNeverRecreateAReportedRecord(t *testing.T
 	if len(timings.records) != 0 {
 		t.Fatalf("late marks recreated %d records after the Task reported", len(timings.records))
 	}
-	// A Task never observed before execution, such as one queued before this
-	// process started, is not tracked either.
 	unobserved := preDispatchTestTask("unobserved", created)
 	timings.mark(unobserved, acpPreDispatchScanned)
 	timings.mark(unobserved, acpPreDispatchReserved)
@@ -459,8 +434,6 @@ func TestACPPreDispatchTimingsLateMarksNeverRecreateAReportedRecord(t *testing.T
 	}
 }
 
-// Each reserved execution attempt records its own start; an attempt that
-// requeues before its turn leaves the record for the attempt that runs.
 func TestACPPreDispatchTimingsStartedIsTheLatestAttempt(t *testing.T) {
 	created := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
 	clock := &steppingClock{now: created.Add(time.Second)}
@@ -482,9 +455,6 @@ func TestACPPreDispatchTimingsStartedIsTheLatestAttempt(t *testing.T) {
 	}
 }
 
-// An execution that exits before its turn begins, here an unverifiable
-// binding, records its start but neither consumes nor reports the Task's
-// milestones; the attempt that reaches its turn reports them.
 func TestExecuteReservedTaskEarlyExitKeepsPreDispatchMilestones(t *testing.T) {
 	task := preDispatchTestTask("55555555-5555-5555-5555-555555555555", time.Now())
 	acpPreDispatch.mark(task, acpPreDispatchObserved)
@@ -509,10 +479,6 @@ func TestExecuteReservedTaskEarlyExitKeepsPreDispatchMilestones(t *testing.T) {
 	}
 }
 
-// The controller's handler and the timing handler both see a Task's Add, in
-// either order. An Add delivered before the first reconcile is kept for the
-// record; one delivered after the reconcile was observed, or after the record
-// finished, is dropped and never creates a record.
 func TestACPPreDispatchInformerAddedOrdering(t *testing.T) {
 	created := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 	t.Run("add before the first reconcile", func(t *testing.T) {

@@ -8,8 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// gatewayCaseNow is the request time of the gateway write cases. Gateway
-// leases and claims are decided on request times, so a fixed time works.
 var gatewayCaseNow = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 
 const (
@@ -23,7 +21,6 @@ func gatewayCaseEvent() storagev1.GatewayEvent {
 	return gatewayEvent(gatewayCaseNow, eventsTenant, "case")
 }
 
-// gatewayRetentionEvent is old enough for retention to compact.
 func gatewayRetentionEvent() storagev1.GatewayEvent {
 	return gatewayEvent(gatewayCaseNow.Add(-2*time.Hour), eventsTenant, "case")
 }
@@ -79,8 +76,6 @@ func failGatewayCaseDelivery(t *testing.T, p storagev1.StateProvider) {
 		storagev1.GatewayDeliveryFailed, "permanent", gatewayCaseNow))
 }
 
-// expireGatewayRetentionCase links an old event and expires it with a
-// delivered reply an hour before gatewayCaseNow, so retention can compact it.
 func expireGatewayRetentionCase(t *testing.T, p storagev1.StateProvider) {
 	t.Helper()
 	event := linkGatewayTask(t, p, gatewayRetentionEvent(), gatewayCaseTaskUID)
@@ -101,7 +96,6 @@ func compactGatewayRetentionCase(t *testing.T, p storagev1.StateProvider) {
 	require.Equal(t, 1, result.DeletedEvents)
 }
 
-// observeGatewayCase reads the case event, its delivery and its Session.
 func observeGatewayCase(t *testing.T, p storagev1.StateProvider) any {
 	t.Helper()
 	ctx := t.Context()
@@ -112,7 +106,6 @@ func observeGatewayCase(t *testing.T, p storagev1.StateProvider) any {
 	return []any{observed(t, stored, err), observed(t, delivery, deliveryErr), observed(t, session, sessionErr)}
 }
 
-// observeGatewayRetention reads what retention compaction changes.
 func observeGatewayRetention(t *testing.T, p storagev1.StateProvider) any {
 	t.Helper()
 	ctx := t.Context()
@@ -124,7 +117,6 @@ func observeGatewayRetention(t *testing.T, p storagev1.StateProvider) any {
 	return []any{observed(t, stored, err), observed(t, receipt, receiptErr), tombstoned}
 }
 
-// observeGatewayMessages reads the case event's message budget and deliveries.
 func observeGatewayMessages(t *testing.T, p storagev1.StateProvider) any {
 	t.Helper()
 	ctx := t.Context()

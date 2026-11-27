@@ -13,10 +13,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// allowTaskData authorizes a task data request without Job identities.
 func allowTaskData(context.Context) ([]store.TaskJobIdentity, error) { return nil, nil }
 
-// accessNothing is task data access that reads and writes nothing.
 func accessNothing(context.Context) error { return nil }
 
 func TestTaskDataTransactionSerializesCleanupAcrossConnections(t *testing.T) {
@@ -29,13 +27,9 @@ func TestTaskDataTransactionSerializesCleanupAcrossConnections(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cleanupDB.Close() })
 	writer, cleanup := NewStore(writerDB, dbPath), NewStore(cleanupDB, dbPath)
-	// A zero busy timeout makes writer exclusion deterministic without sleeps
-	// or timing assertions, even when cleanup uses another controller connection.
 	_, err = cleanupDB.ExecContext(ctx, `PRAGMA busy_timeout=0`)
 	require.NoError(t, err)
 	require.NoError(t, writer.withTaskDataTransaction(ctx, func(txCtx context.Context) error {
-		// The store's internal transaction, which a fenced call also uses,
-		// excludes cleanup before any payload is read or written.
 		cleanupErr := cleanup.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: "ns", TaskName: "task"})
 		require.Error(t, cleanupErr)
 		require.True(t, isSQLiteRetryableError(cleanupErr))
@@ -268,10 +262,6 @@ func TestTaskDataTransactionEventAndInboxCommitRollback(t *testing.T) {
 	}
 }
 
-// TestCheckTaskDataFenceReadsInOneTransaction requires a fence check made
-// outside a task data transaction to read the cleanup generation and the Job
-// revocations in one transaction, so a reclamation that commits between the
-// reads cannot pair the old generation with a revocation it deleted.
 func TestCheckTaskDataFenceReadsInOneTransaction(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := t.Context()

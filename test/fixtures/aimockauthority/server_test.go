@@ -37,7 +37,6 @@ func newFixture(t *testing.T) (*Server, *httptest.Server) {
 	return s, h
 }
 
-// observe calls the loopback-only observer surface in memory.
 func observe(s *Server, method, path, body string) *http.Response {
 	recorder := httptest.NewRecorder()
 	s.ObserverHandler().ServeHTTP(recorder, httptest.NewRequest(method, path, strings.NewReader(body)))

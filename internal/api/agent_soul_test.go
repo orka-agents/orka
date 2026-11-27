@@ -101,8 +101,6 @@ func TestHandlers_UpdateAgent_ValidatesDefaultedSoulRuntime(t *testing.T) {
 	}
 }
 
-// REST writes must reject what the Agent reconciler would reject, instead of
-// persisting an Agent that can never become ready.
 func TestHandlers_AgentWritesRejectInvalidSoulAndCopilotInstructions(t *testing.T) {
 	copilot := &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot}
 	for _, tc := range []struct {

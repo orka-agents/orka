@@ -23,8 +23,6 @@ import (
 
 var _ = Describe("Controller Feature Tests", func() {
 
-	// --- SystemPrompt from ConfigMap ---
-
 	Describe("Agent SystemPrompt from ConfigMap", func() {
 		const (
 			configMapName      = "e2e-systemprompt-cm"
@@ -148,8 +146,6 @@ var _ = Describe("Controller Feature Tests", func() {
 			}
 		})
 	})
-
-	// --- Skill CRD Injection ---
 
 	Describe("Agent Skills from Skill CRD", func() {
 		const (
@@ -275,8 +271,6 @@ var _ = Describe("Controller Feature Tests", func() {
 		})
 	})
 
-	// --- Task Deletion Cleanup (Finalizer) ---
-
 	Describe("Task Deletion with Finalizer Cleanup", func() {
 		const taskName = "e2e-finalizer-task"
 
@@ -352,8 +346,6 @@ var _ = Describe("Controller Feature Tests", func() {
 			}, 30*time.Second, time.Second).Should(Succeed())
 		})
 	})
-
-	// --- MaxConcurrentChildren Enforcement ---
 
 	Describe("MaxConcurrentChildren Enforcement", func() {
 		const (
@@ -473,11 +465,6 @@ var _ = Describe("Controller Feature Tests", func() {
 			}
 
 			By("sampling child phases until all three children have run in turn")
-			// Sample while the children run and also verify their recorded
-			// startTime/completionTime intervals do not overlap, so concurrent
-			// execution is caught even if children finish between polls.
-			// Requiring all three Succeeded children also proves waiting
-			// children are admitted and checked.
 			deadline := time.Now().Add(3 * time.Minute)
 			maxRunning, admitted := 0, false
 			for {
@@ -551,8 +538,6 @@ var _ = Describe("Controller Feature Tests", func() {
 		})
 	})
 
-	// --- Namespace Isolation ---
-
 	Describe("Namespace Isolation", func() {
 		It("should reject access to tasks in other namespaces", func() {
 			By("creating a task in the default namespace")
@@ -573,8 +558,6 @@ var _ = Describe("Controller Feature Tests", func() {
 
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(taskManifest)
-			// This may fail if CRDs are not installed in default namespace
-			// or if RBAC prevents it. Both are valid outcomes.
 			output, err := utils.Run(cmd)
 
 			DeferCleanup(func() {
@@ -590,8 +573,6 @@ var _ = Describe("Controller Feature Tests", func() {
 			}
 
 			By("verifying the controller only processes tasks in its watch namespace")
-			// The controller should not process tasks outside orka-system
-			// The task should stay Pending since no controller watches default ns
 			time.Sleep(10 * time.Second)
 
 			cmd = exec.Command("kubectl", "get", "task", "e2e-cross-ns-task",
@@ -600,8 +581,6 @@ var _ = Describe("Controller Feature Tests", func() {
 			if err == nil && phase != "" {
 				_, _ = fmt.Fprintf(GinkgoWriter,
 					"Cross-namespace task phase: %s (empty or Pending expected)\n", phase)
-				// If controller is watching all namespaces, it may process this
-				// The key check is that enforce-namespace-isolation prevents API access
 			}
 		})
 	})

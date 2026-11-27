@@ -8,8 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// runOperationReceipts checks how a provider settles operations and keeps
-// their receipts, beyond the per-method write catalog.
 func runOperationReceipts(t *testing.T, newProvider StateFactory) {
 	resolveRequest := func(dataset string, envelope storagev1.WriteEnvelope, method string) storagev1.ResolveOperationRequest {
 		return storagev1.ResolveOperationRequest{
@@ -80,8 +78,6 @@ func runOperationReceipts(t *testing.T, newProvider StateFactory) {
 		removed, err := provider.PruneOperationReceipts(ctx, 100)
 		require.NoError(t, err)
 		require.Zero(t, removed, "a fresh receipt survives pruning")
-		// The newer write comes from the same issuer, so its order stamp is
-		// greater and it replaces the result.
 		newer := NewWriteEnvelope(t, info.DatasetID, suiteFence, "SaveResult", "tenant", "task", []byte("newer"))
 		require.NoError(t, provider.SaveResult(storagev1.WithWriteEnvelope(ctx, newer), "tenant", "task", []byte("newer")))
 		outcome, err := provider.ResolveOperation(ctx, storagev1.ResolveOperationRequest{

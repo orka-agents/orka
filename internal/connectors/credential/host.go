@@ -22,34 +22,17 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// ErrHostLinkUnavailable reports a Connection that can no longer feed an
-// agent host: it is gone or unlinked, its consent no longer covers the
-// provider, or the provider no longer serves agent hosts.
 var ErrHostLinkUnavailable = errors.New("the agent host's GitHub link is unavailable")
 
-// HostCredential is the access token Orka hands a person's agent host.
 type HostCredential struct {
-	AccessToken string
-	// ExpiresAt is zero when the provider reported no expiry.
-	ExpiresAt time.Time
-	// Version changes whenever custody holds new material.
+	AccessToken   string
+	ExpiresAt     time.Time
 	Version       int64
 	GrantSequence int64
-	// Refreshable reports whether custody holds a refresh token for the
-	// grant. GitHub issues one only beside a token that expires, so it tells
-	// an expiry GitHub set from a deadline Orka chose for a token it was
-	// handed without one.
-	Refreshable bool
-	// ConnectionUID binds the grant sequence to this incarnation of the link.
+	Refreshable   bool
 	ConnectionUID string
 }
 
-// HostCredential returns the access token for the agent host fed by the named
-// Connection, refreshed first when it would expire within horizon. Only the
-// access token leaves custody; the refresh token never does. It shares the
-// tool path's single-flight refresh, so a host and a tool call never refresh
-// the same grant twice, and a refresh made for either replaces the other's
-// token.
 func (s *Source) HostCredential(ctx context.Context, namespace, name string, horizon time.Duration) (HostCredential, error) {
 	connection, ref, credential, err := s.hostLink(ctx, namespace, name)
 	if err != nil {
@@ -58,8 +41,6 @@ func (s *Source) HostCredential(ctx context.Context, namespace, name string, hor
 	if s.expiresWithin(credential, horizon) {
 		refreshed, err := s.refreshSingleFlight(ctx, connection, ref, credential.GrantSequence, horizon)
 		if err != nil {
-			// A refresh that ended the link (a revoked or expired grant)
-			// shows on the Connection; anything else is worth a retry.
 			if _, linkErr := s.hostConnection(ctx, namespace, name); linkErr != nil {
 				return HostCredential{}, linkErr
 			}
@@ -67,11 +48,6 @@ func (s *Source) HostCredential(ctx context.Context, namespace, name string, hor
 		}
 		credential = refreshed
 	}
-	// Every check runs again before release: a disconnect that began after
-	// the first read tombstones custody without the custody read noticing,
-	// and the provider may have stopped serving hosts, or a re-consent may
-	// have replaced the material, while a refresh was in flight. Only what
-	// custody still holds, for a link that still passes, is released.
 	again, _, latest, err := s.hostLink(ctx, namespace, name)
 	if err != nil {
 		return HostCredential{}, err
@@ -92,18 +68,11 @@ func (s *Source) HostCredential(ctx context.Context, namespace, name string, hor
 	}, nil
 }
 
-// CheckHostLink reports whether the named Connection can still feed an agent
-// host, without refreshing its token: a suspended host keeps its token copy
-// only while it can.
 func (s *Source) CheckHostLink(ctx context.Context, namespace, name string) error {
 	_, _, _, err := s.hostLink(ctx, namespace, name)
 	return err
 }
 
-// hostLink loads a host's Connection and the credential it holds, and checks
-// that the link may feed an agent host. A host keeps the template it was
-// created from: pointing the provider at another template affects only hosts
-// created afterwards.
 func (s *Source) hostLink(ctx context.Context, namespace, name string) (
 	*corev1alpha1.Connection, store.ConnectorCredentialRef, store.ConnectorCredential, error) {
 	var ref store.ConnectorCredentialRef
@@ -125,8 +94,6 @@ func (s *Source) hostLink(ctx context.Context, namespace, name string) (
 	if provider.Spec.AgentHost == nil {
 		return nil, ref, store.ConnectorCredential{}, hostLinkUnavailable("its connector provider no longer serves agent hosts")
 	}
-	// A settled refusal, including deletion, needs no custody read. A storage
-	// outage must not keep a host running after its provider refused it.
 	judged, accepted := providerVerdict(provider)
 	if judged && !accepted {
 		return nil, ref, store.ConnectorCredential{}, hostLinkUnavailable("its connector provider is not accepted")
@@ -142,27 +109,18 @@ func (s *Source) hostLink(ctx context.Context, namespace, name string) (
 	if err != nil {
 		return nil, ref, store.ConnectorCredential{}, err
 	}
-	// An unobserved or inconclusive status is retryable, but only after
-	// custody: missing credentials already prove that the link has ended.
 	if !judged {
 		return nil, ref, store.ConnectorCredential{}, fmt.Errorf("connector provider %q has not judged its latest change", provider.Name)
 	}
-	// The provider just read is accepted, so a mismatch with it is a
-	// verdict too; a failed read above is retried.
 	if err := checkProvider(connection, provider, credential, nil); err != nil {
 		return nil, ref, store.ConnectorCredential{}, hostLinkUnavailable(err.Error())
 	}
-	// Everything the Connection's status summarizes has now been checked
-	// against the provider and custody directly, so a status that has not
-	// caught up with an edit, or that records a failed read, stops no host.
 	if !connectors.ConnectionLinked(connection) {
 		return nil, ref, store.ConnectorCredential{}, fmt.Errorf("the Connection %q has not caught up with its latest change", name)
 	}
 	return connection, ref, credential, nil
 }
 
-// hostConnection reads a host's Connection fresh and requires that its person
-// still holds a link: it exists, is not being deleted, and is Ready.
 func (s *Source) hostConnection(ctx context.Context, namespace, name string) (*corev1alpha1.Connection, error) {
 	connection := &corev1alpha1.Connection{}
 	if err := s.reader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, connection); err != nil {
@@ -171,8 +129,6 @@ func (s *Source) hostConnection(ctx context.Context, namespace, name string) (*c
 		}
 		return nil, fmt.Errorf("load connection: %w", err)
 	}
-	// A Connection being deleted is a disconnect, even while its finalizer
-	// holds it.
 	if !connection.DeletionTimestamp.IsZero() {
 		return nil, hostLinkUnavailable("the Connection is being deleted")
 	}
@@ -183,10 +139,6 @@ func (s *Source) hostConnection(ctx context.Context, namespace, name string) (*c
 	return connection, nil
 }
 
-// providerVerdict reports whether the provider controller has judged the
-// provider's current generation, and if so whether it accepted it. A current
-// False condition is a refusal; a missing, older or Unknown one awaits
-// judgment. A provider being deleted is refused.
 func providerVerdict(provider *corev1alpha1.ConnectorProvider) (judged, accepted bool) {
 	if !provider.DeletionTimestamp.IsZero() {
 		return true, false

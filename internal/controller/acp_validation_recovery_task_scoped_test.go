@@ -11,9 +11,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// A task-scoped Task has no Session binding, so its dispatch must record the
-// workspace digest itself or a later abandoned-validation recovery has nothing
-// to compare against.
 func TestACPDispatcherRecordsTaskScopedRuntimeWorkspaceDigest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -63,8 +60,6 @@ func TestRecoveredValidationWorkspaceTaskScoped(t *testing.T) {
 				}
 			})
 			t.Run("legacy empty digest", func(t *testing.T) {
-				// Controllers before the fix never recorded the digest for
-				// task-scoped Tasks; recovery must not loop on them forever.
 				d, task, _, _ := newValidationRecoveryFixture(t, git, false)
 				task.Status.Execution.RuntimeSessionWorkspaceDigest = ""
 				if _, _, err := d.recoveredValidationWorkspace(t.Context(), task, task.UID); err != nil {
@@ -86,8 +81,6 @@ func TestRecoveredValidationWorkspaceTaskScoped(t *testing.T) {
 	}
 }
 
-// Only task-scoped Tasks may omit the digest. A Session-backed Task always
-// recorded it, so an empty value there is still a mismatch.
 func TestRecoveredValidationWorkspaceSessionRequiresDigest(t *testing.T) {
 	for _, git := range []bool{false, true} {
 		t.Run(map[bool]string{false: "empty", true: "git"}[git], func(t *testing.T) {

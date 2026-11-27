@@ -18,7 +18,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/wiretest"
 )
 
-// bulkLimits allow one streaming call at a time for at most limit.
 func bulkLimits(limit time.Duration) wire.Limits {
 	return wire.Limits{
 		MaxConcurrent: map[storagev1.CallClass]int{storagev1.CallBulk: 1},
@@ -26,9 +25,6 @@ func bulkLimits(limit time.Duration) wire.Limits {
 	}
 }
 
-// An upload that stalls without ending its stream, and with no deadline of
-// its own, is ended at the bulk duration limit without reaching the
-// provider, and its slot is free again.
 func TestServerEndsStalledUploadsAtTheDurationLimit(t *testing.T) {
 	provider := newRecordingProvider()
 	config := serveBoth(provider)
@@ -56,8 +52,6 @@ func TestServerEndsStalledUploadsAtTheDurationLimit(t *testing.T) {
 	require.NoError(t, client.SaveResult(t.Context(), "n", "t", []byte("r")), "the bulk slot is free again")
 }
 
-// A download whose reader stops reading is ended at the bulk duration limit,
-// and its slot is free again.
 func TestServerEndsStalledDownloadsAtTheDurationLimit(t *testing.T) {
 	provider := newRecordingProvider()
 	provider.set("GetResult", []any{pattern(16 * wire.MaxChunkBytes)}, nil)
@@ -70,8 +64,6 @@ func TestServerEndsStalledDownloadsAtTheDurationLimit(t *testing.T) {
 	_, err = stalled.Header()
 	require.NoError(t, err, "the download started")
 
-	// A small download finishes well inside the limit, so it succeeds as
-	// soon as the stalled one has released the only bulk slot.
 	provider.set("GetArtifact", []any{[]byte("small"), "text/plain"}, nil)
 	client := wire.NewClient(conn, boundConfig)
 	require.Eventually(t, func() bool {
@@ -80,8 +72,6 @@ func TestServerEndsStalledDownloadsAtTheDurationLimit(t *testing.T) {
 	}, 10*time.Second, 50*time.Millisecond, "the stalled download releases its slot at the limit")
 }
 
-// slowDescriber describes its dataset only when its context ends, like a
-// provider whose database does not answer.
 type slowDescriber struct {
 	*recordingProvider
 	entered chan struct{}
@@ -96,9 +86,6 @@ func (p slowDescriber) Describe(ctx context.Context) (storagev1.ProviderInfo, er
 	return storagev1.ProviderInfo{}, ctx.Err()
 }
 
-// The first description of the providers runs inside the call's admission
-// and duration limit: other calls are shed rather than queued behind it, and
-// it ends at the limit.
 func TestServerBoundsTheFirstDescription(t *testing.T) {
 	provider := slowDescriber{recordingProvider: newRecordingProvider(), entered: make(chan struct{}, 1)}
 	client := wire.NewClient(wiretest.Dial(t, wire.ServerConfig{State: provider, Limits: wire.Limits{
@@ -126,8 +113,6 @@ func TestServerBoundsTheFirstDescription(t *testing.T) {
 	require.Empty(t, provider.callsTo("SavePlan"))
 }
 
-// orderedDescriber blocks its first description, after reading its dataset,
-// until released, so a newer description can finish first.
 type orderedDescriber struct {
 	*recordingProvider
 	dataset atomic.Pointer[string]
@@ -146,8 +131,6 @@ func (p *orderedDescriber) Describe(context.Context) (storagev1.ProviderInfo, er
 	return info, nil
 }
 
-// A description that finishes after a newer one never restores the dataset
-// the newer one replaced.
 func TestServerKeepsTheNewestDescription(t *testing.T) {
 	provider := &orderedDescriber{recordingProvider: newRecordingProvider(), entered: make(chan struct{}), release: make(chan struct{})}
 	provider.dataset.Store(new("old-dataset"))
@@ -165,8 +148,6 @@ func TestServerKeepsTheNewestDescription(t *testing.T) {
 	require.Equal(t, "new-dataset", server.DatasetID(), "the older description does not overwrite the newer one")
 }
 
-// A download over the client's limit is refused from its headers, before any
-// of its bytes are received.
 func TestClientRefusesOversizedDownloadsFromTheirHeaders(t *testing.T) {
 	provider := newRecordingProvider()
 	server, err := wire.NewServer(serveBoth(provider))

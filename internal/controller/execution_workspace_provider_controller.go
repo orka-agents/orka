@@ -29,9 +29,6 @@ const (
 	defaultProviderHeartbeatCheck       = 30 * time.Second
 )
 
-// ExecutionWorkspaceProviderReconciler evaluates generic provider usability and
-// prevents deletion while pools or concrete workspaces remain bound to a provider.
-// Adapter-owned status fields are preserved.
 type ExecutionWorkspaceProviderReconciler struct {
 	client.Client
 	APIReader        client.Reader
@@ -180,12 +177,6 @@ func (r *ExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context, re
 	return ctrl.Result{RequeueAfter: defaultProviderHeartbeatCheck}, nil
 }
 
-// The shared checkpoint policy authorizes the exact registration named by its
-// routing label. Core cannot replace that name with a hash or annotation.
-// Core treats workspaces and checkpoints labeled with the legacy ACP routing
-// identity as legacy-owned, and legacy registrations under the original route
-// must retire under the previous release, so no registration may claim either
-// form as controllerName.
 func workspaceProviderControllerReserved(controllerName string) bool {
 	return controllerName == acpWorkspaceControllerLabelValue || controllerName == acpWorkspaceProviderControllerName
 }
@@ -252,8 +243,6 @@ func (r *ExecutionWorkspaceProviderReconciler) providerHasReferences(
 	if r.RESTMapper != nil {
 		gvk := workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint")
 		if _, err := r.RESTMapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
-			// Cleanup-only installations may have just the four base workspace
-			// APIs. Discovery must prove absence before omitting this scan.
 			if apimeta.IsNoMatchError(err) {
 				return false, nil
 			}
@@ -290,7 +279,6 @@ func (r *ExecutionWorkspaceProviderReconciler) patchProviderConditions(ctx conte
 	})
 }
 
-// SetupWithManager registers the generic provider usability controller.
 func (r *ExecutionWorkspaceProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&workspacev1alpha1.ExecutionWorkspaceProvider{}).

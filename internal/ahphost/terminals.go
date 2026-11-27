@@ -18,30 +18,18 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// maxStoredTerminalContent bounds the output a terminal channel's stored
-// state keeps for snapshots. Live delivery is not affected.
 const maxStoredTerminalContent = 64 << 10
 
-// TerminalProvider runs the host's terminals for a backend. A terminal is a
-// root-level resource of one user: it belongs to the backend that created
-// it, not to a session.
 type TerminalProvider interface {
-	// CreateTerminal starts a terminal on channel and returns its initial state.
 	CreateTerminal(ctx context.Context, principal Principal, params ahptypes.CreateTerminalParams, emit Emitter) (ahptypes.TerminalState, error)
-	// DisposeTerminal stops a terminal. A missing terminal is not an error.
 	DisposeTerminal(ctx context.Context, principal Principal, channel string) error
-	// Terminals lists the user's running terminals for the root state.
 	Terminals(ctx context.Context, principal Principal) ([]ahptypes.TerminalInfo, error)
 }
 
-// TerminalReaper is a TerminalProvider that can stop what terminals an earlier
-// process left behind still run, once their shells are no longer its own. The
-// host calls it before dropping their channels, and keeps them when it fails.
 type TerminalReaper interface {
 	ReapTerminals(ctx context.Context, principal Principal, channels []string) error
 }
 
-// terminalProvider returns the first backend that offers terminals.
 func (r *Registry) terminalProvider() (SessionBackend, TerminalProvider, bool) {
 	if r == nil {
 		return nil, nil, false
@@ -95,9 +83,6 @@ func (c *conn) createTerminal(ctx context.Context, raw json.RawMessage) error {
 	} else if !errors.Is(err, errUnknownChannel) {
 		return err
 	}
-	// Ended terminals nothing follows go, so a client that never disposes of
-	// them cannot grow what is stored; one that fails to go is tried again
-	// with the next terminal.
 	if err := c.host.dropOrphanedTerminals(ctx, c.principal); err != nil {
 		c.host.cfg.Logger.Error(err, "could not drop ended terminals", "user", c.principal.UserKey)
 	}
@@ -119,9 +104,6 @@ func (c *conn) createTerminal(ctx context.Context, raw json.RawMessage) error {
 		_ = provider.DisposeTerminal(ctx, c.principal, params.Channel)
 		return err
 	}
-	// The shell may already have exited, or written output. What it reported
-	// that cannot be stored takes the terminal back, rather than leave a
-	// channel that shows a shell no longer running.
 	if err := c.host.finishCreation(ctx, c.principal, params.Channel); err != nil {
 		c.unsubscribeFrom(params.Channel)
 		cleanup := context.WithoutCancel(ctx)
@@ -162,17 +144,12 @@ func (c *conn) disposeTerminal(ctx context.Context, raw json.RawMessage) error {
 	return nil
 }
 
-// refreshTerminals updates the user's terminal list after a terminal was
-// created or disposed of. That change is done, so a failed update does not
-// report it failed, which would leave the client unable to retry it: the list
-// is built whole again on its next change.
 func (h *Host) refreshTerminals(ctx context.Context, principal Principal) {
 	if err := h.updateTerminals(ctx, principal); err != nil {
 		h.cfg.Logger.Error(err, "could not update the terminal list")
 	}
 }
 
-// updateTerminals journals the user's terminal list on the root channel.
 func (h *Host) updateTerminals(ctx context.Context, principal Principal) error {
 	terminals, err := h.cfg.Backends.terminals(ctx, principal)
 	if err != nil {
@@ -187,13 +164,10 @@ func (h *Host) updateTerminals(ctx context.Context, principal Principal) error {
 	return h.apply(ctx, principal, rootChannel, []ahptypes.StateAction{action}, nil)
 }
 
-// UpdateTerminals lets a backend publish a change to the user's terminals,
-// such as one that exited.
 func (h *Host) UpdateTerminals(ctx context.Context, principal Principal) error {
 	return h.updateTerminals(ctx, principal)
 }
 
-// trimTerminalContent keeps the end of a terminal's stored output.
 func trimTerminalContent(state *ahptypes.TerminalState) {
 	total := 0
 	for _, part := range state.Content {
@@ -232,7 +206,6 @@ func terminalPartSize(part ahptypes.TerminalContentPart) int {
 	}
 }
 
-// backendForChannel finds the backend that owns a session or terminal channel.
 func (c *conn) backendForChannel(ctx context.Context, stored storedChannel) (SessionBackend, error) {
 	name := stored.Backend
 	if stored.Session != "" {

@@ -272,23 +272,6 @@ func TestCheckPullRequestCITool_WaitTimeoutPending(t *testing.T) {
 	}
 }
 
-// Demo 10 run 2026-06-01 10:50 PT regressed when check_pull_request_ci
-// returned a TERMINAL "no_checks" result on a freshly opened PR — the
-// coordinator declared success at status=no_checks while GitHub Actions
-// had simply not registered any check_run objects yet (workflows take
-// 10-60 seconds to be queued on a fresh PR). The real CI then ran and
-// posted a lint=FAILURE that the demo wrapper missed.
-//
-// Fix: when wait_timeout > 0 AND the head SHA has no check_runs, treat
-// no_checks as NON-terminal — keep polling until either (a) check runs
-// register and resolve to a real status, or (b) the wait_timeout
-// elapses. Only at (b) do we report status=no_checks as the final
-// answer, distinguishing "wait timed out with no checks registered"
-// from "checks registered but didn't finish in time".
-//
-// Test (a): server returns "no checks yet" twice, then a passing check.
-// The tool should keep polling through the empty responses and finally
-// report status=success.
 func TestCheckPullRequestCITool_NoChecksKeepsPollingUntilChecksRegister(t *testing.T) {
 	previousMinimum := minPullRequestCIPollInterval
 	minPullRequestCIPollInterval = time.Millisecond
@@ -303,10 +286,8 @@ func TestCheckPullRequestCITool_NoChecksKeepsPollingUntilChecksRegister(t *testi
 			checkRunsCalls++
 			w.WriteHeader(http.StatusOK)
 			if checkRunsCalls <= 2 {
-				// First two calls: no checks registered yet (the fresh-PR window).
 				_, _ = fmt.Fprint(w, `{"total_count":0,"check_runs":[]}`)
 			} else {
-				// Third call: passing check_run registered.
 				_, _ = fmt.Fprint(w, `{"total_count":1,"check_runs":[{"name":"build","status":"completed","conclusion":"success"}]}`)
 			}
 		default:
@@ -347,10 +328,6 @@ func TestCheckPullRequestCITool_NoChecksKeepsPollingUntilChecksRegister(t *testi
 	}
 }
 
-// Test (b): the head SHA never gets check_runs registered. After the
-// wait_timeout elapses we should report status=no_checks distinctly
-// (not as CI_PENDING) so the coordinator knows this is the terminal
-// state, not a transient pending one.
 func TestCheckPullRequestCITool_NoChecksTerminalAfterTimeout(t *testing.T) {
 	checkRunsCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -481,10 +458,6 @@ func TestParsePullRequestCIWaitConfigBounds(t *testing.T) {
 	}
 }
 
-// TestWaitForPullRequestCIBoundsTheFinalCheck covers a status check still
-// running when the wait deadline passes: the whole call is bounded by the
-// wait plus a fixed final-check budget instead of running every paginated
-// request of one more check to completion.
 func TestWaitForPullRequestCIBoundsTheFinalCheck(t *testing.T) {
 	previousMinimum, previousBudget := minPullRequestCIPollInterval, pullRequestCIFinalCheckBudget
 	minPullRequestCIPollInterval, pullRequestCIFinalCheckBudget = time.Millisecond, 50*time.Millisecond
@@ -494,7 +467,6 @@ func TestWaitForPullRequestCIBoundsTheFinalCheck(t *testing.T) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/pulls/42"):
 			if calls.Add(1) > 1 {
-				// Every later check stalls until the caller gives up.
 				<-r.Context().Done()
 				return
 			}

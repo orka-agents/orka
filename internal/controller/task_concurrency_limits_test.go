@@ -27,9 +27,6 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-// limitTestReconciler returns a reconciler whose informer cache still shows
-// peer before its admission, while the API server already has it admitted, as
-// when another Task's reconcile admitted peer concurrently.
 func limitTestReconciler(t *testing.T, task, peer *corev1alpha1.Task, objects ...client.Object) *TaskReconciler {
 	t.Helper()
 	scheme := newTestScheme()
@@ -50,7 +47,6 @@ func objectCopies(objects []client.Object) []client.Object {
 	return copies
 }
 
-// limitTestTask is a Pending container Task.
 func limitTestTask(name string) *corev1alpha1.Task {
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name + "-uid"), Finalizers: []string{labels.TaskFinalizer}},
@@ -59,8 +55,6 @@ func limitTestTask(name string) *corev1alpha1.Task {
 	}
 }
 
-// Parallel reconciles must not admit past the namespace limit: a Task the
-// cache has not yet seen as Pending is counted from the API server.
 func TestHandlePendingNamespaceLimitCountsConcurrentlyAdmittedTasks(t *testing.T) {
 	task := limitTestTask("checking")
 	peer := limitTestTask("admitted-concurrently")
@@ -78,7 +72,6 @@ func TestHandlePendingNamespaceLimitCountsConcurrentlyAdmittedTasks(t *testing.T
 	assertNoJobsForTask(t, r, task)
 }
 
-// The same holds for a parent's maxConcurrentChildren.
 func TestCoordinationChildLimitCountsConcurrentlyAdmittedSiblings(t *testing.T) {
 	parentAgent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "coordinator", Namespace: "default"},
@@ -109,9 +102,6 @@ func TestCoordinationChildLimitCountsConcurrentlyAdmittedSiblings(t *testing.T) 
 	}
 }
 
-// Two Pending Tasks waiting under a limit of one used to count each other
-// and wait forever. Waiting Tasks no longer count: the first to take the slot
-// proceeds and the other waits for it.
 func TestHandlePendingNamespaceLimitAdmitsOneOfTwoWaitingTasks(t *testing.T) {
 	first := limitTestTask("first-waiting")
 	second := limitTestTask("second-waiting")
@@ -133,7 +123,6 @@ func TestHandlePendingNamespaceLimitAdmitsOneOfTwoWaitingTasks(t *testing.T) {
 	if result.RequeueAfter != 10*time.Second {
 		t.Fatalf("second RequeueAfter = %v, want it to wait for the slot", result.RequeueAfter)
 	}
-	// Only the admitted Task created its Job.
 	stored := &corev1alpha1.Task{}
 	for _, task := range []*corev1alpha1.Task{first, second} {
 		if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), stored); err != nil {
@@ -145,9 +134,6 @@ func TestHandlePendingNamespaceLimitAdmitsOneOfTwoWaitingTasks(t *testing.T) {
 	}
 }
 
-// A recurring Task's scheduling parent stays Scheduled and runs nothing
-// itself, so it never holds a slot: under a limit of one, both its own child
-// run and an unrelated Task proceed.
 func TestHandlePendingRecurringParentHoldsNoSlot(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -183,10 +169,6 @@ func TestHandlePendingRecurringParentHoldsNoSlot(t *testing.T) {
 	}
 }
 
-// Two reconciles of Tasks in one namespace can both read a worker
-// RoleBinding with a stale RoleRef. When the other has already replaced it
-// with the desired binding, this one must not delete that replacement out
-// from under running workers.
 func TestRecreateWorkerRoleBindingKeepsAConcurrentReplacement(t *testing.T) {
 	ctx := context.Background()
 	const namespace = "shared-ns"
@@ -197,8 +179,6 @@ func TestRecreateWorkerRoleBindingKeepsAConcurrentReplacement(t *testing.T) {
 	replacement := workerRoleBinding(namespace, spec)
 	replacement.UID = "replacement-uid"
 	r := newUnitReconciler(newTestScheme(), replacement)
-	// The fake client ignores delete preconditions; the API server refuses a
-	// delete whose UID precondition does not match with a Conflict.
 	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
 		Delete: func(ctx context.Context, delegate client.WithWatch, object client.Object, options ...client.DeleteOption) error {
 			deleteOptions := &client.DeleteOptions{}
@@ -229,11 +209,6 @@ func TestRecreateWorkerRoleBindingKeepsAConcurrentReplacement(t *testing.T) {
 	}
 }
 
-// A child pinned to a replaced parent fails terminally rather than being
-// admitted under the Task that now holds the parent's name, whose children
-// limit does not count it. Several such children cannot each run under a
-// limit of one, and the new parent's own child is still admitted. A cache
-// that still holds the earlier parent does not fail the new parent's child.
 func TestCoordinationChildOfAReplacedParentIsNeverAdmitted(t *testing.T) {
 	ctx := context.Background()
 	parentAgent := &corev1alpha1.Agent{
@@ -282,10 +257,6 @@ func TestCoordinationChildOfAReplacedParentIsNeverAdmitted(t *testing.T) {
 		t.Fatalf("the new parent's child: handled=%t err=%v, want it admitted", handled, err)
 	}
 
-	// The cache still holds the earlier parent; the API server has the new
-	// one. The new parent's child is confirmed against the API server and
-	// admitted, while a child pinned to the stale cached parent is also
-	// refreshed against the API server and failed as replaced.
 	cachedParent := parent.DeepCopy()
 	cachedParent.UID = "parent-old"
 	fresh := child("new-b", parent.UID)
@@ -308,9 +279,6 @@ func TestCoordinationChildOfAReplacedParentIsNeverAdmitted(t *testing.T) {
 	}
 }
 
-// limitTestRetryingTask is a Job Task backing off between attempts, as
-// retryTask leaves it: Pending, its Job cleared, and the retry-pending
-// condition the only sign it was admitted.
 func limitTestRetryingTask(name string) *corev1alpha1.Task {
 	task := limitTestTask(name)
 	task.Spec.RetryPolicy = &corev1alpha1.RetryPolicy{InitialDelay: &metav1.Duration{Duration: time.Hour}}
@@ -322,11 +290,6 @@ func limitTestRetryingTask(name string) *corev1alpha1.Task {
 	return task
 }
 
-// A Job Task in retry backoff when the namespace limit is first enforced has
-// no grant, and its cleared Job no longer shows it admitted. It still holds
-// its slot: another Task is not admitted past the limit while it backs off,
-// it takes its own grant before the delay returns, and the other Task is
-// admitted once it finishes.
 func TestHandlePendingRetryBackoffKeepsItsNamespaceSlot(t *testing.T) {
 	ctx := context.Background()
 	retrying, waiting := limitTestRetryingTask("retrying"), limitTestTask("waiting")
@@ -386,9 +349,6 @@ func TestHandlePendingRetryBackoffKeepsItsNamespaceSlot(t *testing.T) {
 	}
 }
 
-// Tasks backing off when a limit is first enforced can outnumber it. They do
-// not wait for each other: one takes the slot, the others wait for it, and a
-// new Task waits for all of them.
 func TestRetryBackoffTasksOverALimitTakeTheSlotInTurn(t *testing.T) {
 	ctx := context.Background()
 	first, second, fresh := limitTestRetryingTask("first"), limitTestRetryingTask("second"), limitTestTask("fresh")
@@ -409,9 +369,6 @@ func TestRetryBackoffTasksOverALimitTakeTheSlotInTurn(t *testing.T) {
 	}
 }
 
-// A retrying child takes its slots in admission order, namespace before
-// children. Waiting for its namespace slot, it takes no child slot, so two
-// retrying siblings never each hold the slot the other waits for.
 func TestRetryBackoffTakesNoChildSlotWhileWaitingForItsNamespaceSlot(t *testing.T) {
 	ctx := context.Background()
 	parentAgent := &corev1alpha1.Agent{
@@ -461,11 +418,6 @@ func TestRetryBackoffTakesNoChildSlotWhileWaitingForItsNamespaceSlot(t *testing.
 	}
 }
 
-// After both limits drop to 1, sibling A holds only a namespace grant and
-// sibling B only a child grant: each needs the slot the other holds. A Task
-// held in one scope gives up its grant in the other, so in either age order
-// exactly one sibling is admitted and the other follows once it finishes.
-// A running holder in either scope holds both siblings until it finishes.
 func TestCrossScopePartialHoldersProceedOneAtATime(t *testing.T) {
 	for _, running := range []string{"", taskAdmissionLedgerKindNamespace, taskAdmissionLedgerKindChildren} {
 		for _, aOlder := range []bool{true, false} {
@@ -516,8 +468,6 @@ func testCrossScopePartialHolders(t *testing.T, running string, aOlder bool) {
 		holder = limitTestTask("running-elsewhere")
 		namespaceGrants = append(namespaceGrants, holder.UID)
 	case taskAdmissionLedgerKindChildren:
-		// A running sibling fills the child slot; the namespace has room for
-		// it and one more.
 		holder = child("running-sibling", 3*time.Minute)
 		namespaceGrants = append(namespaceGrants, holder.UID)
 		childGrants = append(childGrants, holder.UID)
@@ -547,8 +497,6 @@ func testCrossScopePartialHolders(t *testing.T, running string, aOlder bool) {
 		current := stored(task)
 		return current.Status.JobName != "" && !current.Status.Phase.IsTerminal()
 	}
-	// reconcile runs every waiting sibling a few times and returns the
-	// admitted ones; never more than one runs at once.
 	reconcile := func(when string) []*corev1alpha1.Task {
 		t.Helper()
 		for range 3 {

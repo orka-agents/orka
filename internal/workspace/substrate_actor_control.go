@@ -6,12 +6,10 @@ import (
 	"strings"
 )
 
-// SubstrateActorPoolExecutor is a control-only adapter for controller-owned Substrate actor pools.
 type SubstrateActorPoolExecutor struct {
 	control substrateControlClient
 }
 
-// NewSubstrateActorPoolExecutor returns the control-only adapter used by the actor pool controller.
 func NewSubstrateActorPoolExecutor(cfg SubstrateConfig) (*SubstrateActorPoolExecutor, error) {
 	control, err := resolveSubstrateControlClient(cfg)
 	if err != nil {
@@ -20,13 +18,10 @@ func NewSubstrateActorPoolExecutor(cfg SubstrateConfig) (*SubstrateActorPoolExec
 	return &SubstrateActorPoolExecutor{control: control}, nil
 }
 
-// Close releases network resources owned by this adapter.
 func (e *SubstrateActorPoolExecutor) Close() error {
 	return closeSubstrateControlClient(e.control)
 }
 
-// resolveSubstrateControlClient returns the injected control client or dials
-// the real gRPC control plane for control-only adapters.
 func resolveSubstrateControlClient(cfg SubstrateConfig) (substrateControlClient, error) {
 	if cfg.ControlClient != nil {
 		return cfg.ControlClient, nil
@@ -34,8 +29,6 @@ func resolveSubstrateControlClient(cfg SubstrateConfig) (substrateControlClient,
 	return newGRPCSubstrateControlClient(cfg)
 }
 
-// closeSubstrateControlClient releases a control client that owns network
-// resources; injected fakes without Close are left untouched.
 func closeSubstrateControlClient(control substrateControlClient) error {
 	if closer, ok := control.(interface{ Close() error }); ok {
 		return closer.Close()
@@ -43,7 +36,6 @@ func closeSubstrateControlClient(control substrateControlClient) error {
 	return nil
 }
 
-// SubstratePoolTelemetry reports safe actor/worker density for a single Orka pool.
 func (e *SubstrateActorPoolExecutor) SubstratePoolTelemetry(
 	ctx context.Context,
 	prefix string,
@@ -100,7 +92,6 @@ func (e *SubstrateActorPoolExecutor) SubstratePoolTelemetry(
 	return substrateDensity(filteredWorkers, filteredActors), nil
 }
 
-// EnsureSubstrateActors creates deterministic actor records for a pool target.
 func (e *SubstrateActorPoolExecutor) EnsureSubstrateActors(
 	ctx context.Context,
 	prefix string,
@@ -143,8 +134,6 @@ func (e *SubstrateActorPoolExecutor) EnsureSubstrateActors(
 	return created, nil
 }
 
-// ConvergeSubstrateActors creates missing deterministic actors below target and
-// deletes deterministic pool actors at or above target.
 func (e *SubstrateActorPoolExecutor) ConvergeSubstrateActors(
 	ctx context.Context,
 	prefix string,
@@ -175,7 +164,6 @@ func (e *SubstrateActorPoolExecutor) ConvergeSubstrateActors(
 	return created, deleted, nil
 }
 
-// PruneSubstrateActors deletes deterministic pool actors at or above target.
 func (e *SubstrateActorPoolExecutor) PruneSubstrateActors(
 	ctx context.Context,
 	prefix string,

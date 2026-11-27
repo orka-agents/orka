@@ -17,8 +17,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Like stoppedAncestor, cross-namespace delegation uses a protected UID and
-// namespace annotation; a controller owner always identifies a local parent.
 func gatewayPassParent(ctx context.Context, reader client.Reader, child *corev1alpha1.Task) (*corev1alpha1.Task, error) {
 	name := labels.ParentTaskName(child.Labels, child.Annotations)
 	uid := strings.TrimSpace(child.Annotations[labels.AnnotationParentTaskUID])
@@ -86,8 +84,6 @@ type gatewayPassAncestor struct {
 	grant *gatewayruntime.TaskGrant
 }
 
-// child is nil for the caller itself. Only ancestors may retain authority
-// after a successful turn, and only while waiting for that exact child UID.
 func gatewayPassActive(task, child *corev1alpha1.Task) bool {
 	if _, cancelled := task.Annotations[labels.AnnotationCancelRequested]; cancelled || !task.DeletionTimestamp.IsZero() {
 		return false
@@ -113,8 +109,6 @@ func gatewayPassActive(task, child *corev1alpha1.Task) bool {
 	return false
 }
 
-// Walk only frozen parent references and compare each against live protected
-// provenance. Live Agent policies never replace a parent's frozen authority.
 func gatewayPassChain(ctx context.Context, reader client.Reader, snapshots store.AgentExecutionSnapshotStore, service *gatewayruntime.Service, task *corev1alpha1.Task, grant *gatewayruntime.TaskGrant, tool string, child *corev1alpha1.Task) ([]gatewayPassAncestor, error) {
 	fail := errors.New("gateway task pass is unavailable")
 	var chain []gatewayPassAncestor
@@ -128,7 +122,6 @@ func gatewayPassChain(ctx context.Context, reader client.Reader, snapshots store
 			return nil, fail
 		}
 		seen[string(live.UID)] = true
-		// Continuations have their own UID but no gateway event or child grant.
 		if live.Annotations[labels.AnnotationContinuationOfUID] != "" {
 			return nil, fail
 		}
@@ -144,8 +137,6 @@ func gatewayPassChain(ctx context.Context, reader client.Reader, snapshots store
 			if namesDelegatingTask(live) || service == nil {
 				return nil, fail
 			}
-			// At freeze there is no tool call yet. A parked parent retains
-			// delegation origin only; root calls keep their existing liveness.
 			if tool == "" || live.Status.Phase != corev1alpha1.TaskPhaseRunning {
 				err = service.ValidateParentTaskGrantOrigin(ctx, live, grant)
 			} else {

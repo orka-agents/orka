@@ -214,7 +214,6 @@ func TestResponsesProductionFinalFunctionArgumentsPresence(t *testing.T) {
 							kind = "response.output_item.added"
 						}
 						events = append(events, map[string]any{"type": kind, "output_index": 0, "item": item})
-						// A later done event may omit arguments without retracting an explicit final snapshot.
 						if source == "completed-added" {
 							omitted := maps.Clone(item)
 							delete(omitted, "arguments")
@@ -382,7 +381,7 @@ func TestResponsesProductionChatFunctionIntegrity(t *testing.T) {
 func invalidResponsesMetadataFixture(source, field, value string) bool {
 	invalid := (value == "empty" || value == "null") && field != "id" && field != "status"
 	if value == "empty" && (field == "delta" || (field == "arguments" && (source == "initial-added" || source == "in-progress-added"))) {
-		return false // An empty argument prefix does not clear accumulated arguments.
+		return false
 	}
 	return invalid
 }
@@ -480,7 +479,6 @@ func TestResponsesProductionFunctionMetadataPresence(t *testing.T) {
 					})
 					stream := mode == "sse"
 					status, _, body := productionResponsesRequest(t, listenResponsesApp(t, server.app), token, fmt.Sprintf(`{"model":"fixture/test-model","store":false,"stream":%t,"input":"write the file","tools":[{"type":"function","name":"file_write"}]}`, stream), mode != "coordinator")
-					// Item IDs and statuses retain their optional metadata normalization.
 					if invalidResponsesMetadataFixture(tc.source, tc.field, value) {
 						require.NoFileExists(t, path, "explicitly invalid metadata must fail before execution")
 						requireResponsesIntegrityFailure(t, status, body, stream)

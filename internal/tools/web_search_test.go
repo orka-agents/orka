@@ -46,13 +46,11 @@ func TestWebSearchTool_Parameters(t *testing.T) {
 		t.Fatal("Parameters() returned nil")
 	}
 
-	// Verify it's valid JSON
 	var schema map[string]any
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Errorf("Parameters() returned invalid JSON: %v", err)
 	}
 
-	// Check required fields
 	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
@@ -90,7 +88,6 @@ func TestNewBrokeredWebSearchToolIgnoresWorkerConfigurationAndRejectsPrivateEndp
 }
 
 func TestWebSearchReturnsErrorsInsteadOfSyntheticResults(t *testing.T) {
-	// Clear any search API so the worker tool takes the DuckDuckGo path.
 	t.Setenv(workerenv.SearchAPIURL, "")
 
 	webSearchResponse := func(status int, body string) http.RoundTripper {
@@ -125,7 +122,6 @@ func TestWebSearchReturnsErrorsInsteadOfSyntheticResults(t *testing.T) {
 			want:      "no parseable results",
 		},
 		{
-			// DuckDuckGo answers automated clients with a challenge page.
 			name:      "bot challenge",
 			transport: webSearchResponse(http.StatusAccepted, `<form id="challenge-form" action="//duckduckgo.com/anomaly.js"></form>`),
 			want:      "DuckDuckGo returned HTTP 202",
@@ -320,8 +316,6 @@ const duckDuckGoResultsHTML = `<div class="result">
 	<a class="result__snippet" href="#">Third snippet</a>
 </div>`
 
-// duckDuckGoResultsTransport answers every request with three DuckDuckGo
-// results, passing each request to inspect first when it is set.
 func duckDuckGoResultsTransport(t *testing.T, inspect func(*http.Request)) http.RoundTripper {
 	t.Helper()
 	return webSearchRoundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -366,10 +360,8 @@ func TestWebSearchTool_Execute_DuckDuckGoSearch(t *testing.T) {
 }
 
 func TestWebSearchTool_Execute_APISearch(t *testing.T) {
-	// Create a test server
 	expectedResponse := `[{"title": "Test", "url": "https://example.com", "snippet": "Test result"}]`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify request
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET request, got %s", r.Method)
 		}
@@ -600,7 +592,6 @@ func TestWebSearchTool_Execute_APIInvalidBaseURL(t *testing.T) {
 }
 
 func TestWebSearchTool_Execute_APIError(t *testing.T) {
-	// Create a test server that returns an error
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("internal server error")) //nolint:errcheck
@@ -648,7 +639,6 @@ func TestWebSearchTool_Execute_WithAuthHeader(t *testing.T) {
 
 func TestWebSearchTool_Execute_ContextCancellation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		// Slow response
 		<-r.Context().Done()
 	}))
 	defer server.Close()
@@ -659,7 +649,7 @@ func TestWebSearchTool_Execute_ContextCancellation(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
+	cancel()
 
 	args := json.RawMessage(`{"query": "test"}`)
 	_, err := tool.Execute(ctx, args)
@@ -690,7 +680,6 @@ func TestParseDDGResults(t *testing.T) {
 		t.Errorf("result[0].Title = %q, want %q", results[0].Title, "Example Page 1")
 	}
 
-	// Tags should be stripped from title
 	if results[1].Title != "Bold Page 2" {
 		t.Errorf("result[1].Title = %q, want %q", results[1].Title, "Bold Page 2")
 	}

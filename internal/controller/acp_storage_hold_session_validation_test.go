@@ -21,11 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// Acknowledging the hold of a Session Task whose receipt was lost after
-// workspace validation started settles the validation as a delivery conflict
-// before recording the outcome as unknown, so the Session turn is finalized
-// and later Tasks on the Session are not blocked.
-//
 //nolint:gocyclo // One end-to-end scenario across the takeover, the hold and its release.
 func TestACPDispatcherSettlesWorkspaceValidationWhenASessionHoldIsAcknowledged(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -78,8 +73,6 @@ func TestACPDispatcherSettlesWorkspaceValidationWhenASessionHoldIsAcknowledged(t
 		t.Fatal(err)
 	}
 
-	// The replaced controller ran the prompt, stored its receipt, moved the
-	// attempt to Settling and started workspace validation.
 	continuity := newACPRecoveryContinuity(t, controlStore, sqliteStore, "held-validation-uid")
 	control, err := continuity.EnsureSession(ctx, ACPEnsureSessionRequest{
 		Namespace: "default", SessionName: "held-validation", SessionType: "task",
@@ -141,7 +134,6 @@ func TestACPDispatcherSettlesWorkspaceValidationWhenASessionHoldIsAcknowledged(t
 	); err != nil {
 		t.Fatal(err)
 	}
-	// The store loses the receipt and the result.
 	if err := sqliteStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
 		t.Fatal(err)
 	}

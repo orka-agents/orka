@@ -1,6 +1,3 @@
-// Command remote-mcp-gateway is a LOCAL PROOF FIXTURE, not a production gateway.
-// It authenticates a narrowly issued transaction and resource credential, then
-// relays MCP unchanged to one fixed upstream. It never implements an MCP tool.
 package main
 
 import (
@@ -159,8 +156,6 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Only bounded protocol categories and outcomes belong in proof logs. Neither
-	// application bodies nor arbitrary caller claims are safe, even in a fixture.
 	g.mu.Lock()
 	_ = json.NewEncoder(g.output).Encode(map[string]any{
 		"event": "exchange", "method": r.Method, "rpc": request.Method,
@@ -176,8 +171,6 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 	if eventStream {
 		if err := forwardEventStream(w, resp.Body); err != nil {
-			// The status and some event bytes may already be on the wire. Abort
-			// rather than append an HTTP error or turn a truncated stream into EOF.
 			panic(http.ErrAbortHandler)
 		}
 		return
@@ -193,7 +186,6 @@ func forwardEventStream(w http.ResponseWriter, body io.Reader) error {
 	remaining := maxResponseBytes
 	buffer := make([]byte, 32<<10)
 	for {
-		// Read at most one byte past the bound, but never forward that byte.
 		n, readErr := body.Read(buffer[:min(len(buffer), remaining+1)])
 		if n > 0 {
 			allowed := min(n, remaining)

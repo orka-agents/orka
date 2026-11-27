@@ -24,8 +24,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// sealedTestKey is a snapshot key with a recognizable pattern, so the tests
-// can search provider input for it.
 var sealedTestKey = []byte("orka-sealed-records-test-key-32b")
 
 func activatedClient(t *testing.T, backend storageclient.EmbeddedStore, key []byte) *storageclient.Client {
@@ -42,7 +40,6 @@ func snapshotFor(taskUID string, body []byte) store.AgentExecutionSnapshot {
 	}
 }
 
-// nativeImport returns a staged import request for a fresh bundle.
 func nativeImport(t *testing.T, name, text string) store.NativeSessionImport {
 	t.Helper()
 	snapshot := storetest.NativeSessionSnapshot(t, text)
@@ -53,7 +50,6 @@ func nativeImport(t *testing.T, name, text string) store.NativeSessionImport {
 	}
 }
 
-// finalizationFixture creates a Session with a bound owner and an open turn.
 func finalizationFixture(t *testing.T, client *storageclient.Client, name, taskUID string) store.CommitSessionTurnFinalizationRequest {
 	t.Helper()
 	ctx := t.Context()
@@ -84,17 +80,11 @@ func finalizationFixture(t *testing.T, client *storageclient.Client, name, taskU
 	}
 }
 
-// TestProviderReceivesOnlySealedSnapshotsAndNativeSessions drives every write
-// of execution snapshots and native session state through the client, then
-// proves the provider never received the plaintext bodies, the native
-// bundles in any encoding, or the snapshot key.
 func TestProviderReceivesOnlySealedSnapshotsAndNativeSessions(t *testing.T) {
 	recorder := newRecordingStore(t)
 	client := activatedClient(t, recorder, sealedTestKey)
 	ctx := t.Context()
 	plaintexts := make([][]byte, 0, 4)
-	// Session turn steps commit only under the dataset's controller epoch,
-	// which finalizationFixture's fence names.
 	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	require.NoError(t, recorder.SyncControllerEpochMirror(ctx, store.ControllerEpoch{
 		Name: store.DefaultControllerEpochName, Epoch: 1, HolderID: "controller",
@@ -118,8 +108,6 @@ func TestProviderReceivesOnlySealedSnapshotsAndNativeSessions(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, imported.Snapshot.Data, staged.Snapshot.Data)
 
-	// A capture outside a turn, then a turn that captures new state and a
-	// turn that carries it across an outcome marker.
 	require.NoError(t, client.CreateSession(ctx, &store.SessionRecord{Namespace: "tenant", Name: "captured", SessionType: "task"}))
 	require.NoError(t, client.BindSessionCleanupIdentity(ctx, "tenant", "captured", "captured-uid"))
 	captured := store.NativeSessionRecord{
@@ -166,16 +154,11 @@ func TestProviderReceivesOnlySealedSnapshotsAndNativeSessions(t *testing.T) {
 	}
 	secrets["snapshot marker"] = "snapshot-plaintext-marker"
 	recorder.requireNoSecret(t, secrets)
-	// The provider received the sealed records' plain facts, so the check
-	// above is not passing on empty records.
 	recorder.requireReceived(t, "StageSealedNativeSessionImport", imported.Snapshot.DataDigest)
 	recorder.requireReceived(t, "CommitSealedSessionTurnFinalization", finalized.Snapshot.DataDigest)
 	recorder.requireReceived(t, "CreateSealedAgentExecutionSnapshot", snapshot.Digest)
 }
 
-// legacySeal and legacyOpen implement the stored formats independently of
-// the client, as the embedded store sealed them before the client held the
-// key.
 func legacySeal(t *testing.T, key, additionalData, plaintext []byte) ([]byte, []byte) {
 	t.Helper()
 	aead := legacyAEAD(t, key)
@@ -209,14 +192,10 @@ func legacyNativeAAD(namespace, name, uid, digest string) []byte {
 	return fmt.Appendf(nil, "orka.native-session.v1\x00%s\x00%s\x00%s\x00%s", namespace, name, uid, digest)
 }
 
-// TestSealedFormatsMatchStoredRecords proves the client reads records in the
-// stored formats and writes records those formats can read, so existing
-// datasets open unchanged.
 func TestSealedFormatsMatchStoredRecords(t *testing.T) {
 	backend := openSQLite(t)
 	ctx := t.Context()
 
-	// Records sealed in the stored formats open through the client.
 	body := []byte(`{"prompt":"sealed in the stored format"}`)
 	snapshot := snapshotFor("legacy-task", body)
 	nonce, ciphertext := legacySeal(t, sealedTestKey, legacySnapshotAAD(snapshot.TaskUID, snapshot.Digest, snapshot.SchemaVersion), body)
@@ -254,7 +233,6 @@ func TestSealedFormatsMatchStoredRecords(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, record, *native)
 
-	// Records the client seals open in the stored formats.
 	written := snapshotFor("client-task", []byte(`{"prompt":"sealed by the client"}`))
 	require.NoError(t, client.PersistAgentExecutionSnapshot(ctx, written))
 	sealed, err := backend.GetSealedAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{TaskUID: written.TaskUID, Digest: written.Digest})
@@ -276,7 +254,6 @@ func TestSealedFormatsMatchStoredRecords(t *testing.T) {
 	require.Equal(t, clientImport.OperationID, opened.SourceOperationID)
 }
 
-// tamperingStore changes what the provider returns for sealed records.
 type tamperingStore struct {
 	*recordingStore
 	snapshot func(*storagev1.SealedAgentExecutionSnapshot)
@@ -299,9 +276,6 @@ func (s *tamperingStore) GetSealedNativeSession(ctx context.Context, namespace, 
 	return sealed, err
 }
 
-// TestClientRejectsWrongKeysAndModifiedRecords covers a missing key, a key
-// that cannot open retained records, and records a provider altered or
-// returned for another identity.
 func TestClientRejectsWrongKeysAndModifiedRecords(t *testing.T) {
 	ctx := context.Background()
 	backend := &tamperingStore{recordingStore: newRecordingStore(t)}
@@ -344,7 +318,6 @@ func TestClientRejectsWrongKeysAndModifiedRecords(t *testing.T) {
 		_, err := client.GetAgentExecutionSnapshot(ctx, key)
 		require.Error(t, err, name)
 	}
-	// Another record's sealed bytes under this key fail authentication.
 	backend.snapshot = func(s *storagev1.SealedAgentExecutionSnapshot) {
 		swapped, err := backend.Store.GetSealedAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{TaskUID: other.TaskUID, Digest: other.Digest})
 		require.NoError(t, err)
@@ -378,11 +351,6 @@ func TestClientRejectsWrongKeysAndModifiedRecords(t *testing.T) {
 	require.Equal(t, imported.Snapshot.Data, native.Snapshot.Data)
 }
 
-// TestConcurrentSnapshotPersistsOfOneKey races persists of one snapshot key.
-// Identical persists all succeed. Persists with different content store one
-// snapshot, and every other caller learns its content differs. A snapshot's
-// digest covers only its body, so the content that differs is the schema
-// version.
 func TestConcurrentSnapshotPersistsOfOneKey(t *testing.T) {
 	const callers = 8
 	race := func(persist func(caller int) error) []error {

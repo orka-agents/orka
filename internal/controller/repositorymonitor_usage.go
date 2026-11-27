@@ -34,8 +34,6 @@ func (r *RepositoryMonitorReconciler) usageOutcomeRequeueAfter(ctx context.Conte
 	if len(links) > 0 {
 		return usageOutcomeBacklogInterval, nil
 	}
-	// Include recently observed links: they still need a timer for their next
-	// refresh. Confirmed merges are excluded by the store.
 	links, err = usageStore.ListUsagePullRequestLinks(ctx, monitor.Namespace, string(monitor.UID), now, 1)
 	if len(links) > 0 {
 		return usageOutcomeRefreshInterval, err
@@ -68,8 +66,6 @@ func (r *RepositoryMonitorReconciler) recordMonitorUsagePRLink(ctx context.Conte
 		LinkedAt: time.Now().UTC()})
 }
 
-// Refresh continues after Tasks finish and queries each linked PR directly,
-// including closed PRs that no longer appear in the open-PR inventory.
 func (r *RepositoryMonitorReconciler) refreshMonitorUsageOutcomes(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) error {
 	usageStore, ok := r.Store.(store.UsageStore)
 	if !ok || monitor.UID == "" {
@@ -109,8 +105,6 @@ func (r *RepositoryMonitorReconciler) refreshMonitorUsageOutcomes(ctx context.Co
 	return nil
 }
 
-// GraphQL exposes GitHub's rules-aware merge state and review decision for the
-// same head in one observation. Unknown decisions fail closed for readiness.
 func (r *RepositoryMonitorReconciler) fetchUsagePullRequest(ctx context.Context, repository string, number int64, token string) (store.UsagePullRequest, error) {
 	var result store.UsagePullRequest
 	owner, name, ok := strings.Cut(repository, "/")

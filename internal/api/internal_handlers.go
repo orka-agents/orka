@@ -33,45 +33,37 @@ const (
 	maxInternalTranscriptSearchLimit     = 50
 )
 
-// InternalHandlers contains handlers for internal worker endpoints.
 type InternalHandlers struct {
-	k8sClient           client.Client
-	apiReader           client.Reader
-	resultStore         store.ResultStore
-	sessionStore        store.SessionStore
-	planStore           store.PlanStore
-	messageStore        store.MessageStore
-	artifactStore       store.ArtifactStore
-	executionEventStore store.ExecutionEventStore
-	gatewayEventStore   store.GatewayEventStore
-	gatewayService      *gatewayruntime.Service
-	memoryStore         store.MemoryStore
-	memoryProposalStore store.MemoryProposalStore
-	// memoryConsolidationStore records memory consolidation runs.
+	k8sClient                client.Client
+	apiReader                client.Reader
+	resultStore              store.ResultStore
+	sessionStore             store.SessionStore
+	planStore                store.PlanStore
+	messageStore             store.MessageStore
+	artifactStore            store.ArtifactStore
+	executionEventStore      store.ExecutionEventStore
+	gatewayEventStore        store.GatewayEventStore
+	gatewayService           *gatewayruntime.Service
+	memoryStore              store.MemoryStore
+	memoryProposalStore      store.MemoryProposalStore
 	memoryConsolidationStore store.MemoryConsolidationStore
 	taskProvenanceProtected  bool
 	connectorTools           ConnectorToolExecutionConfig
 }
 
-// InternalHandlersConfig holds optional configuration for internal handlers.
 type InternalHandlersConfig struct {
-	Client              client.Client
-	APIReader           client.Reader
-	MemoryStore         store.MemoryStore
-	MemoryProposalStore store.MemoryProposalStore
-	// MemoryConsolidationStore records memory consolidation runs.
+	Client                   client.Client
+	APIReader                client.Reader
+	MemoryStore              store.MemoryStore
+	MemoryProposalStore      store.MemoryProposalStore
 	MemoryConsolidationStore store.MemoryConsolidationStore
 	ExecutionEventStore      store.ExecutionEventStore
 	GatewayEventStore        store.GatewayEventStore
 	GatewayService           *gatewayruntime.Service
-	// TaskProvenanceProtected permits cross-task coordination only when the
-	// Task provenance admission webhook protects coordination ancestry.
-	TaskProvenanceProtected bool
-	// ConnectorTools lets native workers run connector-backed tools here.
-	ConnectorTools ConnectorToolExecutionConfig
+	TaskProvenanceProtected  bool
+	ConnectorTools           ConnectorToolExecutionConfig
 }
 
-// NewInternalHandlers creates a new InternalHandlers instance.
 func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.PlanStore, ms store.MessageStore, as store.ArtifactStore, configs ...InternalHandlersConfig) *InternalHandlers {
 	h := &InternalHandlers{
 		resultStore:   rs,
@@ -95,8 +87,6 @@ func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.P
 	return h
 }
 
-// SubmitResult handles POST /internal/v1/results/{namespace}/{taskName}.
-// Workers call this to persist task results.
 func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 	namespace := c.Params("namespace")
 	taskName := c.Params("taskName")
@@ -115,8 +105,6 @@ func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotImplemented, "result storage not enabled")
 	}
 
-	// Finish the bounded body read before reserving the store writer. A slow
-	// upload must not hold up Task deletion or preserve an earlier authorization.
 	body := c.Request().BodyStream()
 	var data []byte
 	if body == nil {
@@ -145,8 +133,6 @@ func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// UpdateExecutionWorkspaceStatus handles
-// POST /internal/v1/tasks/{namespace}/{taskName}/execution-workspace/status.
 func (h *InternalHandlers) UpdateExecutionWorkspaceStatus(c fiber.Ctx) error {
 	namespace := c.Params("namespace")
 	taskName := c.Params("taskName")
@@ -180,12 +166,8 @@ func (h *InternalHandlers) UpdateExecutionWorkspaceStatus(c fiber.Ctx) error {
 		if err != nil {
 			return err
 		}
-		// Update the exact authorized version. A concurrent controller change
-		// must conflict and repeat authorization before the worker can write.
 		statusrules.PreserveReadyTelemetry(status, task.Status.ExecutionWorkspace)
 		if previous := task.Status.ExecutionWorkspace; previous != nil {
-			// Workers report legacy provider status; attachment authority and
-			// finalization state remain owned by the controller.
 			status.ClassRef = previous.ClassRef
 			status.WorkspaceRef = previous.WorkspaceRef
 			status.State = previous.State
@@ -205,8 +187,6 @@ func (h *InternalHandlers) UpdateExecutionWorkspaceStatus(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// UploadArtifact handles POST /internal/v1/artifacts/{namespace}/{taskName}/{filename}.
-// Workers call this to upload artifact files.
 func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 	namespace := c.Params("namespace")
 	taskName := c.Params("taskName")
@@ -216,7 +196,6 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace, taskName, and filename are required")
 	}
 
-	// Server-side filename validation (defense-in-depth)
 	if len(filename) > 255 {
 		return fiber.NewError(fiber.StatusBadRequest, "filename exceeds 255 character limit")
 	}
@@ -263,8 +242,6 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusCreated)
 }
 
-// GetSessionTranscript handles GET /internal/v1/sessions/{namespace}/{name}/transcript.
-// Returns the session transcript as JSONL (one JSON object per line).
 func (h *InternalHandlers) GetSessionTranscript(c fiber.Ctx) error {
 	namespace := c.Params("namespace")
 	name, err := url.PathUnescape(c.Params("name"))
@@ -383,8 +360,6 @@ func transcriptSessionType(ctx context.Context, sessionStore store.SessionStore,
 	return session.SessionType, nil
 }
 
-// SearchTranscript handles GET /internal/v1/sessions/{namespace}/search.
-// It searches namespace-scoped session transcripts and returns compact snippets.
 func (h *InternalHandlers) SearchTranscript(c fiber.Ctx) error {
 	namespace := c.Params("namespace")
 	if namespace == "" {
@@ -510,8 +485,6 @@ func parseOptionalNonNegativeQueryInt(raw, name string) (int, error) {
 	return value, nil
 }
 
-// SubmitPlan handles POST /internal/v1/plans/{namespace}/{taskName}.
-// Workers call this to persist autonomous plan state.
 func (h *InternalHandlers) SubmitPlan(c fiber.Ctx) error {
 	namespace := c.Params("namespace")
 	taskName := c.Params("taskName")
@@ -560,8 +533,6 @@ func (h *InternalHandlers) SubmitPlan(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// GetPlan handles GET /internal/v1/plans/{namespace}/{taskName}.
-// Workers call this to load the current plan state at startup.
 func (h *InternalHandlers) GetPlan(c fiber.Ctx) error {
 	namespace := c.Params("namespace")
 	taskName := c.Params("taskName")
@@ -595,8 +566,6 @@ func (h *InternalHandlers) GetPlan(c fiber.Ctx) error {
 	return c.JSON(plan)
 }
 
-// SendMessage handles POST /internal/v1/messages/{namespace}.
-// Workers call this to send messages to sibling tasks.
 func (h *InternalHandlers) SendMessage(c fiber.Ctx) error {
 	namespace := c.Params("namespace")
 	if namespace == "" {
@@ -643,8 +612,6 @@ func (h *InternalHandlers) SendMessage(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// GetMessages handles GET /internal/v1/messages/{namespace}/{taskName}.
-// Workers call this to check for messages from sibling tasks.
 func (h *InternalHandlers) GetMessages(c fiber.Ctx) error {
 	namespace := c.Params("namespace")
 	taskName := c.Params("taskName")

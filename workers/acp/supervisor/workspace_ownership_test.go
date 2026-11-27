@@ -31,9 +31,6 @@ func TestSessionWorkspaceOutsideRoot(t *testing.T) {
 	}
 }
 
-// A resumed lineage's checkpoint mismatch may be wiped only under the
-// controller's exact prior-identity assertion for a verified publication
-// transition; every other foreign identity stays fail-closed.
 func TestDurableResumeTransitionAuthorized(t *testing.T) {
 	t.Parallel()
 	if durableResumeTransitionAuthorized("github.com/o/source", "abc", "") {

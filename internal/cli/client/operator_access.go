@@ -17,12 +17,10 @@ import (
 	"github.com/orka-agents/orka/internal/operatoraccess"
 )
 
-// OperatorExecStreams are the local ends of an operator exec.
 type OperatorExecStreams struct {
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
-	// Controls carries resize and signal requests (Ctrl-C forwarding).
+	Stdin    io.Reader
+	Stdout   io.Writer
+	Stderr   io.Writer
 	Controls <-chan operatoraccess.Control
 }
 
@@ -82,9 +80,6 @@ func operatorAPIError(response *http.Response, fallback error) error {
 	return fmt.Errorf("API error (HTTP %d): %s", response.StatusCode, message)
 }
 
-// OperatorExec runs one command in the Task's RuntimeSession workspace and
-// returns its final status. The command is sent as the first stream message
-// so argv never appears in URLs or headers.
 func (c *Client) OperatorExec(ctx context.Context, taskName string, options operatoraccess.ExecOptions, streams OperatorExecStreams) (operatoraccess.Status, error) {
 	if err := options.Normalize(); err != nil {
 		return operatoraccess.Status{}, err
@@ -117,9 +112,6 @@ func (c *Client) OperatorExec(ctx context.Context, taskName string, options oper
 	if err := write(operatoraccess.Frame(operatoraccess.ChannelControl, request)); err != nil {
 		return operatoraccess.Status{}, fmt.Errorf("send exec request: %w", err)
 	}
-	// Input that cannot be read is not the end of the input. Telling the
-	// remote command it was would let it finish on truncated input and report
-	// success, so a failed read ends the exec instead.
 	stdinFailure := make(chan error, 1)
 	if options.Stdin && streams.Stdin != nil {
 		go func() {
@@ -152,9 +144,6 @@ func (c *Client) OperatorExec(ctx context.Context, taskName string, options oper
 		if kind != websocket.MessageBinary || len(payload) == 0 {
 			continue
 		}
-		// Output that cannot be written locally is lost, so the exec is not a
-		// success whatever the remote command goes on to return. Returning
-		// closes the stream, which stops the command.
 		switch payload[0] {
 		case operatoraccess.ChannelStdout:
 			if err := writeOperatorOutput(streams.Stdout, payload[1:]); err != nil {
@@ -183,8 +172,6 @@ func writeOperatorOutput(w io.Writer, data []byte) error {
 	return err
 }
 
-// pumpOperatorStdin forwards stdin until it ends. Only a real end of input is
-// announced to the remote command; any other read error is returned.
 func pumpOperatorStdin(stdin io.Reader, tty bool, write func([]byte) error) error {
 	buffer := make([]byte, 16<<10)
 	for {
@@ -218,7 +205,6 @@ func pumpOperatorControls(ctx context.Context, controls <-chan operatoraccess.Co
 	}
 }
 
-// OperatorCopyFrom copies one regular workspace file into w.
 func (c *Client) OperatorCopyFrom(ctx context.Context, taskName, path string, maxBytes int64, w io.Writer) (int64, error) {
 	query := url.Values{"path": {path}}
 	if maxBytes > 0 {
@@ -250,7 +236,6 @@ func (c *Client) OperatorCopyFrom(ctx context.Context, taskName, path string, ma
 	return copied, nil
 }
 
-// OperatorCopyTo writes exactly size bytes from r into one workspace file.
 func (c *Client) OperatorCopyTo(ctx context.Context, taskName, path string, r io.Reader, size int64) (int64, error) {
 	endpoint, err := c.operatorURL(taskName, "files", "", url.Values{"path": {path}, "size": {strconv.FormatInt(size, 10)}})
 	if err != nil {

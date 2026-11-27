@@ -19,8 +19,6 @@ import (
 	"github.com/orka-agents/orka/internal/acp"
 )
 
-// workspaceIdentityArg is the identity the supervisor would have recorded for
-// root (following a symbolic link, the strongest case for refusal tests).
 func workspaceIdentityArg(root string) string {
 	var stat unix.Stat_t
 	if unix.Stat(root, &stat) != nil {
@@ -29,8 +27,6 @@ func workspaceIdentityArg(root string) string {
 	return operatorWorkspaceIdentity{dev: uint64(stat.Dev), ino: stat.Ino}.String() //nolint:unconvert // Dev is uint32 on some Linux architectures.
 }
 
-// runFileHelper accepts the pre-identity argument form (mode, root, path,
-// bound) and inserts root's identity, so cases read naturally.
 func runFileHelper(t *testing.T, args []string, stdin io.Reader) (operatorFileStatus, []byte) {
 	t.Helper()
 	if len(args) == 4 {
@@ -96,7 +92,6 @@ func TestOperatorFileHelperRefusesTraversalAndSymlinks(t *testing.T) {
 			t.Fatalf("path %q escaped the workspace: %+v %q", rel, status, content)
 		}
 	}
-	// Writes through a symlinked directory or onto a symlink never touch the target.
 	for _, rel := range []string{"dirlink/new", "link"} {
 		status, _ := runFileHelper(t, []string{OperatorFileHelperWrite, root, rel, "3"}, strings.NewReader("pwn"))
 		if status.OK {
@@ -117,12 +112,10 @@ func TestOperatorFileHelperWritesExactlyTheDeclaredSize(t *testing.T) {
 	if err := os.WriteFile(target, []byte("original"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	// A truncated upload never replaces the target.
 	status, _ := runFileHelper(t, []string{OperatorFileHelperWrite, root, "notes.txt", "10"}, strings.NewReader("short"))
 	if status.OK {
 		t.Fatal("short upload must fail")
 	}
-	// An oversized upload never replaces the target.
 	status, _ = runFileHelper(t, []string{OperatorFileHelperWrite, root, "notes.txt", "3"}, strings.NewReader("too long"))
 	if status.OK || status.Code != operatorFileCodeTooLarge {
 		t.Fatalf("oversized upload must fail: %+v", status)
@@ -167,8 +160,6 @@ func TestOperatorFileHelperRejectsMalformedInvocations(t *testing.T) {
 	}
 }
 
-// The child owns its session root, so it can replace the workspace directory
-// with a symbolic link to its private home; the helper must refuse to follow it.
 func TestOperatorFileHelperRefusesASymlinkedWorkspaceRoot(t *testing.T) {
 	sessionRoot := t.TempDir()
 	home := filepath.Join(sessionRoot, "home")
@@ -195,8 +186,6 @@ func TestOperatorFileHelperRefusesASymlinkedWorkspaceRoot(t *testing.T) {
 	}
 }
 
-// The supervisor runs with a 077 umask that the helper inherits; uploads must
-// still keep a replaced file's mode and give a new file 0644.
 func TestOperatorFileHelperAppliesTheIntendedModeDespiteUmask(t *testing.T) {
 	previous := unix.Umask(0o077)
 	defer unix.Umask(previous)
@@ -226,12 +215,6 @@ func TestOperatorFileHelperAppliesTheIntendedModeDespiteUmask(t *testing.T) {
 	}
 }
 
-// The child owns the directories beneath the workspace and can move one into
-// its private home between the helper resolving a parent directory and
-// opening or committing the final entry. The operation must fail and nothing
-// outside the workspace may be read or written.
-// substitutingReader replaces the upload's temporary entry with the session's
-// own file once the helper starts reading stdin.
 type substitutingReader struct {
 	t       *testing.T
 	root    string
@@ -262,9 +245,6 @@ func substituteOperatorUpload(t *testing.T, root string) {
 	}
 }
 
-// The session can replace the upload's temporary entry while stdin streams,
-// or between the helper's check and its rename. The copy must never report
-// success for an inode it did not write.
 func TestOperatorFileHelperRefusesASubstitutedTemporaryFile(t *testing.T) {
 	t.Run("while streaming", func(t *testing.T) {
 		root := t.TempDir()
@@ -309,8 +289,6 @@ func TestOperatorFileHelperRefusesADirectoryMovedOutDuringResolution(t *testing.
 	}
 	moveOut := func(t *testing.T, root, outside string) func() {
 		return func() {
-			// Swap the workspace's a with a directory of the same name in
-			// the private home whose notes holds a secret.
 			if err := os.Rename(filepath.Join(root, "a"), filepath.Join(outside, "a")); err != nil {
 				t.Error(err)
 			}
@@ -348,8 +326,6 @@ func TestOperatorFileHelperRefusesADirectoryMovedOutDuringResolution(t *testing.
 	})
 }
 
-// The child owns its session root, so it can rename the workspace aside and
-// put another directory it can read in its place.
 func TestOperatorFileHelperRefusesAReplacedWorkspaceRoot(t *testing.T) {
 	session := t.TempDir()
 	root, home := filepath.Join(session, "workspace"), filepath.Join(session, "home")
@@ -381,9 +357,6 @@ func TestOperatorFileHelperRefusesAReplacedWorkspaceRoot(t *testing.T) {
 	}
 }
 
-// recreateDirectoryWithInode creates directories under parent until one is
-// given the wanted inode number, as a session child that has deleted its
-// workspace would, and reports whether one was.
 func recreateDirectoryWithInode(t *testing.T, parent, prefix string, want uint64) (string, bool) {
 	t.Helper()
 	for attempt := range 64 {
@@ -402,11 +375,6 @@ func recreateDirectoryWithInode(t *testing.T, parent, prefix string, want uint64
 	return "", false
 }
 
-// Renaming the workspace aside keeps its inode allocated, so the replacement
-// has a different one. Deleting it does not: the filesystem can hand the same
-// inode number to the next directory the child creates, which then carries
-// the recorded device and inode. The supervisor holds the recorded directory
-// open for the session's lifetime so that cannot happen.
 func TestOperatorFileHelperRefusesADeletedAndRecreatedWorkspaceRoot(t *testing.T) {
 	session := t.TempDir()
 	probe := filepath.Join(session, "probe")
@@ -438,10 +406,6 @@ func TestOperatorFileHelperRefusesADeletedAndRecreatedWorkspaceRoot(t *testing.T
 	}
 	identity := operatorWorkspaceIdentity{dev: device, ino: inode}.String()
 
-	// The child deletes its workspace and creates directories until one is
-	// given the recorded inode number, then moves it into place. With the
-	// directory held, none is; the last attempt stands in for the best the
-	// child can do.
 	if err := os.Remove(paths.Workspace); err != nil {
 		t.Fatal(err)
 	}

@@ -19,14 +19,10 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// rbacGrant allows one user one verb on one resource, in one namespace and,
-// when name is set, on one named object only, as a Kubernetes RBAC rule does.
-// The verb "*" allows every verb.
 type rbacGrant struct {
 	user, verb, group, resource, subresource, namespace, name string
 }
 
-// grantAuthorizer allows exactly the requests one of its grants matches.
 type grantAuthorizer []rbacGrant
 
 func (a grantAuthorizer) Authorize(_ context.Context, attributes authorizer.Attributes) (authorizer.Decision, string, error) {
@@ -43,17 +39,10 @@ func (a grantAuthorizer) Authorize(_ context.Context, attributes authorizer.Attr
 }
 
 const (
-	// taskStatusUpdater may manage Tasks and update their status in the test
-	// namespace, as an operator can.
-	taskStatusUpdater = "operator@example.com"
-	// taskEditor may manage Tasks in the test namespace and read their
-	// status, as Orka's Task admin role allows, but not update it.
-	taskEditor = "task-admin@example.com"
-	// elsewhereStatusUpdater may update Task status only in another namespace.
+	taskStatusUpdater      = "operator@example.com"
+	taskEditor             = "task-admin@example.com"
 	elsewhereStatusUpdater = "elsewhere@example.com"
-	// thisTaskStatusUpdater may update the status of the test Task only.
-	thisTaskStatusUpdater = "this-task@example.com"
-	// otherTaskStatusUpdater may update the status of another Task only.
+	thisTaskStatusUpdater  = "this-task@example.com"
 	otherTaskStatusUpdater = "other-task@example.com"
 )
 
@@ -76,8 +65,6 @@ func storageRecoveryAuthorizer() grantAuthorizer {
 	)
 }
 
-// acknowledgedGatewayTask returns oldTask with the storage recovery
-// acknowledgement annotation set to holdID.
 func acknowledgedGatewayTask(oldTask *unstructured.Unstructured, holdID string) *unstructured.Unstructured {
 	newTask := oldTask.DeepCopy()
 	annotations := newTask.GetAnnotations()
@@ -89,9 +76,6 @@ func acknowledgedGatewayTask(oldTask *unstructured.Unstructured, holdID string) 
 	return newTask
 }
 
-// A user who may update a Task's status can release a Task storage hold on a
-// Gateway-owned Task, and only by changing that one annotation. Permission to
-// update the Task alone is not enough.
 func TestGatewayTaskProtectionAllowsOnlyStorageRecoveryAcknowledgement(t *testing.T) {
 	policy := compileGatewayTaskProtection(t).withAuthorizer(storageRecoveryAuthorizer())
 	allowsUser := func(username string, newTask, oldTask *unstructured.Unstructured, subresource string) bool {
@@ -191,15 +175,12 @@ func TestGatewayTaskProtectionAllowsOnlyStorageRecoveryAcknowledgement(t *testin
 	})
 }
 
-// failingAuthorizer cannot reach a decision.
 type failingAuthorizer struct{}
 
 func (failingAuthorizer) Authorize(context.Context, authorizer.Attributes) (authorizer.Decision, string, error) {
 	return authorizer.DecisionNoOpinion, "", errors.New("authorizer unavailable")
 }
 
-// When the status check cannot be answered, the acknowledgement is refused,
-// and the controller and trusted workers keep their access.
 func TestGatewayTaskStorageRecoveryAcknowledgementFailsClosed(t *testing.T) {
 	policy := compileGatewayTaskProtection(t).withAuthorizer(failingAuthorizer{})
 	oldTask := gatewayPolicyTask()

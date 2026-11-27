@@ -34,10 +34,6 @@ func (s *generationCommitFailureStore) CommitSessionRuntimeGeneration(ctx contex
 	return s.DurableControlStore.CommitSessionRuntimeGeneration(ctx, request)
 }
 
-// A failure between RuntimeSession creation and prompt submission requeues
-// the Task with the provider process preserved. The retry reuses a process
-// that never received a prompt, so the toolbox note is still due; it stops
-// being due only once a prompt is accepted.
 func TestACPDispatcherToolboxNoteSurvivesPreSubmissionRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
@@ -86,8 +82,6 @@ func TestACPDispatcherToolboxNoteSurvivesPreSubmissionRetry(t *testing.T) {
 	require.False(t, acpToolboxNoteDue(&acpTaskSession{Binding: *binding, Reused: true}))
 }
 
-// Continuation turns reuse a live binding with its delivery record, so the
-// note is not repeated; any replacement process starts without it.
 func TestACPToolboxNoteFollowsRuntimeSessionPlanning(t *testing.T) {
 	profileDigest := harnessv2.ProfileDigest("sha256:1111111111111111111111111111111111111111111111111111111111111111")
 	rotatedDigest := harnessv2.ProfileDigest("sha256:2222222222222222222222222222222222222222222222222222222222222222")
@@ -122,10 +116,6 @@ func TestACPToolboxNoteFollowsRuntimeSessionPlanning(t *testing.T) {
 	}
 }
 
-// A Reserved Session Task whose interrupted preparation still holds an open
-// SessionTurn is failed with ToolboxUnavailable only after the turn is
-// recovered and finalized, so the next Session Task is not blocked on the
-// mutation lease.
 func TestACPDispatcherToolboxUnavailableFinalizesRecoveredSessionTurn(t *testing.T) {
 	ctx := context.Background()
 	controlStore, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "toolbox-turn.db"))

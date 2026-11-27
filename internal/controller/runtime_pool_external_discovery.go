@@ -87,10 +87,6 @@ func externalDiscoveryIntents(pool *corev1alpha1.RuntimePool) ([]externalDiscove
 	return intents, nil
 }
 
-// saveExternalDiscoveryIntents compares the receipt itself, not the whole pool.
-// After a conflict or lost response it re-reads the pool: an unchanged receipt
-// is rewritten and an already-written one is accepted. Otherwise an unrelated
-// pool write could drop an acknowledged create's UID, which no read recovers.
 func (r *RuntimePoolReconciler) saveExternalDiscoveryIntents(ctx context.Context, pool *corev1alpha1.RuntimePool, intents []externalDiscoveryIntent) error {
 	desired := ""
 	if len(intents) != 0 {
@@ -128,8 +124,6 @@ func (r *RuntimePoolReconciler) saveExternalDiscoveryIntents(ctx context.Context
 			*pool = *current
 			return nil
 		case previous:
-			// The retry patch must diff only the receipt key against current
-			// annotations; a stale map could null out a concurrent annotation.
 			pool.ResourceVersion, pool.Annotations = current.ResourceVersion, maps.Clone(current.Annotations)
 			return err
 		default:
@@ -156,9 +150,6 @@ func externalDiscoveryIntentMatches(pool *corev1alpha1.RuntimePool, cfg runtimeP
 		externalCoreResourceOwned(pool, cfg, object) && externalDiscoveryMatches(cfg, object)
 }
 
-// Cross-namespace objects have no valid ownerReference. Only a durably saved
-// UID from an acknowledged create authorizes reuse or deletion. An unknown
-// creation outcome stays closed; public labels and specs cannot recover a UID.
 func (r *RuntimePoolReconciler) ensureExternalDiscoveryResource(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, kind string) error {
 	intents, err := externalDiscoveryIntents(pool)
 	if err != nil {

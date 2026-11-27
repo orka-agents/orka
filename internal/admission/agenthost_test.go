@@ -109,7 +109,6 @@ func TestAgentHostCannotNameASecretTheCallerCannotRead(t *testing.T) {
 	authorizer := &capturedAgentHostAuth{secretErr: errors.New("access denied")}
 	validator := newAgentHostValidator(t, authorizer)
 	require.False(t, validator.Handle(context.Background(), agentHostRequest(t, admissionv1.Create, "bob-github", "")).Allowed)
-	// Pointing a running host at another Secret is checked too.
 	require.False(t, validator.Handle(context.Background(),
 		agentHostRequest(t, admissionv1.Update, "bob-github", "alice-github")).Allowed)
 	require.False(t, validator.Handle(context.Background(),
@@ -144,7 +143,6 @@ func TestAgentHostChangingTheSecretKeyIsChecked(t *testing.T) {
 	request := agentHostRequest(t, admissionv1.Update, "alice-github", "alice-github")
 	request.Object = runtime.RawExtension{Raw: agentHostObjectWithKey(t, "alice-github", "admin-token")}
 	require.False(t, validator.Handle(context.Background(), request).Allowed)
-	// An explicit default key is the same selection.
 	request.Object = runtime.RawExtension{Raw: agentHostObjectWithKey(t, "alice-github", "token")}
 	require.True(t, validator.Handle(context.Background(), request).Allowed)
 }
@@ -198,8 +196,6 @@ func agentHostProviderObjects(template string) []client.Object {
 	}
 }
 
-// Only the controller creates a host fed by a Connection, from the template
-// its provider names, which needs no template use grant.
 func TestAgentHostFromAConnectionIsTheControllersOnly(t *testing.T) {
 	validator, authorizer := newConnectionHostValidator(t, agentHostProviderObjects("copilotd")...)
 	response := validator.Handle(context.Background(), connectionHostRequest(t, testControllerUsername, "copilotd"))

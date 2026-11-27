@@ -11,18 +11,12 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// These tests drive the router from NewServer: TokenReview authentication,
-// SubjectAccessReview authorization, the handlers and the SQLite store. Only
-// the Kubernetes review backends are fixtures.
-
 var memoryCreateRoutes = []string{"/api/v1/memories", "/internal/v1/memories/default"}
 
 func memoryPermission(verb, resource, name string) authorizationv1.ResourceAttributes {
 	return authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: resource, Verb: verb, Name: name}
 }
 
-// signInAs makes later requests authenticate as the named ServiceAccount,
-// holding only the given permissions, and returns its username.
 func (f *externalAuthorizationFixture) signInAs(t *testing.T, name string, permissions ...authorizationv1.ResourceAttributes) string {
 	t.Helper()
 	f.user.Username = "system:serviceaccount:default:" + name
@@ -64,7 +58,6 @@ func TestMemoryCreateKeepsClientSource(t *testing.T) {
 			for _, tc := range []struct{ body, source string }{
 				{`{"content":"named source","source":"user"}`, "user"},
 				{`{"content":"default source"}`, "manual"},
-				// Older clients send every key; empty provenance names nothing.
 				{`{"content":"empty provenance","source":"","sourceProposalId":""}`, "manual"},
 			} {
 				status, body := f.request(t, http.MethodPost, path, tc.body)
@@ -80,7 +73,6 @@ func TestMemoryCreateKeepsClientSource(t *testing.T) {
 	}
 }
 
-// memoryUpdateRoutes prefix the memory ID on the public and internal routes.
 var memoryUpdateRoutes = []string{"/api/v1/memories/", "/internal/v1/memories/default/"}
 
 func TestMemoryUpdateRejectsClientProposalSource(t *testing.T) {
@@ -115,8 +107,6 @@ func TestMemoryUpdateRejectsClientProposalSource(t *testing.T) {
 	}
 }
 
-// An applied memory can still be edited, including by sending back the memory
-// as read, and its proposal provenance stays as apply recorded it.
 func TestMemoryUpdateKeepsAppliedProvenance(t *testing.T) {
 	for _, route := range memoryUpdateRoutes {
 		t.Run(route, func(t *testing.T) {
@@ -145,7 +135,6 @@ func TestMemoryUpdateKeepsAppliedProvenance(t *testing.T) {
 				require.Equal(t, "protected", stored.SourceProposalID)
 			}
 
-			// Its source cannot be changed away from memory_proposal either.
 			for _, body := range []string{
 				`{"content":"relabeled","source":"user"}`,
 				`{"source":" "}`,
@@ -165,8 +154,6 @@ func TestMemoryUpdateKeepsAppliedProvenance(t *testing.T) {
 	}
 }
 
-// A memory_proposal source with no proposal link (or a legacy whitespace-only
-// proposal link) was not written by apply, so an update can still correct it.
 func TestMemoryUpdateRelabelsUnlinkedProposalSource(t *testing.T) {
 	for _, route := range memoryUpdateRoutes {
 		for _, tc := range []struct {
@@ -197,9 +184,6 @@ func TestMemoryUpdateRelabelsUnlinkedProposalSource(t *testing.T) {
 	}
 }
 
-// A legacy applied memory whose source was relabeled before this guard existed
-// still carries its sourceProposalId: updates cannot change its source to
-// another ordinary value, while restoring canonical memory_proposal is allowed.
 func TestMemoryUpdateProtectsAndRestoresRelabeledAppliedMemory(t *testing.T) {
 	for _, route := range memoryUpdateRoutes {
 		t.Run(route, func(t *testing.T) {
@@ -236,8 +220,6 @@ func TestMemoryUpdateProtectsAndRestoresRelabeledAppliedMemory(t *testing.T) {
 	}
 }
 
-// A memory writer cannot create a memory that names a pending proposal, so
-// applying the reviewed proposal writes and links the reviewed content.
 func TestReviewedProposalApplyLinksReviewedContent(t *testing.T) {
 	const reviewed = "Returns go through the dock 4 intake desk."
 	f := newExternalAuthorizationFixture(t)
@@ -284,7 +266,6 @@ func TestReviewedProposalApplyLinksReviewedContent(t *testing.T) {
 	require.Equal(t, applier, stored.AppliedBy)
 	require.NotNil(t, stored.AppliedAt)
 
-	// Applying again returns the same memory once its read is authorized.
 	f.signInAs(t, "applier", append(applyPermissions, memoryPermission("get", "memories", applied.ID))...)
 	status, body = f.request(t, http.MethodPost, "/api/v1/memory-proposals/"+proposal.ID+"/apply", `{}`)
 	require.Equal(t, http.StatusOK, status, body)
@@ -305,9 +286,6 @@ func TestReviewedProposalApplyLinksReviewedContent(t *testing.T) {
 	require.Equal(t, 1, linked)
 }
 
-// Applying a merge or supersede creates the replacing memory with apply's
-// provenance, leaves the provenance of the memories it replaces as it was, and
-// a client cannot change the new memory's provenance afterwards.
 func TestConsolidationApplyRecordsServerOwnedProvenance(t *testing.T) {
 	for _, proposalType := range []string{store.MemoryProposalTypeMerge, store.MemoryProposalTypeSupersede} {
 		t.Run(proposalType, func(t *testing.T) {
@@ -358,9 +336,6 @@ func TestConsolidationApplyRecordsServerOwnedProvenance(t *testing.T) {
 	}
 }
 
-// A retire creates no memory: it disables its targets and leaves their
-// provenance as it was, so a retired memory is not labeled as applied from the
-// proposal.
 func TestRetireApplyLeavesTargetProvenance(t *testing.T) {
 	f := newExternalAuthorizationFixture(t)
 	protected, err := f.store.GetMemory(t.Context(), "default", "protected")
@@ -390,8 +365,6 @@ func TestRetireApplyLeavesTargetProvenance(t *testing.T) {
 	require.Equal(t, "protected", applied.AppliedMemoryID)
 }
 
-// Update never changes sourceProposalId, so an ordinary memory cannot be
-// linked to a pending proposal and later returned as its application.
 func TestMemoryUpdateCannotLinkAPendingProposal(t *testing.T) {
 	for _, route := range memoryUpdateRoutes {
 		t.Run(route, func(t *testing.T) {

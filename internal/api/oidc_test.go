@@ -290,8 +290,6 @@ func TestValidateOIDCToken_RequiresAllowedSubject(t *testing.T) {
 	cfg.AllowedSubjects = nil
 	token := provider.issueToken(t, testOIDCTokenOptions{})
 
-	// An empty list allows no one, but still names the verified subject, so
-	// an installation can learn the first subjects to add.
 	_, err := validateOIDCToken(context.Background(), token, cfg)
 	notAllowed, ok := errors.AsType[*oidcSubjectNotAllowedError](err)
 	if !ok || notAllowed.Subject == "" || !errors.Is(err, errOIDCAuthorization) {

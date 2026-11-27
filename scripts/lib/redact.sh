@@ -1,20 +1,4 @@
 #!/usr/bin/env bash
-# Shared secret redaction for E2E diagnostics output.
-# Source this file; do not execute it.
-#
-# redact reads stdin and writes a redacted copy to stdout. The pattern set is
-# the union of every redaction previously maintained by the individual E2E
-# scripts (auth/cookie/API-key headers, Bearer/Basic values, GitHub
-# gh*_/github_pat_ tokens, token/api-key assignments, env-style token and
-# webhook-secret assignments, JSON name/value credential pairs, webhook
-# signatures, and JWTs). It intentionally over-redacts: when a header or
-# token-like assignment is seen, the remainder of the line is dropped.
-#
-# Callers that hold literal secret values can list the NAMES of the shell
-# variables carrying them in the ORKA_REDACT_SECRET_VARS array, for example:
-#   ORKA_REDACT_SECRET_VARS=(webhook_secret)
-# The value of each named variable is read at call time, so variables that are
-# assigned or rotated after sourcing are still redacted.
 
 redact() {
   local text var value

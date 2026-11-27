@@ -45,17 +45,6 @@ type githubTaskContext struct {
 	forgeCredentialRef *corev1alpha1.WorkspaceCredentialReference
 }
 
-// resolveReadRepoAndToken resolves GitHub owner/repo, read-only auth token, and API base URL.
-// Repository resolution prefers an explicit repoURL, then task workspace config,
-// then ORKA_GIT_REPO when no task context is available. If taskName, or an
-// implicit ToolContext task, is available alongside repoURL, repoURL still
-// selects the repository while the task workspace supplies repository scope
-// and can supply credentials.
-//
-// For task-scoped calls, read credentials are selected by repository role:
-// readCredentialRef for the source repository and publicationReadCredentialRef
-// for the publication repository. Repository write and forge mutation credentials
-// are never used for read-only calls.
 func resolveReadRepoAndToken(ctx context.Context, k8sClient client.Client, toolName, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
 	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, toolName, taskName, repoURL, overrideBaseURL, false, githubCredentialRead)
 }
@@ -64,9 +53,6 @@ func resolveScopedReadRepoAndToken(ctx context.Context, k8sClient client.Client,
 	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, toolName, taskName, repoURL, overrideBaseURL, true, githubCredentialRead)
 }
 
-// resolveForgeRepoAndToken resolves GitHub owner/repo, forge-mutation auth token,
-// and API base URL. Task-scoped mutations require forgeCredentialRef and never
-// fall back to publication or read credentials.
 func resolveForgeRepoAndToken(ctx context.Context, k8sClient client.Client, toolName, taskName, repoURL, overrideBaseURL string) (owner, repo, token, baseURL string, err error) {
 	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, toolName, taskName, repoURL, overrideBaseURL, false, githubCredentialForgeMutation)
 }
@@ -88,9 +74,6 @@ func resolveRepoAndTokenWithPolicy(
 		baseURL = overrideBaseURL
 	}
 
-	// The requester's linked account comes first. A bound Connection that
-	// cannot be used fails the call; only a call with no Connection bound
-	// resolves the Task's own credential Secrets below.
 	linked, err := linkedGitHubToken(ctx, toolName)
 	if err != nil {
 		return "", "", "", "", err
@@ -99,12 +82,6 @@ func resolveRepoAndTokenWithPolicy(
 		token = linked
 	}
 
-	// Under a linked account the repository scope comes from the current
-	// Task, or from a child it controls (a coordinator opening the pull
-	// request for its coder's work): any other Task would lend its
-	// workspace to point the person's token at a repository this Task was
-	// never given. Those Tasks are read uncached, and a child is read once:
-	// the workspace it was validated with is the one that scopes the call.
 	scopeReader := client.Reader(k8sClient)
 	var linkedChild *githubTaskContext
 	if linked != "" {
@@ -115,8 +92,6 @@ func resolveRepoAndTokenWithPolicy(
 			return "", "", "", "", err
 		}
 		if scopeNamespace != "" && scopeNamespace != githubTaskNamespace(ctx) {
-			// The Task this turn created lives where its creation tool was
-			// told; the scope lookup below reads it from there.
 			ctx = withGitHubTaskNamespace(ctx, scopeNamespace)
 		}
 	}
@@ -135,9 +110,6 @@ func resolveRepoAndTokenWithPolicy(
 		requireTaskCredentials = tc.RequireGitHubTaskCredentials
 	}
 	if linked != "" && scopeTaskName == "" {
-		// Outside a Task only a Task this turn created may scope the
-		// person's token; naming none would let repo_url reach any
-		// repository the person can.
 		return "", "", "", "", fmt.Errorf("task_name must name a task created in this conversation when acting through a linked account outside a task")
 	}
 	if requireTaskCredentials && scopeTaskName == "" && token == "" {
@@ -147,8 +119,6 @@ func resolveRepoAndTokenWithPolicy(
 		return "", "", "", "", fmt.Errorf("repo_url repository %s/%s requires a permitted repository scope", owner, repo)
 	}
 	if scopeTaskName != "" {
-		// A linked token is scoped by the Task's declared workspace alone;
-		// a transaction's repository context never widens it.
 		var taskContext githubTaskContext
 		if linkedChild != nil {
 			taskContext = *linkedChild
@@ -209,10 +179,6 @@ func resolveRepoAndTokenWithPolicy(
 	return owner, repo, token, baseURL, nil
 }
 
-// linkedGitHubToken returns the requester's linked-account token for the
-// named tool when the ToolContext binds one, "" when none is bound, and an
-// error when a bound Connection cannot be used. The binding itself refuses
-// a forge mutation under a linked account the person limited to reading.
 func linkedGitHubToken(ctx context.Context, toolName string) (string, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil || tc.LinkedAccounts == nil {
@@ -234,15 +200,10 @@ func linkedGitHubToken(ctx context.Context, toolName string) (string, error) {
 	return credential.AccessToken, nil
 }
 
-// githubResponseLimit bounds one GitHub API document.
 const githubResponseLimit int64 = 1 << 20
 
-// errGitHubResponseTooLarge reports a GitHub document past its read limit.
 var errGitHubResponseTooLarge = errors.New("GitHub response is too large")
 
-// readGitHubResponse reads at most limit bytes of a GitHub response and
-// reports one that exceeds the limit, instead of handing a document cut
-// mid-way to the JSON decoder.
 func readGitHubResponse(body io.Reader, limit int64) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(body, limit+1))
 	if err != nil {
@@ -263,10 +224,6 @@ func githubRepoAllowed(owner, repo string, scopes []githubRepoScope) bool {
 	return false
 }
 
-// linkedScopeReader is the reader a linked-account call resolves Task scope
-// through: the tool context's uncached reader when there is one, so a Task
-// deleted and recreated under the same name is never judged from a stale
-// cache.
 func linkedScopeReader(ctx context.Context, k8sClient client.Client) client.Reader {
 	if tc := GetToolContext(ctx); tc != nil && tc.PolicyReader != nil {
 		return tc.PolicyReader
@@ -277,23 +234,12 @@ func linkedScopeReader(ctx context.Context, k8sClient client.Client) client.Read
 	return k8sClient
 }
 
-// linkedTaskScopeAllowed reports whether taskName may supply the repository
-// scope for a call made through a linked account: it must be the current
-// Task, a Task the current Task controller-owns, or (outside a Task) a Task
-// this turn created for the same person. For a named Task it returns the
-// scope read from the same object it validated, so the caller never reloads
-// a name that may by then be another Task, and the namespace that Task lives
-// in when it differs from the call's ("" means the call's own namespace).
 func linkedTaskScopeAllowed(ctx context.Context, reader client.Reader, taskName string) (*githubTaskContext, string, error) {
 	tc := GetToolContext(ctx)
 	taskName = strings.TrimSpace(taskName)
 	if taskName == "" {
 		return nil, "", nil
 	}
-	// Outside a Task (chat and the compatibility proxies) there is no
-	// current Task whose scope a named Task could be checked against, so
-	// the only Tasks that may lend their workspace to the person's token
-	// are the ones this turn's tools created for that same person.
 	if tc == nil || strings.TrimSpace(tc.TaskID) == "" {
 		return linkedCreatedTaskScopeAllowed(ctx, reader, tc, taskName)
 	}
@@ -311,9 +257,6 @@ func linkedTaskScopeAllowed(ctx context.Context, reader client.Reader, taskName 
 	if owner == nil || string(owner.UID) != strings.TrimSpace(tc.TaskUID) || owner.Kind != taskKindString || owner.APIVersion != corev1alpha1.GroupVersion.String() {
 		return nil, "", fmt.Errorf("task_name %q must name the current task or one of its own child tasks when acting through a linked account", taskName)
 	}
-	// Ownership alone is not repository authority: a coordinator can create
-	// a child naming any repository, so the child's workspace may only
-	// point the linked token at repositories the current Task itself holds.
 	parent, err := loadGitHubTaskScopes(ctx, reader, strings.TrimSpace(tc.TaskID), true)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve the current task's repository scope: %w", err)
@@ -331,13 +274,7 @@ func linkedTaskScopeAllowed(ctx context.Context, reader client.Reader, taskName 
 	return &child, "", nil
 }
 
-// linkedCreatedTaskScopeAllowed accepts taskName outside a Task only when
-// this turn created it and it is stamped with the same requester the
-// linked account belongs to: the person chose that repository themselves.
 func linkedCreatedTaskScopeAllowed(ctx context.Context, reader client.Reader, tc *ToolContext, taskName string) (*githubTaskContext, string, error) {
-	// The GitHub tools name a Task without a namespace, so the record this
-	// turn kept (namespace, name, UID at creation) resolves it: the call's
-	// namespace first, otherwise the one unambiguous entry with that name.
 	namespace, uid := githubTaskNamespace(ctx), ""
 	if tc != nil {
 		if uid = tc.CreatedTaskUID(namespace, taskName); uid == "" {
@@ -359,8 +296,6 @@ func linkedCreatedTaskScopeAllowed(ctx context.Context, reader client.Reader, tc
 	if string(task.UID) != uid {
 		return nil, "", fmt.Errorf("task_name %q is not the task this conversation created (identity changed)", taskName)
 	}
-	// The repository scope is the one this turn chose at creation: a
-	// workspace edited since then may not redirect the person's token.
 	if WorkspaceDigest(&task) != tc.CreatedTaskWorkspaceDigest(namespace, taskName) {
 		return nil, "", fmt.Errorf("task_name %q: its workspace changed after this conversation created it, so it cannot scope the linked account", taskName)
 	}
@@ -375,8 +310,6 @@ func linkedCreatedTaskScopeAllowed(ctx context.Context, reader client.Reader, tc
 	return &scoped, namespace, nil
 }
 
-// withGitHubTaskNamespace returns ctx with a ToolContext copy whose
-// Namespace is namespace, so the Task-scope lookups read from there.
 func withGitHubTaskNamespace(ctx context.Context, namespace string) context.Context {
 	tc := GetToolContext(ctx)
 	if tc == nil {
@@ -387,9 +320,6 @@ func withGitHubTaskNamespace(ctx context.Context, namespace string) context.Cont
 	return WithToolContext(ctx, &scoped)
 }
 
-// loadGitHubTaskScopes loads the Task's repository scopes. With
-// workspaceOnly, only spec.workspace repositories count; the transaction's
-// repository context is left out.
 func loadGitHubTaskScopes(ctx context.Context, reader client.Reader, taskName string, workspaceOnly bool) (githubTaskContext, error) {
 	taskName = githubTaskNameFromContext(ctx, taskName)
 	if strings.TrimSpace(taskName) == "" {
@@ -405,9 +335,6 @@ func loadGitHubTaskScopes(ctx context.Context, reader client.Reader, taskName st
 	if err := reader.Get(ctx, types.NamespacedName{Name: taskName, Namespace: ns}, &task); err != nil {
 		return githubTaskContext{}, fmt.Errorf("failed to get task %s: %w", taskName, err)
 	}
-	// The current Task is fenced by the UID the call was authenticated as:
-	// a Task recreated under the same name since then is another Task, and
-	// its workspace never scopes this call's credential.
 	if tc := GetToolContext(ctx); tc != nil && strings.TrimSpace(tc.TaskUID) != "" &&
 		taskName == strings.TrimSpace(tc.TaskID) && string(task.UID) != strings.TrimSpace(tc.TaskUID) {
 		return githubTaskContext{}, fmt.Errorf("task %s was replaced since this call was authorized; its workspace does not scope the call", taskName)
@@ -415,8 +342,6 @@ func loadGitHubTaskScopes(ctx context.Context, reader client.Reader, taskName st
 	return githubTaskScopesOf(&task, taskName, workspaceOnly)
 }
 
-// githubTaskScopesOf returns the repository scopes task declares. With
-// workspaceOnly, only spec.workspace repositories count.
 func githubTaskScopesOf(task *corev1alpha1.Task, taskName string, workspaceOnly bool) (githubTaskContext, error) {
 	var result githubTaskContext
 	var scopes []githubRepoScope
@@ -573,10 +498,7 @@ func resolveGitSecretToken(ctx context.Context, k8sClient client.Client, credent
 	return token, nil
 }
 
-// resolveToken attempts to read a GitHub token from well-known file paths
-// and environment variables.
 func resolveToken() string {
-	// Try mounted secret files
 	for _, path := range []string{"/secrets/git/token", "/secrets/git/password", "/secrets/git/" + workerenv.GitHubToken} {
 		if data, err := os.ReadFile(path); err == nil {
 			if t := strings.TrimSpace(string(data)); t != "" {
@@ -585,6 +507,5 @@ func resolveToken() string {
 		}
 	}
 
-	// Fall back to GITHUB_TOKEN env var
 	return os.Getenv(workerenv.GitHubToken)
 }

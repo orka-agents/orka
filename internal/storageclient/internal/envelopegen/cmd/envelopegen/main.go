@@ -1,6 +1,3 @@
-// Command envelopegen writes the storage client's write envelope decorators.
-//
-// Usage: envelopegen <package> <output file>
 package main
 
 import (

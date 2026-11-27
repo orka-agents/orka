@@ -135,14 +135,10 @@ func (e EventExpectation) Matches(identity EventIdentity) error {
 }
 
 type AcceptedEvent struct {
-	AcceptedAt time.Time   `json:"acceptedAt"`
-	Lease      PromptLease `json:"lease"`
-	ACPVersion string      `json:"acpVersion"`
-	// LiveUpdates confirms that the runtime honors the LiveUpdatesHeader for
-	// this prompt: it streams the live-update kinds and fields and redacts
-	// every event's content before it leaves the runtime. A consumer must not
-	// show a prompt's content live without it.
-	LiveUpdates bool `json:"liveUpdates,omitempty"`
+	AcceptedAt  time.Time   `json:"acceptedAt"`
+	Lease       PromptLease `json:"lease"`
+	ACPVersion  string      `json:"acpVersion"`
+	LiveUpdates bool        `json:"liveUpdates,omitempty"`
 }
 
 func (e AcceptedEvent) Validate() error {
@@ -157,19 +153,10 @@ func (e AcceptedEvent) Validate() error {
 
 type UpdateKind string
 
-// LiveUpdatesHeader, set to "1" on a start-prompt request, asks the runtime
-// to stream the live-update kinds and fields: assistant thoughts and a tool
-// call's name, raw input and file edits. A runtime that does not know the
-// header ignores it and streams the base kinds, and a runtime never sends
-// live updates to a client that did not ask, so neither side's strict
-// decoding meets fields it does not know. A runtime that honors the header
-// confirms it with AcceptedEvent.LiveUpdates.
 const LiveUpdatesHeader = "X-Orka-Live-Updates"
 
 const (
 	UpdateAssistantMessageChunk UpdateKind = "assistant_message_chunk"
-	// UpdateAssistantThoughtChunk carries the agent's reasoning. A supervisor
-	// sends it only to a controller that asked for live updates.
 	UpdateAssistantThoughtChunk UpdateKind = "assistant_thought_chunk"
 	UpdateToolCall              UpdateKind = "tool_call"
 	UpdateToolCallUpdate        UpdateKind = "tool_call_update"
@@ -192,52 +179,31 @@ const (
 )
 
 type ToolCallUpdate struct {
-	ToolCallID     string         `json:"toolCallID"`
-	Title          string         `json:"title,omitempty"`
-	Kind           string         `json:"kind,omitempty"`
-	Status         ToolCallStatus `json:"status"`
-	Content        []ContentBlock `json:"content,omitempty"`
-	ContentReplace bool           `json:"contentReplace,omitempty"`
-	// ContentOmitted reports that an otherwise present content snapshot was
-	// intentionally omitted to satisfy a transport bound. Receivers must retain
-	// truncation state instead of treating the missing content as complete.
-	ContentOmitted bool `json:"contentOmitted,omitempty"`
-	// Name, RawInput and Diffs are live-update fields, sent only to a
-	// controller that asked for them. Name is the tool's own identity when the
-	// adapter reports one; Title stays the display text.
-	Name string `json:"name,omitempty"`
-	// RawInput is the tool's input as a JSON value, redacted.
-	RawInput json.RawMessage `json:"rawInput,omitempty"`
-	// Diffs are the file edits the tool reports, redacted.
-	Diffs []ToolCallDiff `json:"diffs,omitempty"`
-	// DiffsOmitted reports that one or more of the tool's file edits were not
-	// sent: outside the workspace, or over the update bound. Text content is
-	// unaffected.
-	DiffsOmitted bool `json:"diffsOmitted,omitempty"`
+	ToolCallID     string          `json:"toolCallID"`
+	Title          string          `json:"title,omitempty"`
+	Kind           string          `json:"kind,omitempty"`
+	Status         ToolCallStatus  `json:"status"`
+	Content        []ContentBlock  `json:"content,omitempty"`
+	ContentReplace bool            `json:"contentReplace,omitempty"`
+	ContentOmitted bool            `json:"contentOmitted,omitempty"`
+	Name           string          `json:"name,omitempty"`
+	RawInput       json.RawMessage `json:"rawInput,omitempty"`
+	Diffs          []ToolCallDiff  `json:"diffs,omitempty"`
+	DiffsOmitted   bool            `json:"diffsOmitted,omitempty"`
 }
 
-// ToolCallDiff is one file edit a tool reports.
 type ToolCallDiff struct {
-	// Path is the file's path relative to the runtime session's workspace
-	// root, in canonical slash form with no ".." segments.
-	Path string `json:"path"`
-	// OldText is the file's previous content; nil for a new file.
+	Path    string  `json:"path"`
 	OldText *string `json:"oldText,omitempty"`
 	NewText string  `json:"newText"`
 }
 
 const (
-	// MaxToolCallRawInputBytes bounds a tool call's raw input.
 	MaxToolCallRawInputBytes = 16 << 10
-	// MaxToolCallDiffs bounds the file edits in one tool call update.
-	MaxToolCallDiffs = 16
-	// MaxToolCallDiffBytes bounds the text of all edits in one update.
-	MaxToolCallDiffBytes = 256 << 10
+	MaxToolCallDiffs         = 16
+	MaxToolCallDiffBytes     = 256 << 10
 )
 
-// ValidateWorkspaceRelativePath checks a file path relative to a workspace
-// root: required, bounded, canonical slash form, not absolute, no NUL and no
-// ".." segments.
 func ValidateWorkspaceRelativePath(value string) error {
 	if err := validateBoundedString("workspace path", value, true, MaxResourceURIBytes); err != nil {
 		return err
@@ -359,20 +325,15 @@ func (u PlanUpdate) Validate() error {
 }
 
 type UsageUpdate struct {
-	// Counts are cumulative for the prompt by default. Input includes cache
-	// reads and writes; cached counts are a breakdown, never added again.
-	InputTokens  uint64 `json:"inputTokens,omitempty"`
-	OutputTokens uint64 `json:"outputTokens,omitempty"`
-	// Nil cache counts are unavailable; a pointer to zero is a reported zero.
+	InputTokens           uint64  `json:"inputTokens,omitempty"`
+	OutputTokens          uint64  `json:"outputTokens,omitempty"`
 	CachedInputTokens     *uint64 `json:"cachedInputTokens,omitempty"`
 	CacheWriteInputTokens *uint64 `json:"cacheWriteInputTokens,omitempty"`
-	// Scope may be "session" for a running conversation total. Such counters
-	// need a baseline before the first prompt to attribute their first delta.
-	Scope             string  `json:"scope,omitempty"`
-	Reported          bool    `json:"reported,omitempty"`
-	Complete          bool    `json:"complete,omitempty"`
-	ContextWindowUsed *uint64 `json:"contextWindowUsed,omitempty"`
-	ContextWindowSize *uint64 `json:"contextWindowSize,omitempty"`
+	Scope                 string  `json:"scope,omitempty"`
+	Reported              bool    `json:"reported,omitempty"`
+	Complete              bool    `json:"complete,omitempty"`
+	ContextWindowUsed     *uint64 `json:"contextWindowUsed,omitempty"`
+	ContextWindowSize     *uint64 `json:"contextWindowSize,omitempty"`
 }
 
 func (u UsageUpdate) Validate() error {
@@ -475,11 +436,7 @@ type PermissionRequestedEvent struct {
 	Title      string              `json:"title"`
 	Options    []PermissionOption  `json:"options"`
 	ExpiresAt  time.Time           `json:"expiresAt"`
-	// RawInput is the input of the call the request is for, as a JSON value,
-	// redacted. Like a tool call's, it is a live-update field, sent only to a
-	// controller that asked for live updates, so a person deciding sees what
-	// they decide on.
-	RawInput json.RawMessage `json:"rawInput,omitempty"`
+	RawInput   json.RawMessage     `json:"rawInput,omitempty"`
 }
 
 func (e PermissionRequestedEvent) Validate(eventTime time.Time) error {

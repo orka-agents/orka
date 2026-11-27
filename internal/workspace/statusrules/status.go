@@ -1,5 +1,3 @@
-// Package statusrules owns provider-neutral Execution Workspace status safety
-// rules shared by API, worker, and controller adapters.
 package statusrules
 
 import (
@@ -10,7 +8,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// Update is the internal worker-to-API Execution Workspace status update shape.
 type Update struct {
 	Provider      corev1alpha1.WorkspaceProvider                  `json:"provider"`
 	TemplateRef   *corev1alpha1.WorkspaceTemplateReference        `json:"templateRef,omitempty"`

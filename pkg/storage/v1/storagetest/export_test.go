@@ -18,17 +18,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRunExportImportAgainstAReferenceProvider runs the export and import
-// cases against memoryExport, an in-memory provider of only the export and
-// import surface, so the cases are exercised before a full provider
-// implements them.
 func TestRunExportImportAgainstAReferenceProvider(t *testing.T) {
 	RunExportImport(t, func(t *testing.T) ExportProvider { return newMemoryExport() }, seedMemoryExport)
 }
 
-// TestRunExportImportSplitsBatchesAProviderRefuses runs the cases against a
-// provider that accepts one record per batch and refuses larger batches with
-// ErrTooLarge, as the contract permits.
 func TestRunExportImportSplitsBatchesAProviderRefuses(t *testing.T) {
 	RunExportImport(t, func(t *testing.T) ExportProvider {
 		m := newMemoryExport()
@@ -37,9 +30,6 @@ func TestRunExportImportSplitsBatchesAProviderRefuses(t *testing.T) {
 	}, seedMemoryExport)
 }
 
-// The reference provider keeps its records apart from the buffers its
-// callers pass and receive, as a provider that copies records over the
-// network does.
 func TestReferenceProviderCopiesRecordBodies(t *testing.T) {
 	ctx := t.Context()
 	source := newMemoryExport()
@@ -77,9 +67,6 @@ func TestReferenceProviderCopiesRecordBodies(t *testing.T) {
 	require.Equal(t, exported, imported.Records[0].Body, "reusing an imported buffer does not change the stored record")
 }
 
-// A changed value differs from the original without growing, so a record at
-// a size bound, such as a message identifier of MaxControlIdentifierBytes,
-// stays valid and conflicts only through the change.
 func TestChangedExportValueKeepsTheSize(t *testing.T) {
 	field := storagev1.ExportField{Name: "namespace", Kind: storagev1.ExportString}
 	for _, value := range []string{strings.Repeat("w", storagev1.MaxControlIdentifierBytes), "x", "é-x", "é"} {
@@ -93,15 +80,12 @@ func TestChangedExportValueKeepsTheSize(t *testing.T) {
 	}
 }
 
-// typedError accepts an error a provider returns as a value or a pointer.
 func TestTypedErrorAcceptsValuesAndPointers(t *testing.T) {
 	want := storagev1.TooLargeError{What: "result", Size: 2, Limit: 1}
 	require.Equal(t, want, typedError[storagev1.TooLargeError](t, fmt.Errorf("import: %w", want), "value"))
 	require.Equal(t, want, typedError[storagev1.TooLargeError](t, fmt.Errorf("import: %w", &want), "pointer"))
 }
 
-// The reference provider refuses a cursor it could not have issued, even
-// one with its own prefix.
 func TestReferenceProviderRefusesCursorsItDidNotIssue(t *testing.T) {
 	provider := newMemoryExport()
 	for _, cursor := range []string{memoryCursorPrefix, memoryCursorPrefix + "!", "before:a2V5"} {
@@ -110,8 +94,6 @@ func TestReferenceProviderRefusesCursorsItDidNotIssue(t *testing.T) {
 	}
 }
 
-// seedMemoryExport stores four records of every family, each field holding
-// a value of its kind, with every third nullable field absent.
 func seedMemoryExport(t *testing.T, provider ExportProvider) {
 	t.Helper()
 	memory := provider.(*memoryExport)
@@ -131,19 +113,16 @@ func seedMemoryExport(t *testing.T, provider ExportProvider) {
 	}
 }
 
-// memoryExport keeps one dataset of canonical records in memory and
-// implements the export and import surface as the contract states it.
 type memoryExport struct {
-	mu        sync.Mutex
-	ids       int
-	datasetID string
-	origin    storagev1.DatasetOrigin
-	state     storagev1.DatasetState
-	source    *storagev1.DatasetSource
-	markers   map[string]storagev1.MigrationMarker
-	records   map[string]map[string]storagev1.RawRecord
-	session   *memoryImport
-	// maxBatchRecords, when set, is the largest batch ImportRecords accepts.
+	mu              sync.Mutex
+	ids             int
+	datasetID       string
+	origin          storagev1.DatasetOrigin
+	state           storagev1.DatasetState
+	source          *storagev1.DatasetSource
+	markers         map[string]storagev1.MigrationMarker
+	records         map[string]map[string]storagev1.RawRecord
+	session         *memoryImport
 	maxBatchRecords int
 }
 
@@ -215,7 +194,6 @@ func (m *memoryExport) ExportFamilies(context.Context) ([]storagev1.ExportFamily
 	return families, nil
 }
 
-// The cursor is the base64url form of the last key returned.
 const memoryCursorPrefix = "after:"
 
 func (m *memoryExport) ExportRecords(_ context.Context, request storagev1.ExportRequest) (storagev1.ExportPage, error) {
@@ -226,8 +204,6 @@ func (m *memoryExport) ExportRecords(_ context.Context, request storagev1.Export
 	if request.Cursor != "" {
 		encoded, ok := strings.CutPrefix(request.Cursor, memoryCursorPrefix)
 		decoded, err := base64.RawURLEncoding.DecodeString(encoded)
-		// The provider never issues a cursor without a key: a page that
-		// returns no record returns no cursor.
 		if !ok || err != nil || len(decoded) == 0 {
 			return storagev1.ExportPage{}, storagev1.ValidationErrorf("export cursor %q is not valid", request.Cursor)
 		}
@@ -245,7 +221,6 @@ func (m *memoryExport) ExportRecords(_ context.Context, request storagev1.Export
 			page.NextCursor = memoryCursorPrefix + base64.RawURLEncoding.EncodeToString([]byte(page.Records[len(page.Records)-1].Key))
 			break
 		}
-		// The caller owns the page, so it gets a copy of each stored body.
 		record := m.records[request.Family][key]
 		record.Body = slices.Clone(record.Body)
 		page.Records = append(page.Records, record)
@@ -374,8 +349,6 @@ func (m *memoryExport) ImportRecords(_ context.Context, request storagev1.Import
 		case ok && !bytes.Equal(stored.Body, record.Body):
 			return storagev1.ImportFamilyProgress{}, storagev1.ConflictErrorf("family %q holds the record's key with another body", request.Family)
 		case !ok:
-			// The provider keeps the bytes it validated, not the caller's
-			// buffer.
 			record.Body = slices.Clone(record.Body)
 			added = append(added, record)
 		}
@@ -512,9 +485,6 @@ func (m *memoryExport) ClearMigrationMarker(_ context.Context, request storagev1
 	return nil
 }
 
-// checkMemoryImportLimits refuses a result over MaxResultBytes and message
-// content over MaxMessageContentBytes, which the reference provider reports
-// as its limits, and a message identifier over MaxControlIdentifierBytes.
 func checkMemoryImportLimits(schema storagev1.ExportFamilySchema, values []any) error {
 	if schema.Name == "messages" {
 		for i, field := range schema.Fields {

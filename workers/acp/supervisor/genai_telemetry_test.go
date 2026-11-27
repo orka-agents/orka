@@ -100,7 +100,6 @@ func TestPromptGenAISpansAndMetricsFromACPStream(t *testing.T) {
 	prompt := h.server.startInvokeAgent(trace.ContextWithSpanContext(context.Background(), operation),
 		&sessionState{id: "session-1"}, testGenAIPromptRequest(), start)
 
-	// A provider session relays two model calls: one succeeds and one fails.
 	session := &providerProxySession{turnPromptID: "prompt-1"}
 	session.setPromptTelemetry("prompt-1", prompt)
 	if chat := session.startChat("other-prompt", 1, start); chat != nil {
@@ -115,8 +114,6 @@ func TestPromptGenAISpansAndMetricsFromACPStream(t *testing.T) {
 	abandoned := session.startChat("prompt-1", 3, start)
 	session.finishChat(3, abandoned, true)
 
-	// Tool calls: a named completed call, a failed call whose name is free
-	// text, and a call that never reports an outcome.
 	prompt.observeTool(&harnessv2.ToolCallUpdate{ToolCallID: "call-1", Kind: "execute", Title: "Run PRIVATE_TITLE", Status: harnessv2.ToolCallStatusPending}, "Bash", start)
 	prompt.observeTool(&harnessv2.ToolCallUpdate{ToolCallID: "call-1", Status: harnessv2.ToolCallStatusCompleted,
 		Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "PRIVATE_RESULT"}}}, "Bash", start.Add(time.Second))
@@ -131,7 +128,6 @@ func TestPromptGenAISpansAndMetricsFromACPStream(t *testing.T) {
 	invoke := assertInvokeAgentSpan(t, h, operation)
 	assertChatSpans(t, h, invoke)
 	assertToolSpans(t, h, invoke)
-	// Content capture stays off whatever the environment says.
 	assertNoGenAIContent(t, h.recorder.Ended())
 	assertACPGenAIMetrics(t, h)
 }
@@ -306,7 +302,6 @@ func TestPromptGenAIDisabledAndAbandoned(t *testing.T) {
 	if prompt != nil {
 		t.Fatal("disabled telemetry created a prompt recorder")
 	}
-	// Every recorder method is a no-op on nil.
 	prompt.observeTool(&harnessv2.ToolCallUpdate{ToolCallID: "call-1", Status: harnessv2.ToolCallStatusCompleted}, "Bash", time.Now())
 	prompt.setUsage(&acp.PromptUsage{})
 	prompt.finish(acp.PromptResult{Outcome: acp.PromptOutcomeCompleted}, time.Now())
@@ -326,7 +321,6 @@ func TestPromptGenAIDisabledAndAbandoned(t *testing.T) {
 		t.Fatalf("invoke spans = %d", len(invoke))
 	}
 	attrs := genAISpanAttributes(invoke[0])
-	// OpenCode speaks OpenAI chat completions whatever provider prefix it pins.
 	if attrs[genai.AttrErrorType].AsString() != genAIErrorTypeAbandoned || attrs[genai.AttrProviderName].AsString() != genai.ProviderOpenAI ||
 		attrs[genai.AttrRequestModel].AsString() != "claude-sonnet-4" {
 		t.Fatalf("abandoned opencode invoke attributes = %v", attrs)
@@ -378,9 +372,6 @@ func TestPromptGenAIRecordsEachToolCallOnce(t *testing.T) {
 	}
 }
 
-// Cancellation can settle a prompt before its stream finisher runs. The
-// invoke_agent span and duration must report that canonical settlement, not
-// the finisher's later result.
 func TestFinishPromptGenAIFollowsCanonicalSettlement(t *testing.T) {
 	h := newGenAITestHarness(t, providerKindCodex, "gpt-5")
 	start := time.Now().UTC()
@@ -410,9 +401,6 @@ func TestFinishPromptGenAIFollowsCanonicalSettlement(t *testing.T) {
 	}
 }
 
-// A finisher that runs before the stream handler records usage, such as
-// remote-renewal compensation finishing with CancelPrompt's result, still
-// ends telemetry with the agent-reported usage.
 func TestFinishPromptGenAIKeepsUsageWhenItEndsTelemetryFirst(t *testing.T) {
 	h := newGenAITestHarness(t, providerKindCodex, "gpt-5")
 	start := time.Now().UTC()
@@ -424,7 +412,6 @@ func TestFinishPromptGenAIKeepsUsageWhenItEndsTelemetryFirst(t *testing.T) {
 		Outcome: acp.PromptOutcomeCancelled, Accepted: true, StopReason: acp.StopReasonCancelled,
 		Usage: &acp.PromptUsage{InputTokens: &input, OutputTokens: &output},
 	}, start.Add(time.Second))
-	// The stream handler's later setUsage cannot change ended telemetry.
 	prompt.genai.setUsage(nil)
 
 	invoke := h.spans("invoke_agent codex")
@@ -442,10 +429,6 @@ func TestFinishPromptGenAIKeepsUsageWhenItEndsTelemetryFirst(t *testing.T) {
 	}
 }
 
-// Each distinct tool name label is a histogram series, and adapter and MCP
-// tool names are unbounded. A supervisor labels at most
-// maxGenAIMetricToolNames of them; later names fall back to their ACP kind.
-// Spans keep every name.
 func TestGenAIToolDurationMetricBoundsToolNameLabels(t *testing.T) {
 	h := newGenAITestHarness(t, providerKindCodex, "gpt-5")
 	start := time.Now().UTC()
@@ -455,7 +438,6 @@ func TestGenAIToolDurationMetricBoundsToolNameLabels(t *testing.T) {
 		update := &harnessv2.ToolCallUpdate{ToolCallID: "call-" + strconv.Itoa(i), Kind: "fetch", Status: harnessv2.ToolCallStatusCompleted}
 		prompt.observeTool(update, "mcp__server__tool_"+strconv.Itoa(i), start)
 	}
-	// A name already admitted keeps its label.
 	prompt.observeTool(&harnessv2.ToolCallUpdate{ToolCallID: "call-again", Kind: "fetch", Status: harnessv2.ToolCallStatusCompleted}, "mcp__server__tool_0", start)
 	prompt.finish(acp.PromptResult{Outcome: acp.PromptOutcomeCompleted, StopReason: acp.StopReasonEndTurn}, start.Add(time.Minute))
 
@@ -530,7 +512,6 @@ func TestSupervisorPromptEmitsGenAISpansWithoutContent(t *testing.T) {
 	if chatAttrs[genai.AttrErrorType].AsString() != "" || chatAttrs[genai.AttrRequestModel].AsString() != "test-model" {
 		t.Fatalf("chat attributes = %v", chatAttrs)
 	}
-	// The ACP call ID is the canonical digest harness v2 events also carry.
 	if !strings.HasPrefix(genAISpanAttributes(tool)[genai.AttrToolCallID].AsString(), "tool-call-v1-sha256-") {
 		t.Fatalf("tool attributes = %v", genAISpanAttributes(tool))
 	}
@@ -542,8 +523,6 @@ func TestSupervisorPromptEmitsGenAISpansWithoutContent(t *testing.T) {
 	}
 }
 
-// runGenAITelemetryPrompt creates a runtime session and runs one prompt of
-// the genAITelemetryMode helper to completion.
 func runGenAITelemetryPrompt(t *testing.T, server *Server, cfg Config, profile harnessv2.RuntimeProfile) {
 	t.Helper()
 	httpServer := httptest.NewServer(server.Handler())
@@ -563,7 +542,6 @@ func runGenAITelemetryPrompt(t *testing.T, server *Server, cfg Config, profile h
 		t.Fatal(err)
 	}
 	defer stream.Close() //nolint:errcheck
-	// Read to EOF: the handler ends its spans before the response completes.
 	completed := false
 	for {
 		event, err := stream.Decode()

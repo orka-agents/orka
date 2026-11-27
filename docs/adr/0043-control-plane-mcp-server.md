@@ -6,7 +6,9 @@ Date: 2026-11-06
 
 Accepted. Adds an opt-in `POST /mcp` endpoint on the API port
 (`--mcp-server-enabled`) that IDE agents use to delegate Tasks, track them, answer
-approvals, and read results. It changes no existing route or permission.
+approvals, and read results. It changes no existing route or permission. Partly superseded
+by [0055](0055-mcp-oauth-protected-resource-metadata.md) for OAuth protected-resource
+discovery.
 
 ## Context
 

@@ -31,18 +31,11 @@ import (
 	"github.com/orka-agents/orka/internal/taskwait"
 )
 
-// ListTaskApprovalsResponse is one read of a Task and the approvals filtered
-// against it. TaskUID, TaskPhase, and TaskDeleting come from that same read,
-// so a client polling the list can tell whether a pending request still
-// belongs to a live Task that DecideTaskApproval would accept, without a
-// second, separately timed lookup by name.
 type ListTaskApprovalsResponse struct {
-	Namespace string `json:"namespace"`
-	TaskName  string `json:"taskName"`
-	TaskUID   string `json:"taskUID,omitempty"`
-	TaskPhase string `json:"taskPhase,omitempty"`
-	// TaskDeleting is true when the Task has a deletion timestamp; decisions
-	// on its requests are refused even while its phase is not terminal.
+	Namespace    string               `json:"namespace"`
+	TaskName     string               `json:"taskName"`
+	TaskUID      string               `json:"taskUID,omitempty"`
+	TaskPhase    string               `json:"taskPhase,omitempty"`
 	TaskDeleting bool                 `json:"taskDeleting,omitempty"`
 	Approvals    []approvals.Approval `json:"approvals"`
 }
@@ -57,7 +50,6 @@ type ApprovalDecisionRequest struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
-// ListTaskApprovals handles GET /api/v1/tasks/{id}/approvals.
 func (h *Handlers) ListTaskApprovals(c fiber.Ctx) error {
 	taskName := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
@@ -86,8 +78,6 @@ func (h *Handlers) ListTaskApprovals(c fiber.Ctx) error {
 	})
 }
 
-// DecideTaskApproval handles POST /api/v1/tasks/{id}/approvals/{approvalID}/decision.
-//
 //nolint:gocyclo // Decision validation, authorization, and replay checks stay together so none can be skipped.
 func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	taskName := c.Params("id")
@@ -113,8 +103,6 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	if err := h.taskAccess().authorizeGatewayTaskOperate(c, "decideTaskApproval", task); err != nil {
 		return err
 	}
-	// A client that answered a Task it resolved earlier never decides a
-	// later Task that reuses the name and an approval ID.
 	if !taskMatchesExpectedUID(c, task) {
 		return fiber.NewError(fiber.StatusNotFound, "task not found")
 	}
@@ -142,11 +130,6 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	return c.JSON(decided)
 }
 
-// DecideTaskApprovalAs decides, for a person signed in with OIDC or a context
-// token, a permission request an agent runtime is holding for them as the
-// requester of the Task. It is the in-process form of the decision route for
-// callers inside the API server and applies the same checks for those
-// identities; it decides no other kind of approval.
 func (h *Handlers) DecideTaskApprovalAs(ctx context.Context, ui *UserInfo, namespace, taskName, approvalID string, approve bool) error {
 	if ui == nil || (ui.AuthType != AuthTypeOIDC && ui.AuthType != AuthTypeContextToken) {
 		return fiber.NewError(fiber.StatusForbidden, "a verified OIDC or context-token identity is required")
@@ -199,8 +182,6 @@ func (h *Handlers) DecideTaskApprovalAs(ctx context.Context, ui *UserInfo, names
 			}
 		}
 	}
-	// A gateway's Task is operated through the gateway's own authorization,
-	// which needs a request; nothing here holds permissions for it.
 	if _, gatewayOwned, err := gatewayTaskIdentity(ctx, h.gatewayEventStore, task); err != nil {
 		return err
 	} else if gatewayOwned {
@@ -214,9 +195,6 @@ func (h *Handlers) DecideTaskApprovalAs(ctx context.Context, ui *UserInfo, names
 	return err
 }
 
-// decideApproval records a decision on one of the Task's approvals for an
-// authorized caller and returns the approval as stored. A permission request
-// held for the Task's requester may be decided only by that requester.
 func (h *Handlers) decideApproval(
 	ctx context.Context,
 	ui *UserInfo,
@@ -267,8 +245,6 @@ func (h *Handlers) decideApproval(
 			return approvals.Approval{}, err
 		}
 	}
-	// A parked turn has ended, but its sign-off approval stays decidable
-	// while the wait is active: the decision starts the continuation turn.
 	if task.Status.Phase.IsTerminal() && !taskwait.AcceptsApprovalDecision(task, approvalID) {
 		return approvals.Approval{}, fiber.NewError(fiber.StatusConflict, "task is complete")
 	}
@@ -295,14 +271,9 @@ func (h *Handlers) decideApproval(
 		SessionName: sessionName,
 		Type:        eventType,
 		Severity:    events.ExecutionEventSeverityInfo,
-		// Stamp the canonical approval ID into the stable top-level field (not
-		// current.ToolCallID, which is empty for harness-emitted approvals). This
-		// keeps approvals.Derive and the terminal-conflict guard able to match the
-		// decision to its pending approval even if a large reason truncates the
-		// JSON content (where approvalID would otherwise be the only copy).
-		ToolCallID: approvalID,
-		Summary:    fmt.Sprintf("approval %s", decision),
-		Content:    content,
+		ToolCallID:  approvalID,
+		Summary:     fmt.Sprintf("approval %s", decision),
+		Content:     content,
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
@@ -332,7 +303,6 @@ func (h *Handlers) decideApproval(
 	return updated, nil
 }
 
-// requestedByCaller reports whether ui is the Task's verified requester.
 func requestedByCaller(task *corev1alpha1.Task, ui *UserInfo) bool {
 	if task == nil || ui == nil || task.Spec.RequestedBy == nil ||
 		task.Annotations[labels.AnnotationRequestedBySource] != labels.RequestedBySourceAPI ||
@@ -352,8 +322,6 @@ func filterTaskApprovalEvents(input []store.ExecutionEvent, task *corev1alpha1.T
 }
 
 func deriveTaskApprovalState(input []store.ExecutionEvent) []approvals.Approval {
-	// Preserve AI-worker parking semantics. Only broker-owned v2 reviews have
-	// an enforced wait deadline, including when their original runtime is lost.
 	values := approvals.Derive(input, time.Time{})
 	now := time.Now().UTC()
 	for i := range values {

@@ -49,8 +49,6 @@ func TestCompatibilityStreamingDoesNotFallbackAfterUsagePersistenceFailure(t *te
 					if matches && failed.CompareAndSwap(false, true) {
 						return errors.New("fixture usage write failed")
 					}
-					// A later write succeeds, so a misplaced fallback would reach
-					// the provider and could falsely return a successful response.
 					return nil
 				})
 				body := runUsagePersistenceStream(t, endpoint, ctx, provider)

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Apply the exact CRD specs from a Helm chart without deleting existing custom resources.
 
 set -euo pipefail
 
@@ -45,23 +44,17 @@ if [[ ! -s "${target_crds}" ]]; then
   exit 1
 fi
 
-# Create missing CRDs and transfer ownership of fields present in the target.
 "${kubectl_cmd[@]}" apply \
   --server-side \
   --force-conflicts \
   --field-manager="${field_manager}" \
   -f "${target_crds}"
 
-# SSA cannot remove fields omitted by a new manager during first adoption. Replace
-# each CRD spec atomically, guarded by resourceVersion, so stale schema fields are
-# removed without deleting the CRD or its custom resources.
 "${kubectl_cmd[@]}" create --dry-run=client -f "${target_crds}" -o json | \
   jq -c '{name: .metadata.name, spec: .spec}' | \
   while IFS= read -r target; do
     name=$(jq -er '.name' <<< "${target}")
     resource_version=$("${kubectl_cmd[@]}" get customresourcedefinition "${name}" -o jsonpath='{.metadata.resourceVersion}')
-    # Large schemas exceed Linux's per-argument limit; keep both JSON payloads
-    # off argv while retaining the atomic resourceVersion fence.
     jq -ec \
       --arg resourceVersion "${resource_version}" \
       '.spec | select(.) | [

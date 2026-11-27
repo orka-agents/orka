@@ -14,7 +14,6 @@ import (
 	"testing"
 )
 
-// taskSpecJSONFields lists TaskSpec fields by JSON name, in declaration order.
 func taskSpecJSONFields(t *testing.T) []string {
 	t.Helper()
 	specType := reflect.TypeFor[TaskSpec]()
@@ -29,8 +28,6 @@ func taskSpecJSONFields(t *testing.T) []string {
 	return fields
 }
 
-// setNonZero gives a value a non-zero setting reachable through every kind
-// TaskSpec uses.
 func setNonZero(t *testing.T, value reflect.Value) {
 	t.Helper()
 	switch value.Kind() {
@@ -63,8 +60,6 @@ func setNonZero(t *testing.T, value reflect.Value) {
 	}
 }
 
-// ExecutionInputs must clear exactly the control fields, so a new TaskSpec
-// field is frozen by a soul binding unless it is deliberately listed.
 func TestTaskSpecExecutionInputsClearOnlyControlFields(t *testing.T) {
 	fields := taskSpecJSONFields(t)
 	for _, control := range TaskControlFields {
@@ -88,8 +83,6 @@ func TestTaskSpecExecutionInputsClearOnlyControlFields(t *testing.T) {
 	}
 }
 
-// The CRD rule must compare every execution input. Regenerate the expression
-// from TaskSpec and require the marker to contain it exactly.
 func TestTaskImmutabilityRuleCoversExecutionInputs(t *testing.T) {
 	var comparisons []string
 	for _, name := range taskSpecJSONFields(t) {

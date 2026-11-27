@@ -6,8 +6,6 @@ import { useUIStore } from '@/stores/ui'
 
 const PROVIDER_PAGE_LIMIT = '100'
 
-// Providers are a paginated Kubernetes-backed list; the picker must see every
-// Provider in the namespace, so all pages are followed like the task hooks do.
 export function useProviderList() {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({

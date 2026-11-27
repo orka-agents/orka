@@ -122,8 +122,6 @@ func TestValidateRuntimeToolboxesLimitsAndOverlap(t *testing.T) {
 	if err := ValidateRuntimeToolboxes([]RuntimeToolbox{make("/opt/a"), make("/opt/a")}); err == nil {
 		t.Fatal("duplicate mount path: expected error")
 	}
-	// Nested paths cannot pass the mountPath shape rule, but the overlap
-	// check must stay independent of it.
 	if !runtimeToolboxMountPathsOverlap("/opt/a", "/opt/a/bin") || !runtimeToolboxMountPathsOverlap("/opt/a/bin", "/opt/a") {
 		t.Fatal("nested mount paths must overlap")
 	}
@@ -165,8 +163,6 @@ func TestRuntimeProfileToolboxDigestIsOrderAndFieldSensitive(t *testing.T) {
 			t.Errorf("%s: profile digest did not change", name)
 		}
 	}
-	// A pure copy keeps the digest, proving the mutations above are the only
-	// source of change.
 	same := base
 	same.Toolboxes = CloneRuntimeToolboxes(base.Toolboxes)
 	if digest, _ := CanonicalProfileDigest(same); digest != baseDigest {
@@ -174,9 +170,6 @@ func TestRuntimeProfileToolboxDigestIsOrderAndFieldSensitive(t *testing.T) {
 	}
 }
 
-// TestRuntimeProfileWithoutToolboxesIsUnchanged is the no-change golden test:
-// a profile without toolboxes serializes and digests exactly like the shape
-// that existed before the field was added.
 func TestRuntimeProfileWithoutToolboxesIsUnchanged(t *testing.T) {
 	legacy := testToolboxProfile(nil)
 	legacyJSON, err := CanonicalValue(legacy)
@@ -245,9 +238,6 @@ func TestRuntimeToolboxChildPath(t *testing.T) {
 	}
 }
 
-// TestReservedOptNamesCoverRuntimeImages scans every built-in runtime
-// Dockerfile for /opt/<name> folders and fails when one is missing from the
-// reserved list, so a new runtime folder cannot be shadowed by a toolbox.
 func TestReservedOptNamesCoverRuntimeImages(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "workers", "acp", "images")
 	matches, err := filepath.Glob(filepath.Join(root, "*", "Dockerfile"))
@@ -267,8 +257,6 @@ func TestReservedOptNamesCoverRuntimeImages(t *testing.T) {
 		switch provider {
 		case "codex", "claude", "copilot", "opencode":
 		default:
-			// Composition images (AgentKit, Foundry) are not built-in
-			// toolbox-capable runtimes.
 			continue
 		}
 		data, err := os.ReadFile(dockerfile)

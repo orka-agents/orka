@@ -19,8 +19,6 @@ var _ store.ExecutionEventStore = (*Store)(nil)
 var _ store.DeduplicatingExecutionEventStore = (*Store)(nil)
 var _ store.AtomicExecutionEventPlanStore = (*Store)(nil)
 
-// AppendExecutionEvent appends an execution event and allocates the next sequence
-// number transactionally for its (namespace, stream_type, stream_id) stream.
 func (s *Store) AppendExecutionEvent(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
 	return writeOperation(ctx, s, "AppendExecutionEvent", nil, func(ctx context.Context) (*store.ExecutionEvent, error) {
 		return s.appendExecutionEventWrite(ctx, event)
@@ -32,9 +30,6 @@ func (s *Store) appendExecutionEventWrite(ctx context.Context, event *store.Exec
 	return appended, err
 }
 
-// AppendExecutionEventIfAbsent atomically appends an execution event when its
-// stream-scoped deduplication key is absent. A repeated key returns the existing
-// event without allocating another sequence.
 func (s *Store) AppendExecutionEventIfAbsent(
 	ctx context.Context,
 	event *store.ExecutionEvent,
@@ -59,8 +54,6 @@ func (s *Store) appendExecutionEventIfAbsentWrite(
 	return s.appendExecutionEvent(ctx, event, dedupeKey, nil)
 }
 
-// AppendExecutionEventsIfAbsent appends deduplicated events in order in one
-// transaction; a failing entry appends none of them.
 func (s *Store) AppendExecutionEventsIfAbsent(ctx context.Context, appends []store.ExecutionEventAppend) ([]store.ExecutionEventAppendResult, error) {
 	return writeOperation(ctx, s, "AppendExecutionEventsIfAbsent", nil, func(ctx context.Context) ([]store.ExecutionEventAppendResult, error) {
 		return s.appendExecutionEventsIfAbsentWrite(ctx, appends)
@@ -99,9 +92,6 @@ func (s *Store) appendExecutionEventsIfAbsentWrite(ctx context.Context, appends 
 	return results, nil
 }
 
-// AppendExecutionEventWithPlanIfAbsent atomically appends an execution event
-// and updates its task plan projection. Duplicate event keys leave the current
-// plan unchanged.
 func (s *Store) AppendExecutionEventWithPlanIfAbsent(
 	ctx context.Context,
 	event *store.ExecutionEvent,
@@ -186,9 +176,6 @@ func (s *Store) appendExecutionEventUnfenced(
 		s.executionEventMu.Lock()
 		defer s.executionEventMu.Unlock()
 	}
-	// An enclosing Task transaction already owns SQLite's writer. Taking the
-	// append mutex here could deadlock with an ordinary append waiting for that
-	// writer while holding the mutex. The writer alone serializes sequence IDs.
 
 	const maxAttempts = 8
 	retryBackoffs := [...]time.Duration{
@@ -337,11 +324,6 @@ func appendSQLiteExecutionEvent(
 	return &event, true, nil
 }
 
-// sameExecutionEventIdentity reports whether a request with a stored event's
-// dedupe key belongs to that event's Task, Session and tool call. A field
-// left empty on either side matches. The type, content and summary may
-// differ: competing outcomes share one key so the first durable outcome wins,
-// and Orka can derive an event again under newer redaction rules.
 func sameExecutionEventIdentity(stored, requested store.ExecutionEvent) bool {
 	same := func(a, b string) bool { return a == "" || b == "" || a == b }
 	return same(stored.TaskName, requested.TaskName) &&
@@ -349,12 +331,6 @@ func sameExecutionEventIdentity(stored, requested store.ExecutionEvent) bool {
 		same(stored.ToolCallID, requested.ToolCallID)
 }
 
-// executionEventByDedupeKeySQL reads the event a stream's deduplication key
-// names. SQLite uses a partial index only when the query's WHERE clause
-// implies the index's own, and a bound key does not imply dedupe_key <> ”.
-// Without that term the lookup reads every event of the stream, inside the
-// append's write transaction, so each append to a stream costs more than the
-// last.
 const executionEventByDedupeKeySQL = `SELECT id, namespace, stream_type, stream_id, seq, type, severity, task_name, session_name,
  agent_name, tool_name, tool_call_id, summary, content_json, content_text, truncation_json, created_at
  FROM execution_events
@@ -501,7 +477,6 @@ func sqliteSessionCursorSeq(ctx context.Context, querier sqliteSessionCursorQuer
 	return 0, err
 }
 
-// ListExecutionEvents returns execution events matching filter in stream sequence order.
 func (s *Store) ListExecutionEvents(ctx context.Context, filter store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
 	var listed []store.ExecutionEvent
 	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
@@ -576,7 +551,6 @@ func (s *Store) listExecutionEventsUnfenced(ctx context.Context, filter store.Ex
 	return out, nil
 }
 
-// ListSessionExecutionEvents returns task-derived events for one session with a deterministic session cursor.
 func (s *Store) ListSessionExecutionEvents(ctx context.Context, filter store.SessionExecutionEventFilter) ([]store.SessionExecutionEvent, int64, error) {
 	filter = filter.Normalized()
 	if err := filter.Validate(); err != nil {
@@ -613,9 +587,6 @@ func (s *Store) ListSessionExecutionEvents(ctx context.Context, filter store.Ses
 	LIMIT ?`
 	out := []store.SessionExecutionEvent{}
 	var latestSeq int64
-	// The watermark, the retained Session cursor and the page read one
-	// snapshot, so a concurrent append and stream deletion cannot produce a
-	// page and latest sequence that never existed together.
 	if err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
 		var err error
 		latestSeq, err = latestSQLiteSessionExecutionEventSeq(ctx, q, filter.Namespace, filter.SessionName)
@@ -642,7 +613,6 @@ func (s *Store) ListSessionExecutionEvents(ctx context.Context, filter store.Ses
 	return out, latestSeq, nil
 }
 
-// GetLatestExecutionEventSeq returns the latest sequence for a stream or zero when empty.
 func (s *Store) GetLatestExecutionEventSeq(ctx context.Context, namespace, streamType, streamID string) (int64, error) {
 	filter := store.ExecutionEventFilter{Namespace: namespace, StreamType: streamType, StreamID: streamID}.Normalized()
 	if err := filter.Validate(); err != nil {
@@ -658,9 +628,6 @@ func (s *Store) GetLatestExecutionEventSeq(ctx context.Context, namespace, strea
 	return seq, err
 }
 
-// GetLatestExecutionEventSeqs reads stream heads through the existing sequence
-// index, without scanning historical events or issuing one query per stream.
-// Every batch reads from one snapshot.
 func (s *Store) GetLatestExecutionEventSeqs(ctx context.Context, namespace, streamType string, streamIDs []string) (map[string]int64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -725,7 +692,6 @@ func readLatestExecutionEventSeqBatch(ctx context.Context, q taskDataExecutor, n
 	return rows.Err()
 }
 
-// DeleteExecutionEvents removes all execution events for one stream.
 func (s *Store) DeleteExecutionEvents(ctx context.Context, namespace, streamType, streamID string) error {
 	return writeOperationErr(ctx, s, "DeleteExecutionEvents", func(ctx context.Context) error {
 		return s.deleteExecutionEventsWrite(ctx, namespace, streamType, streamID)
@@ -860,9 +826,6 @@ func normalizeSQLiteExecutionEvent(event *store.ExecutionEvent) error {
 	if !events.IsValidExecutionEventType(event.Type) {
 		return store.ValidationErrorf("unsupported execution event type %q", event.Type)
 	}
-	// Orka redacts and bounds the payload above the storage client; the
-	// store only requires that structured content is valid JSON. Content that
-	// is only whitespace is no content.
 	event.Content = bytes.TrimSpace(event.Content)
 	if len(event.Content) == 0 {
 		event.Content = nil

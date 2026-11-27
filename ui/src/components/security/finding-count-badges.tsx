@@ -3,10 +3,6 @@ import type { RepositoryScan } from '@/schemas/security'
 
 type FindingCounts = NonNullable<NonNullable<RepositoryScan['status']>['findingCounts']>
 
-/**
- * Open findings per severity. Critical and high turn red only when there are
- * some; a zero count stays neutral so clean repositories do not read as alarms.
- */
 export function FindingCountBadges({ counts }: { counts?: FindingCounts }) {
   const critical = counts?.critical ?? 0
   const high = counts?.high ?? 0

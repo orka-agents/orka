@@ -25,14 +25,10 @@ const (
 
 var ErrScanRunCancellationPending = fmt.Errorf("%w: scan run cancellation is pending", store.ErrConflict)
 
-// NewScanRunID does not depend on second-resolution Task names. The full ID
-// fits in a Kubernetes label and remains stable for every stage of the run.
 func NewScanRunID() string {
 	return "scan_" + strings.ToLower(rand.Text())
 }
 
-// ScanStageTaskNameForRun gives a stage the same name on every reconciliation
-// while keeping separate runs distinct, including runs started in one second.
 func ScanStageTaskNameForRun(repositoryScanName, mode, stage, scope, runID string) string {
 	parts := []string{sanitizeName(repositoryScanName), sanitizeName(mode), sanitizeName(stage)}
 	if scope != "" {
@@ -41,8 +37,6 @@ func ScanStageTaskNameForRun(repositoryScanName, mode, stage, scope, runID strin
 	return boundedTaskName(append(parts, sanitizeName(runID))...)
 }
 
-// ScanRunMatchesRepositoryScan never adopts an unbound historical run into a
-// live RepositoryScan, whose Kubernetes UID and generation are nonzero.
 func ScanRunMatchesRepositoryScan(run *store.ScanRun, scan *corev1alpha1.RepositoryScan) bool {
 	return run != nil && scan != nil && scan.DeletionTimestamp.IsZero() &&
 		run.Namespace == scan.Namespace && run.RepositoryScan == scan.Name &&
@@ -53,7 +47,6 @@ func activeScanRunPhase(phase string) bool {
 	return phase == "pending" || phase == "running"
 }
 
-// ValidateScanStageRun checks live parent identity and durable run ownership.
 func ValidateScanStageRun(ctx context.Context, s store.SecurityStore, reader client.Reader, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
 	if s == nil {
 		return fmt.Errorf("security store is required to validate scan stage admission")
@@ -76,8 +69,6 @@ func ValidateScanStageRun(ctx context.Context, s store.SecurityStore, reader cli
 	return nil
 }
 
-// CreateInitialScanTask keeps a failed admission reserved until cleanup confirms
-// that no Task remains, including when Create returns an ambiguous response.
 func CreateInitialScanTask(ctx context.Context, s store.SecurityStore, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, task *corev1alpha1.Task) error {
 	if s == nil {
 		return fmt.Errorf("security store is required to admit an initial scan Task")
@@ -97,9 +88,6 @@ func CreateInitialScanTask(ctx context.Context, s store.SecurityStore, c client.
 	return nil
 }
 
-// EnsureRepositoryScanRunFinalizer installs deletion cleanup before reserving a
-// run. The live reader prevents stale cache entries from retiring newer runs;
-// the optimistic patch cannot attach the finalizer to a recreated or edited object.
 func EnsureRepositoryScanRunFinalizer(ctx context.Context, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan) error {
 	if reader == nil {
 		reader = c
@@ -121,9 +109,6 @@ func EnsureRepositoryScanRunFinalizer(ctx context.Context, c client.Client, read
 	})
 }
 
-// RetireStaleScanRuns releases reservations from an earlier object or spec.
-// It also reports a stale status binding even if that run is already terminal.
-// Legacy rows remain unbound; no identity is inferred from the current object.
 func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan) (bool, error) {
 	runs, err := s.ListActiveScanRuns(ctx, scan.Namespace, scan.Name)
 	if err != nil {
@@ -133,10 +118,7 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Cl
 	if err != nil {
 		return false, err
 	}
-	// Prefer the pending snapshots, including their cleanup version, when a
-	// request appeared after the active-reservation read.
 	runs = append(pending, runs...)
-	// The newest admission also fences stale generations after it completes.
 	latest, _, err := s.ListScanRuns(ctx, scan.Namespace, scan.Name, 1, "")
 	if err != nil {
 		return false, err
@@ -155,8 +137,6 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Cl
 		}
 	}
 
-	// The parent may have changed while the run snapshots were collected.
-	// Include late Tasks, then validate the caller before any cancellation.
 	cleanupPending, err := resumeScanPipelineCleanup(ctx, s, c, reader, scan)
 	if err != nil {
 		return false, err
@@ -172,8 +152,6 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Cl
 		if scan.DeletionTimestamp.IsZero() && run.RepositoryScanUID == string(scan.UID) && run.RepositoryScanGeneration > scan.Generation {
 			return false, fmt.Errorf("%w: a newer repository scan generation has already admitted a run", store.ErrConflict)
 		}
-		// A deleting owner can only release its own reservations. A newer
-		// incarnation may already have appeared by the time cleanup retries.
 		if !scan.DeletionTimestamp.IsZero() && run.RepositoryScanUID != "" && run.RepositoryScanUID != string(scan.UID) {
 			continue
 		}
@@ -204,9 +182,6 @@ func RetireStaleScanRuns(ctx context.Context, s store.SecurityStore, c client.Cl
 	return staleStatus, nil
 }
 
-// Owned Task events requeue the parent, including after a controller restart.
-// Use their run IDs to find stale or cancelled history without paging through all runs.
-// Tasks without a matching run must finish deletion before new admission.
 func resumeScanPipelineCleanup(ctx context.Context, s store.SecurityStore, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan) (bool, error) {
 	if reader == nil {
 		reader = c
@@ -243,8 +218,6 @@ func resumeScanPipelineCleanup(ctx context.Context, s store.SecurityStore, c cli
 			snapshots[runID] = run
 		}
 		if !scanRunOwnsTask(run, scan, task) {
-			// Missing history cannot authorize cleanup for another owner or
-			// justify reconstructing a run from Task labels.
 			if owner.UID == scan.UID {
 				orphans = append(orphans, task)
 			}
@@ -257,13 +230,9 @@ func resumeScanPipelineCleanup(ctx context.Context, s store.SecurityStore, c cli
 			return false, fmt.Errorf("%w: a newer repository scan generation has already admitted a run", store.ErrConflict)
 		}
 		if run.CancellationPending {
-			// This read can see cancellation requested after the initial
-			// pending-run snapshot. Admission must still wait for cleanup.
 			cleanupPending = true
 			continue
 		}
-		// A failed review can make a run terminal while sibling Tasks remain
-		// active. They still need cancellation when the parent identity changes.
 		staleTerminal := !activeScanRunPhase(run.Phase) && !ScanRunMatchesRepositoryScan(run, scan)
 		if run.CancellationVersion != 0 || staleTerminal {
 			late[run.ID] = run
@@ -300,9 +269,6 @@ func validateScanRunRetirementIdentity(ctx context.Context, c client.Client, rea
 	return nil
 }
 
-// DeleteScanRunPipelineTasks requests cancellation through Task deletion before
-// releasing a run reservation. Terminal Tasks and other owners are preserved.
-// The result reports whether this live read observed any nonterminal owned Tasks.
 func DeleteScanRunPipelineTasks(ctx context.Context, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) (bool, error) {
 	if reader == nil {
 		reader = c
@@ -356,20 +322,14 @@ func activeScanPipelineTask(task *corev1alpha1.Task) bool {
 	return !task.Status.Phase.IsTerminal()
 }
 
-// RollbackScanRunAdmission cancels work whose admission lost status ownership.
-// Failed cancellation keeps the reservation and durable cleanup intent.
 func RollbackScanRunAdmission(ctx context.Context, s store.SecurityStore, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
 	return CancelScanRun(ctx, s, c, reader, scan, run, "scan admission lost repository scan status ownership")
 }
 
-// CancelScanRun records intent before requesting Task deletion so reconciliation
-// can retry failures even when the run still matches the current configuration.
 func CancelScanRun(ctx context.Context, s store.SecurityStore, c client.Client, reader client.Reader, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, reason string) error {
 	if err := s.RequestScanRunCancellation(ctx, run, reason); err != nil {
 		return err
 	}
-	// A creator can outlive its preflight and crash after Create succeeds. Keep
-	// intent pending until a later cleanup pass checks the live Task collection.
 	_, err := DeleteScanRunPipelineTasks(ctx, c, reader, scan, run)
 	return err
 }
@@ -385,8 +345,6 @@ func finishScanRunCancellation(ctx context.Context, s store.SecurityStore, c cli
 	return s.CompleteScanRunCancellation(ctx, run)
 }
 
-// CurrentRepositoryScanTasks excludes foreign owners and pipeline Tasks whose
-// persisted run belongs to a previous RepositoryScan incarnation or generation.
 func CurrentRepositoryScanTasks(ctx context.Context, s store.SecurityStore, scan *corev1alpha1.RepositoryScan, tasks []corev1alpha1.Task) ([]corev1alpha1.Task, error) {
 	current := make([]corev1alpha1.Task, 0, len(tasks))
 	if s == nil {
@@ -418,7 +376,6 @@ func CurrentRepositoryScanTasks(ctx context.Context, s store.SecurityStore, scan
 				continue
 			}
 		case StageValidation, StagePatch:
-			// These follow-up Tasks have their own finding/publication checks.
 		default:
 			continue
 		}

@@ -13,42 +13,26 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// MinBearerTokenBytes is the shortest adapter bearer token accepted, the same
-// floor AgentRuntime controller tokens use.
 const MinBearerTokenBytes = 32
 
-// Credentials is the Secret material for one adapter. Its String and
-// GoString forms never include the values.
 type Credentials struct {
 	caBundle    []byte
 	bearerToken []byte
 }
 
-// CABundle returns a copy of the PEM CA bundle, or nil when the adapter uses
-// the system roots.
 func (c Credentials) CABundle() []byte { return bytes.Clone(c.caBundle) }
 
-// BearerToken returns a copy of the bearer token.
 func (c Credentials) BearerToken() []byte { return bytes.Clone(c.bearerToken) }
 
 func (c Credentials) String() string { return "storageconfig.Credentials{<redacted>}" }
 
-// GoString keeps %#v from printing the token.
 func (c Credentials) GoString() string { return c.String() }
 
-// Resolved is a Config with the Secret material its adapters need.
 type Resolved struct {
-	Config *Config
-	// Credentials holds one entry per adapter backend, keyed by backend name.
-	// It is empty when every contract is bound to embedded SQLite.
+	Config      *Config
 	Credentials map[string]*Credentials
 }
 
-// Resolve reads every Secret the bound adapters reference from namespace,
-// the installation namespace, through reader. Pass the manager's API reader,
-// which reads directly from the API server: resolution runs before the cache
-// starts and must not wait for it. A configuration bound only to embedded
-// SQLite makes no API calls.
 func (c *Config) Resolve(ctx context.Context, reader client.Reader, namespace string) (*Resolved, error) {
 	resolved := &Resolved{Config: c, Credentials: map[string]*Credentials{}}
 	var adapters []Binding
@@ -86,8 +70,6 @@ func (c *Config) Resolve(ctx context.Context, reader client.Reader, namespace st
 	return resolved, nil
 }
 
-// secretReader reads each Secret once per resolution, so one adapter's CA
-// bundle and token come from the same Secret version when they share one.
 type secretReader struct {
 	reader    client.Reader
 	namespace string
@@ -139,8 +121,6 @@ func (r *secretReader) value(ctx context.Context, ref SecretKeyRef) ([]byte, err
 	return bytes.Clone(value), nil
 }
 
-// validateBearerToken requires a token that fits an Authorization header
-// unchanged: long enough, and only visible ASCII.
 func validateBearerToken(token []byte) error {
 	if len(token) < MinBearerTokenBytes {
 		return fmt.Errorf("bearer token must contain at least %d bytes", MinBearerTokenBytes)

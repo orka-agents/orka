@@ -34,9 +34,6 @@ const (
 	TaskExecutionAuthorityWebhookPath = "/validate-core-orka-ai-v1alpha1-task-execution-authority"
 )
 
-// ExecutionModeConfig identifies exact controller writers. Namespace-scoped
-// RBAC remains the primary authorization boundary; these usernames are a
-// second fail-closed identity fence for controller-owned writes.
 type ExecutionModeConfig struct {
 	ControllerUsernames []string
 }
@@ -57,9 +54,6 @@ func (c ExecutionModeConfig) controller(username string) bool {
 	return slices.Contains(c.ControllerUsernames, strings.TrimSpace(username))
 }
 
-// RegisterExecutionModeWebhooks registers the static execution-mode boundary
-// for Orka resources. Namespace claim immutability and ACP workspace
-// coordination Lease ownership are ValidatingAdmissionPolicies.
 func RegisterExecutionModeWebhooks(
 	server webhook.Server,
 	scheme *runtime.Scheme,
@@ -116,23 +110,15 @@ func (v *AgentContractValidator) Handle(ctx context.Context, req ctrladmission.R
 	if !agentUsesBuiltInRuntime(object) {
 		return ctrladmission.Allowed("Agent derives its contract from AgentRuntime")
 	}
-	// The namespace is immutably bound to one mode, so an omitted contract
-	// can only mean that mode. An explicit value must still agree with it.
 	if object.Spec.Runtime.ContractVersion != nil && *object.Spec.Runtime.ContractVersion != mode.ContractVersion() {
 		return ctrladmission.Denied(fmt.Sprintf("Agent contractVersion must match namespace execution mode %q", mode))
 	}
 	if object.Spec.Model == nil || strings.TrimSpace(object.Spec.Model.Name) == "" {
-		// The ACP session configuration requires a model; rejecting here
-		// turns a run-time Task failure into an immediate, actionable error.
 		return ctrladmission.Denied("built-in Agent runtime requires spec.model.name (the ACP runtime session has no default model)")
 	}
 	if oldObject != nil && oldObject.Spec.Runtime != nil && oldObject.Spec.Runtime.ContractVersion != nil &&
 		object.Spec.Runtime.ContractVersion != nil &&
 		*oldObject.Spec.Runtime.ContractVersion != *object.Spec.Runtime.ContractVersion {
-		// A written selector never moves to another contract. Clearing it is
-		// allowed: an omitted selector already means the namespace mode, so
-		// reapplying a manifest that no longer spells it out changes nothing,
-		// and the Agent controller writes the value back.
 		return ctrladmission.Denied("Agent contractVersion is immutable")
 	}
 	return ctrladmission.Allowed("Agent contract matches the immutable namespace mode")
@@ -217,9 +203,6 @@ func (v *TaskExecutionAuthorityValidator) Handle(ctx context.Context, req ctrlad
 	if oldObject.Status.SoulBinding != nil && !reflect.DeepEqual(oldObject.Status.SoulBinding, object.Status.SoulBinding) {
 		return ctrladmission.Denied("AI soul binding is write-once and immutable")
 	}
-	// Match the live generation when first binding, not when preserving a
-	// binding: deletion can advance metadata.generation without changing spec.
-	// The immutable spec/binding and finalizer ownership checks above still apply.
 	if binding := object.Status.SoulBinding; binding != nil && (object.Spec.Type != corev1alpha1.TaskTypeAI ||
 		oldObject.Status.SoulBinding == nil && (binding.TaskGeneration != object.Generation || !object.DeletionTimestamp.IsZero())) {
 		return ctrladmission.Denied("AI soul binding does not match the Task identity")
@@ -316,9 +299,6 @@ func admissionReadError(operation string, err error) ctrladmission.Response {
 	return ctrladmission.Errored(http.StatusInternalServerError, fmt.Errorf("%s: %w", operation, err))
 }
 
-// taskSpecUnchangedForAuthority applies the same freeze as the Task CRD rule:
-// an ACP execution binding freezes the whole spec, while a soul-only binding
-// freezes the execution inputs and leaves control fields such as suspend mutable.
 func taskSpecUnchangedForAuthority(oldObject, object *corev1alpha1.Task) bool {
 	if oldObject.Status.AgentExecutionBinding != nil {
 		return reflect.DeepEqual(oldObject.Spec, object.Spec)

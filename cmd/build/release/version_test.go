@@ -37,8 +37,6 @@ func versionFixture(t *testing.T) (string, map[string]string) {
 	return root, files
 }
 
-// Use the real source files, but overlay the upcoming defaults so this fixture
-// works both before and after the development chart inputs land.
 func repositoryDevelopmentInputs(t *testing.T) map[string]string {
 	t.Helper()
 	edits := map[string][]replacement{
@@ -93,7 +91,6 @@ func TestUpdateVersionPreservesFormattingAndUpdatesEveryReleaseImage(t *testing.
 					t.Fatalf("changed file permissions for %s", name)
 				}
 			}
-			// Repeating the same update preserves the complete file contents.
 			must(t, updateVersion(root, "v9.8.7-rc.3"))
 		})
 	}
@@ -105,7 +102,6 @@ func TestRepositoryVersionDefaultHonorsMakeOverrides(t *testing.T) {
 	if len(assignments) != 1 {
 		t.Fatalf("repository Makefile has %d VERSION defaults, want one", len(assignments))
 	}
-	// Release preparation rewrites the default, so expect whatever this checkout declares.
 	_, declared, _ := strings.Cut(assignments[0], "= ")
 	path := filepath.Join(t.TempDir(), makefilePath)
 	writeTestFile(t, path, assignments[0]+"\nprint-version:\n\t@printf '%s' '$(VERSION)'\n")

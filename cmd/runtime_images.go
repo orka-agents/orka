@@ -25,7 +25,6 @@ const (
 	acpRuntimeImageRequestTimeout = 15 * time.Second
 )
 
-// normalizeSessionLoaderImage accepts an immutable configured image without registry I/O.
 func normalizeSessionLoaderImage(image string) (string, error) {
 	ref, err := distributionref.ParseNormalizedNamed(strings.TrimSpace(image))
 	if err == nil {
@@ -36,7 +35,6 @@ func normalizeSessionLoaderImage(image string) (string, error) {
 	return "", errors.New("--session-loader-image requires a SHA256-digest-pinned image (repository@sha256:<digest>)")
 }
 
-// Advertise coding runtimes only when their image and model connection are configured.
 func configuredACPRuntimeAvailability(
 	images controller.ACPRuntimeImages,
 	proxy controller.RuntimePoolProviderProxyConfig,
@@ -52,12 +50,6 @@ func configuredACPRuntimeAvailability(
 	}
 }
 
-// resolveACPRuntimeImagesOrDisable pins configured tags once per controller
-// process. When any resolution fails, every coding-agent runtime is disabled
-// for this process and the error is returned for logging: agent Tasks then
-// fail closed with an unavailable runtime, while AI and container Tasks, which
-// never needed these images, keep running. A partially resolved set is never
-// used, so a tag can never silently fall back to a mutable reference.
 func resolveACPRuntimeImagesOrDisable(
 	ctx context.Context,
 	configured controller.ACPRuntimeImages,
@@ -70,9 +62,6 @@ func resolveACPRuntimeImagesOrDisable(
 	return resolved, nil
 }
 
-// resolveACPRuntimeImages pins configured tags once per controller process.
-// Consumers still receive only digest references or disabled providers, and a
-// failed resolution returns no partial configuration.
 func resolveACPRuntimeImages(
 	ctx context.Context,
 	configured controller.ACPRuntimeImages,
@@ -121,8 +110,6 @@ func runtimeImageRegistryClient(client *http.Client) *auth.Client {
 		}
 		return nil
 	}
-	// No local credentials are loaded. Public registries may still issue
-	// anonymous bearer tokens, which ORAS handles without exposing them.
 	return &auth.Client{Client: &bounded, Cache: auth.NewCache()}
 }
 
@@ -139,9 +126,6 @@ func resolveACPRuntimeImage(ctx context.Context, image string, client *auth.Clie
 		if digested.Digest().Algorithm() != "sha256" {
 			return "", errors.New("digest references must use SHA256")
 		}
-		// A tag alongside the digest is informational; pools and admission
-		// accept only the canonical repository@digest form. Explicit digests
-		// are trusted as given and never contact a registry.
 		return distributionref.TrimNamed(ref).Name() + "@" + digested.Digest().String(), nil
 	}
 	tagged, ok := ref.(distributionref.Tagged)
@@ -154,8 +138,6 @@ func resolveACPRuntimeImage(ctx context.Context, image string, client *auth.Clie
 		return "", errors.New("invalid registry repository")
 	}
 	remoteRepository.Client = client
-	// Resolve returns the manifest or multi-platform index digest as published;
-	// it does not select a platform based on the controller's architecture.
 	descriptor, err := remoteRepository.Resolve(ctx, tagged.Tag())
 	if err != nil {
 		return "", runtimeImageRegistryError(err)
@@ -168,8 +150,6 @@ func resolveACPRuntimeImage(ctx context.Context, image string, client *auth.Clie
 }
 
 func runtimeImageRegistryError(err error) error {
-	// Registry responses and token endpoint URLs can contain sensitive values.
-	// Return only known errors or HTTP status codes to the startup logger.
 	for _, known := range []error{context.Canceled, context.DeadlineExceeded, errdef.ErrNotFound} {
 		if errors.Is(err, known) {
 			return fmt.Errorf("resolve tag: %w", known)

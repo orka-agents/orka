@@ -47,7 +47,6 @@ func TestReviewPullRequestTool_Metadata(t *testing.T) {
 		t.Error("parameters should not be empty")
 	}
 
-	// Verify schema contains expected fields
 	var schema map[string]any
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("failed to parse parameters schema: %v", err)
@@ -144,7 +143,6 @@ func TestReviewPullRequestTool_MissingSecret(t *testing.T) {
 }
 
 func TestReviewPullRequestTool_Success(t *testing.T) {
-	// Mock GitHub API with 3 endpoints
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET, got %s", r.Method)
@@ -158,12 +156,10 @@ func TestReviewPullRequestTool_Success(t *testing.T) {
 
 		switch {
 		case path == testPRPath && accept == testDiffAccept:
-			// PR diff endpoint
 			w.Header().Set("Content-Type", "text/plain")
 			_, _ = fmt.Fprint(w, "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1,3 +1,4 @@\n package main\n+// new comment\n")
 
 		case path == testPRPath:
-			// PR details endpoint
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{
 				"title": "feat: add comment",
@@ -174,7 +170,6 @@ func TestReviewPullRequestTool_Success(t *testing.T) {
 			}`)
 
 		case path == "/repos/sozercan/ayna/pulls/42/files":
-			// PR files endpoint
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `[{
 				"filename": "main.go",
@@ -476,7 +471,6 @@ func TestReviewPullRequestTool_Execute_InvalidArgs(t *testing.T) {
 
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
-	// Missing both required fields (empty JSON object)
 	args := json.RawMessage(`{}`)
 
 	_, err := tool.Execute(context.Background(), args)
@@ -847,9 +841,6 @@ func TestReviewPullRequestTool_CustomPasswordKey(t *testing.T) {
 	}
 }
 
-// TestReviewPullRequestTool_RefusesOversizedPages covers a files page past
-// the GitHub document limit and a diff past the diff limit: both are refused
-// before use instead of being parsed or returned from a cut prefix.
 func TestReviewPullRequestTool_RefusesOversizedPages(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -889,9 +880,6 @@ func TestReviewPullRequestTool_RefusesOversizedPages(t *testing.T) {
 	}
 }
 
-// TestFetchPRFilesPaginates covers a pull request with more changed files
-// than one page holds: every page is read up to the cap, and a list cut at
-// the cap is reported as possibly incomplete.
 func TestFetchPRFilesPaginates(t *testing.T) {
 	serve := func(totalFiles int) *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -922,10 +910,6 @@ func TestFetchPRFilesPaginates(t *testing.T) {
 	}
 }
 
-// TestFetchPRFilesSplitsOversizedPages covers changed-file pages whose
-// patches exceed the document limit: the page is re-read as smaller pages
-// covering the same files instead of failing the call, and the byte budget
-// over all pages cuts the list, reported as possibly incomplete.
 func TestFetchPRFilesSplitsOversizedPages(t *testing.T) {
 	const totalFiles = prFilesPerPage + 20
 	patch := strings.Repeat("y", 15000)

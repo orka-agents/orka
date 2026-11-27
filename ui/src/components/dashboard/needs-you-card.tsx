@@ -9,12 +9,8 @@ import type { AttentionKind } from '@/schemas/attention'
 
 const kinds: AttentionKind[] = ['approval', 'outcomeUnknown', 'failed', 'podWaiting', 'monitorBlocked']
 
-/** The dashboard's top attention items, linking to the full board. */
 export function NeedsYouCard({ limit = 5 }: { limit?: number }) {
   const { data: cached, isLoading, error } = useAttention(limit, 30000)
-  // A 403 replaces the cached items: polling has stopped, so they would stay
-  // up as current after access was revoked. Any other failure keeps the last
-  // loaded items with a note that they are stale.
   const shownError = error && (isForbiddenError(error) || !cached) ? error : null
   const staleError = error && !shownError ? error : null
   const data = shownError ? undefined : cached

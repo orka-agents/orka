@@ -12,10 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// consolidatedApplicationRows returns the application rows before, taken
-// from a store below schema version 6, as the version 6 step leaves them:
-// memories gain generation 1 and no superseding memory, and proposals gain no
-// targets or sources. Tables before does not hold are left out.
 func consolidatedApplicationRows(t *testing.T, before map[string][]string) map[string][]string {
 	t.Helper()
 	after := maps.Clone(before)
@@ -43,10 +39,6 @@ func consolidatedApplicationRows(t *testing.T, before map[string][]string) map[s
 	return after
 }
 
-// seedVersion5Memories writes a memory and a proposal through SQL the
-// version 5 layout accepts, so the upgrade has records to carry. Only a store
-// whose key bootstrap finished may hold rows: rows would keep an unfinished
-// one from minting its key.
 func seedVersion5Memories(t *testing.T, db *sql.DB) {
 	t.Helper()
 	_, err := db.Exec(`INSERT INTO memories (id, namespace, source, content, tags_json, recalled_count)
@@ -65,7 +57,6 @@ func schemaVersion5StoreDB(t *testing.T, origin string, complete bool, installat
 
 	schema, err := readSchema(db)
 	require.NoError(t, err)
-	// A literal digest, independent of schema172, as in historicalSchemaDB.
 	require.Equal(t, "8d812a8681fbf1d0139be0d700ed3722d725b5bf787576c1cf002b39fa6c402e", schemaFingerprint(schema))
 	version, err := readSchemaVersion(db)
 	require.NoError(t, err)
@@ -73,11 +64,6 @@ func schemaVersion5StoreDB(t *testing.T, origin string, complete bool, installat
 	return path, db
 }
 
-// A version 5 store upgrades in place to the memory generation layout: it
-// keeps its identity row, binding, key bootstrap state, controller epoch and
-// operation receipts and every record, its memories start at generation 1
-// and its proposals name no targets. A second open is current and does not
-// back up again.
 func TestSchemaVersion5StoreUpgradesInPlace(t *testing.T) {
 	for _, state := range version3StoreStates {
 		t.Run(state.name, func(t *testing.T) {
@@ -141,8 +127,6 @@ func TestSchemaVersion5StoreUpgradesInPlace(t *testing.T) {
 	}
 }
 
-// A failed memory generation step leaves the version 5 store unchanged,
-// including its binding and records, and the next open upgrades it.
 func TestSchemaVersion5UpgradeFailureRollsBack(t *testing.T) {
 	path, db := schemaVersion5StoreDB(t, datasetOriginNew, true, "installation-a", true)
 	before, err := readDataset(db)
@@ -156,7 +140,6 @@ func TestSchemaVersion5UpgradeFailureRollsBack(t *testing.T) {
 	steps := versionUpgrades()
 	first := slices.IndexFunc(steps, func(step versionUpgrade) bool { return step.from == 5 })
 	require.GreaterOrEqual(t, first, 0)
-	// The final step fails, so every step from version 5 rolls back together.
 	steps[len(steps)-1].sql += `; SELECT no_such_function()`
 	require.ErrorContains(t, runVersionUpgrades(t.Context(), conn, 5, schema172, steps[first:]), "no_such_function",
 		"the failing step ran and rolled back, rather than the upgrade refusing the layout")
@@ -184,10 +167,6 @@ func TestSchemaVersion5UpgradeFailureRollsBack(t *testing.T) {
 	assertMigrationRecords(t, s.db, path)
 }
 
-// A fixture rebuilt from historical DDL plus every step through 171-to-172.sql
-// has the version 5 layout but no identity row. It takes the version 0 path
-// and is adopted, while every real version 5 store is refused there and takes
-// the version path, as for earlier versions.
 func TestSchemaVersion5StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 	_, fixture := historicalSchemaDB(t, "abd2c040")
 	_, err := fixture.Exec(migration166To167 + migration167To168 + migration168To169 + migration169To170 + migration170To171 + migration171To172)

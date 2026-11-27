@@ -68,7 +68,6 @@ func TestCreateAgentTaskTool_Parameters(t *testing.T) {
 			t.Errorf("missing %s property", key)
 		}
 	}
-	// Task names are generated, so the model is not asked for one.
 	if _, ok := props[nameField]; ok {
 		t.Errorf("schema must not offer a %s argument the tool ignores", nameField)
 	}
@@ -314,8 +313,6 @@ func TestCreateAgentTaskTool_Execute(t *testing.T) {
 	}
 }
 
-// Both creation tools must preserve Task-authored PR text without granting
-// publication authority. Exercise their public Execute paths with nested maps.
 func testWorkspacePullRequestMetadata(t *testing.T, execute func(*testing.T, map[string]any) (*corev1alpha1.WorkspaceConfig, string)) {
 	t.Helper()
 	title := " \tfix: 修正 café e\u0301 🚀  "
@@ -401,8 +398,6 @@ func testWorkspacePullRequestMetadata(t *testing.T, execute func(*testing.T, map
 		})
 	}
 
-	// Construct fake credential-shaped text without storing token literals or
-	// printing rejected input, even when a redaction assertion fails.
 	fakeToken := "g" + "hp_" + strings.Repeat("NOTAREALSECRET", 3)
 	fakeAssignment := "password=" + strings.Repeat("FAKE_TEST_ONLY_", 3)
 	type invalidMetadata struct {
@@ -1090,8 +1085,6 @@ func TestCreateAgentTaskTool_Execute_CanonicalizesWorkspaceRepositoryArgs(t *tes
 }
 
 func TestCreateAgentTaskTool_Execute_AllowsReadWorkspaceWithoutGitRepo(t *testing.T) {
-	// The controller preflight rejects readCredentialRef without gitRepo, so
-	// auto-discovery must not attach one to a repository-free read workspace.
 	fc := newFakeClient(
 		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testGitCredentialsSecret, Namespace: defaultNamespace}},
 	)

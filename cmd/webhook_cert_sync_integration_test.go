@@ -27,8 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
-// Exercise startup, publication, and rotation without a projected Secret mount.
-// CA rejection is covered by unit tests; the rotator promptly repairs CA drift.
 func TestWebhookCertificateReadyWithoutSecretProjection(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("set KUBEBUILDER_ASSETS to run the envtest certificate integration")
@@ -142,7 +140,6 @@ func TestWebhookCertificateReadyWithoutSecretProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Exercise recovery from CA drift using real informers and the rotator.
 	if err := api.Get(ctx, client.ObjectKeyFromObject(configuration), configuration); err != nil {
 		t.Fatal(err)
 	}
@@ -150,15 +147,12 @@ func TestWebhookCertificateReadyWithoutSecretProjection(t *testing.T) {
 	if err := api.Update(ctx, configuration); err != nil {
 		t.Fatal(err)
 	}
-	// Upstream immediately repairs drift, so assert steady-state recovery rather
-	// than depending on the scheduling of its repair versus the probe.
 	waitForWebhookTest(t, func() bool {
 		if err := api.Get(ctx, client.ObjectKeyFromObject(configuration), configuration); err != nil {
 			return false
 		}
 		return !bytes.Equal(configuration.Webhooks[0].ClientConfig.CABundle, []byte("wrong CA")) && check(nil) == nil
 	})
-	// Invalidating the key asks the unchanged rotator to generate a new pair.
 	if err := api.Get(ctx, client.ObjectKeyFromObject(secret), secret); err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +164,6 @@ func TestWebhookCertificateReadyWithoutSecretProjection(t *testing.T) {
 		current, err := syncer.GetCertificate(nil)
 		return err == nil && !bytes.Equal(current.Certificate[0], original.Certificate[0]) && check(nil) == nil
 	})
-	// A trusted TLS client sees the rotated leaf, not merely readiness state.
 	assertWebhookTestServingCertificate(t, syncer, port)
 }
 

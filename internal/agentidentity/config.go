@@ -1,7 +1,5 @@
 // Copyright (c) 2026. MIT License - see LICENSE file for details.
 
-// Package agentidentity holds the controller's configuration for external
-// Agent identities (ADR 0039) and the checks every binding path shares.
 package agentidentity
 
 import (
@@ -16,46 +14,23 @@ import (
 
 var guidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
-// EntraConfig is the one Entra issuer instance an installation uses.
 type EntraConfig struct {
-	// TenantID is the Entra tenant that holds the blueprint.
-	TenantID string
-	// BlueprintClientID is the agent identity blueprint every bound identity
-	// must be a child of.
+	TenantID          string
 	BlueprintClientID string
-	// Authority is the Entra authority URL tokens are requested from;
-	// DefaultEntraAuthority when empty.
-	Authority string
+	Authority         string
 }
 
-// authority returns the canonical authority; see
-// entraclient.CanonicalAuthority.
 func (c EntraConfig) authority() string {
 	return entraclient.CanonicalAuthority(c.Authority)
 }
 
-// Config is the controller-wide identity configuration.
 type Config struct {
-	// Entra is nil when no Entra issuer is configured.
-	Entra *EntraConfig
-	// AgentUseAuthorization mirrors --agent-use-authorization-enabled, which
-	// identity-bound Agents require. Setting it asserts that the agent-use
-	// ValidatingAdmissionPolicies are installed, which the Helm value does
-	// together with the flag; the controller does not detect them.
+	Entra                 *EntraConfig
 	AgentUseAuthorization bool
-	// EnforcedSince is when this controller's current, unbroken period of
-	// Agent use enforcement began, by the API server's clock; see
-	// StartEnforcementPeriod. Objects created before it may have been
-	// created while the check was off, so no claim covers them. Zero leaves
-	// claims judged by their grant time alone.
-	EnforcedSince time.Time
-	// Enforcement, when set, replaces EnforcedSince with a period that starts
-	// once this controller leads; until then no identity binding is decided.
-	Enforcement *EnforcementPeriod
+	EnforcedSince         time.Time
+	Enforcement           *EnforcementPeriod
 }
 
-// EnforcementStart returns when the current period of Agent use enforcement
-// began, or started=false while it is not known yet.
 func (c Config) EnforcementStart() (since time.Time, started bool) {
 	if c.Enforcement != nil {
 		return c.Enforcement.Since()
@@ -63,7 +38,6 @@ func (c Config) EnforcementStart() (since time.Time, started bool) {
 	return c.EnforcedSince, true
 }
 
-// Validate rejects a partly or wrongly configured issuer at startup.
 func (c Config) Validate() error {
 	if c.Entra == nil {
 		return nil
@@ -72,16 +46,12 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(tenant) == "" || strings.TrimSpace(blueprint) == "" {
 		return fmt.Errorf("the Entra agent identity issuer needs both a tenant ID and a blueprint client ID")
 	}
-	// The issuer sends these values as they are, so surrounding space would
-	// reach Entra; they must be bare GUIDs.
 	if !guidPattern.MatchString(tenant) || !guidPattern.MatchString(blueprint) {
 		return fmt.Errorf("the Entra tenant ID and blueprint client ID must be GUIDs without surrounding space")
 	}
 	return entraclient.ValidateAuthority(c.Entra.Authority)
 }
 
-// Instance returns the configured instance of an issuer type, which a Task
-// binding freezes next to the identity.
 func (c Config) Instance(issuer string) (string, bool) {
 	switch issuer {
 	case corev1alpha1.AgentIdentityIssuerEntra:
@@ -90,8 +60,6 @@ func (c Config) Instance(issuer string) (string, bool) {
 		}
 		instance := "entra:" + strings.ToLower(strings.TrimSpace(c.Entra.TenantID)) + "/" +
 			strings.ToLower(strings.TrimSpace(c.Entra.BlueprintClientID))
-		// Tokens come from the authority too, so restarting against another
-		// one must fail bound Tasks closed. The public cloud stays implicit.
 		if authority := c.Entra.authority(); authority != DefaultEntraAuthority {
 			instance += "@" + authority
 		}
@@ -101,8 +69,6 @@ func (c Config) Instance(issuer string) (string, bool) {
 	}
 }
 
-// ValidateAgent reports why an identity-bound Agent cannot be used on this
-// controller. Agents without an identity always pass.
 func (c Config) ValidateAgent(agent *corev1alpha1.Agent) error {
 	issuer, _, ok := agent.IdentityRef()
 	if !ok {
@@ -123,8 +89,6 @@ func (c Config) ValidateAgent(agent *corev1alpha1.Agent) error {
 	return nil
 }
 
-// BindingRef returns the identity a Task binding freezes for the Agent, or
-// nil when the Agent has none.
 func (c Config) BindingRef(agent *corev1alpha1.Agent) (*corev1alpha1.AgentExecutionIdentityRef, error) {
 	issuer, id, ok := agent.IdentityRef()
 	if !ok {

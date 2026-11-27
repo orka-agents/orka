@@ -660,8 +660,6 @@ func TestValidateChildTaskAgainstParentTransactionAuthorizesCustomToolHTTPSecret
 	}
 }
 
-// The Substrate egress gateway injects a Substrate MCP actor's egress
-// credential into its requests, so delegating the Tool delegates the Secret.
 func TestValidateChildTaskAgainstParentTransactionAuthorizesSubstrateMCPEgressCredentials(t *testing.T) {
 	const (
 		toolName   = "github-mcp"

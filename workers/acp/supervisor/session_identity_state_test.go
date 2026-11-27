@@ -138,8 +138,6 @@ func TestE2EPromptWriteAmbiguityLedgerSurvivesDirectRuntimeReplacement(t *testin
 	}
 	closeIdentityTestSupervisor(t, server)
 
-	// A physical replacement receives a fresh emptyDir-backed SessionBaseDir.
-	// Only the controller-owned recorder survives that boundary.
 	restartedCfg, _ := newSessionIdentityTestConfig(t)
 	restartedCfg.E2EPromptWriteAmbiguityMarker = testE2EPromptWriteAmbiguityMarker
 	restartedCfg.E2EPromptWriteFaultRecorder = recorder
@@ -185,9 +183,6 @@ func TestSessionIdentityStateMissingWithStaleEntriesFailsClosed(t *testing.T) {
 	}
 }
 
-// A durable volume whose committed checkpoints survived while the allocator
-// state was lost (a partial restore) must refuse startup: a fresh allocator
-// at zero could hand a continuation a UID/GID a pre-suspension session used.
 func TestNewRefusesDurableCheckpointsWithoutIdentityState(t *testing.T) {
 	cfg, _ := newSessionIdentityTestConfig(t)
 	cfg.DurableWorkspaceDir = t.TempDir()
@@ -205,8 +200,6 @@ func TestNewRefusesDurableCheckpointsWithoutIdentityState(t *testing.T) {
 		t.Fatalf("New error = %v, want the orphaned-checkpoint refusal", err)
 	}
 
-	// With the allocator state present alongside the checkpoint, startup
-	// proceeds normally.
 	healthy, _ := newSessionIdentityTestConfig(t)
 	healthy.DurableWorkspaceDir = t.TempDir()
 	first, err := New(healthy)
@@ -240,10 +233,6 @@ func TestNewRefusesDurableCheckpointsWithoutIdentityState(t *testing.T) {
 	closeIdentityTestSupervisor(t, second)
 }
 
-// A partial restore can preserve the latest committed checkpoint while
-// rolling the allocator file back to an older, otherwise valid count. The
-// checkpoint's recorded high-water floor must reject that inconsistent state
-// before the next child can reuse an existing UID/GID.
 func TestNewRefusesDurableCheckpointNewerThanIdentityState(t *testing.T) {
 	cfg, _ := newSessionIdentityTestConfig(t)
 	cfg.DurableWorkspaceDir = t.TempDir()
@@ -294,8 +283,6 @@ func TestNewRefusesDurableCheckpointNewerThanIdentityState(t *testing.T) {
 	}
 }
 
-// A surviving workspace tree still proves that a pre-suspension session
-// received an identity even when both of its checkpoint sidecars were lost.
 func TestNewRefusesDurableWorkspaceTreeWithoutIdentityState(t *testing.T) {
 	cfg, _ := newSessionIdentityTestConfig(t)
 	cfg.DurableWorkspaceDir = t.TempDir()
@@ -342,9 +329,6 @@ func TestNewRefusesMarkerlessDurableWorkspaceWithIdentityState(t *testing.T) {
 	}
 }
 
-// Fresh preparation publishes a pending marker before creating the workspace
-// tree. A restart can therefore validate the allocator floor, then the next
-// creation wipes the partial tree instead of getting stranded at startup.
 func TestNewRecoversFreshDurableWorkspacePendingMarker(t *testing.T) {
 	cfg, _ := newSessionIdentityTestConfig(t)
 	cfg.DurableWorkspaceDir = t.TempDir()
@@ -392,9 +376,6 @@ func TestNewRecoversFreshDurableWorkspacePendingMarker(t *testing.T) {
 	}
 }
 
-// A staged repository transition proves that this durable volume has prior
-// session identity history even if the committed binding was wiped before a
-// crash. Losing the allocator state in that window must also fail closed.
 func TestNewRefusesDurableTransitionWithoutIdentityState(t *testing.T) {
 	cfg, _ := newSessionIdentityTestConfig(t)
 	cfg.DurableWorkspaceDir = t.TempDir()

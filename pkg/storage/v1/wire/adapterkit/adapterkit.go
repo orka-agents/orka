@@ -1,32 +1,3 @@
-// Package adapterkit serves an orka.storage.v1 provider as a separately
-// deployed storage adapter.
-//
-// Serve wraps the wire server library with what an adapter process needs:
-// TLS 1.3 with a serving certificate reloaded from disk, client
-// authentication by bearer token, by mTLS client certificate or by both,
-// per-class concurrency limits that shed load with OVERLOADED, liveness,
-// readiness and metrics on a separate plain HTTP port, and a graceful stop.
-// A provider uses SettleContext to finish a commit it has already sent after
-// the caller's context ends.
-//
-// A minimal adapter:
-//
-//	func main() {
-//		provider := openProvider() // implements storagev1.StateProvider
-//		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
-//		defer stop()
-//		err := adapterkit.Serve(ctx, adapterkit.Config{
-//			State:          provider,
-//			AdapterName:    "example-adapter",
-//			AdapterVersion: version,
-//			CertFile:       "/etc/orka-storage/tls/tls.crt",
-//			KeyFile:        "/etc/orka-storage/tls/tls.key",
-//			BearerTokenDir: "/etc/orka-storage/client-auth",
-//		})
-//		if err != nil {
-//			log.Fatal(err)
-//		}
-//	}
 package adapterkit
 
 import (
@@ -47,25 +18,16 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire"
 )
 
-// Defaults for unset Config fields.
 const (
-	DefaultAddress           = ":8443"
-	DefaultProbeAddress      = ":8080"
-	DefaultSettleTimeout     = 10 * time.Second
-	DefaultReloadInterval    = 10 * time.Second
-	DefaultReadinessInterval = 10 * time.Second
-	DefaultShutdownTimeout   = 30 * time.Second
-	// DefaultMaxConcurrentStreams caps the calls one client connection
-	// carries at once.
+	DefaultAddress              = ":8443"
+	DefaultProbeAddress         = ":8080"
+	DefaultSettleTimeout        = 10 * time.Second
+	DefaultReloadInterval       = 10 * time.Second
+	DefaultReadinessInterval    = 10 * time.Second
+	DefaultShutdownTimeout      = 30 * time.Second
 	DefaultMaxConcurrentStreams = 256
 )
 
-// DefaultLimits returns the per-class limits Serve uses when Config.Limits
-// leaves a class unset. A call's class is the one the contract's method
-// catalog gives its method. The limits admit more calls than an Orka
-// controller sends by default, so shedding happens only under abnormal load,
-// and they keep control calls, such as health checks, apart from storage
-// traffic.
 func DefaultLimits() wire.Limits {
 	return wire.Limits{
 		MaxConcurrent: map[storagev1.CallClass]int{
@@ -78,90 +40,37 @@ func DefaultLimits() wire.Limits {
 	}
 }
 
-// limitedClasses are the call classes the method catalog assigns. A poller
-// chooses CallStream itself, so a server cannot tell those calls apart.
 var limitedClasses = []storagev1.CallClass{
 	storagev1.CallControl, storagev1.CallInteractive, storagev1.CallBackground, storagev1.CallBulk,
 }
 
-// Config configures Serve.
 type Config struct {
-	// State is the state.v1 provider to serve, or nil.
-	State storagev1.StateProvider
-	// Artifacts is the artifacts.v1 provider to serve, or nil. At least one
-	// of State and Artifacts is required; when both are set they must serve
-	// the same dataset.
-	Artifacts storagev1.ArtifactProvider
-	// AdapterName and AdapterVersion identify the adapter in Describe.
+	State          storagev1.StateProvider
+	Artifacts      storagev1.ArtifactProvider
 	AdapterName    string
 	AdapterVersion string
 
-	// Address is the storage port's listen address. Empty means
-	// DefaultAddress.
-	Address string
-	// Listener, when set, is the storage listener, and Address is ignored.
-	// Serve closes it.
-	Listener net.Listener
-	// ProbeAddress serves /healthz, /readyz and /metrics over plain HTTP.
-	// The probe port carries no stored data and needs no credentials, so
-	// kubelet probes can reach it. Empty means DefaultProbeAddress.
-	ProbeAddress string
-	// ProbeListener, when set, is the probe listener, and ProbeAddress is
-	// ignored. Serve closes it.
+	Address       string
+	Listener      net.Listener
+	ProbeAddress  string
 	ProbeListener net.Listener
 
-	// CertFile and KeyFile hold the PEM serving certificate (with its chain)
-	// and private key, such as the tls.crt and tls.key of a mounted
-	// kubernetes.io/tls Secret. They are reloaded when they change.
 	CertFile string
 	KeyFile  string
 
-	// BearerTokenDir, when set, enables bearer authentication: a call must
-	// present "authorization: Bearer <token>" for a token stored in a
-	// regular file of this directory whose name starts with "token", such
-	// as the keys token and token-2 of a mounted Secret. Surrounding
-	// whitespace in the files is ignored. The set is reloaded when the files
-	// change, so a token is rotated by adding a second key, moving clients to
-	// it and removing the first.
-	BearerTokenDir string
-	// ClientCAFile, when set, enables mTLS authentication: a client must
-	// present a certificate that chains to a CA in this PEM bundle and
-	// carries one of AllowedClientURIs or AllowedClientDNSNames as a subject
-	// alternative name. The bundle is reloaded when it changes and may hold
-	// an old and a new CA during rotation.
+	BearerTokenDir        string
 	ClientCAFile          string
 	AllowedClientURIs     []string
 	AllowedClientDNSNames []string
-	// At least one of BearerTokenDir and ClientCAFile is required. With both,
-	// a call must pass both.
 
-	// Limits bounds concurrency and duration per call class. A class left
-	// unset uses DefaultLimits.
-	Limits wire.Limits
-	// MaxBlobBytes caps the blob an upload may carry. Zero means
-	// wire.DefaultMaxBlobBytes.
-	MaxBlobBytes int64
-	// MaxConcurrentStreams caps the calls one connection carries at once.
-	// Zero means DefaultMaxConcurrentStreams.
+	Limits               wire.Limits
+	MaxBlobBytes         int64
 	MaxConcurrentStreams uint32
-	// SettleTimeout bounds the context SettleContext returns. Zero means
-	// DefaultSettleTimeout.
-	SettleTimeout time.Duration
-	// ReloadInterval is how often credential files are checked for changes.
-	// Zero means DefaultReloadInterval.
-	ReloadInterval time.Duration
-	// ReadinessInterval is how often the providers are described and
-	// health-checked for readiness. Zero means DefaultReadinessInterval.
-	ReadinessInterval time.Duration
-	// ShutdownTimeout bounds how long a graceful stop waits for calls in
-	// progress. When it passes, Serve closes every remaining connection and
-	// returns without waiting for handlers still running, such as one
-	// settling a commit with SettleContext; set it above SettleTimeout to
-	// let such commits settle. Zero means DefaultShutdownTimeout.
-	ShutdownTimeout time.Duration
-	// Logger receives the adapter's logs; it never receives request or
-	// response content or credential values. Nil means slog.Default().
-	Logger *slog.Logger
+	SettleTimeout        time.Duration
+	ReloadInterval       time.Duration
+	ReadinessInterval    time.Duration
+	ShutdownTimeout      time.Duration
+	Logger               *slog.Logger
 }
 
 func (c *Config) applyDefaults() {
@@ -224,14 +133,7 @@ func (c *Config) validate() error {
 	return errors.Join(problems...)
 }
 
-// Serve serves the configured providers until ctx ends, then stops
-// gracefully: it reports not ready, lets calls in progress finish for up to
-// ShutdownTimeout and closes the listeners. It returns nil after a stop that
-// ctx requested, or the error that stopped serving. Invalid configuration
-// or credentials fail before anything listens.
 func Serve(ctx context.Context, config Config) error {
-	// Serve owns the listeners it is given, including when it fails before
-	// it serves.
 	serving := false
 	defer func() {
 		if !serving {
@@ -286,9 +188,6 @@ func Serve(ctx context.Context, config Config) error {
 	defer cancel()
 	errs := make(chan error, 2)
 	var workers sync.WaitGroup
-	// grpcServer.Serve returns only once a stop completes, which a handler
-	// still settling can delay past the grace period, so it is not one of the
-	// workers Serve always waits for.
 	grpcServed := make(chan struct{})
 	go func() {
 		defer close(grpcServed)
@@ -338,16 +237,11 @@ func Serve(ctx context.Context, config Config) error {
 	return serveErr
 }
 
-// The probe server's timeouts. ReadTimeout bounds a whole request,
-// including a body the server discards after a probe handler that never reads
-// it, and IdleTimeout closes a keep-alive connection no probe uses, so a
-// stalled or idle peer never holds a probe connection open.
 var (
 	probeReadTimeout = 5 * time.Second
 	probeIdleTimeout = 60 * time.Second
 )
 
-// listen opens the storage and probe listeners Serve has not been given.
 func listen(config *Config) (net.Listener, net.Listener, error) {
 	listener := config.Listener
 	if listener == nil {
@@ -369,7 +263,6 @@ func listen(config *Config) (net.Listener, net.Listener, error) {
 	return listener, probeListener, nil
 }
 
-// closeListeners closes the listeners Serve was given.
 func closeListeners(listeners ...net.Listener) {
 	for _, listener := range listeners {
 		if listener != nil {
@@ -378,14 +271,6 @@ func closeListeners(listeners ...net.Listener) {
 	}
 }
 
-// stopGracefully lets calls in progress finish for up to timeout, then
-// closes every connection and returns. It does not wait for handlers that
-// outlive their connections: GracefulStop waits for every handler while
-// holding the server's lock, so even Stop can block behind it, and both run
-// on in the background until the remaining handlers return. Stop also waits
-// for connections still in their handshake before it closes any, so the
-// forced stop closes every connection the listener accepted itself.
-// It reports whether the timeout forced the stop.
 func stopGracefully(server *grpc.Server, listener *trackedListener, timeout time.Duration) bool {
 	stopped := make(chan struct{})
 	go func() {
@@ -404,8 +289,6 @@ func stopGracefully(server *grpc.Server, listener *trackedListener, timeout time
 	}
 }
 
-// trackedListener records the connections it accepts, so a forced stop can
-// close each of them, including one whose handshake has not finished.
 type trackedListener struct {
 	net.Listener
 	mu     sync.Mutex
@@ -433,8 +316,6 @@ func (l *trackedListener) Accept() (net.Conn, error) {
 	return tracked, nil
 }
 
-// closeAll closes every accepted connection still open, and any the
-// listener accepts later.
 func (l *trackedListener) closeAll() {
 	l.mu.Lock()
 	l.closed = true
@@ -448,7 +329,6 @@ func (l *trackedListener) closeAll() {
 	}
 }
 
-// trackedConn removes itself from its listener when it closes.
 type trackedConn struct {
 	net.Conn
 	listener *trackedListener
@@ -461,16 +341,12 @@ func (c *trackedConn) Close() error {
 	return c.Conn.Close()
 }
 
-// readiness tracks whether the adapter can serve: its providers describe a
-// dataset and pass their health checks, and it is not stopping.
 type readiness struct {
 	config  *Config
 	server  *wire.Server
 	metrics *metrics
 	logger  *slog.Logger
 
-	// mu orders a check's result against drain, so a check that finishes
-	// after the adapter starts stopping never reports ready again.
 	mu       sync.Mutex
 	ready    bool
 	draining bool
@@ -507,12 +383,8 @@ func (r *readiness) check(ctx context.Context) {
 	r.metrics.setReady(ready)
 }
 
-// errProviderPanicked is the readiness failure of a provider that panicked.
 var errProviderPanicked = errors.New("the storage provider panicked")
 
-// readinessReason names why a readiness check failed without the provider's
-// error text or panic value, which can carry backend details such as a
-// connection string's credentials.
 func readinessReason(err error) string {
 	switch {
 	case errors.Is(err, errProviderPanicked):
@@ -532,9 +404,6 @@ func readinessReason(err error) string {
 	}
 }
 
-// probe describes the providers and checks their health. A provider that
-// panics makes the adapter not ready rather than ending the process; the
-// next check runs as usual.
 func (r *readiness) probe(ctx context.Context) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -555,14 +424,12 @@ func (r *readiness) probe(ctx context.Context) (err error) {
 	return nil
 }
 
-// isReady reports the last readiness check's result.
 func (r *readiness) isReady() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.ready
 }
 
-// drain reports not ready for the rest of the process's life.
 func (r *readiness) drain() {
 	r.mu.Lock()
 	defer r.mu.Unlock()

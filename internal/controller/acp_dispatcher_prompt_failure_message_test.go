@@ -34,13 +34,10 @@ func TestACPWorkspaceValidationFailureMessageProjectsSupervisorReason(t *testing
 
 func TestACPWorkspaceValidationFailureMessageTruncatesOnRuneBoundary(t *testing.T) {
 	t.Parallel()
-	// Three-byte runes put the workspace status byte limit inside a rune.
 	multibyte := strings.Repeat("界", acpPromptFailureMessageLimit)
 	clientErr := &harnessv2.ClientError{StatusCode: 409, Code: harnessv2.ErrorCodeSessionPoisoned, Message: multibyte}
 	got := acpWorkspaceValidationFailureMessage(clientErr)
 	const generic = "workspace validation failed before a trusted delta was established: "
-	// The complete projected message, including its prefix, is bounded on a
-	// rune boundary.
 	if !strings.HasPrefix(got, generic) || !utf8.ValidString(got) || len(got) > acpPromptFailureMessageLimit || len(got) < acpPromptFailureMessageLimit-utf8.UTFMax {
 		t.Fatalf("acpWorkspaceValidationFailureMessage() = %q (%d bytes)", got, len(got))
 	}
@@ -70,8 +67,6 @@ func TestACPWorkspaceValidationFailureMessageRedactsCredentialShapedDetail(t *te
 func TestACPWorkspaceValidationFailureMessageRedactsCredentialsSplitByControlRunes(t *testing.T) {
 	t.Parallel()
 	const key = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
-	// C0, DEL, and C1 controls inside the token must be dropped (not
-	// replaced) so the token reassembles and is redacted as a whole.
 	split := "upstream rejected api_key=" + key[:10] + "\x00" + key[10:20] + "\x7f" + key[20:30] + "\u0085" + key[30:] + " for the model"
 	got := acpWorkspaceValidationFailureMessage(&harnessv2.ClientError{
 		StatusCode: 409, Code: harnessv2.ErrorCodeSessionPoisoned, Message: split,
@@ -98,8 +93,6 @@ func TestStripACPControlRunesReassemblesLineWrappedCredential(t *testing.T) {
 
 func TestStripACPControlRunesDropsFormatRunesBeforeRedaction(t *testing.T) {
 	t.Parallel()
-	// A zero-width space (U+200B, category Cf) inside a credential must not
-	// split the token past the redactor in persisted status or logs.
 	const secret = "ak-live-0123456789abcdef"
 	split := "api_key=" + secret[:10] + "\u200b" + secret[10:]
 	got := redact.SensitiveText(stripACPControlRunes(split))

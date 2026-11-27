@@ -470,8 +470,6 @@ func mustObjectPath(t *testing.T, digest string) string {
 	return value
 }
 
-// newDefaultArtifactClient builds an ArtifactClient with the production
-// transfer limits env.go applies when constructing the supervisor.
 func newDefaultArtifactClient(baseURL string, client *http.Client, authorization ArtifactAuthorizationProvider) (*ArtifactClient, error) {
 	return newArtifactClient(baseURL, client, authorization, artifactClientLimits{
 		MaxDownloadBytes: defaultWorkspaceArtifactDownloadBytes,

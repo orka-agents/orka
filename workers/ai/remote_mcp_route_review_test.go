@@ -26,8 +26,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Keep the real resolver and its side effects; inject changes only at the
-// Kubernetes read boundary, after native binding but during request preparation.
 type remotePreparationReader struct {
 	client.Client
 	beforePolicyRead func()

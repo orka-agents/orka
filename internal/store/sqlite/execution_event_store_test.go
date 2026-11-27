@@ -600,9 +600,6 @@ func TestExecutionEventStoreListSessionTypeFilterPreservesCursor(t *testing.T) {
 	}
 }
 
-// A deduplicated append reads its key through the stream's deduplication
-// index rather than every event of the stream, so its write transaction
-// does not grow with the stream.
 func TestExecutionEventDedupeKeyLookupSearchesTheDedupeIndex(t *testing.T) {
 	s := setupTestStore(t)
 	rows, err := s.db.Query(`EXPLAIN QUERY PLAN `+executionEventByDedupeKeySQL, "tenant", "task", "task-a", "key")

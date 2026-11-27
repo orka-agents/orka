@@ -39,7 +39,6 @@ import (
 	chattools "github.com/orka-agents/orka/internal/tools"
 )
 
-// chatMockProvider implements llm.Provider for testing.
 type chatMockProvider struct {
 	name         string
 	responses    []*llm.CompletionResponse
@@ -48,7 +47,7 @@ type chatMockProvider struct {
 	beforeReturn func()
 	streamCh     chan llm.StreamChunk
 	streamErr    error
-	sent         [][]llm.Message // the messages of each Complete call
+	sent         [][]llm.Message
 }
 
 type cancellableChatProvider struct {
@@ -232,7 +231,6 @@ func reserveTestChatTurn(t *testing.T, ch *ChatHandler, sessionID string) string
 	return turnID
 }
 
-// providerCRD creates a Provider CRD + matching Secret for tests.
 func providerCRD(name, namespace, providerType, model string) []runtime.Object { //nolint:unparam
 	return []runtime.Object{
 		&corev1alpha1.Provider{
@@ -249,8 +247,6 @@ func providerCRD(name, namespace, providerType, model string) []runtime.Object {
 		},
 	}
 }
-
-// --- writeSSE ---
 
 func TestWriteSSE(t *testing.T) {
 	tests := []struct {
@@ -282,8 +278,6 @@ func TestWriteSSE(t *testing.T) {
 		})
 	}
 }
-
-// --- hashArgs ---
 
 func TestHashArgs(t *testing.T) {
 	tests := []struct {
@@ -318,8 +312,6 @@ func TestHashArgs(t *testing.T) {
 	})
 }
 
-// --- HandleChatConfig ---
-
 func TestHandleChatConfig(t *testing.T) {
 	ss := newTestSessionStore(t)
 	rs := newTestResultStore(t)
@@ -345,8 +337,6 @@ func TestHandleChatConfig(t *testing.T) {
 	assert.Equal(t, "test-model", body["model"])
 	assert.Equal(t, float64(20), body["maxIterations"])
 
-	// availableTools should be a non-empty list, and never advertise
-	// list_connections while connectors are disabled.
 	tools, ok := body["availableTools"].([]any)
 	require.True(t, ok)
 	assert.Greater(t, len(tools), 0)
@@ -386,14 +376,10 @@ func TestHandleChatConfigRequiresExplicitProviderForContextTokens(t *testing.T) 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	var body map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
-	// The resolver refuses the implicit default for context-token callers, so
-	// the config must not advertise one.
 	assert.Equal(t, true, body["requireExplicitProvider"])
 	assert.Equal(t, "", body["provider"])
 	assert.Equal(t, "", body["model"])
 }
-
-// --- HandleCancelChat ---
 
 func TestHandleCancelChat(t *testing.T) {
 	ss := newTestSessionStore(t)
@@ -406,13 +392,11 @@ func TestHandleCancelChat(t *testing.T) {
 	app.Delete("/api/v1/chat/:sessionId", ch.HandleCancelChat)
 
 	t.Run("missing sessionId returns 400", func(t *testing.T) {
-		// Fiber route won't match without the param, so we test empty string via a separate route
 		app2 := fiber.New()
 		app2.Delete("/api/v1/chat/", ch.HandleCancelChat)
 		req := httptest.NewRequest(http.MethodDelete, "/api/v1/chat/", nil)
 		resp, err := app2.Test(req)
 		require.NoError(t, err)
-		// Fiber returns 404 for unmatched routes or 400 for empty param
 		assert.Contains(t, []int{http.StatusBadRequest, http.StatusNotFound}, resp.StatusCode)
 	})
 
@@ -483,7 +467,6 @@ func TestHandleCancelChat(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 
-		// Verify deleted
 		_, err = ss.GetSession(ctx, "default", "test-session")
 		assert.True(t, errors.Is(err, store.ErrNotFound))
 	})
@@ -521,8 +504,6 @@ func TestHandleCancelChatStopsActiveSSETurnBeforeSuccess(t *testing.T) {
 	objects := providerCRD(defaultNamespace, defaultNamespace, providerType, "test-model")
 	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithRuntimeObjects(objects...).Build()
 	baseSessionStore := newTestSessionStore(t)
-	// A pre-existing Session survives failed-turn release so DELETE must pass
-	// through the durable deletion gate below instead of finding it gone.
 	now := time.Now().UTC()
 	require.NoError(t, baseSessionStore.CreateSession(context.Background(), &store.SessionRecord{
 		Namespace: defaultNamespace, Name: sessionID, SessionType: store.SessionTypeChat,
@@ -674,8 +655,6 @@ func TestHandleChatRemovesNewEmptySessionAfterProviderFailure(t *testing.T) {
 	}
 }
 
-// --- loadChatSession ---
-
 func TestLoadChatSession(t *testing.T) {
 	ss := newTestSessionStore(t)
 	rs := newTestResultStore(t)
@@ -686,7 +665,6 @@ func TestLoadChatSession(t *testing.T) {
 
 	t.Run("no session returns nil", func(t *testing.T) {
 		msgs, err := ch.loadChatSession(ctx, "default", "nonexistent")
-		// LoadTranscript may return nil,nil for nonexistent sessions
 		if err != nil {
 			assert.Nil(t, msgs)
 		} else {
@@ -737,8 +715,6 @@ func TestLoadChatSession(t *testing.T) {
 	})
 }
 
-// --- saveChatSession ---
-
 func TestSaveChatSession(t *testing.T) {
 	ss := newTestSessionStore(t)
 	rs := newTestResultStore(t)
@@ -758,14 +734,12 @@ func TestSaveChatSession(t *testing.T) {
 		}, turnID)
 		require.NoError(t, err)
 
-		// Verify session was created
 		sess, err := ss.GetSession(ctx, "default", "new-session")
 		require.NoError(t, err)
 		assert.Equal(t, "chat", sess.SessionType)
 		assert.Equal(t, 10, sess.InputTokens)
 		assert.Equal(t, 20, sess.OutputTokens)
 
-		// Verify messages were stored
 		stored, err := ss.LoadTranscript(ctx, "default", "new-session", 0)
 		require.NoError(t, err)
 		assert.Len(t, stored, 2)
@@ -787,7 +761,6 @@ func TestSaveChatSession(t *testing.T) {
 	})
 
 	t.Run("appends only turn messages using the persisted count as a revision fence", func(t *testing.T) {
-		// Create a session with 2 messages already persisted
 		now := time.Now()
 		err := ss.CreateSession(ctx, &store.SessionRecord{
 			Namespace:   "default",
@@ -813,7 +786,7 @@ func TestSaveChatSession(t *testing.T) {
 
 		stored, err := ss.LoadTranscript(ctx, "default", "partial-session", 0)
 		require.NoError(t, err)
-		require.Len(t, stored, 3) // 2 old + 1 new
+		require.Len(t, stored, 3)
 		assert.Equal(t, "new response", stored[2].Content)
 	})
 
@@ -892,7 +865,7 @@ func TestAcquireChatSessionFencesDeletionUntilRelease(t *testing.T) {
 		t.Fatalf("DeleteSession(locked chat) error = %v, want ErrConflict", err)
 	}
 	active.finish()
-	active.finish() // idempotent close for overlapping handler/stream cleanup paths.
+	active.finish()
 	require.NoError(t, ss.DeleteSession(ctx, "default", "locked-chat", time.Now().UTC()))
 	if _, err := ss.GetSession(ctx, "default", "locked-chat"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("GetSession() error = %v, want ErrNotFound", err)
@@ -936,8 +909,6 @@ func TestChatCancellationGateBlocksReplacementUntilDeletionCompletes(t *testing.
 	replacement.finish()
 }
 
-// --- lookupProvider ---
-
 func TestLookupProvider(t *testing.T) {
 	scheme := newTestScheme()
 
@@ -965,8 +936,6 @@ func TestLookupProvider(t *testing.T) {
 		assert.Contains(t, err.Error(), "not found")
 	})
 }
-
-// --- resolveAPIKey ---
 
 func TestResolveAPIKey(t *testing.T) {
 	scheme := newTestScheme()
@@ -1056,12 +1025,9 @@ func TestResolveAPIKey(t *testing.T) {
 	})
 }
 
-// --- resolveProvider ---
-
 func TestResolveProvider(t *testing.T) {
 	scheme := newTestScheme()
 
-	// Register a test provider factory so llm.NewProvider("test-type", ...) works
 	llm.RegisterProvider("test-type", func(cfg llm.ProviderConfig) (llm.Provider, error) {
 		return &chatMockProvider{name: "test-type"}, nil
 	})
@@ -1168,12 +1134,9 @@ func TestResolveProvider(t *testing.T) {
 	})
 }
 
-// --- wrapWithRetryAndFallback ---
-
 func TestWrapWithRetryAndFallback(t *testing.T) {
 	scheme := newTestScheme()
 
-	// Ensure test-type provider is registered
 	llm.RegisterProvider("test-type", func(cfg llm.ProviderConfig) (llm.Provider, error) {
 		return &chatMockProvider{name: "test-type"}, nil
 	})
@@ -1228,7 +1191,6 @@ func TestWrapWithRetryAndFallback(t *testing.T) {
 		result, err := ch.wrapWithRetryAndFallback(context.Background(), nil, primary, ChatRequest{AgentRef: "fb-agent"}, "default")
 		require.NoError(t, err)
 		assert.NotNil(t, result)
-		// The result should be a FallbackProvider wrapping the primary
 		assert.NotEqual(t, "primary", result.Name())
 	})
 
@@ -1286,8 +1248,6 @@ func TestWrapWithRetryAndFallback(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
 }
-
-// --- runToolLoop ---
 
 func TestRunToolLoop(t *testing.T) {
 	scheme := newTestScheme()
@@ -1365,7 +1325,7 @@ func TestRunToolLoop(t *testing.T) {
 		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
 		ctx, cancel := context.WithCancel(context.Background())
-		cancel() // Cancel immediately
+		cancel()
 
 		provider := &chatMockProvider{
 			responses: []*llm.CompletionResponse{
@@ -1427,10 +1387,9 @@ func TestRunToolLoop(t *testing.T) {
 		ss := newTestSessionStore(t)
 		rs := newTestResultStore(t)
 		cfg := DefaultChatConfig()
-		cfg.MaxIterations = 1 // Very low limit
+		cfg.MaxIterations = 1
 		ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
 
-		// First call returns tool call (uses iteration 0), then iteration 1 hits max
 		provider := &chatMockProvider{
 			responses: []*llm.CompletionResponse{
 				{
@@ -1509,7 +1468,6 @@ func TestRunToolLoop(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "All done!", content)
 
-		// Should have tool_call, tool_result, and message events
 		hasToolCall := false
 		hasToolResult := false
 		hasMessage := false
@@ -1577,8 +1535,6 @@ func TestRunToolLoopPreservesTranscriptAcrossTruncation(t *testing.T) {
 
 					firstTool := llm.ToolCall{ID: "new-call-1", Name: "list_tasks", Arguments: json.RawMessage(`{}`)}
 					secondTool := llm.ToolCall{ID: "new-call-2", Name: "list_tasks", Arguments: json.RawMessage(`{}`)}
-					// This intermediate exchange must survive even when it is too big
-					// for configured context or the halved overflow-retry budget.
 					intermediate := strings.Repeat("new intermediate reasoning ", 200)
 					provider := &mockAnthropicProvider{responses: []*llm.CompletionResponse{
 						{Content: intermediate, ToolCalls: []llm.ToolCall{firstTool}, InputTokens: 2, OutputTokens: 3},
@@ -1595,8 +1551,6 @@ func TestRunToolLoopPreservesTranscriptAcrossTruncation(t *testing.T) {
 						sessionID, "default", "test-model", 0.7, 4096, historyCount, nil, turnID,
 					)
 
-					// Check provider-facing truncation actually happened, independently
-					// of the durable transcript assertions below.
 					if truncation == "context overflow" {
 						require.Len(t, provider.requests, 4)
 						assert.Less(t, len(provider.requests[2].Messages), len(provider.requests[1].Messages))
@@ -1715,9 +1669,6 @@ func TestRunToolLoopPreservesContinuationAndProgressAcrossTruncation(t *testing.
 	assert.Equal(t, want, stored)
 }
 
-// TestRunToolLoopKeepsTruncatedPrefixStable checks that a chat over its
-// session budget sends each step the previous step's messages plus the new
-// ones, so a provider's prompt cache matches, until the cut has to move.
 func TestRunToolLoopKeepsTruncatedPrefixStable(t *testing.T) {
 	ctx := context.Background()
 	const sessionID = "stable-prefix-session"
@@ -1732,7 +1683,7 @@ func TestRunToolLoopKeepsTruncatedPrefixStable(t *testing.T) {
 		WithStatusSubresource(task).Build()
 	cfg := DefaultChatConfig()
 	cfg.MaxIterations = 12
-	cfg.MaxSessionSize = 8000 // a 2000-token budget
+	cfg.MaxSessionSize = 8000
 	ch := newTestChatHandler(t, fakeClient, newTestSessionStore(t), newTestResultStore(t), cfg)
 	turnID := reserveTestChatTurn(t, ch, sessionID)
 	provider := &chatMockProvider{}
@@ -1761,8 +1712,6 @@ func TestRunToolLoopKeepsTruncatedPrefixStable(t *testing.T) {
 	}
 	assert.LessOrEqual(t, moves, 2, "the truncation cut moved on %d of %d steps", moves, len(provider.sent)-1)
 
-	// The next turn reloads the whole transcript and truncates it afresh: it
-	// must cut where the last step did, or the next request misses the cache.
 	stored, err := ch.loadChatSession(ctx, "default", sessionID)
 	require.NoError(t, err)
 	last, next := provider.sent[len(provider.sent)-1], ch.sessionView(stored)
@@ -1770,8 +1719,6 @@ func TestRunToolLoopKeepsTruncatedPrefixStable(t *testing.T) {
 	assert.Equal(t, last, next[:len(last)], "the next turn cuts the transcript elsewhere")
 }
 
-// Chat usage counts the whole prompt: Anthropic's input count leaves out the
-// tokens read from and written to its cache.
 func TestRunToolLoopCountsCachedPromptTokens(t *testing.T) {
 	const sessionID = "cached-usage-session"
 	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
@@ -1790,12 +1737,9 @@ func TestRunToolLoopCountsCachedPromptTokens(t *testing.T) {
 	assert.Equal(t, 125, usage.InputTokens)
 }
 
-// --- HandleChat ---
-
 func TestHandleChat(t *testing.T) {
 	scheme := newTestScheme()
 
-	// Ensure test-type provider is registered
 	llm.RegisterProvider("test-type", func(cfg llm.ProviderConfig) (llm.Provider, error) {
 		return &chatMockProvider{
 			name: "test-type",
@@ -1881,7 +1825,7 @@ func TestHandleChat(t *testing.T) {
 		ss := newTestSessionStore(t)
 		rs := newTestResultStore(t)
 		cfg := DefaultChatConfig()
-		cfg.MaxConcurrent = 0 // zero capacity semaphore
+		cfg.MaxConcurrent = 0
 		ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
 
 		app := fiber.New()
@@ -1941,13 +1885,11 @@ func TestHandleChat(t *testing.T) {
 		body, _ := json.Marshal(ChatRequest{Message: "hello"})
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		// No Accept: application/json → defaults to SSE
 		resp, err := app.Test(req)
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		assert.Equal(t, "text/event-stream", resp.Header.Get("Content-Type"))
 
-		// Parse SSE events
 		scanner := bufio.NewScanner(resp.Body)
 		var events []string
 		for scanner.Scan() {
@@ -1957,14 +1899,11 @@ func TestHandleChat(t *testing.T) {
 			}
 		}
 
-		// Should have at least status and done events
 		assert.Contains(t, events, "status")
 		assert.Contains(t, events, "done")
 	})
 
 	t.Run("SSE status names the Provider resource", func(t *testing.T) {
-		// The status line reads "Connected to <provider>/<model>": the
-		// provider is the Provider the caller chose, not its type.
 		objs := providerCRD("vekil", "default", "test-type", "test-model")
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 		ch := newTestChatHandler(t, fakeClient, newTestSessionStore(t), newTestResultStore(t), DefaultChatConfig())
@@ -2069,7 +2008,6 @@ func TestHandleChat(t *testing.T) {
 	})
 
 	t.Run("provider not found returns error", func(t *testing.T) {
-		// No provider CRDs registered, just a bare client
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 		ss := newTestSessionStore(t)
 		rs := newTestResultStore(t)
@@ -2084,7 +2022,6 @@ func TestHandleChat(t *testing.T) {
 		req.Header.Set("Accept", "application/json")
 		resp, err := app.Test(req)
 		require.NoError(t, err)
-		// Provider resolution failure may return 400 or 500
 		assert.True(t, resp.StatusCode >= 400, "expected error status code, got %d", resp.StatusCode)
 	})
 }
@@ -2192,8 +2129,6 @@ func TestHandleCancelChatHidesGatewaySession(t *testing.T) {
 	_, err = ss.GetSession(context.Background(), "default", "gateway-cancel-private")
 	require.NoError(t, err)
 }
-
-// --- Tests: loadChatSession with tool calls ---
 
 func TestLoadChatSession_WithToolCalls(t *testing.T) {
 	ss := newTestSessionStore(t)
@@ -2405,8 +2340,6 @@ func beginTestActiveChat(ch *ChatHandler, ctx context.Context, sessionID string)
 	return active, nil
 }
 
-// Another person cannot cancel, and so delete, an AHP session through chat;
-// its owner still can.
 func TestHandleCancelChatRefusesAnotherPersonsAHPSession(t *testing.T) {
 	ctx := context.Background()
 	ss := newTestSessionStore(t)
@@ -2441,7 +2374,6 @@ func TestHandleCancelChatRefusesAnotherPersonsAHPSession(t *testing.T) {
 	_, err = ss.GetSession(ctx, defaultNamespace, "ahp-alice")
 	require.NoError(t, err, "another person's cancellation left the session in place")
 
-	// Nor continue it, which would read the conversation into theirs.
 	app.Post("/api/v1/chat", ch.HandleChat)
 	body, err := json.Marshal(ChatRequest{Message: "what did we discuss?", SessionID: "ahp-alice"})
 	require.NoError(t, err)

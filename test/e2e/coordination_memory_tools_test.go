@@ -18,9 +18,6 @@ import (
 	"github.com/orka-agents/orka/test/utils"
 )
 
-// Coordination memory tools run against the live Copilot proxy when
-// E2E_LIVE_COPILOT_PROXY_BASE_URL is set, and otherwise against the suite's
-// aimock, which scripts the four tool calls with this run's markers.
 var _ = Describe("Coordination Memory Tools", Ordered, func() {
 	const (
 		providerName         = "e2e-memory-tools-provider"

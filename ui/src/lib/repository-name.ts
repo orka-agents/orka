@@ -1,8 +1,3 @@
-/**
- * Derives the "owner/repo" label for a RepositoryScan from its repoURL. The
- * API only stores repoURL (owner/repository are never populated), so the
- * label is parsed from the URL and falls back to the resource name.
- */
 export function repositoryDisplayName(spec: { repoURL?: string; owner?: string; repository?: string }, fallback: string): string {
   if (spec.owner && spec.repository) return `${spec.owner}/${spec.repository}`
   const parsed = parseRepositoryURL(spec.repoURL)

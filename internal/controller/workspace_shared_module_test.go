@@ -16,9 +16,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// The fixture was captured before extraction at Orka commit
-// 1cd16c88b43410e0ea46463f8a39b473d8e5250e. Its capture source and matching SDK
-// regression live in orka-workspace/testdata/baseline/orka-1cd16c88b.
 func TestResolvedClassProfileHashMatchesSharedModuleBaseline(t *testing.T) {
 	t.Parallel()
 	data, err := os.ReadFile(filepath.Join("testdata", "workspace-class-profile-hashes.json"))

@@ -76,8 +76,6 @@ func TestLoadConfigFromEnvToolboxesJoinTheProfileDigest(t *testing.T) {
 	if with.Fence.RuntimeProfileDigest == without.Fence.RuntimeProfileDigest {
 		t.Fatal("toolboxes must change the supervisor's runtime profile digest")
 	}
-	// The supervisor must compute exactly the digest the controller computes
-	// for the same profile with the same toolbox list.
 	expected := harnessv2.RuntimeProfile{
 		ACPProfile: harnessv2.ACPProfileV1, AdapterDigests: acp.BuiltInRuntimeAdapterDigests(providerKindCodex),
 		ProviderKind: providerKindCodex, Model: "gpt-test",
@@ -180,20 +178,13 @@ func TestVerifyToolboxesRunsUnprivilegedArchCheckForImageVolumes(t *testing.T) {
 		t.Skip("unix only")
 	}
 	if os.Geteuid() == 0 {
-		// As root, the check drops to toolboxCheckUID, which cannot reach the
-		// private temporary folders that hold the helper and fake toolbox.
 		t.Skip("requires a non-root test runner")
 	}
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The test binary stands in for the supervisor binary; TestMain-free
-	// delegation: the subcommand is implemented by the toolbox package, so
-	// route the exec through a tiny helper process below.
 	helper := filepath.Join(t.TempDir(), "orka-acp-runtime")
-	// The supervisor launches the check with a minimal environment, so the
-	// helper is selected by an argument marker rather than an env variable.
 	script := "#!/bin/sh\nexec " + self + " -test.run=TestToolboxCheckHelperProcess -- orka-toolbox-helper \"$@\"\n"
 	if err := os.WriteFile(helper, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -241,8 +232,6 @@ func TestVerifyToolboxesRunsUnprivilegedArchCheckForImageVolumes(t *testing.T) {
 	}
 }
 
-// TestToolboxCheckHelperProcess is the exec target for the unprivileged check
-// test above. It behaves like the supervisor binary's toolbox subcommands.
 func TestToolboxCheckHelperProcess(t *testing.T) {
 	var args []string
 	for i, arg := range os.Args {
@@ -285,7 +274,6 @@ func TestWriteToolboxLoginProfileRestoresPathForLoginShells(t *testing.T) {
 		t.Fatalf("profile must export PATH:\n%s", profile)
 	}
 	if sh, lookErr := exec.LookPath("sh"); lookErr == nil {
-		// Simulate /etc/profile resetting PATH, then source the generated file.
 		cmd := exec.Command(sh, "-c", "PATH=/usr/bin:/bin; . "+filepath.Join(home, ".profile")+"; printf %s \"$PATH\"")
 		out, runErr := cmd.Output()
 		if runErr != nil {

@@ -82,7 +82,6 @@ type commandResult struct {
 	err    error
 }
 
-// Only external effects are replaceable in tests. Release checks always execute.
 type workflow struct {
 	root   string
 	run    func(commandSpec) commandResult
@@ -139,7 +138,6 @@ func (w *workflow) command(args ...string) (string, error) {
 func (w *workflow) commandRaw(dir, input string, args ...string) (string, error) {
 	result := w.run(commandSpec{dir: dir, args: args, input: input})
 	if result.err != nil {
-		// Commands may handle credentials. Never include arguments or captured output.
 		return "", fmt.Errorf("%s command failed", args[0])
 	}
 	return result.stdout, nil
@@ -198,7 +196,6 @@ func decodeJSON(data []byte, target any) error {
 		return errors.New("missing JSON response or release artifact")
 	}
 	if err := json.Unmarshal(data, target); err != nil {
-		// JSON errors can contain snippets of credential-bearing command responses.
 		return errors.New("invalid JSON response or release artifact")
 	}
 	return nil
@@ -470,7 +467,6 @@ func (w *workflow) observeDispatch(
 }
 
 func (w *workflow) waitQualification(run workflowRun, name, branch, candidate string) (workflowRun, error) {
-	// Reserve time for evidence within the parent's six-hour runner limit.
 	deadline := w.now().Add(5*time.Hour + 40*time.Minute)
 	var approvalDeadline time.Time
 	for run.Status != runCompleted {
@@ -480,7 +476,6 @@ func (w *workflow) waitQualification(run workflowRun, name, branch, candidate st
 		}
 		var reason string
 		nextStep := "publication is blocked"
-		// Pending indicates concurrency contention, unlike approval waiting or a queued runner.
 		switch {
 		case run.Status == "pending":
 			reason = "qualification queued behind another run"

@@ -63,8 +63,6 @@ var _ = Describe("Chat with Tool Execution", Ordered, func() {
 			model = "gpt-4o-mini"
 		}
 
-		// The chat coordinator exposes management tools such as list_tools,
-		// not worker built-ins such as code_exec.
 		By("sending a chat message that should trigger list_tools tool use")
 		chatBody := fmt.Sprintf(`{
 			"message": "Use the list_tools tool to list the tools in this namespace, then summarize them in one sentence. You MUST use the list_tools tool. %s",

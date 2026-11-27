@@ -28,7 +28,6 @@ export function AgentCreateForm() {
   const [name, setName] = useState('')
   const [mode, setMode] = useState<'ai' | 'runtime'>('ai')
 
-  // Native AI agents reference a Provider resource in the Agent's namespace.
   const [provider, setProvider] = useState('')
   const [providerMissing, setProviderMissing] = useState(false)
   const [model, setModel] = useState('')
@@ -39,18 +38,12 @@ export function AgentCreateForm() {
   const [systemPrompt, setSystemPrompt] = useState('')
   const [soul, setSoul] = useState('')
 
-  // ACP runtime mode selects either an Orka-managed profile or a registered v2 runtime.
   const [runtimeSource, setRuntimeSource] = useState<'built-in' | 'external'>('built-in')
   const [runtimeType, setRuntimeType] = useState<BuiltInAgentRuntimeType>('claude')
   const [runtimeRef, setRuntimeRef] = useState('')
 
   const selectedProvider = providers.find((p) => p.name === provider)
 
-  // Model, token, and runtime fields mean different things per mode (the
-  // native max-tokens field and OpenCode's output limit share state), so a
-  // mode switch starts the mode-specific fields over instead of carrying them.
-  // The role and soul apply to native AI and built-in runtimes alike, so they
-  // carry over.
   const handleModeChange = (value: string) => {
     setMode(value as 'ai' | 'runtime')
     setProvider('')
@@ -69,7 +62,6 @@ export function AgentCreateForm() {
 
     const trimmedModel = model.trim()
     if (mode === 'ai') {
-      // The pick must still be listed: a namespace switch leaves a stale name.
       if (!selectedProvider) {
         setProviderMissing(true)
         return
@@ -137,7 +129,6 @@ export function AgentCreateForm() {
 
     if (mode === 'ai') {
       spec.providerRef = { name: provider }
-      // An omitted model name inherits the Provider's defaultModel.
       const modelConfig = {
         ...(trimmedModel ? { name: trimmedModel } : {}),
         ...(temperature ? { temperature: Number(temperature) } : {}),

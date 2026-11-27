@@ -141,7 +141,6 @@ describe('TaskCreateForm', () => {
     mockNavigate.mockClear()
     vi.mocked(toast.success).mockClear()
     vi.mocked(toast.error).mockClear()
-    // Polyfill pointer capture methods missing in jsdom (needed by Radix Select)
     if (!Element.prototype.hasPointerCapture) {
       Element.prototype.hasPointerCapture = () => false
     }
@@ -172,7 +171,6 @@ describe('TaskCreateForm', () => {
 
   it('container type shows image and command inputs', () => {
     render(<TaskCreateForm />)
-    // Container is default type
     expect(screen.getByText('Image')).toBeInTheDocument()
     expect(screen.getByText('Command')).toBeInTheDocument()
     expect(screen.getByPlaceholderText('alpine:latest')).toBeInTheDocument()
@@ -182,7 +180,6 @@ describe('TaskCreateForm', () => {
   it('AI type shows provider, model, prompt fields', async () => {
     render(<TaskCreateForm />)
 
-    // Open the type select
     const typeTrigger = screen.getByText('Type').closest('.space-y-2')!.querySelector('[role="combobox"]')!
     fireEvent.pointerDown(typeTrigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
     await waitFor(() => {
@@ -281,7 +278,6 @@ describe('TaskCreateForm', () => {
 
     await user.type(screen.getByPlaceholderText('my-task'), 'no-cmd-task')
     await user.type(screen.getByPlaceholderText('alpine:latest'), 'nginx:latest')
-    // Don't fill in command to test the `if (command)` branch false path
 
     await user.click(screen.getByRole('button', { name: 'Create Task' }))
 
@@ -363,7 +359,6 @@ describe('TaskCreateForm', () => {
     fireEvent.click(screen.getByRole('option', { name: /native-agent/ }))
 
     await waitFor(() => expect(screen.getByTestId('ai-agent-info-card')).toBeInTheDocument())
-    // Provider/model collapse into optional overrides once an Agent is chosen.
     expect(screen.queryByRole('combobox', { name: 'AI provider' })).not.toBeInTheDocument()
     expect(screen.getByText(/Provider \/ model overrides/)).toBeInTheDocument()
     expect(screen.getByText(/built-in CLI runtime are hidden/)).toBeInTheDocument()
@@ -407,8 +402,6 @@ describe('TaskCreateForm', () => {
     fireEvent.click(await screen.findByRole('option', { name: /native-agent/ }))
     await waitFor(() => expect(screen.getByTestId('ai-agent-info-card')).toBeInTheDocument())
 
-    // A refocus refetch now 403s; the selection must not survive as a
-    // hidden agentRef while the selector renders empty.
     await act(async () => {
       focusManager.setFocused(false)
       focusManager.setFocused(true)
@@ -419,8 +412,6 @@ describe('TaskCreateForm', () => {
     await user.type(screen.getByPlaceholderText('my-task'), 'ai-task')
     await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Summarize')
     await user.click(screen.getByRole('button', { name: 'Create Task' }))
-    // With the stale selection dropped, submission demands the visible
-    // Agent/Provider choice instead of silently sending the hidden Agent.
     expect(toast.error).toHaveBeenCalledWith('Select an Agent or a Provider for the AI task')
     expect(submitted).toBeUndefined()
   })
@@ -444,7 +435,6 @@ describe('TaskCreateForm', () => {
     const user = userEvent.setup()
     const { unmount } = render(<TaskCreateForm />)
 
-    // Configure the inline provider/model first, as if no Agent were going to be used.
     const enterInlineProvider = async () => {
       fireEvent.pointerDown(screen.getByRole('combobox', { name: 'AI provider' }), { button: 0, pointerId: 1, pointerType: 'mouse' })
       fireEvent.click(await screen.findByRole('option', { name: 'OpenAI' }))
@@ -470,13 +460,10 @@ describe('TaskCreateForm', () => {
     await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Summarize')
     await user.click(screen.getByRole('button', { name: 'Create Task' }))
     await waitFor(() => expect(submitted).toHaveLength(1))
-    // The stale inline values must not travel as hidden overrides.
     expect(submitted[0]).toMatchObject({ agentRef: { name: 'native-agent' }, ai: { prompt: 'Summarize' } })
     expect(submitted[0].ai).not.toHaveProperty('provider')
     expect(submitted[0].ai).not.toHaveProperty('model')
 
-    // A created task ends the form (it navigates away), so the re-entered
-    // overrides are submitted from a fresh form.
     unmount()
     useStateTypeOverride = 'ai'
     render(<TaskCreateForm />)
@@ -486,7 +473,6 @@ describe('TaskCreateForm', () => {
     await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Summarize')
     disclosure = screen.getByRole('button', { name: /Provider \/ model overrides/ })
 
-    // Overrides re-entered after opening the disclosure are sent.
     await user.click(disclosure)
     expect(disclosure).toHaveAttribute('aria-expanded', 'true')
     expect(document.getElementById('ai-model-overrides')).not.toBeNull()
@@ -519,12 +505,10 @@ describe('TaskCreateForm', () => {
     await waitFor(() => expect(screen.getByTestId('ai-agent-info-card')).toBeInTheDocument())
 
     await user.click(screen.getByRole('button', { name: /Provider \/ model overrides/ }))
-    // A providerRef Agent's Provider CRD is authoritative: no provider picker, only the model.
     expect(screen.queryByRole('combobox', { name: 'AI provider' })).not.toBeInTheDocument()
     expect(screen.getByTestId('ai-provider-locked')).toHaveTextContent('anthropic')
     expect(screen.getByPlaceholderText('Agent default')).toBeInTheDocument()
 
-    // Switching namespaces drops the (namespace-scoped) selection.
     act(() => {
       useUIStore.setState({ namespace: 'other' })
     })
@@ -560,7 +544,6 @@ describe('TaskCreateForm', () => {
     fireEvent.click(await screen.findByRole('option', { name: /native-agent/ }))
     await waitFor(() => expect(screen.getByTestId('ai-agent-info-card')).toBeInTheDocument())
 
-    // The Agent is deleted; the next refetch no longer lists it.
     agents = []
     window.dispatchEvent(new Event('visibilitychange'))
     await waitFor(() => expect(screen.queryByTestId('ai-agent-info-card')).not.toBeInTheDocument())
@@ -992,7 +975,6 @@ describe('TaskCreateForm', () => {
     )
     render(<TaskCreateForm />)
 
-    // Wait for agents to load and select the agent
     const trigger = screen.getByText('Agent Reference').closest('.space-y-2')!.querySelector('[role="combobox"]')!
     await waitFor(() => expect(trigger).not.toBeDisabled())
     fireEvent.pointerDown(trigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
@@ -1227,8 +1209,6 @@ describe('TaskCreateForm', () => {
     await user.type(screen.getByPlaceholderText('my-task'), 'once')
     await user.type(screen.getByPlaceholderText('alpine:latest'), 'alpine')
 
-    // Two submits before React re-renders model a double click that beats
-    // the isPending-driven disabled state.
     const form = screen.getByRole('button', { name: 'Create Task' }).closest('form')!
     fireEvent.submit(form)
     fireEvent.submit(form)
@@ -1250,7 +1230,6 @@ describe('TaskCreateForm', () => {
     render(<TaskCreateForm />)
     const nameInput = screen.getByLabelText('Name')
     await user.type(nameInput, 'My_Task')
-    // Not flagged mid-typing; flagged once the field is left.
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     await user.type(screen.getByPlaceholderText('alpine:latest'), 'alpine')
     expect(screen.getByRole('alert')).toHaveTextContent('Use lowercase letters, numbers, "-", or "."')

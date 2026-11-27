@@ -11,10 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// openConformanceStore opens a fresh file-backed store through the production
-// open path: process lock, schema creation and dataset identity. As in
-// production, it refuses every write without a write envelope; the suite
-// attaches one.
 func openConformanceStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 	backend, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
@@ -26,12 +22,6 @@ func openConformanceStore(t *testing.T) *sqlite.Store {
 	return backend
 }
 
-// conformanceHarnesses are the optional suite harnesses SQLite supplies. A
-// restart closes the store and opens its file again through the production
-// open path, refusing writes without an envelope as before. SQLite migrates
-// its schema only while it opens, under its process lock, so the maintenance
-// harness holds the dataset in the migrating state through a test hook.
-// SQLite declares no automatic switch.
 func conformanceHarnesses() []storagetest.Option {
 	return []storagetest.Option{
 		storagetest.WithMaintenance(storagetest.MaintenanceHarness{
@@ -41,8 +31,6 @@ func conformanceHarnesses() []storagetest.Option {
 			Exit: func(t *testing.T, provider storagev1.ProviderDescriber) {
 				sqlite.SetDatasetStateForTest(provider.(*sqlite.Store), storagev1.DatasetReady)
 			},
-			// The suite sends IsLocked with an envelope, as every catalog
-			// write, and SQLite refuses it while migrating.
 			RefusesReadingWrites: true,
 		}),
 		storagetest.WithDurability(storagetest.DurabilityHarness{
@@ -67,11 +55,6 @@ func TestStateProviderConformance(t *testing.T) {
 	}, conformanceHarnesses()...)
 }
 
-// The suite runs again with every family that has wire RPCs served over a
-// real TLS loopback by the server library and called through the generated
-// client, proving the wire mapping preserves SQLite's behavior. Families
-// without RPCs yet are served in process. The server recomputes each write's
-// request digest, as a transport across a process boundary must.
 func TestStateProviderConformanceOverWire(t *testing.T) {
 	storagetest.RunState(t, func(t *testing.T) storagev1.StateProvider {
 		return wiretest.State(t, openConformanceStore(t))
@@ -84,10 +67,6 @@ func TestArtifactProviderConformance(t *testing.T) {
 	}, conformanceHarnesses()...)
 }
 
-// artifactsOnly serves only artifacts.v1. The suite cannot give its dataset
-// the first controller epoch through the state mirror, so it advances the
-// dataset, which records the suite's installation, as it would for a
-// provider that serves artifacts alone.
 type artifactsOnly struct {
 	storagev1.ArtifactProvider
 }
@@ -98,9 +77,6 @@ func TestArtifactsOnlyProviderConformance(t *testing.T) {
 	})
 }
 
-// The artifacts suite runs again with the artifact store served over the TLS
-// loopback, artifact bytes moving with blob framing on a separate bulk
-// connection. The families without RPCs yet are served in process.
 func TestArtifactProviderConformanceOverWire(t *testing.T) {
 	storagetest.RunArtifacts(t, func(t *testing.T) storagev1.ArtifactProvider {
 		return wiretest.Artifacts(t, openConformanceStore(t))

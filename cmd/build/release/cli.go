@@ -23,7 +23,6 @@ type cliTarget struct {
 	os, arch string
 }
 
-// Keep archive and checksum ordering stable across matrix job completion order.
 var cliTargets = []cliTarget{
 	{"darwin", amd64Arch}, {"darwin", "arm64"},
 	{"linux", amd64Arch}, {"linux", "arm64"},

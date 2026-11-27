@@ -36,7 +36,6 @@ import (
 
 func TestACPMCPBrokerHTTPDelegationPreservesTraceContext(t *testing.T) {
 	previousPropagator := otel.GetTextMapPropagator()
-	// A global baggage propagator must not broaden the supervisor's transport.
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	t.Cleanup(func() { otel.SetTextMapPropagator(previousPropagator) })
 	for _, sampled := range []bool{true, false} {
@@ -90,7 +89,6 @@ func TestACPMCPBrokerHTTPDelegationPreservesTraceContext(t *testing.T) {
 			require.NoError(t, err)
 			frozenPolicy := request.Authorization.Configuration()
 			credentials := controller.ACPMCPBrokerCredentials{
-				// These credentials are synthetic and never leave the loopback test server.
 				ControllerBearerToken: strings.Repeat("b", 32), CapabilitySecret: bytes.Repeat([]byte("c"), harnessv2.MinCapabilitySecretBytes),
 				ExpectedFence: request.Metadata.Fence, RuntimeProfile: profile, ExpectedMCPConfiguration: &frozenPolicy,
 				ControllerFence: store.ControllerEpochFence{Name: epoch.Name, Epoch: epoch.Epoch, HolderID: epoch.HolderID},

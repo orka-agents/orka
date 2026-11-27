@@ -68,8 +68,6 @@ func TestExternalNativeWorkspaceKeepsProviderTokenOutOfTheSandbox(t *testing.T) 
 	if bootstrap.ControllerToken == "" || bootstrap.CapabilitySecret == "" {
 		t.Fatal("the native bootstrap lost its runtime control credentials")
 	}
-	// A bootstrap for a different provider Secret than the admitted rule names
-	// is stale and refused rather than seeding the placeholder.
 	rotated := provider.DeepCopy()
 	rotated.Name += "-rotated"
 	if _, err := externalNativeCredentialBootstrap(w.Spec.Workload, auth, rotated); err == nil {
@@ -92,9 +90,6 @@ func TestExternalNativeWorkspaceRefusesWithoutProviderTokenInjection(t *testing.
 	}
 }
 
-// Credential injection is a gateway feature. A native provider that claims it
-// without the egress allowlist gets a NetworkPolicy-shaped request, whose
-// bootstrap would carry the real token, so admission refuses instead.
 func TestExternalNativeWorkspaceRefusesInjectionWithoutEgressAllowlist(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	f.advertiseNativeProcess(t)

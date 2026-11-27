@@ -15,9 +15,6 @@ import (
 
 const legacyDefaultOpenCodeTemperature = 0.7
 
-// openCodeModelSpecError is a fail-closed OpenCode model validation failure.
-// message is the caller-visible error text; hint is remediation guidance for
-// chat-tool surfaces.
 type openCodeModelSpecError struct {
 	message string
 	hint    string
@@ -25,13 +22,6 @@ type openCodeModelSpecError struct {
 
 func (e *openCodeModelSpecError) Error() string { return e.message }
 
-// validateOpenCodeModelSpec applies the fail-closed OpenCode model rules
-// shared by the create-agent and chat-create-agent surfaces: substitution
-// braces are rejected, the model must resolve to literal provider/model form,
-// an explicit provider hint must match the provider embedded in model.name,
-// temperature may only be the legacy default, fallbacks are unsupported, and
-// contextWindow/maxTokens must be positive with contextWindow exceeding
-// maxTokens. On success it returns the resolved providerID and modelID.
 func validateOpenCodeModelSpec(model *corev1alpha1.ModelConfig) (string, string, *openCodeModelSpecError) {
 	if model == nil || strings.TrimSpace(model.Name) == "" {
 		return "", "", &openCodeModelSpecError{

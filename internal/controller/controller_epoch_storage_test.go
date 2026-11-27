@@ -15,7 +15,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// blockingEpochDataset holds every advance until release is closed.
 type blockingEpochDataset struct {
 	*recordingEpochDataset
 	release chan struct{}
@@ -47,14 +46,10 @@ func writeFenceWithin(manager *ControllerEpochManager, contract string, wait tim
 	return manager.WriteFence(ctx, contract)
 }
 
-// An artifact store that cannot advance at takeover does not hold back the
-// state store: state writes and CurrentFence open as soon as the state
-// dataset has advanced, and artifact writes wait for their own dataset.
 func TestControllerEpochManagerOpensEachStorageDatasetIndependently(t *testing.T) {
 	ctx := context.Background()
 	authority, _ := newKubernetesControllerEpochAuthority(t)
 	state := newRecordingEpochDataset("dataset-state")
-	// A description that fails for a reason retrying can fix is retried.
 	state.describeErrs = []error{errors.New("connection refused")}
 	artifacts := &blockingEpochDataset{recordingEpochDataset: newRecordingEpochDataset("dataset-artifacts"), release: make(chan struct{})}
 	manager := NewControllerEpochManager(authority, "controller-a").
@@ -104,7 +99,6 @@ func TestControllerEpochManagerOpensEachStorageDatasetIndependently(t *testing.T
 	}
 }
 
-// Contracts served by one dataset share one advance.
 func TestControllerEpochManagerAdvancesASharedDatasetOnce(t *testing.T) {
 	authority, _ := newKubernetesControllerEpochAuthority(t)
 	dataset := newRecordingEpochDataset("dataset-shared")
@@ -127,9 +121,6 @@ func TestControllerEpochManagerAdvancesASharedDatasetOnce(t *testing.T) {
 	}
 }
 
-// A dataset that refuses the advance, because it belongs to another
-// installation or holds a newer epoch, stops the manager before any fence
-// opens. A transient failure is retried instead.
 func TestControllerEpochManagerStopsWhenADatasetRefusesTheAdvance(t *testing.T) {
 	authority, _ := newKubernetesControllerEpochAuthority(t)
 	dataset := newRecordingEpochDataset("dataset-a")
@@ -191,8 +182,6 @@ func TestControllerEpochManagerRejectsIncompatibleDatasets(t *testing.T) {
 	}
 }
 
-// heldWriteStore holds SaveResult after it reached the provider with its
-// write envelope, as a slow network would deliver it late.
 type heldWriteStore struct {
 	*sqlite.Store
 	entered     chan struct{}
@@ -224,8 +213,6 @@ func newFencedStorageClient(t *testing.T, backend storageclient.EmbeddedStore, m
 	return client
 }
 
-// A write the replaced controller issued before the takeover, and that
-// reaches the store only after the successor advanced it, changes nothing.
 func TestReplacedControllerDelayedWriteIsFencedAfterTakeover(t *testing.T) {
 	ctx := context.Background()
 	authority, _ := newKubernetesControllerEpochAuthority(t)

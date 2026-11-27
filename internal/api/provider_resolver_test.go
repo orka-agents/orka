@@ -41,8 +41,6 @@ func (c *providerReadTrackingClient) Get(ctx context.Context, key client.ObjectK
 	return c.Client.Get(ctx, key, obj, opts...)
 }
 
-// helpers
-
 func newScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(s)
@@ -77,8 +75,6 @@ func makeAgent(name string, providerRef *corev1alpha1.ProviderReference, model *
 		},
 	}
 }
-
-// Tests
 
 const (
 	testRuntimeAgentModel = "gpt-5.6-sol"
@@ -154,8 +150,6 @@ func TestProviderResolver_ResolveAPIKey(t *testing.T) {
 }
 
 func TestProviderResolverMasksMissingAndDisallowedExplicitNames(t *testing.T) {
-	// A denied reference gets the same error whether or not the Provider
-	// exists, and no credential is read either way.
 	denied := errors.New("provider reference denied")
 	provider := makeProvider("hidden", "default", corev1alpha1.ProviderTypeOpenAI, "hidden-secret", "gpt-4o")
 	secret := makeSecret("hidden-secret", "default", "api-key", "test-key")
@@ -186,10 +180,6 @@ func TestProviderResolverMasksMissingAndDisallowedExplicitNames(t *testing.T) {
 }
 
 func TestProviderResolverAuthorizesReferenceWithProviderType(t *testing.T) {
-	// A grant by provider type ("openai") must admit a Provider named
-	// differently ("prod") once its type is known, exactly as the Providers
-	// list does; a Provider of another type and a missing name are both
-	// denied with the same error.
 	denied := errors.New("provider reference denied")
 	byType := func(info ProviderResolutionInfo) error {
 		if info.Type == string(corev1alpha1.ProviderTypeOpenAI) {
@@ -249,7 +239,6 @@ func TestProviderResolver_Resolve(t *testing.T) {
 		openaiProviderName = "openai"
 	)
 
-	// Shared objects
 	openaiProvider := makeProvider(openaiProviderName, ns, corev1alpha1.ProviderTypeOpenAI, "openai-secret", "gpt-4")
 	openaiSecret := makeSecret("openai-secret", ns, "api-key", "sk-openai")
 	anthropicProvider := makeProvider("anthropic", ns, corev1alpha1.ProviderTypeAnthropic, "anthropic-secret", "claude-sonnet-4-20250514")
@@ -264,7 +253,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 		opts      ResolveOpts
 		wantModel string
 		wantErr   string
-		wantPType string // provider Name()
+		wantPType string
 	}{
 		{
 			name:    "explicit provider name",
@@ -480,7 +469,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 		},
 		{
 			name:    "secret not found during resolve",
-			objects: []runtime.Object{openaiProvider}, // no secret
+			objects: []runtime.Object{openaiProvider},
 			config:  DefaultChatConfig(),
 			opts: ResolveOpts{
 				ProviderName: openaiProviderName,
@@ -513,7 +502,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 				Namespace:    ns,
 			},
 			wantModel: "gpt-4",
-			wantPType: openaiProviderName, // azure-openai uses the openai provider internally
+			wantPType: openaiProviderName,
 		},
 		{
 			name: "require model with empty model from provider CRD",
@@ -557,7 +546,6 @@ func TestProviderResolver_Resolve(t *testing.T) {
 			objects: []runtime.Object{defaultProvider, defaultSecret},
 			config: func() ChatConfig {
 				c := DefaultChatConfig()
-				// config.Provider points to nonexistent, should fall to "default"
 				c.Provider = "nonexistent-config-prov"
 				return c
 			}(),
@@ -628,8 +616,6 @@ func TestProviderResolver_Resolve(t *testing.T) {
 	}
 }
 
-// readyProvider returns a copy of the Provider with status.ready set, as the
-// controller reports for a usable Provider.
 func readyProvider(provider *corev1alpha1.Provider) *corev1alpha1.Provider {
 	ready := provider.DeepCopy()
 	ready.Status.Ready = true

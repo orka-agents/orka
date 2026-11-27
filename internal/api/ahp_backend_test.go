@@ -72,10 +72,9 @@ type ahpTestEnv struct {
 	server  *httptest.Server
 	tokens  *ahphost.TokenService
 
-	mu          sync.Mutex
-	decisions   []string
-	gitRequests []*http.Request
-	// onTaskCreate, when set, runs before a Task is created and can refuse it.
+	mu           sync.Mutex
+	decisions    []string
+	gitRequests  []*http.Request
 	onTaskCreate func(*corev1alpha1.Task) error
 }
 
@@ -83,7 +82,6 @@ type ahpRoundTrip func(*http.Request) (*http.Response, error)
 
 func (f ahpRoundTrip) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
-// ahpTestAdvertisement is a smart HTTP ref advertisement whose HEAD points at branch.
 func ahpTestAdvertisement(branch string) string {
 	pkt := func(line string) string { return fmt.Sprintf("%04x%s", len(line)+4, line) }
 	return pkt("# service=git-upload-pack\n") + "0000" +
@@ -112,7 +110,6 @@ func newAHPTestEnvWith(t *testing.T, authz ContextTokenAuthorizationConfig, obje
 		ahpTestAgent("copilot-haiku", corev1alpha1.AgentRuntimeCopilot, "claude-haiku-5.5"),
 		ahpTestAgent("copilot-gpt", corev1alpha1.AgentRuntimeCopilot, "gpt-5.4-nano"),
 		ahpTestAgent("claude-sonnet", corev1alpha1.AgentRuntimeClaude, "claude-sonnet-5"),
-		// An Agent without a model and one on a custom runtime are not offered.
 		&corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "no-model", Namespace: ahpTestNamespace},
 			Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}}},
 	)
@@ -193,7 +190,6 @@ func ahpCtx(t *testing.T) context.Context {
 	return ctx
 }
 
-// setUpSession adds the project and creates a session in it.
 func (e *ahpTestEnv) setUpSession(c *ahp.Client, mode string) string {
 	e.t.Helper()
 	ctx := ahpCtx(e.t)
@@ -237,7 +233,6 @@ func (e *ahpTestEnv) publish(task string, update *harnessv2.UpdateEvent) {
 	e.live.Publish(liveevents.Event{Namespace: ahpTestNamespace, Task: task, Runtime: &harnessv2.Event{Type: harnessv2.EventUpdate, Update: update}})
 }
 
-// ahpReadyInput is the tool input a toolCallReady action shows.
 func ahpReadyInput(t *testing.T, raw json.RawMessage) string {
 	t.Helper()
 	var ready ahptypes.ChatToolCallReadyAction
@@ -304,8 +299,6 @@ func TestAHPBackendOffersBuiltInRuntimesAndProjects(t *testing.T) {
 	require.Error(t, err, "a session outside a project is refused")
 }
 
-// A model whose Agent the controller found unusable is not offered: every
-// turn on it would fail. One whose Agent was not checked yet still is.
 func TestAHPBackendOffersNoModelOfAnUnusableAgent(t *testing.T) {
 	agent := func(name, model string, conditions ...metav1.Condition) *corev1alpha1.Agent {
 		agent := ahpTestAgent(name, corev1alpha1.AgentRuntimeOpencode, model)
@@ -329,9 +322,6 @@ func TestAHPBackendOffersNoModelOfAnUnusableAgent(t *testing.T) {
 	require.NotContains(t, models, "openai/broken")
 }
 
-// A session whose Agent stops being offered moves, as a model switch does,
-// to another Agent that offers the same model, rather than refusing the very
-// model the person is shown.
 func TestAHPBackendMovesASessionOffAnAgentThatIsNoLongerOffered(t *testing.T) {
 	env := newAHPTestEnv(t, ahpTestAgent("copilot-gpt-spare", corev1alpha1.AgentRuntimeCopilot, "gpt-5.4-nano"))
 	ctx := ahpCtx(t)
@@ -398,7 +388,6 @@ func TestAHPBackendRunsATurnAsATask(t *testing.T) {
 	require.Equal(t, corev1alpha1.PermissionDecisionsRequester, task.Spec.AgentRuntime.PermissionDecisions,
 		"manual approvals hold permission requests for the person")
 
-	// A second message while the turn runs is refused.
 	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
 		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-x", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Message: ahptypes.Message{Text: "again", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}},
@@ -415,8 +404,6 @@ func TestAHPBackendRunsATurnAsATask(t *testing.T) {
 	env.live.Publish(liveevents.Event{Namespace: ahpTestNamespace, Task: taskName, Approval: &liveevents.Approval{
 		ID: "approval-1", State: liveevents.ApprovalPending, ToolCallID: "tool-1", ToolName: "bash", Title: "Run tests",
 	}})
-	// The request carries no input; the confirmation shows the one the call
-	// reported while it waited.
 	require.JSONEq(t, `{"command":"go test ./..."}`, ahpReadyInput(t, waitForActionType(t, chatSub, "chat/toolCallReady")))
 	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatToolCallConfirmedAction{
 		Type: ahptypes.ActionTypeChatToolCallConfirmed, TurnId: "turn-1", ToolCallId: "tool-1", Approved: true,
@@ -478,7 +465,6 @@ func TestAHPBackendRunsATurnAsATask(t *testing.T) {
 	require.Equal(t, "// Widgets.\npackage widgets\n", after.Data)
 	require.NoError(t, c.Request(ctx, "resourceRead", ahptypes.ResourceReadParams{Channel: record.Changeset, Uri: files[0].Edit.Before.Content.Uri}, &before))
 	require.Equal(t, old, before.Data)
-	// The protocol's root-channel form serves the same contents.
 	rootAfter, err := c.ResourceRead(ctx, ahptypes.ResourceReadParams{Uri: ahpTestDir + "/widgets.go"})
 	require.NoError(t, err)
 	require.Equal(t, after.Data, rootAfter.Data)
@@ -494,7 +480,6 @@ func TestAHPBackendRunsATurnAsATask(t *testing.T) {
 	require.Equal(t, ahptypes.SessionStatusIdle, listed.Items[0].Status)
 	require.Equal(t, int64(1), *listed.Items[0].Changes.Files)
 
-	// The next turn continues the Session.
 	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
 		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-2", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Message: ahptypes.Message{Text: "and again", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}, Model: &ahptypes.ModelSelection{Id: "claude-haiku-5.5"}},
@@ -508,9 +493,6 @@ func TestAHPBackendRunsATurnAsATask(t *testing.T) {
 		return env.backend.activeTurn(ahphost.UserKey("https://issuer.example", "alice"), ahpTestSession) == nil
 	}, 5*time.Second, 20*time.Millisecond)
 
-	// Another model moves the session to a new Orka Session, with the
-	// conversation so far as context. Nothing was published, so the branch
-	// stays.
 	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
 		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-3", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Message: ahptypes.Message{Text: "switch", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}, Model: &ahptypes.ModelSelection{Id: "gpt-5.4-nano"}},
@@ -573,8 +555,6 @@ func TestAHPBackendCancelsATurn(t *testing.T) {
 	require.Equal(t, ahptypes.TurnStateCancelled, turns[0].State)
 }
 
-// A turn its Task's deadline stopped ends with the reason and the limit, not
-// as cancelled: that reads as though the person had cancelled it.
 func TestAHPBackendShowsATurnItsDeadlineStoppedAsAnError(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -607,9 +587,6 @@ func TestAHPBackendShowsATurnItsDeadlineStoppedAsAnError(t *testing.T) {
 	require.Contains(t, failed.Part.Error.Message, task.Spec.Timeout.Duration.String()+" time limit")
 }
 
-// A turn follows the Task it created, not its name: events from a Task
-// created later under the same name are not the turn's, and that Task's
-// result does not settle it.
 func TestAHPBackendFollowsTheTaskItCreatedNotItsName(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -640,7 +617,6 @@ func TestAHPBackendFollowsTheTaskItCreatedNotItsName(t *testing.T) {
 	require.Contains(t, string(raw), "mine")
 	require.NotContains(t, string(raw), "intruder")
 
-	// The Task is deleted and another is created under its name; it succeeds.
 	require.NoError(t, env.kube.Delete(ctx, task))
 	replacement := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: ahpTestNamespace, UID: "uid-of-another-task"},
 		Spec: task.Spec}
@@ -654,9 +630,6 @@ func TestAHPBackendFollowsTheTaskItCreatedNotItsName(t *testing.T) {
 	require.NotContains(t, ahpTurnText(state.Chat.Turns[len(state.Chat.Turns)-1].ResponseParts), "intruder")
 }
 
-// A turn recorded before Task UIDs were kept takes, on recovery, the UID of
-// the Task under its name before it follows any event, and keeps it in the
-// record for the next recovery.
 func TestAHPBackendRecoveryPinsALegacyTurnsTask(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -676,7 +649,6 @@ func TestAHPBackendRecoveryPinsALegacyTurnsTask(t *testing.T) {
 	require.Eventually(t, func() bool { turn = env.backend.activeTurn(alice.UserKey, ahpTestSession); return turn != nil },
 		5*time.Second, 20*time.Millisecond)
 
-	// The leader stops; its record, written before UIDs were kept, has none.
 	env.backend.forgetTurn(turn)
 	require.NoError(t, env.backend.updateSession(ctx, alice.UserKey, ahpTestSession, func(s *ahpSession) { s.ActiveTaskUID = "" }))
 	env.backend.mu.Lock()
@@ -698,8 +670,6 @@ func TestAHPBackendRecoveryPinsALegacyTurnsTask(t *testing.T) {
 	require.NotContains(t, string(raw), "intruder", "an event of another Task under the name is not the recovered turn's")
 }
 
-// A legacy turn whose Task is already gone when it is recovered takes no
-// Task created afterwards under the name for its own: it ends as deleted.
 func TestAHPBackendRecoveryAdoptsNoTaskForALegacyTurnWhoseTaskIsGone(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -728,7 +698,6 @@ func TestAHPBackendRecoveryAdoptsNoTaskForALegacyTurnWhoseTaskIsGone(t *testing.
 	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
 	require.Equal(t, ahpTaskGoneUID, record.ActiveTaskUID, "a later recovery knows the Task was gone too")
 
-	// Another Task is created under the name, says something and succeeds.
 	replacement := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: ahpTestNamespace, UID: "uid-of-another-task"},
 		Spec: task.Spec}
 	require.NoError(t, env.kube.Create(ctx, replacement))
@@ -746,8 +715,6 @@ func TestAHPBackendRecoveryAdoptsNoTaskForALegacyTurnWhoseTaskIsGone(t *testing.
 	require.NotEqual(t, "uid-of-another-task", record.ActiveTaskUID)
 }
 
-// Results are kept by the Task's name: a result a Task created since under
-// the name wrote is not the turn's answer.
 func TestAHPBackendReadsNoResultOfATaskThatTookTheName(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -773,7 +740,6 @@ func TestAHPBackendReadsNoResultOfATaskThatTookTheName(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "the turn's answer", string(data))
 
-	// When the Task cannot be read to confirm it, the result is not shown.
 	env.backend.h.apiReader = interceptor.NewClient(env.kube.(client.WithWatch), interceptor.Funcs{
 		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
 			return errors.New("the API server timed out")
@@ -791,8 +757,6 @@ func TestAHPBackendReadsNoResultOfATaskThatTookTheName(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrNotFound, "another Task's result is not the turn's answer")
 }
 
-// A client's turn cancel that fails is tried again, so the Task does not run
-// on while the client shows the turn cancelled.
 func TestAHPBackendRetriesAFailedTurnCancel(t *testing.T) {
 	env := newAHPTestEnv(t)
 	env.backend.cancelBackoff = wait.Backoff{Duration: 20 * time.Millisecond, Factor: 1, Steps: 500}
@@ -812,7 +776,6 @@ func TestAHPBackendRetriesAFailedTurnCancel(t *testing.T) {
 		return env.backend.activeTurn(ahphost.UserKey("https://issuer.example", "alice"), ahpTestSession) != nil
 	}, 5*time.Second, 20*time.Millisecond)
 
-	// Only the Task's requester may cancel it, so the first attempts fail.
 	task.Spec.RequestedBy.Subject = "bob"
 	require.NoError(t, env.kube.Update(ctx, task))
 	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnCancelledAction{
@@ -833,8 +796,6 @@ func TestAHPBackendRetriesAFailedTurnCancel(t *testing.T) {
 	require.Eventually(t, cancelRequested, 5*time.Second, 20*time.Millisecond, "the cancellation is retried until it lands")
 }
 
-// A client cancel that comes while the turn's Task is being created finds no
-// Task to stop; the turn then cancels the Task it created.
 func TestAHPBackendCancelsATaskCreatedAfterTheClientCancelled(t *testing.T) {
 	env := newAHPTestEnv(t)
 	env.backend.cancelBackoff = wait.Backoff{Duration: 20 * time.Millisecond, Factor: 1, Steps: 50}
@@ -843,7 +804,6 @@ func TestAHPBackendCancelsATaskCreatedAfterTheClientCancelled(t *testing.T) {
 	chat := env.setUpSession(c, "allow-all")
 	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice"), Issuer: "https://issuer.example",
 		Subject: "alice", Username: "alice", Namespace: ahpTestNamespace}
-	// The cancel reads the Task before it exists, and finds nothing.
 	missed := make(chan struct{}, 1)
 	env.backend.h.apiReader = interceptor.NewClient(env.kube.(client.WithWatch), interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -947,7 +907,6 @@ func TestAHPBackendDecidesAsTheConfirmingConnection(t *testing.T) {
 	taskName := record.OrkaSession + "-t1"
 	env.waitForTask(taskName)
 
-	// The tool runs, then asks permission: the confirmation opens again.
 	env.publish(taskName, &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCall, ToolCall: &harnessv2.ToolCallUpdate{
 		ToolCallID: "tool-1", Name: "bash", Title: "Run", Status: harnessv2.ToolCallStatusInProgress,
 	}})
@@ -956,7 +915,6 @@ func TestAHPBackendDecidesAsTheConfirmingConnection(t *testing.T) {
 		ID: "approval-1", State: liveevents.ApprovalPending, ToolCallID: "tool-1", ToolName: "bash", Title: "Run",
 		Input: json.RawMessage(`{"command":"make release"}`),
 	}})
-	// The confirmation shows what the request asks to run.
 	require.JSONEq(t, `{"command":"make release"}`, ahpReadyInput(t, waitForActionType(t, chatSub, "chat/toolCallReady")))
 
 	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatToolCallConfirmedAction{
@@ -988,8 +946,6 @@ func TestAHPBackendDisposeKeepsOtherSessions(t *testing.T) {
 	require.Error(t, env.backend.getRecord(ctx, userKey, ahpRecordSession, ahpTestSession, &gone))
 }
 
-// A session whose running Task cannot be cancelled is kept, so disposal can be
-// retried instead of leaving a Task nothing can cancel or follow.
 func TestAHPBackendKeepsASessionWhoseTaskItCannotCancel(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -1007,7 +963,6 @@ func TestAHPBackendKeepsASessionWhoseTaskItCannotCancel(t *testing.T) {
 	taskName := record.OrkaSession + "-t1"
 	task := env.waitForTask(taskName)
 
-	// Only the Task's requester may cancel it, so this cancellation fails.
 	task.Spec.RequestedBy.Subject = "bob"
 	require.NoError(t, env.kube.Update(ctx, task))
 	require.Error(t, c.Request(ctx, "disposeSession", ahptypes.DisposeSessionParams{Channel: ahpTestSession}, nil))
@@ -1023,8 +978,6 @@ func TestAHPBackendKeepsASessionWhoseTaskItCannotCancel(t *testing.T) {
 	require.Contains(t, task.Annotations, labels.AnnotationCancelRequested, "the Task was asked to stop")
 }
 
-// A cancel bound to a Task's UID leaves another Task created later under the
-// same name alone: it is not the turn's.
 func TestAHPBackendCancelsOnlyTheTaskItsTurnCreated(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -1052,9 +1005,6 @@ func TestAHPBackendCancelsOnlyTheTaskItsTurnCreated(t *testing.T) {
 	require.Contains(t, task.Annotations, labels.AnnotationCancelRequested, "the turn's own Task is stopped")
 }
 
-// A root read of a file an agent changed comes from the user's running
-// workspace, where a terminal may have changed or deleted it since; the
-// reported contents serve only while no workspace runs.
 func TestAHPBackendReadsRootFilesFromTheRunningWorkspace(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -1092,8 +1042,6 @@ func TestAHPBackendReadsRootFilesFromTheRunningWorkspace(t *testing.T) {
 	require.Error(t, err, "a file deleted in the running workspace is gone")
 }
 
-// A session cannot be named with a scheme this backend routes to a chat,
-// changeset or file contents.
 func TestAHPBackendRefusesASessionOnAReservedScheme(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -1146,9 +1094,6 @@ func TestAHPBackendRemovesAProjectNoSessionUses(t *testing.T) {
 	}, nil), "a removed project takes no new sessions")
 }
 
-// Reading a file from the root, with no workspace running, serves the newest
-// change any session recorded for it: a newer session's deletion leaves it
-// not found, and a later write is read again.
 func TestAHPBackendRootReadHonorsANewerDeletion(t *testing.T) {
 	env := newAHPTestEnv(t)
 	ctx := ahpCtx(t)
@@ -1190,8 +1135,6 @@ func TestAHPBackendRootReadHonorsANewerDeletion(t *testing.T) {
 	require.Equal(t, "rewritten", data, "a write after the deletion is the file's")
 }
 
-// Filling in a default branch changes only a project still stored: one
-// removed while its branch was looked up stays removed.
 func TestAHPBackendDefaultBranchBackfillKeepsARemovedProjectRemoved(t *testing.T) {
 	env := newAHPTestEnv(t)
 	ctx := ahpCtx(t)
@@ -1210,8 +1153,6 @@ func TestAHPBackendDefaultBranchBackfillKeepsARemovedProjectRemoved(t *testing.T
 	require.Equal(t, "main", project.DefaultBranch, "a branch already found stays")
 }
 
-// A repeat clone that finds the default branch while the project is being
-// removed leaves it removed.
 func TestAHPBackendRepeatCloneKeepsARemovedProjectRemoved(t *testing.T) {
 	gitSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-token", Namespace: ahpTestNamespace}, Data: map[string][]byte{"token": []byte("not-a-real-token")}}
 	env := newAHPTestEnv(t, gitSecret)
@@ -1222,7 +1163,6 @@ func TestAHPBackendRepeatCloneKeepsARemovedProjectRemoved(t *testing.T) {
 	id := "project-" + ahpHash(repo)[:16]
 	require.NoError(t, env.backend.putRecord(ctx, alice.UserKey, ahpRecordProject, id, ahpProject{ID: id, URL: repo, Name: "widgets", Owner: "octo"}))
 	env.backend.gitHTTP = &http.Client{Transport: ahpRoundTrip(func(*http.Request) (*http.Response, error) {
-		// The project is removed while its default branch is looked up.
 		removed, err := env.backend.removeProject(context.Background(), alice, id)
 		require.NoError(t, err)
 		require.True(t, removed)
@@ -1237,8 +1177,6 @@ func TestAHPBackendRepeatCloneKeepsARemovedProjectRemoved(t *testing.T) {
 		"the late backfill does not recreate the project")
 }
 
-// A project's checkout path leaves out the host, so the same owner and name on
-// another host is refused rather than opening the first one's checkout.
 func TestAHPBackendRefusesAProjectOnAnotherProjectsPath(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -1321,7 +1259,7 @@ func TestAHPBackendReopensARefusedApproval(t *testing.T) {
 		require.NoError(t, err)
 	}
 	confirm()
-	waitForActionType(t, chatSub, "chat/toolCallReady") // reopened after the refusal
+	waitForActionType(t, chatSub, "chat/toolCallReady")
 	confirm()
 	require.Eventually(t, func() bool {
 		env.mu.Lock()
@@ -1330,8 +1268,6 @@ func TestAHPBackendReopensARefusedApproval(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond)
 }
 
-// A request that expired before the person's decision landed is not asked
-// again: it can no longer be approved.
 func TestAHPBackendDoesNotReopenAnExpiredApproval(t *testing.T) {
 	env := newAHPTestEnv(t)
 	userKey := ahphost.UserKey("https://issuer.example", "alice")
@@ -1339,7 +1275,6 @@ func TestAHPBackendDoesNotReopenAnExpiredApproval(t *testing.T) {
 	decided := make(chan struct{})
 	env.backend.decideApproval = func(context.Context, *UserInfo, string, string, string, bool) error {
 		defer close(decided)
-		// The expiry wins the race and reaches the turn before the refusal.
 		env.live.Publish(liveevents.Event{Namespace: ahpTestNamespace, Task: taskName, Approval: &liveevents.Approval{
 			ID: "approval-1", State: liveevents.ApprovalExpired, ToolCallID: "tool-1",
 		}})
@@ -1410,7 +1345,6 @@ func TestAHPBackendResolvesTheDefaultBranchOnGitHubOnly(t *testing.T) {
 	require.Equal(t, "x-access-token", user)
 	require.Equal(t, "not-a-real-token", password)
 
-	// Another host is never contacted, so its credential stays home.
 	cloned.Project = nil
 	require.NoError(t, c.Request(ctx, ahpExtensionCloneProject, map[string]string{"url": "https://git.example.com/octo/gadgets"}, &cloned))
 	require.Nil(t, cloned.Project["defaultBranch"])
@@ -1457,8 +1391,6 @@ func TestAHPBackendSessionsPublishToTheClientsBranch(t *testing.T) {
 	require.Equal(t, "/workspace/src/octo/widgets", named.WorkDir, "without workspaces the session works in the project path")
 }
 
-// A workspace's clone holds the project's default branch, so a session
-// branch under it is replaced even when the session starts elsewhere.
 func TestAHPBackendKeepsWorkspaceBranchesClearOfTheDefault(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -1571,7 +1503,6 @@ func TestAHPBackendShowsPlansUsageAndRunningOutput(t *testing.T) {
 	require.Contains(t, calls[1], `"displayName":"Viewing pkg/widgets.go"`, "runtime-private paths become relative")
 	require.Contains(t, calls[1], `ok  pkg/a\nok  pkg/b\n`, "streamed output stays as the result")
 
-	// The turn fails the way a runtime that reports errors as reply text does.
 	env.publish(taskName, &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "Error: 400 model unavailable"}})
 	waitForActionType(t, chatSub, "chat/delta")
 	task := &corev1alpha1.Task{}
@@ -1631,7 +1562,6 @@ func TestAHPBackendSwitchesModelsAcrossRuntimesAndBranches(t *testing.T) {
 	require.NoError(t, err)
 	alice := ahphost.UserKey("https://issuer.example", "alice")
 
-	// A model only another runtime serves runs there.
 	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
 		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Message: ahptypes.Message{Text: "start", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}, Model: &ahptypes.ModelSelection{Id: "claude-sonnet-5"}},
@@ -1642,7 +1572,6 @@ func TestAHPBackendSwitchesModelsAcrossRuntimesAndBranches(t *testing.T) {
 	first := env.waitForTask(record.OrkaSession + "-t1")
 	require.Equal(t, "claude-sonnet", first.Spec.AgentRef.Name)
 
-	// The turn publishes, so the branch now belongs to that Orka Session.
 	first.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 	first.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{Branch: record.Branch, State: corev1alpha1.TaskDeliveryStateVerifiedExact}
 	require.NoError(t, env.kube.Status().Update(ctx, first))
@@ -1664,7 +1593,6 @@ func TestAHPBackendSwitchesModelsAcrossRuntimesAndBranches(t *testing.T) {
 	require.Equal(t, record.Branch+"-2", updated.Branch)
 	require.False(t, updated.Published)
 	require.Equal(t, record.WorkDir, updated.WorkDir, "without workspaces the session keeps the project directory")
-	// The note reaches the turn after its Task is created.
 	require.Eventually(t, func() bool {
 		snapshot, _, err := c.Subscribe(ctx, chat)
 		if err != nil {
@@ -1675,9 +1603,6 @@ func TestAHPBackendSwitchesModelsAcrossRuntimesAndBranches(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond)
 }
 
-// A turn that published records so even when the store refuses the write that
-// records its reply: its end, which is retried until it lands, carries it too,
-// so a later model switch moves to a new branch.
 func TestAHPBackendRecordsAPublicationItsReplyWriteLost(t *testing.T) {
 	gitSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-token", Namespace: ahpTestNamespace}, Data: map[string][]byte{"token": []byte("not-a-real-token")}}
 	env := newAHPTestEnv(t, gitSecret)
@@ -1697,8 +1622,6 @@ func TestAHPBackendRecordsAPublicationItsReplyWriteLost(t *testing.T) {
 	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
 	first := env.waitForTask(record.OrkaSession + "-t1")
 
-	// The write that records the reply, and with it the publication while
-	// the turn is still active, is refused.
 	var refused atomic.Int32
 	failing := &ahpFailingStore{AHPStore: env.backend.store, fail: func(r store.AHPRecord) bool {
 		var session ahpSession
@@ -1755,7 +1678,6 @@ func TestAHPBackendRunsMessagesSentDuringATurn(t *testing.T) {
 		return env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &current) == nil && len(current.Pending) == 2
 	}, 5*time.Second, 20*time.Millisecond)
 
-	// The steering message is queued first, and the chat shows it so.
 	var ids []string
 	require.Eventually(t, func() bool {
 		queued, _, err := c.Subscribe(ctx, chat)
@@ -1770,7 +1692,6 @@ func TestAHPBackendRunsMessagesSentDuringATurn(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond)
 	require.Equal(t, []string{"s1", "q1"}, ids)
 
-	// When the turn ends, the steering message runs first, then the queued one.
 	env.setPhase(record.OrkaSession+"-t1", corev1alpha1.TaskPhaseSucceeded)
 	second := env.waitForTask(record.OrkaSession + "-t2")
 	require.Equal(t, "steer", second.Spec.Prompt)
@@ -1789,8 +1710,6 @@ func TestAHPBackendRunsMessagesSentDuringATurn(t *testing.T) {
 	require.Empty(t, state.QueuedMessages)
 }
 
-// ahpFailingStore fails the record writes fail selects while armed, of kind
-// when it is set and of sessions otherwise.
 type ahpFailingStore struct {
 	store.AHPStore
 	armed atomic.Bool
@@ -1806,8 +1725,6 @@ func (s *ahpFailingStore) PutAHPRecord(ctx context.Context, record store.AHPReco
 	return s.AHPStore.PutAHPRecord(ctx, record)
 }
 
-// A session whose records cannot all be written leaves none behind, so its
-// branch can be claimed again and its project removed.
 func TestAHPBackendSessionThatCannotBeRecordedLeavesNothing(t *testing.T) {
 	for _, kind := range []string{ahpRecordChat, ahpRecordSession} {
 		t.Run(kind, func(t *testing.T) {
@@ -1842,8 +1759,6 @@ func TestAHPBackendSessionThatCannotBeRecordedLeavesNothing(t *testing.T) {
 	}
 }
 
-// ahpFailingScanStore refuses to list sessions while armed, and counts the
-// session scans it is asked for.
 type ahpFailingScanStore struct {
 	store.AHPStore
 	armed atomic.Bool
@@ -1860,8 +1775,6 @@ func (s *ahpFailingScanStore) ListAHPRecords(ctx context.Context, userKey, kind 
 	return s.AHPStore.ListAHPRecords(ctx, userKey, kind)
 }
 
-// A turn clients were shown started, whose start the previous leader journaled
-// but never ran, is ended by recovery instead of staying active for good.
 func TestAHPBackendRecoveryEndsATurnThatNeverStarted(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -1869,20 +1782,14 @@ func TestAHPBackendRecoveryEndsATurnThatNeverStarted(t *testing.T) {
 	chat := env.setUpSession(c, "allow-all")
 	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Namespace: ahpTestNamespace,
 		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
-	// The turn's start is journaled, as a client's action is, but nothing ran it.
 	require.NoError(t, env.backend.emitterFor(alice).Emit(ctx, chat, ahpUserTurn("turn-lost", "run me")))
 	state, err := ahphost.ChannelState(ctx, env.backend.store, alice.UserKey, chat)
 	require.NoError(t, err)
 	require.NotNil(t, state.Chat.ActiveTurn, "the chat shows the turn started")
-	// A restarted process has recovered nothing for this user yet.
 	env.backend.mu.Lock()
 	delete(env.backend.recovered, alice.UserKey)
 	env.backend.mu.Unlock()
 
-	// The host lists agents, and so recovers, while it holds the user's lock:
-	// a client subscribing to the root after the restart starts recovery,
-	// and must not wait on the turn's end, which the host emits under that
-	// same lock.
 	subscribed := make(chan error, 1)
 	go func() {
 		_, _, err := c.Subscribe(ctx, ahptypes.RootResourceURI)
@@ -1903,9 +1810,6 @@ func TestAHPBackendRecoveryEndsATurnThatNeverStarted(t *testing.T) {
 	require.Empty(t, tasks.Items)
 }
 
-// Recovery runs the messages an idle session still has waiting, left behind
-// by a restart before they ran: one whose sender is gone is reported and
-// leaves the queue instead of waiting for good.
 func TestAHPBackendRecoversMessagesAnIdleSessionLeftWaiting(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -1917,7 +1821,6 @@ func TestAHPBackendRecoversMessagesAnIdleSessionLeftWaiting(t *testing.T) {
 		s.Pending = []ahpPending{{ID: "left-behind", Kind: string(ahptypes.PendingMessageKindQueued), Version: "v1",
 			Message: ahptypes.Message{Text: "run me", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}}}}
 	}))
-	// A restarted process has recovered nothing for this user yet.
 	env.backend.mu.Lock()
 	delete(env.backend.recovered, alice.UserKey)
 	env.backend.mu.Unlock()
@@ -1932,8 +1835,6 @@ func TestAHPBackendRecoversMessagesAnIdleSessionLeftWaiting(t *testing.T) {
 	require.Empty(t, tasks.Items, "a message whose sender is gone does not run")
 }
 
-// Recovery after a restart runs again when its session scan failed, so a
-// transient store error cannot leave a running turn unrecovered.
 func TestAHPBackendRetriesAFailedRecoveryScan(t *testing.T) {
 	env := newAHPTestEnv(t)
 	failing := &ahpFailingScanStore{AHPStore: env.backend.store}
@@ -1958,8 +1859,6 @@ func ahpUserTurn(id, text string) ahptypes.StateAction {
 	}}
 }
 
-// A queued message that cannot be taken off the stored queue does not start:
-// it would run again once that turn ended.
 func TestAHPBackendKeepsAMessageItCouldNotTakeOffTheQueue(t *testing.T) {
 	env := newAHPTestEnv(t)
 	failing := &ahpFailingStore{AHPStore: env.backend.store, fail: func(record store.AHPRecord) bool {
@@ -1997,8 +1896,6 @@ func TestAHPBackendKeepsAMessageItCouldNotTakeOffTheQueue(t *testing.T) {
 	require.Len(t, current.Pending, 1)
 }
 
-// A turn that cannot be recorded on its session fails visibly and creates no
-// Task, because nothing could find that Task again.
 func TestAHPBackendFailsATurnItCannotRecord(t *testing.T) {
 	env := newAHPTestEnv(t)
 	failing := &ahpFailingStore{AHPStore: env.backend.store, fail: func(record store.AHPRecord) bool {
@@ -2024,8 +1921,6 @@ func TestAHPBackendFailsATurnItCannotRecord(t *testing.T) {
 	require.Nil(t, env.backend.activeTurn(alice, ahpTestSession))
 }
 
-// A turn is on its session before its Task exists, so a controller that stops
-// in between leaves a turn recovery can settle, never a Task nothing finds.
 func TestAHPBackendRecordsATurnBeforeItsTask(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -2053,8 +1948,6 @@ func TestAHPBackendRecordsATurnBeforeItsTask(t *testing.T) {
 	}
 }
 
-// A turn whose Task cannot be created is taken back: the session is free and
-// the next message runs as that turn.
 func TestAHPBackendTakesBackATurnWhoseTaskWasNotCreated(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -2065,7 +1958,6 @@ func TestAHPBackendTakesBackATurnWhoseTaskWasNotCreated(t *testing.T) {
 	alice := ahphost.UserKey("https://issuer.example", "alice")
 	record := ahpSession{}
 	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
-	// The server stored the first turn's Task even though its create failed.
 	kept := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: record.OrkaSession + "-t1", Namespace: ahpTestNamespace},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "first"}}
 	var refuse atomic.Bool
@@ -2103,8 +1995,6 @@ func TestAHPReorderPending(t *testing.T) {
 	require.Equal(t, []string{"s", "c", "a", "b"}, ids)
 }
 
-// A file edited back to how it began, or created and deleted again, leaves the
-// changeset: nothing else would take it off without a workspace.
 func TestAHPChangesDropAFileThatNoLongerDiffers(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -2134,8 +2024,6 @@ func TestAHPChangesDropAFileThatNoLongerDiffers(t *testing.T) {
 	require.Equal(t, ahpTestDir+"/c.go", files[0].Edit.After.Uri)
 }
 
-// A session keeps only the contents its changed files name, whatever was
-// stored for earlier versions: a long session's edits do not grow it.
 func TestAHPChangesKeepOnlyTheContentsTheirFilesName(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -2162,7 +2050,6 @@ func TestAHPChangesKeepOnlyTheContentsTheirFilesName(t *testing.T) {
 		changes.setFile(dir+"/a.go", &v0, &v1, true)
 		changes.setFile(dir+"/b.go", nil, &v1, true)
 	})
-	// a.go moves on; b.go still names v1.
 	changes.change(func() { changes.setFile(dir+"/a.go", &v1, &v2, true) })
 	require.Equal(t, []string{v0, v1, v2}, stored())
 	changes.change(func() {
@@ -2176,7 +2063,6 @@ func TestAHPChangesKeepOnlyTheContentsTheirFilesName(t *testing.T) {
 	require.Equal(t, []string{v3}, stored(), "the branch's files replace the reported ones")
 }
 
-// ahpFlakyChangeStore fails listing files and deleting contents while armed.
 type ahpFlakyChangeStore struct {
 	store.AHPStore
 	failList, failDelete atomic.Bool
@@ -2196,8 +2082,6 @@ func (s *ahpFlakyChangeStore) DeleteAHPRecord(ctx context.Context, userKey, kind
 	return s.AHPStore.DeleteAHPRecord(ctx, userKey, kind, key)
 }
 
-// Contents a change could not drop, as the store failed it, go with a later
-// change, even one made through another changeset of the session.
 func TestAHPChangesRetryContentsTheyCouldNotDrop(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -2241,7 +2125,6 @@ func TestAHPChangesRetryContentsTheyCouldNotDrop(t *testing.T) {
 	require.Equal(t, []string{v2, v3}, stored(), "the next change drops what earlier ones could not")
 }
 
-// ahpFlakyEmitter refuses changeset actions while armed and records the rest.
 type ahpFlakyEmitter struct {
 	ahpActionsEmitter
 	fail atomic.Bool
@@ -2254,8 +2137,6 @@ func (e *ahpFlakyEmitter) Emit(ctx context.Context, channel string, actions ...a
 	return e.ahpActionsEmitter.Emit(ctx, channel, actions...)
 }
 
-// A file change clients could not be shown, as the journal refused it, is
-// shown with the session's next change, as the file is stored then.
 func TestAHPChangesShowAgainWhatClientsMissed(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -2319,7 +2200,6 @@ func TestAHPChangesFollowTheBranch(t *testing.T) {
 	require.NoError(t, env.backend.getRecord(ctx, principal.UserKey, ahpRecordSession, ahpTestSession, &record))
 	changes := &ahpChanges{b: env.backend, ctx: ctx, principal: principal, session: record, emit: env.backend.emitterFor(principal)}
 
-	// A turn reported one edit; the branch holds another edit and a deletion.
 	before, reported := "package a\n", "package a\n// reported\n"
 	changes.setFile(ahpTestDir[len("file://"):]+"/a.go", &before, &reported, true)
 	gone, edited := "x\n", "package b\n// shell edit\n"
@@ -2380,8 +2260,6 @@ func TestAHPBackendDropsWaitingMessagesWithoutTheirSender(t *testing.T) {
 		defer env.backend.mu.Unlock()
 		return len(env.backend.pendingAuth) == 1
 	}, 5*time.Second, 20*time.Millisecond)
-	// The sender known for the message is another version's, as when the
-	// message was replaced meanwhile.
 	env.backend.mu.Lock()
 	for key, sender := range env.backend.pendingAuth {
 		sender.version = "another version"
@@ -2422,7 +2300,6 @@ func TestAHPBackendSwitchKeepsTheApprovalMode(t *testing.T) {
 	waitForActionType(t, chatSub, "chat/turnComplete")
 	require.Eventually(t, func() bool { return env.backend.activeTurn(alice, ahpTestSession) == nil }, 5*time.Second, 20*time.Millisecond)
 
-	// The person asks to approve tool calls, then switches models.
 	_, err = c.Dispatch(ctx, ahpTestSession, ahptypes.StateAction{Value: &ahptypes.SessionConfigChangedAction{
 		Type: ahptypes.ActionTypeSessionConfigChanged, Config: map[string]json.RawMessage{"approvalMode": json.RawMessage(`"manual"`)},
 	}})
@@ -2445,8 +2322,6 @@ func TestAHPBackendSwitchKeepsTheApprovalMode(t *testing.T) {
 	require.Equal(t, 2, current.Generation)
 }
 
-// File URIs escape names a client's URI parser would otherwise split, and
-// read back as the same path.
 func TestAHPFileURIsEscapeAndRoundTrip(t *testing.T) {
 	for _, name := range []string{"a#b.go", "a?b.go", "a%20b.go", "a b.go", "plain.go"} {
 		file := "/workspace/src/octo/widgets/" + name
@@ -2466,8 +2341,6 @@ func TestAHPFileURIsEscapeAndRoundTrip(t *testing.T) {
 	}
 }
 
-// A message admitted before its session was disposed of waits behind other
-// work; when its turn finally starts, it runs nothing for the gone session.
 func TestAHPBackendRunsNoTurnForADisposedSession(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -2490,7 +2363,6 @@ func TestAHPBackendRunsNoTurnForADisposedSession(t *testing.T) {
 	require.Nil(t, env.backend.activeTurn(alice.UserKey, ahpTestSession))
 }
 
-// ahpSessionReadStore lets a test fail or change the next session read.
 type ahpSessionReadStore struct {
 	store.AHPStore
 	mu   sync.Mutex
@@ -2512,8 +2384,6 @@ func (s *ahpSessionReadStore) GetAHPRecord(ctx context.Context, userKey, kind, k
 	return record, err
 }
 
-// A turn runs only with the approval mode the session holds: a session that
-// cannot be read, or whose mode changed after it was read, starts no Task.
 func TestAHPBackendStartsNoTurnWithAStaleApprovalMode(t *testing.T) {
 	for name, next := range map[string]func(store.AHPRecord, error) (store.AHPRecord, error){
 		"unreadable session": func(store.AHPRecord, error) (store.AHPRecord, error) {
@@ -2560,11 +2430,8 @@ func TestAHPBackendStartsNoTurnWithAStaleApprovalMode(t *testing.T) {
 	}
 }
 
-// A turn whose live updates fell behind after some text streamed ends with its
-// stored result as the answer, so the reply a model switch carries is whole.
 func TestAHPBackendUsesTheStoredResultAfterLiveUpdatesLag(t *testing.T) {
 	env := newAHPTestEnv(t)
-	// A one-event buffer lets the test make the turn's subscription fall behind.
 	env.live = liveevents.NewBroker(1)
 	env.backend.live = env.live
 	c := env.connect("alice")
@@ -2592,7 +2459,6 @@ func TestAHPBackendUsesTheStoredResultAfterLiveUpdatesLag(t *testing.T) {
 	env.publish(taskName, chunk("The first part"))
 	waitForActionType(t, chatSub, "chat/delta")
 
-	// While the turn cannot read, its one-event buffer overflows.
 	turn.mu.Lock()
 	for range 3 {
 		env.publish(taskName, chunk(" lost"))
@@ -2612,7 +2478,6 @@ func TestAHPBackendUsesTheStoredResultAfterLiveUpdatesLag(t *testing.T) {
 	require.Equal(t, answer, record.History[len(record.History)-1].Reply)
 }
 
-// ahpTurnText is the text of a turn's markdown parts.
 func ahpTurnText(parts []ahptypes.ResponsePart) string {
 	var text strings.Builder
 	for _, part := range parts {
@@ -2623,9 +2488,6 @@ func ahpTurnText(parts []ahptypes.ResponsePart) string {
 	return text.String()
 }
 
-// A turn the previous leader streamed in full before it stopped is settled by
-// recovery from its Task without showing the answer twice; one whose shown
-// text is not the answer still gets it.
 func TestAHPBackendRecoveryDoesNotRepeatAStreamedAnswer(t *testing.T) {
 	for _, test := range []struct{ streamed, answer, want string }{
 		{streamed: "woke-up", answer: "woke-up", want: "woke-up"},
@@ -2656,7 +2518,6 @@ func testAHPRecoveredAnswer(t *testing.T, streamed, answer, want string) {
 	env.publish(taskName, &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: streamed}})
 	waitForActionType(t, chatSub, "chat/delta")
 
-	// The leader stops before it settles the turn; the Task then succeeds.
 	env.backend.forgetTurn(turn)
 	env.backend.mu.Lock()
 	delete(env.backend.recovered, alice.UserKey)
@@ -2678,11 +2539,6 @@ func testAHPRecoveredAnswer(t *testing.T, streamed, answer, want string) {
 	require.Equal(t, answer, record.History[len(record.History)-1].Reply)
 }
 
-// Recovery reads sessions and registers their turns under the user's
-// lifecycle lock, which disposing of, creating and starting a turn in a
-// session hold: it waits while one runs, so it never registers a turn for a
-// session that changed after it was read. A connection that recovers
-// meanwhile waits too, and finds the turns live; it scans once.
 func TestAHPBackendRecoveryWaitsForSessionChanges(t *testing.T) {
 	env := newAHPTestEnv(t)
 	scans := &ahpFailingScanStore{AHPStore: env.backend.store}
@@ -2712,9 +2568,6 @@ func TestAHPBackendRecoveryWaitsForSessionChanges(t *testing.T) {
 	require.Equal(t, int32(1), scans.scans.Load(), "the second connection waits for the first recovery instead of scanning")
 }
 
-// A client that reconnects after a restart and subscribes only to its chat,
-// never to the root that lists agents, still finds the turn recovered: its
-// connection recovers it, so the turn settles instead of waiting unseen.
 func TestAHPBackendRecoversTurnsForAClientThatSkipsTheRoot(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -2732,7 +2585,6 @@ func TestAHPBackendRecoversTurnsForAClientThatSkipsTheRoot(t *testing.T) {
 	require.Eventually(t, func() bool { turn = env.backend.activeTurn(alice.UserKey, ahpTestSession); return turn != nil },
 		5*time.Second, 20*time.Millisecond)
 
-	// The leader stops before it settles the turn; the Task then succeeds.
 	env.backend.forgetTurn(turn)
 	env.backend.mu.Lock()
 	delete(env.backend.recovered, alice.UserKey)
@@ -2753,9 +2605,6 @@ func TestAHPBackendRecoversTurnsForAClientThatSkipsTheRoot(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond, "the recovered turn settled")
 }
 
-// A waiting message whose start could not be shown goes back on the queue,
-// even when the store refuses that at first, and is tried again: nothing else
-// would start it until another turn ends.
 func TestAHPBackendRetriesDrainingAfterAStartItCouldNotShow(t *testing.T) {
 	env := newAHPTestEnv(t)
 	env.backend.sessionRetry = time.Millisecond
@@ -2775,7 +2624,6 @@ func TestAHPBackendRetriesDrainingAfterAStartItCouldNotShow(t *testing.T) {
 	refusals := &atomic.Int32{}
 	refusals.Store(3)
 	emit := ahpRefusingStartEmitter{Emitter: env.backend.emitterFor(alice), refusals: refusals}
-	// The store also refuses, at first, to put the message back.
 	var restoreRefusals atomic.Int32
 	failing := &ahpFailingStore{AHPStore: env.backend.store, fail: func(record store.AHPRecord) bool {
 		var session ahpSession
@@ -2796,8 +2644,6 @@ func TestAHPBackendRetriesDrainingAfterAStartItCouldNotShow(t *testing.T) {
 	require.Greater(t, restoreRefusals.Load(), int32(2), "putting the message back was refused, then tried again")
 }
 
-// ahpRefusingStartEmitter refuses to show a turn's start while refusals
-// remain, as a journal that cannot be written.
 type ahpRefusingStartEmitter struct {
 	ahphost.Emitter
 	refusals *atomic.Int32
@@ -2812,8 +2658,6 @@ func (e ahpRefusingStartEmitter) Emit(ctx context.Context, channel string, actio
 	return e.Emitter.Emit(ctx, channel, actions...)
 }
 
-// ahpRefusingDeltaEmitter refuses the next text delta while armed, as a
-// journal that cannot be written.
 type ahpRefusingDeltaEmitter struct {
 	ahphost.Emitter
 	armed *atomic.Bool
@@ -2828,8 +2672,6 @@ func (e ahpRefusingDeltaEmitter) Emit(ctx context.Context, channel string, actio
 	return e.Emitter.Emit(ctx, channel, actions...)
 }
 
-// A piece of the answer the journal refused while it streamed is not lost:
-// the turn ends with the stored answer in full.
 func TestAHPBackendShowsTheStoredAnswerAfterARefusedDelta(t *testing.T) {
 	env := newAHPTestEnv(t)
 	var refuse atomic.Bool
@@ -2875,11 +2717,8 @@ func TestAHPBackendShowsTheStoredAnswerAfterARefusedDelta(t *testing.T) {
 	require.Equal(t, answer, record.History[len(record.History)-1].Reply)
 }
 
-// A permission request held while the turn's live updates fell behind is
-// still shown: the turn reads it back from its approval record.
 func TestAHPBackendShowsAPermissionRequestHeldWhileLiveUpdatesLagged(t *testing.T) {
 	env := newAHPTestEnv(t)
-	// A one-event buffer lets the test make the turn's subscription fall behind.
 	env.live = liveevents.NewBroker(1)
 	env.backend.live = env.live
 	approvalEvents := storetest.NewFakeExecutionEventStore()
@@ -2900,8 +2739,6 @@ func TestAHPBackendShowsAPermissionRequestHeldWhileLiveUpdatesLagged(t *testing.
 	require.Eventually(t, func() bool { turn = env.backend.activeTurn(userKey, ahpTestSession); return turn != nil },
 		5*time.Second, 20*time.Millisecond)
 
-	// The controller holds a request and records it; its live event is lost
-	// with the others the turn could not take.
 	content, err := json.Marshal(map[string]any{
 		"approvalID": "approval-held", "kind": approvals.KindPermission, "action": "Allow the agent to run bash",
 		"riskSummary": "Run the tests", "targetTool": "bash", "toolCallID": "tool-held",
@@ -2925,8 +2762,6 @@ func TestAHPBackendShowsAPermissionRequestHeldWhileLiveUpdatesLagged(t *testing.
 	require.NoError(t, json.Unmarshal(ready, &action))
 	require.Equal(t, "tool-held", action.ToolCallId)
 	require.NotNil(t, action.ConfirmationTitle, "the held request is shown for the person's decision")
-	// Its input is never stored and its live event was lost, so the person
-	// cannot see what it would run: it can only be denied.
 	require.Nil(t, action.ToolInput)
 	require.Len(t, action.Options, 1)
 	require.Equal(t, ahptypes.ConfirmationOptionKindDeny, action.Options[0].Kind)
@@ -2954,8 +2789,6 @@ func TestAHPBackendShowsAPermissionRequestHeldWhileLiveUpdatesLagged(t *testing.
 	}, 5*time.Second, 20*time.Millisecond, "the denial reaches the Task")
 }
 
-// A held request the turn missed is shown with Allow when the call's own
-// updates already reported its input.
 func TestAHPBackendOffersApprovalForARecoveredRequestWithKnownInput(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -2986,7 +2819,6 @@ func TestAHPBackendOffersApprovalForARecoveredRequestWithKnownInput(t *testing.T
 	require.Contains(t, *action.ToolInput.Inline, "go test")
 }
 
-// ahpConfigEmitter records the session config changes the backend shows.
 type ahpConfigEmitter struct {
 	mu      sync.Mutex
 	configs []map[string]json.RawMessage
@@ -3003,8 +2835,6 @@ func (e *ahpConfigEmitter) Emit(_ context.Context, _ string, actions ...ahptypes
 	return nil
 }
 
-// An approval mode a client chose that cannot be stored is shown as the mode
-// the session's turns still run under, so no client shows a mode they do not.
 func TestAHPBackendShowsTheApprovalModeTurnsRunUnder(t *testing.T) {
 	env := newAHPTestEnv(t)
 	env.backend.modeBackoff = wait.Backoff{Duration: time.Millisecond, Factor: 1, Steps: 3}
@@ -3034,15 +2864,12 @@ func TestAHPBackendShowsTheApprovalModeTurnsRunUnder(t *testing.T) {
 	require.JSONEq(t, `"allow-all"`, string(last[ahpConfigEffectiveMode]))
 }
 
-// ahpFailingEmitter refuses every action, as a failed journal write does.
 type ahpFailingEmitter struct{}
 
 func (ahpFailingEmitter) Emit(context.Context, string, ...ahptypes.StateAction) error {
 	return errors.New("the journal refused the write")
 }
 
-// A waiting message whose start cannot be shown stays waiting, with its
-// sender, instead of leaving the queue unseen.
 func TestAHPBackendKeepsAMessageWhoseStartCannotBeShown(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -3073,8 +2900,6 @@ func TestAHPBackendKeepsAMessageWhoseStartCannotBeShown(t *testing.T) {
 	require.Empty(t, tasks.Items)
 }
 
-// The bound on waiting messages holds where the queue is written, so messages
-// two connections had both admitted below it cannot grow the queue past it.
 func TestAHPBackendKeepsTheWaitingMessageBound(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -3098,8 +2923,6 @@ func TestAHPBackendKeepsTheWaitingMessageBound(t *testing.T) {
 	require.False(t, slices.ContainsFunc(record.Pending, func(p ahpPending) bool { return p.ID == "one-too-many" }))
 }
 
-// A message whose start waited past its reservation, while another message's
-// turn was recorded, runs no second Task beside that turn.
 func TestAHPBackendStartsNoTurnBesideAnActiveOne(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -3128,8 +2951,6 @@ func TestAHPBackendStartsNoTurnBesideAnActiveOne(t *testing.T) {
 	require.Equal(t, 1, record.Turns)
 }
 
-// A turn that streamed no text shows its stored result, with the same pattern
-// redaction a live final answer gets.
 func TestAHPBackendRedactsAStoredResult(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -3179,8 +3000,6 @@ func TestAHPBackendRedactsAStoredResult(t *testing.T) {
 	require.NotContains(t, record.History[len(record.History)-1].Reply, secret, "the reply a model switch carries over is redacted")
 }
 
-// A URI created again after it was disposed of gets its own Orka Session, so
-// the Session and Tasks its earlier use kept never stand in its first turn's way.
 func TestAHPBackendGivesARecreatedSessionItsOwnOrkaSession(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -3229,8 +3048,6 @@ func TestAHPCanonicalRepository(t *testing.T) {
 	}
 }
 
-// The namespace's repository credential goes to github.com projects only; a
-// project on another host, which the user names freely, is cloned anonymously.
 func TestAHPBackendSendsTheGitCredentialToGitHubOnly(t *testing.T) {
 	env := newAHPTestEnv(t)
 	ctx := ahpCtx(t)
@@ -3259,8 +3076,6 @@ func TestAHPBackendSendsTheGitCredentialToGitHubOnly(t *testing.T) {
 	}
 }
 
-// A turn's end the store refuses is tried again: a session still recording
-// the turn would refuse every later message while this process runs.
 func TestAHPBackendRetriesATurnEndTheStoreRefused(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -3285,7 +3100,6 @@ func TestAHPBackendRetriesATurnEndTheStoreRefused(t *testing.T) {
 	turn.finishSession()
 	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
 	require.Equal(t, "turn-1", record.ActiveTurn, "the store refused the turn's end")
-	// The store refuses well past a few tries.
 	time.Sleep(300 * time.Millisecond)
 	failing.armed.Store(false)
 	cancel()
@@ -3295,7 +3109,6 @@ func TestAHPBackendRetriesATurnEndTheStoreRefused(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "the turn's end is tried again")
 }
 
-// ahpActionsEmitter records every action emitted.
 type ahpActionsEmitter struct {
 	mu      sync.Mutex
 	actions []ahptypes.StateAction
@@ -3308,8 +3121,6 @@ func (e *ahpActionsEmitter) Emit(_ context.Context, _ string, actions ...ahptype
 	return nil
 }
 
-// A waiting message whose replacement the store refuses keeps waiting, with
-// its sender, and the client shows it again instead of the replacement.
 func TestAHPBackendKeepsAWaitingMessageWhoseReplacementFails(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -3322,7 +3133,6 @@ func TestAHPBackendKeepsAWaitingMessageWhoseReplacementFails(t *testing.T) {
 	env.backend.pendingAuth = map[string]ahpPendingSender{key: {principal: alice, version: "v1"}}
 	env.backend.mu.Unlock()
 	waiting := ahptypes.Message{Text: "run me", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}}
-	// A running turn keeps the message waiting.
 	require.NoError(t, env.backend.updateSession(ctx, alice.UserKey, ahpTestSession, func(s *ahpSession) {
 		s.ActiveTurn = "running"
 		s.Pending = []ahpPending{{ID: "waiting", Kind: string(ahptypes.PendingMessageKindQueued), Version: "v1", Message: waiting}}
@@ -3352,8 +3162,6 @@ func TestAHPBackendKeepsAWaitingMessageWhoseReplacementFails(t *testing.T) {
 	require.Equal(t, "run me", shown.Message.Text)
 }
 
-// A cancel or a tool decision runs after it was admitted. By then its turn
-// may have ended and another started; it must not act on that one.
 func TestAHPBackendDeferredActionsKeepToTheirTurn(t *testing.T) {
 	env := newAHPTestEnv(t)
 	env.backend.cancelBackoff = wait.Backoff{Duration: 20 * time.Millisecond, Factor: 1, Steps: 5}
@@ -3377,7 +3185,6 @@ func TestAHPBackendDeferredActionsKeepToTheirTurn(t *testing.T) {
 		return turn != nil
 	}, 5*time.Second, 20*time.Millisecond)
 
-	// A cancel of an earlier turn stops nothing.
 	env.backend.HandleClientAction(ctx, alice, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnCancelledAction{
 		Type: ahptypes.ActionTypeChatTurnCancelled, TurnId: "turn-0", Duration: 10,
 	}}, &ahpActionsEmitter{})
@@ -3388,8 +3195,6 @@ func TestAHPBackendDeferredActionsKeepToTheirTurn(t *testing.T) {
 		return ok
 	}, 300*time.Millisecond, 20*time.Millisecond, "the running turn's Task is not cancelled")
 
-	// A decision for an earlier turn's tool call decides nothing, even if
-	// the running turn uses the same call ID.
 	var decided atomic.Int32
 	env.backend.decideApproval = func(context.Context, *UserInfo, string, string, string, bool) error {
 		decided.Add(1)
@@ -3412,9 +3217,6 @@ func TestAHPBackendDeferredActionsKeepToTheirTurn(t *testing.T) {
 	require.EqualValues(t, 1, decided.Load(), "the running turn's own decision")
 }
 
-// A turn recorded before a restart whose Task was never created leaves the
-// session counting a turn its Orka Session never ran, and no Orka Session:
-// the next turn creates it, rather than continue one that does not exist.
 func TestAHPBackendCreatesTheOrkaSessionNoTurnCreated(t *testing.T) {
 	env := newAHPTestEnv(t)
 	sessions, ok := env.backend.store.(store.SessionStore)
@@ -3439,9 +3241,6 @@ func TestAHPBackendCreatesTheOrkaSessionNoTurnCreated(t *testing.T) {
 	require.True(t, task.Spec.SessionRef.Create, "the turn creates the Orka Session")
 }
 
-// A turn whose Task could not be created is taken back, also when the store
-// refuses that at first: a session still recording the turn would refuse
-// every later message.
 func TestAHPBackendTakesBackAFailedTurnTheStoreRefusedAtFirst(t *testing.T) {
 	env := newAHPTestEnv(t)
 	env.backend.sessionRetry = time.Millisecond
@@ -3476,9 +3275,6 @@ func TestAHPBackendTakesBackAFailedTurnTheStoreRefusedAtFirst(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "the session is free again")
 }
 
-// A turn whose Task creation reported a failure stays the session's until
-// that Task is known absent or asked to stop: a Task the server kept anyway
-// must not run beside the next turn.
 func TestAHPBackendKeepsAFailedTurnUntilItsTaskIsStopped(t *testing.T) {
 	env := newAHPTestEnv(t)
 	env.backend.cancelBackoff = wait.Backoff{Duration: 20 * time.Millisecond, Factor: 1, Steps: 50}
@@ -3514,8 +3310,6 @@ func TestAHPBackendKeepsAFailedTurnUntilItsTaskIsStopped(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "the turn is taken back once the Task is known absent")
 }
 
-// A message waiting behind a turn whose Task was not created runs once the
-// turn's take-back lands, also when the store refused it at first.
 func TestAHPBackendRunsAWaitingMessageAfterALateTakeBack(t *testing.T) {
 	env := newAHPTestEnv(t)
 	env.backend.sessionRetry = time.Millisecond
@@ -3558,8 +3352,6 @@ func TestAHPBackendRunsAWaitingMessageAfterALateTakeBack(t *testing.T) {
 		"the waiting message starts its turn once the take-back lands")
 }
 
-// The reply a turn ends with reaches the session's history, which a model
-// switch builds its prompt from, also when the store refused it at first.
 func TestAHPBackendKeepsTheReplyTheStoreRefusedAtFirst(t *testing.T) {
 	env := newAHPTestEnv(t)
 	env.backend.sessionRetry = time.Millisecond
@@ -3579,7 +3371,6 @@ func TestAHPBackendKeepsTheReplyTheStoreRefusedAtFirst(t *testing.T) {
 	var refused atomic.Int32
 	failing := &ahpFailingStore{AHPStore: env.backend.store, fail: func(record store.AHPRecord) bool {
 		var session ahpSession
-		// Every write of the session, the reply's included, fails for now.
 		if json.Unmarshal(record.Value, &session) != nil || session.Session != ahpTestSession {
 			return false
 		}
@@ -3604,8 +3395,6 @@ func TestAHPBackendKeepsTheReplyTheStoreRefusedAtFirst(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "the reply is in the session's history")
 }
 
-// A waiting message the store refuses to take off the queue is tried again,
-// rather than wait for another turn to end or a restart.
 func TestAHPBackendRetriesDrainingAWaitingMessage(t *testing.T) {
 	env := newAHPTestEnv(t)
 	env.backend.sessionRetry = time.Millisecond
@@ -3643,7 +3432,6 @@ func TestAHPBackendRetriesDrainingAWaitingMessage(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "the waiting message runs once the store takes it off")
 }
 
-// ahpFailingChannelStore fails reads of channel states while armed.
 type ahpFailingChannelStore struct {
 	store.AHPStore
 	armed atomic.Bool
@@ -3656,8 +3444,6 @@ func (s *ahpFailingChannelStore) GetAHPChannelState(ctx context.Context, userKey
 	return s.AHPStore.GetAHPChannelState(ctx, userKey, channel)
 }
 
-// Recovery that could not read a chat to end its unstarted turn runs again,
-// so the turn does not stay shown as running until the next restart.
 func TestAHPBackendRetriesEndingAnUnstartedTurnItCouldNotRead(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -3688,7 +3474,6 @@ func TestAHPBackendRetriesEndingAnUnstartedTurnItCouldNotRead(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "the retry ends the turn that never started")
 }
 
-// ahpFlakyResultStore fails a number of result reads before answering.
 type ahpFlakyResultStore struct {
 	store.ResultStore
 	failures atomic.Int32
@@ -3701,8 +3486,6 @@ func (s *ahpFlakyResultStore) GetResult(ctx context.Context, namespace, taskName
 	return s.ResultStore.GetResult(ctx, namespace, taskName)
 }
 
-// A turn's stored result is read again after a failed read; one that cannot
-// be read at all is not settled silently.
 func TestAHPTurnRetriesReadingItsResult(t *testing.T) {
 	previous := ahpResultReadDelays
 	ahpResultReadDelays = []time.Duration{time.Millisecond, time.Millisecond}
@@ -3725,7 +3508,6 @@ func TestAHPTurnRetriesReadingItsResult(t *testing.T) {
 	require.Error(t, err, "a read that keeps failing is reported")
 }
 
-// Only models of Agents the person may use are offered.
 func TestAHPAgentChoicesFollowAgentUseAuthorization(t *testing.T) {
 	enableAgentUseAuthorization(t)
 	kube := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(
@@ -3743,11 +3525,10 @@ func TestAHPAgentChoicesFollowAgentUseAuthorization(t *testing.T) {
 		"a model is offered through an Agent the person may use, and not through one they may not")
 }
 
-// ahpPausingStore pauses one call, when armed, until the test lets it go.
 type ahpPausingStore struct {
 	store.AHPStore
-	pauseDeletes chan chan struct{} // DeleteAHPRecords of content
-	pauseRead    chan chan struct{} // GetAHPRecord of a session
+	pauseDeletes chan chan struct{}
+	pauseRead    chan chan struct{}
 }
 
 func (s *ahpPausingStore) DeleteAHPRecords(ctx context.Context, userKey, kind, prefix string) error {
@@ -3773,9 +3554,6 @@ func (s *ahpPausingStore) GetAHPRecord(ctx context.Context, userKey, kind, key s
 	return record, err
 }
 
-// A session update that read the session before it was disposed of cannot
-// write it back after: disposal deletes the record under the lock updates
-// hold from their read to their write.
 func TestAHPBackendDisposalLeavesNoSessionAnUpdateWritesBack(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -3786,14 +3564,12 @@ func TestAHPBackendDisposalLeavesNoSessionAnUpdateWritesBack(t *testing.T) {
 	pausing := &ahpPausingStore{AHPStore: env.backend.store, pauseDeletes: make(chan chan struct{}, 1), pauseRead: make(chan chan struct{}, 1)}
 	env.backend.store = pausing
 
-	// Disposal stops just before it deletes the session's record.
 	releaseDispose := make(chan struct{})
 	pausing.pauseDeletes <- releaseDispose
 	disposed := make(chan error, 1)
 	go func() { disposed <- env.backend.DisposeSession(ctx, alice, ahpTestSession) }()
 	require.Eventually(t, func() bool { return len(pausing.pauseDeletes) == 0 }, 5*time.Second, 5*time.Millisecond)
 
-	// An update reads the session and stops before writing it.
 	releaseUpdate := make(chan struct{})
 	pausing.pauseRead <- releaseUpdate
 	updated := make(chan error, 1)
@@ -3803,7 +3579,7 @@ func TestAHPBackendDisposalLeavesNoSessionAnUpdateWritesBack(t *testing.T) {
 	require.Eventually(t, func() bool { return len(pausing.pauseRead) == 0 }, 5*time.Second, 5*time.Millisecond)
 
 	close(releaseDispose)
-	time.Sleep(100 * time.Millisecond) // disposal deletes now, unless it waits for the update
+	time.Sleep(100 * time.Millisecond)
 	close(releaseUpdate)
 	require.NoError(t, <-updated)
 	require.NoError(t, <-disposed)
@@ -3812,9 +3588,6 @@ func TestAHPBackendDisposalLeavesNoSessionAnUpdateWritesBack(t *testing.T) {
 		"the disposed session is not written back")
 }
 
-// A call the runtime announces before describing it starts once it is
-// described, so clients show its title, and a call named as a typed call
-// without the input that call reads is renamed so clients show its title.
 func TestAHPToolCallStartsDescribedAndAvoidsTypedNamesWithoutInput(t *testing.T) {
 	emitter := &ahpActionsEmitter{}
 	turn := &ahpTurn{id: "turn-1", ctx: t.Context(), emit: emitter, tools: map[string]*ahpToolCall{}}
@@ -3838,30 +3611,23 @@ func TestAHPToolCallStartsDescribedAndAvoidsTypedNamesWithoutInput(t *testing.T)
 		return nil
 	}
 
-	// Announced without a title: nothing is shown yet.
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-1", Kind: "read", Status: harnessv2.ToolCallStatusPending})
 	require.Empty(t, starts())
-	// Described: the call starts with its title, under a name no client types.
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-1", Kind: "read", Title: "Viewing README.md", Status: harnessv2.ToolCallStatusPending})
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-1", Status: harnessv2.ToolCallStatusCompleted})
 	require.Len(t, starts(), 1)
 	require.Equal(t, "read_call", startOf("read-1").ToolName)
 	require.Equal(t, "Viewing README.md", startOf("read-1").DisplayName)
 
-	// A call that runs without ever being described still starts, by its kind.
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "search-1", Kind: "search", Status: harnessv2.ToolCallStatusPending})
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "search-1", Status: harnessv2.ToolCallStatusInProgress})
 	require.Equal(t, "search_call", startOf("search-1").ToolName)
 
-	// The Copilot runtime names its calls by their kind and sends no input.
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-2", Name: "read", Kind: "read", Title: "Viewing go.sum", Status: harnessv2.ToolCallStatusPending})
 	require.Equal(t, "read_call", startOf("read-2").ToolName)
-	// A search with a path but no pattern is renamed too.
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "grep-1", Name: "grep", Title: "Searching", RawInput: json.RawMessage(`{"path":"."}`), Status: harnessv2.ToolCallStatusInProgress})
 	require.Equal(t, "grep_call", startOf("grep-1").ToolName)
 
-	// With the input its typed call reads, a name is kept: announced early,
-	// the input is kept until the call starts.
 	input := json.RawMessage(`{"file_path":"README.md"}`)
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-3", Name: "Read", Kind: "read", RawInput: input, Status: harnessv2.ToolCallStatusPending})
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "read-3", Title: "Read File", Status: harnessv2.ToolCallStatusInProgress})
@@ -3869,9 +3635,6 @@ func TestAHPToolCallStartsDescribedAndAvoidsTypedNamesWithoutInput(t *testing.T)
 	require.JSONEq(t, string(input), string(turn.tools["read-3"].input))
 	require.Empty(t, turn.heldTools)
 
-	// A call described with its input, then run by updates that do not
-	// repeat it, is ready with the input it started with.
-	// Its path is shown relative to the session's working directory.
 	turn.tool(&harnessv2.ToolCallUpdate{
 		ToolCallID: "read-4", Name: "read", Kind: "read", Title: "Viewing go.mod", Status: harnessv2.ToolCallStatusPending,
 		RawInput: json.RawMessage(`{"path":"/sessions/session-1/workspace/go.mod","view_range":[1,5]}`),
@@ -3892,7 +3655,6 @@ func TestAHPToolCallStartsDescribedAndAvoidsTypedNamesWithoutInput(t *testing.T)
 	require.NotNil(t, ready.ToolInput.Inline)
 	require.JSONEq(t, string(path), *ready.ToolInput.Inline)
 
-	// Other names and kinds pass through.
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "bash-1", Name: "bash", Kind: "execute", Title: "Run tests", Status: harnessv2.ToolCallStatusInProgress})
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "exec-1", Name: "execute", Kind: "execute", Title: "List files", Status: harnessv2.ToolCallStatusInProgress})
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "other-1", Kind: "other", Title: "Thinking", Status: harnessv2.ToolCallStatusInProgress})
@@ -3900,8 +3662,6 @@ func TestAHPToolCallStartsDescribedAndAvoidsTypedNamesWithoutInput(t *testing.T)
 	require.Equal(t, "execute", startOf("exec-1").ToolName)
 	require.Equal(t, "other", startOf("other-1").ToolName)
 
-	// A held call that asks for permission starts with what it was announced
-	// with, and the confirmation shows its input.
 	command := json.RawMessage(`{"command":"make test"}`)
 	turn.tool(&harnessv2.ToolCallUpdate{ToolCallID: "bash-2", Kind: "execute", RawInput: command, Status: harnessv2.ToolCallStatusPending})
 	turn.onApproval(&liveevents.Approval{ID: "approval-1", ToolCallID: "bash-2", State: liveevents.ApprovalPending})

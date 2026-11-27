@@ -36,7 +36,6 @@ describe('EventTimeline', () => {
     expect(screen.getByText('TaskCreated')).toBeInTheDocument()
     expect(screen.getByText('task started')).toBeInTheDocument()
     expect(screen.getByText('#1')).toBeInTheDocument()
-    // Lifecycle category label appears for lifecycle events.
     expect(screen.getAllByText('Lifecycle').length).toBeGreaterThan(0)
   })
 
@@ -48,7 +47,6 @@ describe('EventTimeline', () => {
     const row = screen.getByTestId('event-row')
     expect(within(row).getByText('Tools')).toBeInTheDocument()
     expect(within(row).getByText('tool: web_fetch')).toBeInTheDocument()
-    // Tool call id is truncated for display (first 12 chars + ellipsis).
     expect(within(row).getByText(/call-1234567/)).toBeInTheDocument()
   })
 
@@ -56,7 +54,7 @@ describe('EventTimeline', () => {
     const events = [makeEvent({ seq: 1, type: 'ToolCallFailed', severity: 'error', summary: 'boom' })]
     render(<EventTimeline events={events} />)
     const row = screen.getByTestId('event-row')
-    expect(within(row).getByText('Error')).toBeInTheDocument() // sr-only severity label
+    expect(within(row).getByText('Error')).toBeInTheDocument()
   })
 
   it('shows a truncated marker for redacted/truncated payloads', () => {
@@ -78,7 +76,6 @@ describe('EventTimeline', () => {
       makeEvent({ seq: 1, type: 'ToolCallCompleted', content: { ok: true, value: 42 } }),
     ]
     render(<EventTimeline events={events} />)
-    // Payload not shown by default.
     expect(screen.queryByTestId('event-payload')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /show payload/i }))
     expect(screen.getByTestId('event-payload')).toBeInTheDocument()
@@ -115,8 +112,6 @@ describe('EventTimeline', () => {
     render(<EventTimeline events={[makeEvent({ seq: 1 })]} streamStatus="streaming" />)
     const live = screen.getByText('Live')
     expect(live).toBeInTheDocument()
-    // Liveness is encoded with the reserved --color-live token, matching the
-    // structured log viewer and live grid conventions from the redesign.
     expect(live.className).toContain('text-live')
   })
 
@@ -155,7 +150,6 @@ describe('EventTimeline', () => {
 
   it('copies the redacted API payload as JSON, not hidden raw data', async () => {
     const user = userEvent.setup()
-    // userEvent installs a clipboard stub; spy on it after setup so the spy wins.
     const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined)
     render(
       <EventTimeline
@@ -165,7 +159,6 @@ describe('EventTimeline', () => {
     await user.click(screen.getByRole('button', { name: 'Copy JSON' }))
     expect(writeText).toHaveBeenCalledTimes(1)
     const copied = writeText.mock.calls[0][0] as string
-    // The copied text is the serialized event payload exactly as the API serves it.
     const parsed = JSON.parse(copied)
     expect(parsed.seq).toBe(4)
     expect(parsed.content).toEqual({ ok: true })
@@ -176,17 +169,14 @@ describe('EventTimeline', () => {
     render(<EventTimeline events={[makeEvent({ seq: 1, type: 'ToolCallCompleted', content: { x: 1 } })]} />)
     const toggle = screen.getByRole('button', { name: /show payload/i })
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
-    // Collapsed: no dangling aria-controls IDREF (the target is not mounted yet).
     expect(toggle).not.toHaveAttribute('aria-controls')
     toggle.focus()
     expect(toggle).toHaveFocus()
-    // Activate via keyboard (Enter), as a keyboard-only user would.
     await user.keyboard('{Enter}')
     const payload = screen.getByTestId('event-payload')
     expect(payload).toBeInTheDocument()
     const expandedToggle = screen.getByRole('button', { name: /hide payload/i })
     expect(expandedToggle).toHaveAttribute('aria-expanded', 'true')
-    // Expanded: aria-controls now resolves to the mounted payload region.
     const controls = expandedToggle.getAttribute('aria-controls')
     expect(controls).toBeTruthy()
     expect(document.getElementById(controls!)).toContainElement(payload)

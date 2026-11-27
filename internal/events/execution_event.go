@@ -4,9 +4,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// The execution event vocabulary is part of the public storage contract in
-// pkg/storage/v1, because providers validate event filters and terminal
-// approval uniqueness against it. These aliases keep the established names.
 type (
 	ExecutionEventTruncation = storagev1.ExecutionEventTruncation
 )

@@ -64,8 +64,6 @@ func TestValidateReservedServiceAccount(t *testing.T) {
 	}
 }
 
-// The resolver refuses the controller's own ServiceAccount before any
-// TokenRequest, so its token never reaches a policy's token endpoint.
 func TestKubernetesResolverNeverMintsTheReservedServiceAccountToken(t *testing.T) {
 	scheme := resolverScheme(t)
 	for name, policy := range map[string]*corev1alpha1.OutboundAccessPolicy{

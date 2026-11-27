@@ -1,24 +1,3 @@
-// Command wiregen writes the orka.storage.v1 Go-to-wire mapping.
-//
-// It reads the Go contract (pkg/storage/v1) with go/types and the wire
-// descriptors from the generated storagepb registry, checks that the two
-// match completely, and writes:
-//
-//   - zz_generated.mapping.go: conversions between every contract record and
-//     its wire message;
-//   - zz_generated.service.go: the method table, a Client method and a server
-//     handler for every RPC;
-//   - wiretest/zz_generated.overlay.go: the test overlay that serves the
-//     families with RPCs over the wire.
-//
-// Generation fails, writing nothing, when a contract method has no RPC or an
-// RPC no method, when an RPC's kind or contract part differs from the
-// contract's method catalog, when a parameter, result or record field (including a field
-// tagged json:"-") has no wire counterpart or the reverse, when a pair of
-// types is not in the mapping table, or when revision annotations are
-// inconsistent. The wire has no "ignore this field" option.
-//
-// Run it with go generate ./v1/wire from the storage module.
 package main
 
 import (
@@ -75,7 +54,6 @@ func run(contractDir, wireDir, wiretestDir string) error {
 	return nil
 }
 
-// wireFiles returns the orka.storage.v1 descriptors linked into this binary.
 func wireFiles() []protoreflect.FileDescriptor {
 	_ = storagepb.File_orka_storage_v1_options_proto
 	var files []protoreflect.FileDescriptor

@@ -336,10 +336,6 @@ func deleteK8sResource(kind, name string) {
 	_, _ = utils.Run(cmd)
 }
 
-// deleteK8sResourceAndOwnedTasks deletes a resource whose controller owns
-// Tasks and waits until garbage collection has removed them. The suite's final
-// cleanup rejects a Task that is already being deleted, so a spec that happens
-// to run last must not leave one behind.
 func deleteK8sResourceAndOwnedTasks(kind, name string) {
 	deleteK8sResource(kind, name)
 	EventuallyWithOffset(1, func(g Gomega) {

@@ -61,10 +61,6 @@ func TestNewAgentListCmdStructure(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Agent command execution with mock server
-// ---------------------------------------------------------------------------
-
 func agentAPIServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

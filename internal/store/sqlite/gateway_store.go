@@ -57,8 +57,6 @@ var (
 	_ store.GatewayDeliveryStore = (*Store)(nil)
 )
 
-// AdmitGatewayEvent atomically deduplicates a normalized event and, for accepted events,
-// creates/upserts the Session and appends one stable user message.
 func (s *Store) AdmitGatewayEvent(ctx context.Context, admission store.GatewayEventAdmission) (*store.GatewayEvent, bool, error) {
 	result, err := writeOperation(ctx, s, "AdmitGatewayEvent", nil, func(ctx context.Context) (resultPair[*store.GatewayEvent, bool], error) {
 		first, second, err := s.admitGatewayEventWrite(ctx, admission)
@@ -195,7 +193,6 @@ func prepareGatewayEventAdmission(admission store.GatewayEventAdmission) (store.
 	if event.ExpiresAt.IsZero() {
 		return store.GatewayEvent{}, false, "", time.Time{}, store.ValidationErrorf("gateway event expiresAt is required")
 	}
-	// SQL compares these times as text, so every stored time shares one zone.
 	event.UpdatedAt, event.ReceivedAt = event.UpdatedAt.UTC(), event.ReceivedAt.UTC()
 	event.NextAttemptAt, event.ExpiresAt = event.NextAttemptAt.UTC(), event.ExpiresAt.UTC()
 	event.OccurredAt, event.CompletedAt = utcTimePtr(event.OccurredAt), utcTimePtr(event.CompletedAt)
@@ -394,12 +391,10 @@ func appendGatewayUserMessageTx(
 	return err
 }
 
-// GetGatewayEvent returns one event by stable Orka event ID.
 func (s *Store) GetGatewayEvent(ctx context.Context, namespace, id string) (*store.GatewayEvent, error) {
 	return getGatewayEventQuery(ctx, s.taskDataExecutor(ctx), namespace, id)
 }
 
-// GetGatewayEventDuplicate resolves a durable duplicate before mutable readiness checks.
 func (s *Store) GetGatewayEventDuplicate(
 	ctx context.Context, candidate *store.GatewayEvent, now time.Time,
 ) (*store.GatewayEvent, error) {
@@ -455,7 +450,6 @@ func (s *Store) GetGatewayEventDuplicate(
 	return nil, store.ErrNotFound
 }
 
-// GetGatewayEventForTask resolves durable gateway ownership for one linked Task identity.
 func (s *Store) GetGatewayEventForTask(ctx context.Context, namespace, taskName, taskUID string) (*store.GatewayEvent, error) {
 	var event *store.GatewayEvent
 	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
@@ -482,7 +476,6 @@ func (s *Store) getGatewayEventForTaskUnfenced(ctx context.Context, namespace, t
 	return event, err
 }
 
-// HasGatewayTaskTombstone reports whether retention compacted the exact linked Task identity.
 func (s *Store) HasGatewayTaskTombstone(ctx context.Context, namespace, taskName, taskUID string) (bool, error) {
 	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(taskName) == "" || strings.TrimSpace(taskUID) == "" {
 		return false, store.ValidationErrorf("namespace, taskName, and taskUID are required")
@@ -495,7 +488,6 @@ func (s *Store) HasGatewayTaskTombstone(ctx context.Context, namespace, taskName
 	return count > 0, nil
 }
 
-// ListGatewayEvents lists newest-first normalized ingress records.
 func (s *Store) ListGatewayEvents(ctx context.Context, filter store.GatewayEventFilter) ([]store.GatewayEvent, error) {
 	query := `SELECT ` + gatewayEventColumns + ` FROM gateway_events WHERE 1 = 1`
 	args := []any{}
@@ -575,7 +567,6 @@ func (s *Store) ListGatewayEvents(ctx context.Context, filter store.GatewayEvent
 	return gatewayEvents, rows.Err()
 }
 
-// ClaimNextGatewayEvent leases the oldest runnable event and reserves its Session.
 func (s *Store) ClaimNextGatewayEvent(ctx context.Context, namespace, owner string, now time.Time, lease time.Duration) (*store.GatewayEvent, error) {
 	return writeOperation(ctx, s, "ClaimNextGatewayEvent", nil, func(ctx context.Context) (*store.GatewayEvent, error) {
 		return s.claimNextGatewayEventWrite(ctx, namespace, owner, now, lease)
@@ -666,7 +657,6 @@ func (s *Store) claimNextGatewayEventWrite(ctx context.Context, namespace, owner
 	return event, nil
 }
 
-// RenewGatewayEventClaim proves ownership immediately before a consequential Task create.
 func (s *Store) RenewGatewayEventClaim(
 	ctx context.Context,
 	namespace, id, owner string,
@@ -689,8 +679,6 @@ func (s *Store) renewGatewayEventClaimWrite(
 	}
 	now = now.UTC()
 	var event *store.GatewayEvent
-	// The renewal and the returned event share one transaction, so a retry
-	// committed in between cannot be returned as the renewed claim.
 	if err := s.writeTransaction(ctx, func(q taskDataExecutor) error {
 		result, err := q.ExecContext(ctx, `UPDATE gateway_events SET claim_until = ?, updated_at = ?
 		WHERE namespace = ? AND id = ? AND state = ? AND claim_owner = ?
@@ -714,9 +702,6 @@ func (s *Store) renewGatewayEventClaimWrite(
 	return event, nil
 }
 
-// FreezeGatewayEventTaskRuntimeAllowedTools records the external runtime policy
-// that will be written to the deterministic Task. The first value wins so
-// crash recovery never rebuilds the Task from mutable live policy.
 func (s *Store) FreezeGatewayEventTaskRuntimeAllowedTools(
 	ctx context.Context,
 	namespace, id, owner string,
@@ -743,7 +728,6 @@ func (s *Store) freezeGatewayEventTaskRuntimeAllowedToolsWrite(
 	}
 	now = now.UTC()
 	if now.IsZero() {
-		// The claim is a lease, which is judged only at the request's time.
 		return nil, store.ValidationErrorf("the request time is required to check the claim")
 	}
 	var event *store.GatewayEvent
@@ -780,7 +764,6 @@ func (s *Store) freezeGatewayEventTaskRuntimeAllowedToolsWrite(
 	return event, nil
 }
 
-// MarkGatewayEventTaskCreated links a claimed event to its deterministic Task.
 func (s *Store) MarkGatewayEventTaskCreated(ctx context.Context, namespace, id, taskName, taskUID, owner string, now time.Time) error {
 	return writeOperationErr(ctx, s, "MarkGatewayEventTaskCreated", func(ctx context.Context) error {
 		return s.markGatewayEventTaskCreatedWrite(ctx, namespace, id, taskName, taskUID, owner, now)
@@ -853,7 +836,6 @@ func (s *Store) markGatewayEventTaskCreatedWrite(ctx context.Context, namespace,
 	return tx.Commit()
 }
 
-// RetryGatewayEvent returns a failed dispatch to the FIFO queue and releases its reservation.
 func (s *Store) RetryGatewayEvent(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error {
 	return writeOperationErr(ctx, s, "RetryGatewayEvent", func(ctx context.Context) error {
 		return s.retryGatewayEventWrite(ctx, namespace, id, owner, reason, nextAttemptAt)
@@ -896,7 +878,6 @@ func (s *Store) retryGatewayEventWrite(ctx context.Context, namespace, id, owner
 	return tx.Commit()
 }
 
-// DeferGatewayEventProjection rotates a nonterminal TaskCreated event behind other due projection work.
 func (s *Store) DeferGatewayEventProjection(
 	ctx context.Context,
 	namespace, id string,
@@ -928,7 +909,6 @@ func (s *Store) deferGatewayEventProjectionWrite(
 	return nil
 }
 
-// ExpireGatewayEvent terminally expires stale work, appends one visible error, and releases the Session.
 func (s *Store) ExpireGatewayEvent(
 	ctx context.Context,
 	namespace, id, owner, reason string,
@@ -960,8 +940,6 @@ func (s *Store) expireGatewayEventWrite(
 	return tx.Commit()
 }
 
-// ExpireGatewayEventWithDelivery atomically expires stale work and creates the
-// corresponding adapter outbox record.
 func (s *Store) ExpireGatewayEventWithDelivery(
 	ctx context.Context,
 	projection store.GatewayExpiryProjection,
@@ -1039,8 +1017,6 @@ func (s *Store) expireGatewayEventWithDeliveryWrite(
 	return delivery, created, nil
 }
 
-// MarkExpiredGatewayEventDeadLettered releases an unrecoverable legacy expiry
-// from repair ordering without fabricating immutable delivery identity.
 func (s *Store) MarkExpiredGatewayEventDeadLettered(
 	ctx context.Context, namespace, id, reason string, now time.Time,
 ) error {
@@ -1139,8 +1115,6 @@ func expireGatewayEventTx(
 	return nil
 }
 
-// ProjectGatewayTerminal atomically appends one terminal message, creates one outbox row,
-// completes the event, and releases the Session for the next queued event.
 func (s *Store) ProjectGatewayTerminal(ctx context.Context, projection store.GatewayTerminalProjection) (*store.GatewayDelivery, bool, error) {
 	result, err := writeOperation(ctx, s, "ProjectGatewayTerminal", nil, func(ctx context.Context) (resultPair[*store.GatewayDelivery, bool], error) {
 		first, second, err := s.projectGatewayTerminalWrite(ctx, projection)
@@ -1281,7 +1255,6 @@ func validateGatewayTerminalProjection(event *store.GatewayEvent, projection *st
 	return nil
 }
 
-// CreateGatewayDelivery idempotently inserts one outbox row.
 func (s *Store) CreateGatewayDelivery(ctx context.Context, delivery *store.GatewayDelivery) (*store.GatewayDelivery, bool, error) {
 	result, err := writeOperationInto(ctx, s, "CreateGatewayDelivery", nil, delivery, func(ctx context.Context) (resultPair[*store.GatewayDelivery, bool], error) {
 		first, second, err := s.createGatewayDeliveryWrite(ctx, delivery)
@@ -1309,12 +1282,10 @@ func (s *Store) createGatewayDeliveryWrite(ctx context.Context, delivery *store.
 	return got, created, nil
 }
 
-// GetGatewayDelivery returns one delivery by stable ID.
 func (s *Store) GetGatewayDelivery(ctx context.Context, namespace, id string) (*store.GatewayDelivery, error) {
 	return getGatewayDeliveryQuery(ctx, s.taskDataExecutor(ctx), namespace, id)
 }
 
-// ListGatewayDeliveries lists newest-first delivery records.
 func (s *Store) ListGatewayDeliveries(ctx context.Context, filter store.GatewayDeliveryFilter) ([]store.GatewayDelivery, error) {
 	if strings.TrimSpace(filter.Namespace) == "" {
 		return nil, store.ValidationErrorf("namespace is required")
@@ -1364,7 +1335,6 @@ func (s *Store) ListGatewayDeliveries(ctx context.Context, filter store.GatewayD
 	return deliveries, rows.Err()
 }
 
-// ClaimNextGatewayDelivery leases the oldest due outbox row.
 func (s *Store) ClaimNextGatewayDelivery(ctx context.Context, namespace, owner string, now time.Time, lease time.Duration) (*store.GatewayDelivery, error) {
 	return writeOperation(ctx, s, "ClaimNextGatewayDelivery", nil, func(ctx context.Context) (*store.GatewayDelivery, error) {
 		return s.claimNextGatewayDeliveryWrite(ctx, namespace, owner, now, lease)
@@ -1390,9 +1360,6 @@ func (s *Store) claimNextGatewayDeliveryWrite(ctx context.Context, namespace, ow
 	); err != nil {
 		return nil, err
 	}
-	// An expired interim is abandoned before evaluating FIFO, without waiting
-	// for maintenance. An active send lease blocks abandonment; after lease
-	// expiry, the send outcome can still be unknown.
 	if _, err := tx.ExecContext(ctx, `UPDATE gateway_deliveries SET state = ?, last_error = 'delivery expired',
 		claim_owner = '', claim_until = NULL, updated_at = ?
 		WHERE (? = '' OR namespace = ?) AND kind = ? AND expires_at <= ? AND (state IN (?, ?) OR
@@ -1471,7 +1438,6 @@ func (s *Store) claimNextGatewayDeliveryWrite(ctx context.Context, namespace, ow
 	return delivery, nil
 }
 
-// MarkGatewayDeliveryDelivered records one successful provider send.
 func (s *Store) MarkGatewayDeliveryDelivered(ctx context.Context, namespace, id, owner, providerMessageID string, now time.Time) error {
 	return writeOperationErr(ctx, s, "MarkGatewayDeliveryDelivered", func(ctx context.Context) error {
 		return s.markGatewayDeliveryDeliveredWrite(ctx, namespace, id, owner, providerMessageID, now)
@@ -1480,10 +1446,6 @@ func (s *Store) MarkGatewayDeliveryDelivered(ctx context.Context, namespace, id,
 
 func (s *Store) markGatewayDeliveryDeliveredWrite(ctx context.Context, namespace, id, owner, providerMessageID string, now time.Time) error {
 	now = now.UTC()
-	// A transaction ctx carries already holds SQLite's only connection, which
-	// serializes this delivery with event appends. Taking the append mutex
-	// then would deadlock with an ordinary append that holds it while waiting
-	// for the connection.
 	if s.taskDataTx(ctx) == nil {
 		s.executionEventMu.Lock()
 		defer s.executionEventMu.Unlock()
@@ -1527,8 +1489,6 @@ func (s *Store) markGatewayDeliveryDeliveredWrite(ctx context.Context, namespace
 		return store.ErrConflict
 	}
 	if delivery.Kind == gatewayDeliveryKindMessage {
-		// Interim receipts belong only to their outbox row, never the terminal
-		// event correlation, Session transcript or Task completion event stream.
 		return tx.Commit()
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE gateway_events SET delivery_id = ?, provider_message_id = ?, updated_at = ?
@@ -1608,7 +1568,6 @@ func (s *Store) markGatewayDeliveryDeliveredWrite(ctx context.Context, namespace
 	return tx.Commit()
 }
 
-// ScheduleGatewayDeliveryRetry records a retryable adapter result.
 func (s *Store) ScheduleGatewayDeliveryRetry(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error {
 	return writeOperationErr(ctx, s, "ScheduleGatewayDeliveryRetry", func(ctx context.Context) error {
 		return s.scheduleGatewayDeliveryRetryWrite(ctx, namespace, id, owner, reason, nextAttemptAt)
@@ -1634,7 +1593,6 @@ func (s *Store) scheduleGatewayDeliveryRetryWrite(ctx context.Context, namespace
 	return nil
 }
 
-// MarkGatewayDeliveryTerminal records a permanent, dead-lettered, or expired result.
 func (s *Store) MarkGatewayDeliveryTerminal(ctx context.Context, namespace, id, owner string, state store.GatewayDeliveryState, reason string, now time.Time) error {
 	return writeOperationErr(ctx, s, "MarkGatewayDeliveryTerminal", func(ctx context.Context) error {
 		return s.markGatewayDeliveryTerminalWrite(ctx, namespace, id, owner, state, reason, now)
@@ -1663,7 +1621,6 @@ func (s *Store) markGatewayDeliveryTerminalWrite(ctx context.Context, namespace,
 	return nil
 }
 
-// RetryGatewayDelivery manually requeues one dead-lettered or failed delivery.
 func (s *Store) RetryGatewayDelivery(ctx context.Context, namespace, id string, now, expiresAt time.Time) (*store.GatewayDelivery, error) {
 	return writeOperation(ctx, s, "RetryGatewayDelivery", nil, func(ctx context.Context) (*store.GatewayDelivery, error) {
 		return s.retryGatewayDeliveryWrite(ctx, namespace, id, now, expiresAt)
@@ -1671,9 +1628,6 @@ func (s *Store) RetryGatewayDelivery(ctx context.Context, namespace, id string, 
 }
 
 func (s *Store) retryGatewayDeliveryWrite(ctx context.Context, namespace, id string, now, expiresAt time.Time) (*store.GatewayDelivery, error) {
-	// Starting any successor closes the interim retry window permanently.
-	// A terminal abandoned without a send also closes it: subsequent Session
-	// turns can then proceed and their rows may be retained independently.
 	var delivery *store.GatewayDelivery
 	if err := s.writeTransaction(ctx, func(q taskDataExecutor) error {
 		result, err := q.ExecContext(ctx, `UPDATE gateway_deliveries AS delivery SET state = ?, attempt_count = 0,
@@ -1711,7 +1665,6 @@ func (s *Store) retryGatewayDeliveryWrite(ctx context.Context, namespace, id str
 	return delivery, nil
 }
 
-// GetGatewayQueueStats returns exact queue depth and oldest-age inputs without identity labels.
 func (s *Store) GetGatewayQueueStats(ctx context.Context, namespace string) (store.GatewayQueueStats, error) {
 	var stats store.GatewayQueueStats
 	var oldestEvent, oldestDelivery sqliteNullableTime
@@ -1719,7 +1672,6 @@ func (s *Store) GetGatewayQueueStats(ctx context.Context, namespace string) (sto
 	if err != nil {
 		return stats, err
 	}
-	// One snapshot keeps the event and delivery counts consistent.
 	defer func() { _ = tx.Rollback() }()
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), MIN(received_at) FROM gateway_events
 		WHERE (? = '' OR namespace = ?) AND state IN (?, ?, ?, ?)`,
@@ -1739,11 +1691,6 @@ func (s *Store) GetGatewayQueueStats(ctx context.Context, namespace string) (sto
 	return stats, nil
 }
 
-// MaintainGatewayRecords expires pending deliveries, compacts terminal event identities into
-// bounded tombstones, and prunes their transcript messages. Transcripts without ACP
-// records are reclaimed atomically with a cleanup completion. Sessions with ACP
-// identity or records remain for coordinated runtime and Kubernetes cleanup.
-// Event expiry stays in the gateway service so it can atomically create a visible error delivery.
 func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, now, terminalCutoff time.Time) (store.GatewayMaintenanceResult, error) {
 	return writeOperation(ctx, s, "MaintainGatewayRecords", nil, func(ctx context.Context) (store.GatewayMaintenanceResult, error) {
 		return s.maintainGatewayRecordsWrite(ctx, namespace, now, terminalCutoff)
@@ -1782,9 +1729,6 @@ func (s *Store) maintainGatewayRecordsWrite(ctx context.Context, namespace strin
 		result.ExpiredDeliveries = int(count)
 	}
 
-	// Keep every row of an event with messages until the whole event can be
-	// removed. This preserves lifetime quota, replay identity, admission order
-	// and evidence of later sends (even after attempt_count is manually reset).
 	deliveryDelete, err := tx.ExecContext(ctx, `DELETE FROM gateway_deliveries AS delivery WHERE (? = '' OR namespace = ?)
 		AND updated_at < ? AND state IN (?, ?, ?, ?)
 		AND NOT EXISTS (SELECT 1 FROM gateway_deliveries message
@@ -1853,7 +1797,7 @@ func (s *Store) maintainGatewayRecordsWrite(ctx context.Context, namespace strin
 		}
 		if retained {
 			result.DeletedSessionMessages++
-		} // The original message content was removed.
+		}
 		messageDelete, deleteErr := tx.ExecContext(ctx, `DELETE FROM session_messages
 			WHERE namespace = ? AND session_name = ?
 			  AND (message_id IN (?, ?, ?) OR (source_type = 'gateway-event' AND source_ref = ?))`,
@@ -2208,8 +2152,6 @@ func validateGatewayDelivery(delivery *store.GatewayDelivery) error {
 	if !store.IsValidGatewayDeliveryState(delivery.State) {
 		return store.ValidationErrorf("unsupported gateway delivery state %q", delivery.State)
 	}
-	// Generic creation, terminal projection and expiry must never admit a
-	// message: only EnqueueGatewayMessage owns its quota and lifecycle checks.
 	if delivery.Kind != gatewayDeliveryKindFinal && delivery.Kind != gatewayDeliveryKindError {
 		return store.ValidationErrorf("unsupported gateway delivery kind %q", delivery.Kind)
 	}

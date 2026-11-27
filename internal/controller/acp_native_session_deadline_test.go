@@ -28,8 +28,6 @@ func TestACPDispatcherNativeRecoveryUserCancellationResumesOriginalCheckpoint(t 
 	testNativeSessionInterruptionResumesCheckpoint(t, true, "")
 }
 
-// A cancel request recorded while the prompt stream is open settles through
-// the stream-error path and keeps the request's message.
 func TestACPDispatcherNativeRecoveryRequestedCancellationKeepsItsMessage(t *testing.T) {
 	testNativeSessionInterruptionResumesCheckpoint(t, true, "cancelled by alice: wrong repository")
 }
@@ -69,8 +67,6 @@ func testNativeSessionInterruptionResumesCheckpoint(t *testing.T, userCancellati
 					mu.Lock()
 					cancellations = append(cancellations, request)
 					mu.Unlock()
-					// Cancellation stops the simulated provider directly. Requiring TCP
-					// disconnect first makes settlement depend on HTTP transport timing.
 					stopOnce.Do(func() { close(stopPrompt) })
 					select {
 					case <-streamCancelled:
@@ -167,8 +163,6 @@ func testNativeSessionInterruptionResumesCheckpoint(t *testing.T, userCancellati
 		fixture.dispatcher.runtimeContextFactory = nil
 		wantReason, wantMessage, wantCancel = "Cancelled", "prompt cancellation settled", harnessv2.CancelReasonControllerShutdown
 		if cancelRequest != "" {
-			// A recorded cancel request reaches the runtime as the user's,
-			// so it answers pending permission requests as cancelled.
 			wantMessage, wantCancel = cancelRequest, harnessv2.CancelReasonUserRequested
 		}
 		cancelAfterRunning = cancelNativeTaskAfterPromptRunning(ctx, fixture, persistence, timedOut, attemptID, accepted, cancelRequest)
@@ -244,8 +238,6 @@ func testNativeSessionInterruptionResumesCheckpoint(t *testing.T, userCancellati
 		t.Logf("timeout settled: cancel=%s, turn=%s, checkpoint messages=%d, lease released=%t, runtime deletes=%d, cleanup complete=%t",
 			request.Reason, turn.State, carried.MessageCount, control.Lease == nil, len(observed.deletes), taskScopedRuntimeSessionCleanupComplete(current))
 	}()
-	// Cleanup must follow the durable carry-forward in this same dispatch, not
-	// fail before its later Session finalization defer has settled the turn.
 	require.NoError(t, dispatchErr)
 	require.True(t, taskScopedRuntimeSessionCleanupComplete(current))
 	require.Empty(t, nativeRecoveryRuntimeStatus(t, ctx, fixture.dispatcher, current).Sessions)
@@ -256,7 +248,6 @@ func testNativeSessionInterruptionResumesCheckpoint(t *testing.T, userCancellati
 		require.Equal(t, *carried, observed.deletedNative[1])
 	}()
 
-	// A fresh dispatcher has no cached runtime binding to mask a lost checkpoint.
 	restarted := newNativeRecoveryDispatcher(t, fixture, persistence)
 	continued := newNativeRecoveryContinuation(t, ctx, fixture, "native-after-deadline", "99999999-9999-9999-9999-999999999999", "prompt-native-after-deadline")
 	dispatchQueuedTask(ctx, t, restarted, continued)
@@ -327,16 +318,12 @@ func cancelNativeTaskAfterPromptRunning(
 				return
 			}
 			if attempt.ExecutionState == store.PromptExecutionRunning {
-				// The dispatcher keeps writing Task status while the prompt runs;
-				// a cancelling writer must retry its update after a conflict.
 				cancelled <- retry.RetryOnConflict(retry.DefaultRetry, func() error {
 					target := &corev1alpha1.Task{}
 					if err := fixture.kubeClient.Get(ctx, client.ObjectKeyFromObject(timedOut), target); err != nil {
 						return err
 					}
 					if cancelRequest != "" && target.Annotations[labels.AnnotationCancelRequested] != cancelRequest {
-						// The request is recorded first; the controller then
-						// writes the Cancelled phase with its message.
 						if target.Annotations == nil {
 							target.Annotations = map[string]string{}
 						}

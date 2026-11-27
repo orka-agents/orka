@@ -25,7 +25,6 @@ var _ = Describe("Agent Advanced Features", func() {
 	const prefix = "e2e-agent-adv-"
 
 	AfterEach(func() {
-		// Clean up all resources with the prefix
 		for _, kind := range []string{"task", "agent", "provider", "skill", "configmap"} {
 			cmd := exec.Command("kubectl", "delete", kind, "-l", "e2e-group=agent-adv",
 				"-n", namespace, "--ignore-not-found")
@@ -238,7 +237,6 @@ var _ = Describe("Agent Advanced Features", func() {
 		By("creating a Provider for the session test")
 		createProviderCRD(providerName, "openai", "e2e-openai-secret", "api-key", e2eOpenAIBaseURL, model)
 
-		// Label the provider for cleanup
 		cmd := exec.Command("kubectl", "label", "provider", providerName,
 			"e2e-group=agent-adv", "-n", namespace, "--overwrite")
 		_, _ = utils.Run(cmd)

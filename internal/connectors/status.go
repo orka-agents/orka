@@ -16,8 +16,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// NormalizeConnectionMode returns the effective Connection mode; an empty
-// mode is readOnly.
 func NormalizeConnectionMode(mode string) (string, error) {
 	switch mode {
 	case "":
@@ -29,13 +27,6 @@ func NormalizeConnectionMode(mode string) (string, error) {
 	}
 }
 
-// ApplyLinkedStatus records a successful consent on the Connection from the
-// material custody holds: the provider OAuth client it was granted against,
-// the granted scopes, the expiry, and the three conditions. The granted
-// scopes are judged against what the mode requires now: a provider expanded
-// after consent started leaves the link Pending until the person consents
-// again. Both the API (right after a commit) and the controller (finishing a
-// commit whose status write was lost) use it, so they never disagree.
 func ApplyLinkedStatus(connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider, credential store.ConnectorCredential, now metav1.Time) {
 	mode, _ := NormalizeConnectionMode(connection.Spec.Mode)
 	connection.Status.State = corev1alpha1.ConnectionStateReady

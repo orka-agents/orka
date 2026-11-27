@@ -14,15 +14,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// The methods in this file apply Orka's redaction and sanitization policy
-// before a provider sees the data, so a provider only ever stores content
-// that Orka has already made safe to persist. A request whose caller supplied
-// its own write envelope is sent unchanged (see identity.go), so for it they
-// only check the policy: a request the policy would change is refused with
-// ErrValidation, and one it would not change is sent as it is.
-
-// protectText redacts value, or returns a caller-owned value as it is and
-// refuses one redaction would change.
 func protectText(ctx context.Context, method, field, value string) (string, error) {
 	redacted := redact.SensitiveText(value)
 	if redacted != value && callerOwnsEnvelope(ctx) {
@@ -31,9 +22,6 @@ func protectText(ctx context.Context, method, field, value string) (string, erro
 	return redacted, nil
 }
 
-// protectTexts redacts every field in place, or, for a caller-owned request,
-// leaves them all as they are and refuses the request if redaction would
-// change any. Nothing is changed when it refuses.
 func protectTexts(ctx context.Context, method string, fields map[string]*string) error {
 	redacted := make(map[string]string, len(fields))
 	for name, field := range fields {
@@ -49,7 +37,6 @@ func protectTexts(ctx context.Context, method string, fields map[string]*string)
 	return nil
 }
 
-// AppendExecutionEvent sanitizes the event payload before appending it.
 func (c *Client) AppendExecutionEvent(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
 	started := time.Now()
 	prepared, err := c.prepareExecutionEvent(ctx, "AppendExecutionEvent", event)
@@ -66,8 +53,6 @@ func (c *Client) AppendExecutionEvent(ctx context.Context, event *store.Executio
 	return appended, nil
 }
 
-// AppendExecutionEventIfAbsent sanitizes the event payload before appending
-// it under a deduplication key.
 func (c *Client) AppendExecutionEventIfAbsent(
 	ctx context.Context,
 	event *store.ExecutionEvent,
@@ -93,8 +78,6 @@ func (c *Client) AppendExecutionEventIfAbsent(
 	return appended, isNew, nil
 }
 
-// AppendExecutionEventWithPlanIfAbsent sanitizes the event payload before
-// appending it together with its plan projection.
 func (c *Client) AppendExecutionEventWithPlanIfAbsent(
 	ctx context.Context,
 	event *store.ExecutionEvent,
@@ -124,12 +107,6 @@ func (c *Client) AppendExecutionEventWithPlanIfAbsent(
 	return appended, isNew, nil
 }
 
-// AppendExecutionEventsIfAbsent sanitizes each event payload before the
-// grouped append. Each event in the group counts as one append attempt: a
-// refused group counts every event as failed, as does a provider error, since
-// the provider commits a group in one transaction. A deduplicated replay
-// counts as appended, and an invalid deduplication key is refused before the
-// provider is called and is not counted, as for the single-event methods.
 func (c *Client) AppendExecutionEventsIfAbsent(ctx context.Context, appends []store.ExecutionEventAppend) ([]store.ExecutionEventAppendResult, error) {
 	started := time.Now()
 	prepared := make([]store.ExecutionEventAppend, len(appends))
@@ -159,12 +136,6 @@ func (c *Client) AppendExecutionEventsIfAbsent(ctx context.Context, appends []st
 	return results, nil
 }
 
-// prepareExecutionEvent returns a sanitized copy of event: payload fields are
-// redacted and bounded, the truncation metadata records what was cut, and the
-// usage observation the event carries is derived from the sanitized payload.
-// Orka stamps the creation time when the caller left it unset, so a derived
-// observation shares the event's time. The caller's event is not changed.
-// A caller-owned event that preparation would change is refused.
 func (c *Client) prepareExecutionEvent(ctx context.Context, method string, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
 	if event == nil {
 		return nil, store.ValidationErrorf("execution event is required")
@@ -196,8 +167,6 @@ func (c *Client) prepareExecutionEvent(ctx context.Context, method string, event
 	return &prepared, nil
 }
 
-// sameExecutionEvent reports whether preparation left an event as it was.
-// Content compares as bytes and the creation time as an instant.
 func sameExecutionEvent(prepared, original store.ExecutionEvent) bool {
 	if !bytes.Equal(prepared.Content, original.Content) || !prepared.CreatedAt.Equal(original.CreatedAt) {
 		return false
@@ -207,9 +176,6 @@ func sameExecutionEvent(prepared, original store.ExecutionEvent) bool {
 	return reflect.DeepEqual(prepared, original)
 }
 
-// providerContext masks the controller's usage attribution once the client
-// has derived usage from it, so a provider receives only the derived and
-// redacted observation. Cancellation and transaction values are kept.
 func providerContext(ctx context.Context) context.Context {
 	if store.UsageAttributionFrom(ctx) == (store.UsageAttribution{}) {
 		return ctx
@@ -232,9 +198,6 @@ func cloneExecutionEvent(event store.ExecutionEvent) store.ExecutionEvent {
 	return event
 }
 
-// CreateMemory redacts the memory content before storing it, and gives a
-// memory without an ID or times one. The caller's record receives the
-// redacted content and the assigned identity, as the stored copy does.
 func (c *Client) CreateMemory(ctx context.Context, memory *store.Memory) error {
 	if memory == nil {
 		return store.ValidationErrorf("memory is required")
@@ -255,7 +218,6 @@ func (c *Client) CreateMemory(ctx context.Context, memory *store.Memory) error {
 	return c.StateProvider.CreateMemory(ctx, memory)
 }
 
-// UpdateMemory redacts the memory content before storing it.
 func (c *Client) UpdateMemory(ctx context.Context, memory *store.Memory) error {
 	if memory == nil {
 		return store.ValidationErrorf("memory is required")
@@ -268,8 +230,6 @@ func (c *Client) UpdateMemory(ctx context.Context, memory *store.Memory) error {
 	return c.StateProvider.UpdateMemory(ctx, memory)
 }
 
-// CreateMemoryProposal redacts every free-text proposal field before storing
-// the proposal, and gives a proposal without an ID or times one.
 func (c *Client) CreateMemoryProposal(ctx context.Context, proposal *store.MemoryProposal) error {
 	if proposal == nil {
 		return store.ValidationErrorf("proposal is required")
@@ -296,9 +256,6 @@ func (c *Client) CreateMemoryProposal(ctx context.Context, proposal *store.Memor
 	return c.StateProvider.CreateMemoryProposal(ctx, proposal)
 }
 
-// CompleteMemoryConsolidationRun redacts every proposal a run creates, as
-// CreateMemoryProposal redacts one, and gives a proposal without an ID or
-// times one.
 func (c *Client) CompleteMemoryConsolidationRun(ctx context.Context, completion store.MemoryConsolidationCompletion) (*store.MemoryConsolidationRun, error) {
 	proposals := make([]store.MemoryProposal, len(completion.Proposals))
 	copy(proposals, completion.Proposals)
@@ -332,7 +289,6 @@ func (c *Client) CompleteMemoryConsolidationRun(ctx context.Context, completion 
 	return c.StateProvider.CompleteMemoryConsolidationRun(ctx, completion)
 }
 
-// ReviewMemoryProposal redacts the reviewer and review note.
 func (c *Client) ReviewMemoryProposal(ctx context.Context, review store.MemoryProposalReview) error {
 	if err := protectTexts(ctx, "ReviewMemoryProposal", map[string]*string{
 		"the reviewer":    &review.Reviewer,
@@ -343,14 +299,10 @@ func (c *Client) ReviewMemoryProposal(ctx context.Context, review store.MemoryPr
 	return c.StateProvider.ReviewMemoryProposal(ctx, review)
 }
 
-// SaveThreatModel sanitizes the threat model content before storing it. The
-// caller's record receives the sanitized content.
 func (c *Client) SaveThreatModel(ctx context.Context, model *store.ThreatModel) error {
 	return saveThreatModel(ctx, c.StateProvider, model)
 }
 
-// SaveThreatModelIfVersion sanitizes the threat model content before the
-// conditional save.
 func (c *Client) SaveThreatModelIfVersion(ctx context.Context, model *store.ThreatModel, expectedVersion int64) error {
 	return saveThreatModelIfVersion(ctx, c.StateProvider, model, expectedVersion)
 }
@@ -380,8 +332,6 @@ func saveThreatModelIfVersion(ctx context.Context, writer threatModelWriter, mod
 	return writer.SaveThreatModelIfVersion(ctx, model, expectedVersion)
 }
 
-// protectThreatModel sanitizes the model's content in place, or leaves a
-// caller-owned model as it is and refuses one sanitizing would change.
 func protectThreatModel(ctx context.Context, method string, model *store.ThreatModel) error {
 	sanitized := security.SanitizeThreatModel(model.Content)
 	if sanitized != model.Content && callerOwnsEnvelope(ctx) {
@@ -391,8 +341,6 @@ func protectThreatModel(ctx context.Context, method string, model *store.ThreatM
 	return nil
 }
 
-// RecordUsage redacts and bounds the provider and model names before storing
-// the observation.
 func (c *Client) RecordUsage(ctx context.Context, observation store.UsageObservation) error {
 	protected := protectUsageObservation(observation)
 	if callerOwnsEnvelope(ctx) {
@@ -410,5 +358,4 @@ func protectUsageObservation(observation store.UsageObservation) store.UsageObse
 	return observation
 }
 
-// maxUsageNameChars bounds stored provider and model names.
 const maxUsageNameChars = 256

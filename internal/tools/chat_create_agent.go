@@ -28,7 +28,6 @@ import (
 	"github.com/orka-agents/orka/internal/tracing"
 )
 
-// ChatCreateAgentTool creates an Agent CRD from the chat context.
 type ChatCreateAgentTool struct{}
 
 func (t *ChatCreateAgentTool) Name() string { return createAgentToolName }
@@ -103,7 +102,6 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		},
 	}
 
-	// Model configuration
 	if modelObj, ok := a[modelField]; ok {
 		switch m := modelObj.(type) {
 		case map[string]any:
@@ -152,7 +150,6 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		}
 	}
 
-	// Set providerRef only when explicitly provided. Runtime Agents clear it below.
 	if providerRefName := chatGetStringArg(a, providerRefField); providerRefName != "" {
 		agent.Spec.ProviderRef = &corev1alpha1.ProviderReference{Name: providerRefName}
 	}
@@ -214,8 +211,6 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	if result, ok := authorizeAgentCreate(ctx, tc, agent); !ok {
 		return result, nil
 	}
-	// Check existence only after authorization, so a scoped caller cannot use
-	// this error to probe Provider names it may not reference.
 	if agent.Spec.ProviderRef != nil {
 		if result, ok := requireExistingProvider(ctx, tc, namespace, agent.Spec.ProviderRef.Name); !ok {
 			return result, nil
@@ -225,7 +220,6 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		return classifyChatK8sErr(err)
 	}
 
-	// Handle initialPrompt: create a task for the agent
 	if initialPrompt := chatGetStringArg(a, "initialPrompt"); initialPrompt != "" {
 		return t.handleInitialPrompt(ctx, tc, agent, namespace, initialPrompt)
 	}
@@ -233,9 +227,6 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	return ChatToolSuccess(map[string]any{nameField: agent.Name, namespaceField: agent.Namespace, messageField: "Agent created"})
 }
 
-// decodeChatCreateAgentArgs preserves the number text only for fields whose
-// bounds must be checked before narrowing. Other fields retain json.Unmarshal's
-// float64 decoding, including model limits and coordination's existing parser.
 func decodeChatCreateAgentArgs(args json.RawMessage) (map[string]any, error) {
 	var values map[string]any
 	if err := json.Unmarshal(args, &values); err != nil {
@@ -287,7 +278,6 @@ func parseChatAgentDefaultMaxTurns(raw any) (int32, error) {
 		text, got := canonicalJSONInteger(number.String())
 		if got == "" {
 			turns, err := strconv.ParseInt(text, 10, 64)
-			// Mirror the Agent CRD's 1..1000 bounds before converting to int32.
 			if err == nil && turns >= minMaxTurns && turns <= maxMaxTurns {
 				return int32(turns), nil
 			}
@@ -306,16 +296,13 @@ func parseChatAgentTemperature(raw any) (float64, error) {
 	return 0, fmt.Errorf("model.temperature must be a number between 0 and 2")
 }
 
-// chatAgentTemperatureInRange checks a valid JSON number's exact decimal value.
-// Comparing its decimal magnitude avoids both float64 boundary rounding and
-// allocating an arbitrary-precision rational for attacker-supplied exponents.
 func chatAgentTemperatureInRange(text string) bool {
 	mantissa, exponent, _ := strings.Cut(strings.ToLower(text), "e")
 	mantissa, negative := strings.CutPrefix(mantissa, "-")
 	whole, fraction, _ := strings.Cut(mantissa, ".")
 	digits := strings.TrimLeft(whole+fraction, "0")
 	if digits == "" {
-		return true // Any spelling of zero, including negative zero.
+		return true
 	}
 	if negative {
 		return false
@@ -325,14 +312,9 @@ func chatAgentTemperatureInRange(text string) bool {
 		var err error
 		exp, err = strconv.Atoi(exponent)
 		if err != nil {
-			// An exponent beyond the machine integer range dwarfs the
-			// mantissa: a nonzero value is either below 2 or above it.
 			return strings.HasPrefix(exponent, "-")
 		}
 	}
-	// The value is digits * 10^(exp-len(fraction)). A value with exactly
-	// one whole digit needs a coefficient comparison; all others are
-	// strictly below or above 2. Compare exponents without adding them.
 	boundaryExp := len(fraction) - len(digits) + 1
 	if exp != boundaryExp {
 		return exp < boundaryExp
@@ -340,10 +322,6 @@ func chatAgentTemperatureInRange(text string) bool {
 	return digits[0] < '2' || (digits[0] == '2' && strings.Trim(digits[1:], "0") == "")
 }
 
-// requireExistingProvider rejects a providerRef that names no Provider, so the
-// model can correct it in the same turn instead of a later Task failing. The
-// error names no other Providers: this lookup uses controller credentials, and
-// the authorization-aware Providers API is the enumeration surface.
 func requireExistingProvider(ctx context.Context, tc *ToolContext, namespace, name string) (string, bool) {
 	err := toolPolicyReader(ctx, tc.Client).Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &corev1alpha1.Provider{})
 	if err == nil {
@@ -475,7 +453,6 @@ func parseResourceListArg(resourcesMap map[string]any, key string) (corev1.Resou
 	return resourceList, "", true
 }
 
-// parseRuntimeConfig extracts runtime configuration from chat args into the agent spec.
 func parseRuntimeConfig(a map[string]any, agent *corev1alpha1.Agent) (string, bool) {
 	var requested RuntimeArgs
 	if value, exists := a[runtimeField]; exists {
@@ -529,9 +506,6 @@ func parseRuntimeConfig(a map[string]any, agent *corev1alpha1.Agent) (string, bo
 	}
 	if resolvedRuntimeType != corev1alpha1.AgentRuntimeOpencode &&
 		(agent.Spec.Model == nil || strings.TrimSpace(agent.Spec.Model.Name) == "") {
-		// Admission rejects a harness-v2 built-in runtime Agent without
-		// spec.model.name; surface the requirement here instead of after a
-		// denied create.
 		result, _ := ChatToolErrorResult(
 			"invalid_arguments",
 			fmt.Sprintf("model.name is required for %s runtime Agents: the ACP runtime session has no default model", resolvedRuntimeType),
@@ -581,11 +555,6 @@ func normalizeChatOpenCodeModel(agent *corev1alpha1.Agent) (string, bool) {
 	return "", true
 }
 
-// parseCoordinationConfig extracts coordination configuration from chat args
-// into the agent spec. It returns an error result and false for a field with
-// the wrong JSON type or an allowed agent without a name. Ignoring either would
-// drop a restriction: an empty allowedAgents lets the Agent delegate to any
-// agent.
 func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) (string, bool) {
 	coord, ok := a["coordination"]
 	if !ok {
@@ -615,8 +584,6 @@ func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) (strin
 		if value == nil {
 			continue
 		}
-		// Out-of-range values would wrap when narrowed to int32, possibly into
-		// the range the Agent CRD accepts.
 		number, ok := value.(float64)
 		if !ok || number != math.Trunc(number) || number < math.MinInt32 || number > math.MaxInt32 {
 			return invalid(limit.field, "a whole number")

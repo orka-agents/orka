@@ -18,23 +18,14 @@ import (
 	"github.com/orka-agents/orka/internal/connectors"
 )
 
-// ListConnectionsToolName is the tool that shows a person their linked
-// accounts and the providers they could still connect.
 const ListConnectionsToolName = "list_connections"
 
-// ConnectorSettingsPath is where a person links accounts in the dashboard.
 const ConnectorSettingsPath = "/settings/connectors"
 
-// ListConnectionsTool lists the requester's Connections and the connector
-// providers available to link. It reads through the controller (never the
-// caller's own Kubernetes permissions) and reports only the Connections
-// whose subject is the verified requester; it never returns token material.
 type ListConnectionsTool struct{}
 
-// Name returns the tool name.
 func (t *ListConnectionsTool) Name() string { return ListConnectionsToolName }
 
-// Description returns the tool description.
 func (t *ListConnectionsTool) Description() string {
 	return "List the accounts the person who started this work has linked (for example GitHub), whether each is ready and readOnly or readWrite, " +
 		"and the connector providers they could still link. Use it before a tool that acts as the person; when a provider is not linked, " +
@@ -43,40 +34,30 @@ func (t *ListConnectionsTool) Description() string {
 		"instead of trying another credential."
 }
 
-// Parameters returns the JSON schema for tool parameters.
 func (t *ListConnectionsTool) Parameters() json.RawMessage {
 	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{}})
 }
 
-// ListConnectionsResult is the tool's result.
 type ListConnectionsResult struct {
-	Connections []LinkedConnectionSummary  `json:"connections"`
-	Available   []ConnectorProviderSummary `json:"available"`
-	// Namespace is where the links live; CLI commands must name it, since
-	// the person's CLI may default to another namespace.
-	Namespace string `json:"namespace,omitempty"`
-	// SettingsPath is the dashboard's connector page, set only when the
-	// controller serves the dashboard.
-	SettingsPath string `json:"settingsPath,omitempty"`
+	Connections  []LinkedConnectionSummary  `json:"connections"`
+	Available    []ConnectorProviderSummary `json:"available"`
+	Namespace    string                     `json:"namespace,omitempty"`
+	SettingsPath string                     `json:"settingsPath,omitempty"`
 }
 
-// LinkedConnectionSummary is one of the requester's Connections.
 type LinkedConnectionSummary struct {
-	Provider    string   `json:"provider"`
-	DisplayName string   `json:"displayName"`
-	Mode        string   `json:"mode"`
-	State       string   `json:"state"`
-	Ready       bool     `json:"ready"`
-	LinkedAt    string   `json:"linkedAt,omitempty"`
-	Message     string   `json:"message,omitempty"`
-	Tools       []string `json:"tools"`
-	// ProviderMissing marks a link whose ConnectorProvider was removed.
-	ProviderMissing bool `json:"providerMissing,omitempty"`
-	// Deleting marks a link whose disconnect is still finishing.
-	Deleting bool `json:"deleting,omitempty"`
+	Provider        string   `json:"provider"`
+	DisplayName     string   `json:"displayName"`
+	Mode            string   `json:"mode"`
+	State           string   `json:"state"`
+	Ready           bool     `json:"ready"`
+	LinkedAt        string   `json:"linkedAt,omitempty"`
+	Message         string   `json:"message,omitempty"`
+	Tools           []string `json:"tools"`
+	ProviderMissing bool     `json:"providerMissing,omitempty"`
+	Deleting        bool     `json:"deleting,omitempty"`
 }
 
-// ConnectorProviderSummary is a provider the requester has not linked.
 type ConnectorProviderSummary struct {
 	Provider    string   `json:"provider"`
 	DisplayName string   `json:"displayName"`
@@ -84,7 +65,6 @@ type ConnectorProviderSummary struct {
 	Tools       []string `json:"tools"`
 }
 
-// Execute lists the requester's Connections and the remaining providers.
 func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (string, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {
@@ -111,20 +91,10 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 	if err := reader.List(ctx, providers, client.InNamespace(tc.Namespace)); err != nil {
 		return classifyChatK8sErr(err)
 	}
-	// The person's Connections are listed on their own, so a link whose
-	// provider was removed (it keeps its tokens until disconnected) is
-	// still reported, as unusable, rather than silently dropped. Ownership
-	// comes from spec.subject, not the index label, the same listing
-	// credential resolution uses, so a link created outside the API or with
-	// its label stripped is never reported as missing.
 	owned, err := connectors.ListSubjectConnectionsAuthoritative(ctx, reader, tc.Namespace, requester)
 	if err != nil {
 		return classifyChatK8sErr(err)
 	}
-	// Every link is kept: a person can hold several Connections to one
-	// provider (created outside the API under their own names), and
-	// credential resolution refuses the tool while duplicates exist, so
-	// each one is reported rather than one hiding the rest.
 	byProvider := make(map[string][]*corev1alpha1.Connection, len(owned))
 	for i := range owned {
 		byProvider[owned[i].Spec.ProviderRef.Name] = append(byProvider[owned[i].Spec.ProviderRef.Name], &owned[i])
@@ -157,20 +127,12 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 			summary := linkedConnectionSummary(connection, displayName, toolNames, false, tc.DashboardEnabled)
 			switch {
 			case len(links) > 1:
-				// Resolution refuses the tool while the person holds more
-				// than one link to the provider; each is reported unusable.
 				summary.Ready = false
 				summary.Message = "you hold several links to this provider; disconnect the extra ones " + disconnectGuidance(tc.DashboardEnabled, connection.Namespace) + " before its tools can run"
 			case !connectors.ProviderAccepted(provider):
-				// Credential resolution refuses a link whose provider is not
-				// accepted, so the listing says so instead of advertising a
-				// link the Connection's own conditions have not caught up on.
 				summary.Ready = false
 				summary.Message = "the provider is not accepted right now (its spec changed or its references are invalid); the link cannot be used until it is"
 			case summary.Ready && !connectors.ConsentMatchesProvider(connection, provider):
-				// The same checks credential resolution applies: a provider
-				// changed since consent refuses the token at once, before the
-				// Connection's conditions catch up.
 				summary.Ready = false
 				summary.Message = "the provider changed since you consented; relink it " + relinkGuidance(tc.DashboardEnabled, connection, requester, summary.Mode) + " before its tools can run"
 			case summary.Ready && !connectors.ScopesCover(connection.Status.GrantedScopes, connectors.ScopesForMode(provider, summary.Mode)):
@@ -190,8 +152,6 @@ func (t *ListConnectionsTool) Execute(ctx context.Context, _ json.RawMessage) (s
 	return ChatToolSuccess(result)
 }
 
-// linkedConnectionSummary describes one of the person's links. A link
-// whose provider is gone is never ready and says so.
 func linkedConnectionSummary(connection *corev1alpha1.Connection, displayName string, toolNames []string, providerMissing, dashboard bool) LinkedConnectionSummary {
 	summary := LinkedConnectionSummary{
 		Provider: connection.Spec.ProviderRef.Name, DisplayName: displayName, Mode: connection.Spec.Mode, State: connection.Status.State,
@@ -201,8 +161,6 @@ func linkedConnectionSummary(connection *corev1alpha1.Connection, displayName st
 	if summary.Mode == "" {
 		summary.Mode = corev1alpha1.ConnectionModeReadOnly
 	}
-	// A Connection the controller has not reconciled yet has no state;
-	// the API view calls that Pending, and so does this listing.
 	if summary.State == "" {
 		summary.State = corev1alpha1.ConnectionStatePending
 	}
@@ -215,8 +173,6 @@ func linkedConnectionSummary(connection *corev1alpha1.Connection, displayName st
 	if providerMissing {
 		summary.Message = "the provider is no longer configured; this link cannot be used and should be disconnected " + disconnectGuidance(dashboard, connection.Namespace)
 	}
-	// A disconnect in progress (the finalizer revokes tokens first, and may
-	// retry) is neither Ready nor something to relink.
 	if !connection.DeletionTimestamp.IsZero() {
 		summary.Deleting = true
 		summary.State = "Disconnecting"
@@ -225,11 +181,6 @@ func linkedConnectionSummary(connection *corev1alpha1.Connection, displayName st
 	return summary
 }
 
-// relinkGuidance says how the person renews a link: the dashboard page when
-// the controller serves one, otherwise the CLI command that starts a new
-// consent for the same provider and mode. `orka connect` consents under the
-// name the API generates for the person, so a link created under another
-// name is removed first; connecting beside it would only add a duplicate.
 func relinkGuidance(dashboard bool, connection *corev1alpha1.Connection, requester *corev1alpha1.RequestedBy, mode string) string {
 	if dashboard {
 		return "under " + ConnectorSettingsPath
@@ -247,8 +198,6 @@ func relinkGuidance(dashboard bool, connection *corev1alpha1.Connection, request
 	return "with `" + command + "`"
 }
 
-// disconnectGuidance says how the person removes a link: the dashboard page
-// when the controller serves one, otherwise the CLI commands.
 func disconnectGuidance(dashboard bool, namespace string) string {
 	if dashboard {
 		return "under " + ConnectorSettingsPath
@@ -257,8 +206,6 @@ func disconnectGuidance(dashboard bool, namespace string) string {
 	return "with `orka connection delete <name>" + in + "` (`orka connection list" + in + "` shows the names)"
 }
 
-// cliNamespaceFlag names the link's namespace in a CLI command, which would
-// otherwise act in whatever namespace the person's CLI defaults to.
 func cliNamespaceFlag(namespace string) string {
 	if strings.TrimSpace(namespace) == "" {
 		return ""

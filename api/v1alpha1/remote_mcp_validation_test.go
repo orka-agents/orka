@@ -67,7 +67,6 @@ func TestRemoteMCPAdmission(t *testing.T) {
 	}
 	baseCases := []admissionCase{
 		{name: "reviewed remote"},
-		// Parameters remains schemaless for legacy compatibility; consumers enforce it for remote.
 		{name: "parameters presence enforced at consumers", patch: func(s map[string]any) { delete(s, "parameters") }},
 		{name: "missing credential", patch: func(s map[string]any) { delete(s["http"].(map[string]any), "authSecretRef") }, reject: true},
 		{name: "missing policy", patch: func(s map[string]any) { delete(s["http"].(map[string]any), "outboundAccessPolicyRef") }, reject: true},

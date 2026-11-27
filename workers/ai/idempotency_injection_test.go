@@ -76,7 +76,6 @@ func TestInjectIdempotencyKeyPreservesArguments(t *testing.T) {
 			} else if wantDigest, err := approvals.TargetArgsDigest(want); err != nil || gotDigest != wantDigest {
 				t.Fatalf("arguments changed: got %s, want %s (digest error %v)", withoutKey, want, err)
 			}
-			// Comparing digests alone would miss changes to number spellings.
 			for _, number := range []string{
 				"9007199254740993", "-9223372036854775808", "9223372036854775807",
 				"9007199254740992.5", "1.0000000000000001", "1.00e+03", "1e-400", "1e400",
@@ -141,8 +140,6 @@ func TestInjectIdempotencyKeyWithoutKeyLeavesArgumentsUntouched(t *testing.T) {
 	}
 }
 
-// injectionRegistryTool uses declared types so the test exercises both injection
-// and the actual Registry.Execute validation, not only a permissive test tool.
 type injectionRegistryTool struct{ recordingTool }
 
 func (injectionRegistryTool) Parameters() json.RawMessage {
@@ -293,8 +290,6 @@ func TestApprovedBuiltinPreflightFailureDoesNotConsumeApproval(t *testing.T) {
 	valid := json.RawMessage(`{"count":1}`)
 	invalidTarget := approvalTargetForTest(t, invalid)
 	validTarget := approvalTargetForTest(t, valid)
-	// Corrected arguments have a distinct approval identity; do not loosen
-	// exact argument binding just to permit a retry.
 	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{
 		resolvedApprovalForTarget(invalidTarget), resolvedApprovalForTarget(validTarget),
 	})

@@ -23,8 +23,6 @@ const (
 	requesterDecisionsMarker  = "// +kubebuilder:validation:XValidation:rule=\"" + requesterDecisionsRule + "\",message=\"" + requesterDecisionsMessage + "\""
 )
 
-// Only agent Tasks are planned onto a runtime that can ask before each tool;
-// AI and container Tasks would run their tools without the requester deciding.
 func TestTaskRequesterPermissionDecisionsAreForAgentTasksOnly(t *testing.T) {
 	if source := string(readTaskTypesSource(t)); !strings.Contains(source, requesterDecisionsMarker) {
 		t.Fatalf("TaskSpec is missing the requester decisions marker: want %q", requesterDecisionsMarker)

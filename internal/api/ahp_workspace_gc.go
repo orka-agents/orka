@@ -18,14 +18,11 @@ import (
 )
 
 const (
-	// ahpWorkspaceActiveAnnotation records a workspace's last use, so an idle
-	// workspace is found after a restart too.
 	ahpWorkspaceActiveAnnotation = "orka.ai/ahp-workspace-active-at"
 	ahpWorkspaceActiveEvery      = 10 * time.Minute
 	ahpWorkspaceCollectEvery     = 5 * time.Minute
 )
 
-// touch notes that a user used their workspace.
 func (w *ahpWorkspaces) touch(principal ahphost.Principal, pod *corev1.Pod) {
 	if !w.enabled() || pod == nil {
 		return
@@ -51,7 +48,6 @@ func (w *ahpWorkspaces) touch(principal ahphost.Principal, pod *corev1.Pod) {
 	_ = w.b.h.client.Patch(context.Background(), pod, patch)
 }
 
-// collectIdle removes idle workspaces until ctx ends.
 func (w *ahpWorkspaces) collectIdle(ctx context.Context) {
 	if !w.enabled() || w.b.cfg.WorkspaceIdleTimeout <= 0 {
 		return
@@ -84,16 +80,12 @@ func (w *ahpWorkspaces) collectOnce(ctx context.Context) {
 	}
 }
 
-// collect removes one idle workspace. While it decides, the workspace is
-// handed to no one: ensure waits for it, so nothing starts in the workspace
-// after the final checks.
 func (w *ahpWorkspaces) collect(ctx context.Context, label string, listed *corev1.Pod) {
 	done, ok := w.beginCollect(label)
 	if !ok {
 		return
 	}
 	defer done()
-	// Use that began before the guard shows now; none can begin after it.
 	pod := &corev1.Pod{}
 	if err := w.reader().Get(ctx, client.ObjectKeyFromObject(listed), pod); err != nil || pod.UID != listed.UID ||
 		!pod.DeletionTimestamp.IsZero() || !w.idle(label, pod) || w.gitBusy(label) {
@@ -105,7 +97,6 @@ func (w *ahpWorkspaces) collect(ctx context.Context, label string, listed *corev
 	_ = w.b.h.client.Delete(ctx, pod, client.Preconditions{UID: &pod.UID})
 }
 
-// idle reports a workspace with nothing running and no recent use.
 func (w *ahpWorkspaces) idle(label string, pod *corev1.Pod) bool {
 	if w.inUse(label) {
 		return false
@@ -116,7 +107,6 @@ func (w *ahpWorkspaces) idle(label string, pod *corev1.Pod) bool {
 	return ahpWorkspaceIdle(w.b.now(), last, pod, w.b.cfg.WorkspaceIdleTimeout)
 }
 
-// beginCollect marks a user's workspace as being collected.
 func (w *ahpWorkspaces) beginCollect(label string) (func(), bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -136,9 +126,6 @@ func (w *ahpWorkspaces) beginCollect(label string) (func(), bool) {
 	}, true
 }
 
-// claimForUse notes a use of the user's workspace, then waits out a
-// collection already deciding about it; the collection sees the use when it
-// has not decided yet.
 func (w *ahpWorkspaces) claimForUse(ctx context.Context, principal ahphost.Principal) error {
 	label := principal.UserKey[:40]
 	w.mu.Lock()
@@ -159,7 +146,6 @@ func (w *ahpWorkspaces) claimForUse(ctx context.Context, principal ahphost.Princ
 	}
 }
 
-// gitBusy reports a git change running in the user's workspace.
 func (w *ahpWorkspaces) gitBusy(label string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -171,7 +157,6 @@ func (w *ahpWorkspaces) gitBusy(label string) bool {
 	return false
 }
 
-// inUse reports whether a user has a shell or a turn running.
 func (w *ahpWorkspaces) inUse(label string) bool {
 	b := w.b
 	b.mu.Lock()
@@ -194,8 +179,6 @@ func (w *ahpWorkspaces) inUse(label string) bool {
 	return false
 }
 
-// ahpWorkspaceIdle reports whether a workspace's last use, as this process
-// saw it or as its annotation or creation records it, is older than idle.
 func ahpWorkspaceIdle(now, last time.Time, pod *corev1.Pod, idle time.Duration) bool {
 	if recorded, err := time.Parse(time.RFC3339, pod.Annotations[ahpWorkspaceActiveAnnotation]); err == nil && recorded.After(last) {
 		last = recorded
@@ -206,8 +189,6 @@ func ahpWorkspaceIdle(now, last time.Time, pod *corev1.Pod, idle time.Duration) 
 	return now.Sub(last) >= idle
 }
 
-// ahpHoldsWorkScript prints a line for each place under the workspace root
-// ($1) that holds work found nowhere else, then "done".
 const ahpHoldsWorkScript = `for p in "$1"/src/*/*; do
   [ -d "$p/.git" ] || continue
   # Every ref and every worktree's HEAD: branches, tags, notes and the stash.
@@ -246,13 +227,6 @@ head -n 1 "$found" | sed 's/^/other /'
 rm -f "$roots" "$found"
 echo done`
 
-// holdsWork reports whether a workspace may hold work that exists nowhere
-// else: uncommitted or untracked files in a checkout, whatever git's display
-// settings; commits that any local ref or worktree HEAD reaches and no
-// remote-tracking branch does; files git was told not to check; any
-// submodule; or any file outside the checkouts other than shell history.
-// Files git ignores inside a checkout and commits only the reflog keeps are
-// not kept. When git warns or a check fails, it keeps the workspace.
 func (w *ahpWorkspaces) holdsWork(ctx context.Context, pod *corev1.Pod) bool {
 	out, err := w.output(ctx, pod, 64<<10, ahpShell, "-c", ahpHoldsWorkScript, "sh", ahpWorkspaceRoot)
 	if err != nil {

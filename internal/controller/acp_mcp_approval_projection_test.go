@@ -30,8 +30,6 @@ func (s *approvalTerminalProjectionOutageStore) AppendExecutionEventIfAbsent(ctx
 	return s.DeduplicatingExecutionEventStore.AppendExecutionEventIfAbsent(ctx, event, key)
 }
 
-// AppendExecutionEventsIfAbsent refuses a whole group that carries a terminal
-// projection, so a recovery decision and its outcome stay unwritten together.
 func (s *approvalTerminalProjectionOutageStore) AppendExecutionEventsIfAbsent(ctx context.Context, appends []store.ExecutionEventAppend) ([]store.ExecutionEventAppendResult, error) {
 	for _, entry := range appends {
 		if s.refuses(entry.Event) {
@@ -132,8 +130,6 @@ func TestMCPApprovalTerminalReceiptSurvivesProjectionOutage(t *testing.T) {
 				}
 			}
 
-			// Exact redelivery must return the same receipt while projection is
-			// still unavailable, without invoking the tool a second time.
 			replayed := awaitMCPApprovalResult(t, f.start(f.request))
 			require.True(t, replayed.Replayed)
 			require.Equal(t, first.IsError, replayed.IsError)
@@ -141,8 +137,6 @@ func TestMCPApprovalTerminalReceiptSurvivesProjectionOutage(t *testing.T) {
 			require.EqualValues(t, 2, projection.attempts.Load())
 			require.Equal(t, tc.executions, f.count.Load())
 
-			// A new controller repairs the event projection from the receipt,
-			// with no executable Secret access or runtime redelivery.
 			f.restart(t)
 			require.EqualError(t, f.reconcile(t), "injected terminal approval projection outage")
 			projection.unavailable.Store(false)
@@ -206,8 +200,6 @@ func TestMCPApprovalReplaysTerminalReceiptDuringEventStoreOutage(t *testing.T) {
 	first := awaitMCPApprovalResult(t, done)
 	require.False(t, first.Replayed)
 
-	// Exact redelivery of a completed call must return the durable receipt
-	// even when no event can be appended; recovery repairs projection later.
 	outage := &approvalAppendOutageStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 	f.broker.ApprovalEvents = outage
 	replayed := awaitMCPApprovalResult(t, f.start(f.request))

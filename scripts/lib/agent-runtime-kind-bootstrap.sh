@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016 # acp_report_update arguments are jq programs.
-# Shared, source-only bootstrap for the agent runtime validator on Kind.
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   echo "error: source scripts/lib/agent-runtime-kind-bootstrap.sh; do not execute it directly" >&2
@@ -16,16 +15,10 @@ live_acp_kind_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${live_acp_kind_lib_dir}/release-chart-acceptance.sh"
 unset live_acp_kind_lib_dir
 
-# Internal port-forward state is process-local. Reset inherited values so a
-# caller-controlled environment can never make cleanup signal or unlink an
-# unrelated resource.
 LIVE_ACP_VEKIL_PORT_FORWARD_PID=""
 LIVE_ACP_VEKIL_PORT_FORWARD_LOG=""
 LIVE_ACP_VEKIL_BASE_URL=""
 LIVE_ACP_VEKIL_PORT_FORWARD_OWNED=0
-# ACP_E2E_MODEL_BACKEND=aimock replaces the live Vekil with aimock at the same
-# vekil-system/vekil identity, scripted by scripts/fixtures/agent-runtime-aimock,
-# so the lane needs no model-provider credential.
 LIVE_ACP_MODEL_BACKEND="${ACP_E2E_MODEL_BACKEND:-vekil}"
 LIVE_ACP_AIMOCK_IMAGE="${ACP_E2E_AIMOCK_IMAGE:-ghcr.io/copilotkit/aimock:1.43.0@sha256:163ecad18171e7d28752c386f448cc168bae71b2278d6b9e61a50f454860d8ed}"
 
@@ -108,8 +101,6 @@ live_acp_kind_preflight() {
     vekil)
       [[ -x "${LIVE_ACP_VEKIL_DEPLOY_SCRIPT}" ]] || live_acp_kind_die "Vekil deploy script is not executable: ${LIVE_ACP_VEKIL_DEPLOY_SCRIPT}" || return 1
       if [[ -n "${LIVE_ACP_VEKIL_LOCAL_IMAGE:-}" ]]; then
-        # A locally built Vekil is published through the run's own registry and
-        # digest-pinned there, so development builds stay immutable end to end.
         docker image inspect "${LIVE_ACP_VEKIL_LOCAL_IMAGE}" >/dev/null 2>&1 || \
           live_acp_kind_die "LIVE_ACP_VEKIL_LOCAL_IMAGE is not a local Docker image: ${LIVE_ACP_VEKIL_LOCAL_IMAGE}" || return 1
       else
@@ -139,8 +130,6 @@ live_acp_kind_create_cluster() {
     args+=(--config "${LIVE_ACP_KIND_CONFIG}")
   fi
 
-  # Arm exact-tag deletion before create: Kind can leave a partial cluster even
-  # when its create command returns non-zero.
   LIVE_ACP_KIND_CREATED=1
   acp_report_update '.cluster = {tag:$tag, creationAttempted:true, registryStarted:false}' \
     --arg tag "${LIVE_ACP_KIND_TAG}" || return 1
@@ -163,8 +152,6 @@ live_acp_kind_start_registry() {
   orka_kind_registry_start "${LIVE_ACP_KIND_CLUSTER}"
 
   if [[ -n "${LIVE_ACP_VEKIL_LOCAL_IMAGE:-}" ]]; then
-    # Publish the development Vekil before the Vekil deploy step so the
-    # deployment references the digest-pinned copy in the run's registry.
     LIVE_ACP_VEKIL_IMAGE="$(orka_kind_registry_push "${LIVE_ACP_VEKIL_LOCAL_IMAGE}" vekil/vekil)"
     export LIVE_ACP_VEKIL_IMAGE
   fi
@@ -195,9 +182,6 @@ live_acp_kind_build_and_publish_images() {
   live_acp_kind_report_images
 }
 
-# Toolbox fixtures are tiny tool images published through the run's registry
-# so the validator can prove toolbox mounting and every documented failure
-# reason without any external registry.
 live_acp_kind_build_and_publish_toolbox_fixtures() {
   local fixtures="${LIVE_ACP_REPO_ROOT}/test/e2e/fixtures/toolboxes"
   local name
@@ -216,9 +200,6 @@ live_acp_kind_build_and_publish_toolbox_fixtures() {
   acp_report_update '.builtImages.toolboxFixture = $toolbox' --arg toolbox "${ACP_E2E_TOOLBOX_IMAGE}"
 }
 
-# Toolboxes are off by default. The deployed controller reads the enablement
-# flags from its environment, so the lane turns them on for its own registry
-# only, after the regular rollout, without changing the shipped manifests.
 live_acp_kind_enable_toolboxes() {
   [[ -n "${ACP_E2E_TOOLBOX_REGISTRY:-}" ]] || return 0
   local namespace="${ORKA_NAMESPACE:-orka-system}"
@@ -231,8 +212,6 @@ live_acp_kind_enable_toolboxes() {
   live_acp_kind_run kubectl -n "${namespace}" rollout status "deployment/${deployment}" --timeout="${LIVE_ACP_ROLLOUT_TIMEOUT}"
 }
 
-# Release candidates use the already built GHCR digests. Rebuilding here would
-# qualify different bytes from the images awaiting release approval.
 live_acp_kind_use_release_images() {
   local manifest="${LIVE_ACP_RELEASE_BUNDLE_DIR}/candidate.json"
   go -C "${LIVE_ACP_REPO_ROOT}" run ./cmd/build/release check-bundle "${LIVE_ACP_RELEASE_BUNDLE_DIR}" || return 1
@@ -305,8 +284,6 @@ live_acp_kind_validate_vekil_catalog() {
       "Vekil model ${opencode_model} for OpenCode does not advertise required endpoint /chat/completions or compatible /responses"
     return 1
   fi
-  # The catalog advertises native endpoints. Vekil can also translate Anthropic
-  # messages through Chat or Responses; the live streaming probe checks that path.
   if ! live_acp_kind_catalog_model_supports_endpoint "${models_file}" "${claude_model}" /v1/messages && \
       ! live_acp_kind_catalog_model_supports_endpoint "${models_file}" "${claude_model}" /chat/completions && \
       ! live_acp_kind_catalog_model_supports_endpoint "${models_file}" "${claude_model}" /responses; then
@@ -435,8 +412,6 @@ live_acp_kind_probe_vekil_wire_path() {
       )
       ;;
     /chat/completions)
-      # Reasoning-family chat models reject the deprecated max_tokens
-      # parameter, so the probe uses max_completion_tokens.
       payload="$(jq -cn --arg model "${model}" '{
         model:$model,
         max_completion_tokens:16,
@@ -547,10 +522,6 @@ live_acp_kind_deploy_vekil() {
   live_acp_kind_probe_configured_models
 }
 
-# live_acp_kind_deploy_aimock stands aimock in for Vekil. The provider proxy
-# reaches it at the production upstream (vekil.vekil-system.svc:1337), and its
-# NetworkPolicy admits only Pods labeled app.kubernetes.io/name=vekil there.
-# The validator loads each runtime's fixtures before that runtime's checks.
 live_acp_kind_deploy_aimock() {
   local context="${LIVE_ACP_CONTEXT}" fixture_dir="${LIVE_ACP_REPO_ROOT}/scripts/fixtures/agent-runtime-aimock"
   local -a from_files=()
@@ -764,14 +735,9 @@ live_acp_kind_cleanup() {
   return "${cleanup_status}"
 }
 
-# CI calls this after uploading the report, using only the recorded run tag and
-# cluster name. It does not repeat or overwrite credential cleanup results.
 live_acp_kind_delete_cluster() {
   local cleanup_status=0
   if acp_report_enabled; then
-    # A timeout can kill the validator before its EXIT trap records preservation.
-    # The fixture path never writes to GitHub. The optional live canary still
-    # needs positive evidence of safe remote cleanup after the validator starts.
     if ! jq -e '
         .schemaVersion == 2 and .gate == "release-qualification" and .mode == "release"
         and has("task") and has("preserved") and .preserved == null

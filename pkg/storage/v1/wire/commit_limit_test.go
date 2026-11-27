@@ -12,7 +12,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/wiretest"
 )
 
-// serveWithBulkLimit serves provider with a short bulk duration limit.
 func serveWithBulkLimit(t *testing.T, provider *recordingProvider) *wire.Client {
 	t.Helper()
 	config := serveBoth(provider)
@@ -20,9 +19,6 @@ func serveWithBulkLimit(t *testing.T, provider *recordingProvider) *wire.Client 
 	return wiretest.Serve(t, config)
 }
 
-// An upload whose provider commits after the bulk duration limit has passed
-// may have committed, so the client never reports it as safely failed: it
-// either succeeds or is an unknown outcome.
 func TestUploadsThatCommitAfterTheLimitAreNeverSafelyFailed(t *testing.T) {
 	for name, save := range map[string]func(*wire.Client) error{
 		"SaveArtifact": func(client *wire.Client) error {
@@ -44,8 +40,6 @@ func TestUploadsThatCommitAfterTheLimitAreNeverSafelyFailed(t *testing.T) {
 			provider.mu.Unlock()
 			go func() {
 				provider.waitEntered(t, name)
-				// Commit after the server's limit has passed, while the
-				// caller is still waiting.
 				time.Sleep(500 * time.Millisecond)
 				close(release)
 			}()

@@ -1,7 +1,3 @@
-// Command artifact-tool performs the two deterministic supply-chain checks used
-// by the ACP image definitions. It intentionally depends only on the Go
-// standard library so it can run in pinned build stages without installing
-// another package manager.
 package main
 
 import (

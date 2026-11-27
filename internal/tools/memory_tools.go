@@ -25,30 +25,21 @@ import (
 	"github.com/orka-agents/orka/workers/common"
 )
 
-// MemoryRecallResultLimit is the largest encoded recall result an agent
-// receives: the native tool reads at most this much of the controller's
-// response, and the ACP broker refuses a larger tool result. A recall whose
-// result is larger is not counted, since the agent never gets all of it.
 const MemoryRecallResultLimit = 1 << 20
 
 const internalMemoryToolBodyLimit = MemoryRecallResultLimit
 
-// RecallMemoryTool retrieves durable namespace-scoped memories relevant to the current task.
 type RecallMemoryTool struct{}
 
-// NewRecallMemoryTool creates a new recall_memory tool.
 func NewRecallMemoryTool() *RecallMemoryTool { return &RecallMemoryTool{} }
 
-// Name returns the tool name.
 func (t *RecallMemoryTool) Name() string { return "recall_memory" }
 
-// Description returns the tool description.
 func (t *RecallMemoryTool) Description() string {
 	return "Recall durable namespace-scoped memories that may help with the current task. " +
 		"Use query and/or tags to find project facts, prior decisions, reusable context, and notes saved from previous work."
 }
 
-// Parameters returns the JSON Schema for the tool parameters.
 func (t *RecallMemoryTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -100,7 +91,6 @@ type recallMemoryArgs struct {
 	IncludeDisabledCamel bool                 `json:"includeDisabled,omitempty"`
 }
 
-// Execute recalls matching memories through the controller's internal API.
 func (t *RecallMemoryTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a recallMemoryArgs
 	if err := decodeMemoryToolArgs(args, &a); err != nil {
@@ -159,8 +149,6 @@ func (t *RecallMemoryTool) Execute(ctx context.Context, args json.RawMessage) (s
 	if a.IncludeDisabled || a.IncludeDisabledCamel {
 		values.Set("includeDisabled", trueStr)
 	}
-	// Mark the request as a recall, so the controller counts the memories it
-	// returns. A prompt's memory context uses the same route without it.
 	values.Set(MemoryListPurposeParam, MemoryListPurposeRecall)
 
 	endpoint := cfg.url("/internal/v1/memories/"+url.PathEscape(cfg.Namespace), values)
@@ -171,36 +159,19 @@ func (t *RecallMemoryTool) Execute(ctx context.Context, args json.RawMessage) (s
 	return body, nil
 }
 
-// MemoryListPurposeParam and MemoryListPurposeRecall mark an internal memory
-// list request as an agent recall, which the controller counts.
 const (
 	MemoryListPurposeParam  = "purpose"
 	MemoryListPurposeRecall = "recall"
 )
 
-// MemoryRecallRecordTimeout bounds one recall count. It is longer than the
-// storage client's own retry horizon, so a count normally finishes, or fails,
-// on its own: cancelling a write midway would leave its outcome unknown, and
-// the storage client holds later writes until it resolves one.
 var MemoryRecallRecordTimeout = time.Minute
 
-// memoryRecallSlots bounds how many recall counts run at once. A recall that
-// finds every slot taken is not counted.
 var memoryRecallSlots = make(chan struct{}, 16)
 
-// RecordMemoryRecall counts the memories a recall returned, without delaying
-// the recall: the count runs in the background, on a fresh context that
-// keeps only the caller's logger, since a request's context can be cancelled
-// or reused once it returns. Counting is best effort, so a count that fails,
-// or finds no free slot, is logged and dropped.
 func RecordMemoryRecall(ctx context.Context, recorder MemoryRecallRecorder, namespace string, memories []store.Memory) {
 	RecordAuthorizedMemoryRecall(ctx, nil, recorder, namespace, memories)
 }
 
-// RecordAuthorizedMemoryRecall is RecordMemoryRecall for a recall that counts
-// only when authorize allows it. Authorize runs in the background before the
-// count, on the count's context, so checking the caller never delays the
-// recall either.
 func RecordAuthorizedMemoryRecall(ctx context.Context, authorize func(context.Context) bool, recorder MemoryRecallRecorder,
 	namespace string, memories []store.Memory) {
 	if recorder == nil || len(memories) == 0 {
@@ -236,23 +207,18 @@ func RecordAuthorizedMemoryRecall(ctx context.Context, authorize func(context.Co
 	}()
 }
 
-// ProposeMemoryTool submits memory-adjacent governance proposals for coordinator review.
 type ProposeMemoryTool struct{}
 
-// NewProposeMemoryTool creates a new propose_memory tool.
 func NewProposeMemoryTool() *ProposeMemoryTool { return &ProposeMemoryTool{} }
 
-// Name returns the tool name.
 func (t *ProposeMemoryTool) Name() string { return "propose_memory" }
 
-// Description returns the tool description.
 func (t *ProposeMemoryTool) Description() string {
 	return "Propose durable memory or reusable skill changes for coordinator review. " +
 		"Use this when you discover information that should persist beyond the current task but should be reviewed before becoming shared memory. " +
 		"Memory proposal descriptions may include an optional `Tags: tag-a, tag-b` line to suggest durable memory tags."
 }
 
-// Parameters returns the JSON Schema for the tool parameters.
 func (t *ProposeMemoryTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -314,7 +280,6 @@ type proposeMemoryPayload struct {
 	Patch       string `json:"patch,omitempty"`
 }
 
-// Execute submits a memory proposal through the controller's internal API.
 func (t *ProposeMemoryTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a proposeMemoryArgs
 	if err := decodeMemoryToolArgs(args, &a); err != nil {
@@ -355,22 +320,17 @@ func (t *ProposeMemoryTool) Execute(ctx context.Context, args json.RawMessage) (
 	return body, nil
 }
 
-// RememberMemoryTool submits durable memory proposals for coordinator review.
 type RememberMemoryTool struct{}
 
-// NewRememberMemoryTool creates a new remember tool.
 func NewRememberMemoryTool() *RememberMemoryTool { return &RememberMemoryTool{} }
 
-// Name returns the tool name.
 func (t *RememberMemoryTool) Name() string { return "remember" }
 
-// Description returns the tool description.
 func (t *RememberMemoryTool) Description() string {
 	return "Submit a durable memory proposal for coordinator review. " +
 		"Use this to preserve durable project facts, conventions, or lessons learned; proposals are reviewed and are not written directly to memory."
 }
 
-// Parameters returns the JSON Schema for the tool parameters.
 func (t *RememberMemoryTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -414,7 +374,6 @@ type rememberMemoryArgs struct {
 	AgentNameCamel string               `json:"agentName,omitempty"`
 }
 
-// Execute submits a durable memory proposal through the controller's internal API.
 func (t *RememberMemoryTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a rememberMemoryArgs
 	if err := decodeMemoryToolArgs(args, &a); err != nil {
@@ -481,22 +440,17 @@ func appendRememberTags(description string, tags memoryToolStringList) string {
 	return description + "\n\n" + tagLine
 }
 
-// SearchTranscriptTool searches prior session transcripts in the current namespace.
 type SearchTranscriptTool struct{}
 
-// NewSearchTranscriptTool creates a new search_transcript tool.
 func NewSearchTranscriptTool() *SearchTranscriptTool { return &SearchTranscriptTool{} }
 
-// Name returns the tool name.
 func (t *SearchTranscriptTool) Name() string { return "search_transcript" }
 
-// Description returns the tool description.
 func (t *SearchTranscriptTool) Description() string {
 	return "Search prior session transcripts in this namespace and return compact snippets. " +
 		"Use this to recover context from previous tasks without reading the current task transcript."
 }
 
-// Parameters returns the JSON Schema for the tool parameters.
 func (t *SearchTranscriptTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -545,7 +499,6 @@ type searchTranscriptArgs struct {
 	MaxSnippetLengthCamel   int                  `json:"maxSnippetLength,omitempty"`
 }
 
-// Execute searches transcript snippets through the controller's internal API.
 func (t *SearchTranscriptTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a searchTranscriptArgs
 	if err := decodeMemoryToolArgs(args, &a); err != nil {
@@ -796,7 +749,6 @@ func addQueryValue(values url.Values, key, value string) {
 	}
 }
 
-// firstNonEmpty returns the first non-blank value, trimmed.
 func firstNonEmpty(values ...string) string {
 	return strings.TrimSpace(common.FirstNonBlank(values...))
 }

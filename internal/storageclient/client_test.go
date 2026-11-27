@@ -17,8 +17,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// Every application store interface that production wiring passes the
-// storage client as, or type-asserts it for, must stay satisfied.
 var (
 	_ storagev1.StateProvider                         = (*storageclient.Client)(nil)
 	_ storagev1.ArtifactProvider                      = (*storageclient.Client)(nil)
@@ -57,17 +55,10 @@ var (
 	_ taskTokenUsageReader                            = (*storageclient.Client)(nil)
 )
 
-// taskTokenUsageReader is the controller's local view of Task token
-// attribution, which it type-asserts on the client.
 type taskTokenUsageReader interface {
 	TaskTokenUsage(ctx context.Context, namespace, taskUID string) (int64, int64, error)
 }
 
-// sqliteOnlyMethods are SQLite store methods that production code does not
-// reach through the application storage client: process lifecycle and key
-// configuration owned by startup, a test helper, and the SQL duplicates of
-// Kubernetes-authoritative control records. Production wiring uses the
-// Kubernetes control store for those records (see the storage ownership doc).
 var sqliteOnlyMethods = map[string]string{
 	"Close":                              "lifecycle",
 	"DatasetInfo":                        "lifecycle",
@@ -179,21 +170,15 @@ func TestNewRejectsTypedNilProviders(t *testing.T) {
 	}
 }
 
-// uncomparableStore is a value-typed provider whose dynamic type cannot be
-// compared with ==.
 type uncomparableStore struct {
 	*sqlite.Store
 	labels map[string]string
 }
 
-// wrappedStore has a comparable type, so whether == panics depends on the
-// provider it wraps.
 type wrappedStore struct {
 	storageclient.EmbeddedStore
 }
 
-// taggedStore has a comparable type, so whether == panics depends on the
-// value held in tag.
 type taggedStore struct {
 	*sqlite.Store
 	tag any

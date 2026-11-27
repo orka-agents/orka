@@ -62,8 +62,6 @@ func TestCreateTaskJobGatewayReplyDefersStalePolicy(t *testing.T) {
 			r, task, agent := newGatewayReplyFreshnessFixture(t)
 			latestTask, latestAgent := task.DeepCopy(), agent.DeepCopy()
 			test.mutate(latestTask, latestAgent)
-			// Policy changed before the uncached Task read; cached resolution still
-			// supplies the old granting Agent and its already-resolved provider.
 			r.APIReader = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(latestTask, latestAgent).Build()
 			resolvedAgent, err := r.resolveAgent(t.Context(), task)
 			require.NoError(t, err)
@@ -127,7 +125,6 @@ func TestCreateTaskJobGatewayReplyRequiresLiveAgent(t *testing.T) {
 func TestCreateTaskJobGatewayReplyDefersReplacedTask(t *testing.T) {
 	r, task, agent := newGatewayReplyFreshnessFixture(t)
 	r.APIReader = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(task.DeepCopy(), agent).Build()
-	// The durable event belongs to the new Task; the caller resolved the old UID.
 	task.UID = "old-task-uid"
 	result, err := r.createTaskJob(t.Context(), task, agent, nil)
 	require.NoError(t, err)
@@ -152,7 +149,7 @@ func TestCreateTaskJobGatewayReplyFreshPolicy(t *testing.T) {
 				task.Spec.Transaction = &corev1alpha1.TaskTransaction{Context: map[string]string{"allowedTools": "[]"}}
 			}
 			latestAgent := agent.DeepCopy()
-			latestAgent.ResourceVersion = "2000" // Metadata/status changes do not invalidate the tuple.
+			latestAgent.ResourceVersion = "2000"
 			r.APIReader = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(task, latestAgent).Build()
 			provider, err := r.resolveProvider(t.Context(), task, agent)
 			require.NoError(t, err)
@@ -185,7 +182,6 @@ func TestCreateTaskJobGatewayReplyRecordedJobRecovery(t *testing.T) {
 			latest := task.DeepCopy()
 			latest.Generation++
 			latest.Spec.AI = &corev1alpha1.AISpec{Tools: []string{}}
-			// Even unavailable Agent state must not replan an existing Job.
 			r.APIReader = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(latest, job).Build()
 			_, err = r.createTaskJob(t.Context(), task, agent, nil)
 			require.NoError(t, err)
@@ -224,7 +220,6 @@ func TestCreateTaskJobGatewayReplyDoesNotRecreateObservedJob(t *testing.T) {
 			err := c.Get(ctx, key, obj, opts...)
 			if _, ok := obj.(*batchv1.Job); ok && err == nil && !observed {
 				observed = true
-				// A previously frozen Job disappears after the preflight read.
 				require.NoError(t, c.Delete(ctx, obj))
 				require.NoError(t, r.Delete(ctx, job))
 			}
@@ -283,7 +278,6 @@ func TestCreateTaskJobNonGatewayAIDefersStaleTask(t *testing.T) {
 			}
 			latest := task.DeepCopy()
 			latest.Generation++
-			// An edited Task cannot use the previous revision's resolved Agent/provider.
 			r.APIReader = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(latest).Build()
 			_, err := r.createTaskJob(t.Context(), task, agent, nil)
 			require.True(t, apierrors.IsConflict(err))

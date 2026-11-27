@@ -19,13 +19,6 @@ import (
 	"github.com/orka-agents/orka/internal/controller"
 )
 
-// SealChildRequesterStamp seals the requester stamp onto a child Task the
-// calling worker created for its own Task. The link is authenticated end to
-// end: the caller must be the parent Task's current worker Pod, the parent
-// must itself carry a valid stamp, the child must be controller-owned by the
-// parent, and the child's requester must equal the parent's. A child sealed
-// this way inherits connector authority; one merely planted with the parent's
-// UID as owner never does, because nothing seals it.
 func (h *InternalHandlers) SealChildRequesterStamp(c fiber.Ctx) error {
 	namespace := strings.TrimSpace(c.Params("namespace"))
 	taskName := strings.TrimSpace(c.Params("taskName"))
@@ -55,10 +48,6 @@ func (h *InternalHandlers) SealChildRequesterStamp(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to read child task")
 	}
-	// The controller validates the link (ownership and an identical
-	// requester) and writes the stamp in one patch fenced on the child's
-	// resource version. Only authenticated paths seal a child: this one for
-	// native workers and the broker's own hook for brokered tools.
 	if err := controller.SealChildRequesterStamp(ctx, h.k8sClient, requesterStampKey, parent, child); err != nil {
 		switch {
 		case errors.Is(err, controller.ErrChildSealRefused):

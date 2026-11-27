@@ -31,8 +31,6 @@ async def main() -> None:
     headers = {"X-Orka-Tools": "disabled"} if args.mode == "client" else {}
     client = OpenAIChatClient(
         model="fixture/test-model",
-        # The production-server test passes an ephemeral signed OIDC credential.
-        # For a deployed Orka endpoint, supply its credential through ORKA_API_KEY.
         api_key=os.environ.get("ORKA_API_KEY", "local-fixture-only"),
         base_url=args.base_url,
         default_headers=headers,
@@ -42,8 +40,6 @@ async def main() -> None:
         tools=[client_echo],
         default_options={
             "store": False,
-            # This pinned client automatically includes encrypted reasoning.
-            # Use the public SDK override to request only the supported output.
             "extra_body": {"include": []},
         },
     )

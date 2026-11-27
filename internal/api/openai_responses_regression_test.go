@@ -136,7 +136,6 @@ func TestResponsesHTTPAnthropicPreservesSystemRole(t *testing.T) {
 				require.Equal(t, "response.completed", events[len(events)-1]["type"])
 			}
 			request := <-captured
-			// The provider marks the first and last system blocks and the last message block as prompt cache breakpoints.
 			cacheControl := map[string]any{"type": "ephemeral"}
 			require.Equal(t, []any{
 				map[string]any{"type": "text", "text": "Keep it short.", "cache_control": cacheControl},
@@ -459,7 +458,7 @@ func TestResponsesProductionTerminalPreservesMembership(t *testing.T) {
 		hasCall := mode == "queued-call" || mode == "emitted-call" || mode == "call-id-bridge"
 		for _, ending := range []string{"completed", "incomplete"} {
 			if hasCall && ending == "incomplete" {
-				continue // Token-budget truncation only supports text output.
+				continue
 			}
 			for _, snapshot := range []string{"truncated", "full", "empty", "omitted"} {
 				if mode == "id-only" && (snapshot == "empty" || snapshot == "omitted") {

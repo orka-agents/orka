@@ -40,7 +40,6 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 		autoSuspendTask     = "e2e-auto-suspend-task"
 		autoSuspendCoord    = "e2e-auto-suspend-coord"
 
-		// aimock fixture markers (test/e2e/testdata/aimock/autonomous_mode.json).
 		autoGoalMarker    = "[e2e:auto-goal]"
 		autoMaxIterMarker = "[e2e:auto-maxiter]"
 		autoEnvMarker     = "[e2e:auto-env]"
@@ -66,7 +65,6 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 		for _, name := range []string{autoTaskName, autoMaxIterTask, autoEnvTaskName, autoContainerTask, autoSuspendTask} {
 			cmd := exec.Command("kubectl", "delete", "task", name, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
-			// Clean up child tasks
 			cmd = exec.Command("kubectl", "delete", "tasks", "-l", fmt.Sprintf("orka.ai/parent-task=%s", name),
 				"-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
@@ -188,8 +186,6 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 			)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			// status.iteration is 0-based and omitted at 0, so the completion
-			// message is the record that at least one iteration ran.
 			g.Expect(output).To(SatisfyAny(
 				HavePrefix("goal complete after "),
 				HavePrefix("reached max iterations"),
@@ -259,9 +255,6 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(token).NotTo(BeEmpty())
 
-		// The controller deletes plan state when a Task completes, so the
-		// Plan API serves it only while the loop is still running (see the
-		// suspend spec).
 		By("querying the Plan API for the completed autonomous task")
 		Eventually(func(g Gomega) {
 			status, _ := fetchAutonomousPlan(g, apiBaseURL, token, autoTaskName)
@@ -349,7 +342,6 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 			)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			// status.iteration is 0-based: maxIterations=2 runs iterations 0 and 1.
 			g.Expect(output).To(Equal("1"),
 				"The final iteration index should be maxIterations-1")
 		}, 30*time.Second, time.Second).Should(Succeed())
@@ -523,7 +515,6 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 		By("waiting for the container task to complete")
 		waitForTaskCompletion(autoContainerTask, 3*time.Minute)
 
-		// Ensure port-forward is available (may have been set up in earlier test)
 		if apiBaseURL == "" {
 			By("setting up port-forward to controller API")
 			var pfErr error
@@ -632,14 +623,11 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 			)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			// Suspend takes effect between iterations and deliberately keeps the
-			// task Running so it can resume when spec.suspend is cleared.
 			g.Expect(output).To(HavePrefix("Running/autonomous task suspended at iteration "),
 				"Task should be parked as suspended")
 		}, 3*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("verifying the task stopped creating new iterations")
-		// Record current iteration count
 		cmd = exec.Command("kubectl", "get", "task", autoSuspendTask,
 			"-o", "jsonpath={.status.iteration}",
 			"-n", namespace,
@@ -647,7 +635,6 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 		iterBefore, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
-		// Wait and verify iteration count doesn't increase
 		time.Sleep(15 * time.Second)
 
 		cmd = exec.Command("kubectl", "get", "task", autoSuspendTask,
@@ -689,8 +676,6 @@ var _ = Describe("Autonomous Mode", Ordered, func() {
 	})
 })
 
-// fetchAutonomousPlan reads a Task's plan through the Plan API and returns the
-// HTTP status and body.
 func fetchAutonomousPlan(g Gomega, apiBaseURL, token, taskName string) (int, []byte) {
 	req, err := http.NewRequest(http.MethodGet, apiBaseURL+"/api/v1/tasks/"+taskName+"/plan", nil)
 	g.Expect(err).NotTo(HaveOccurred())
@@ -703,8 +688,6 @@ func fetchAutonomousPlan(g Gomega, apiBaseURL, token, taskName string) (int, []b
 	return resp.StatusCode, body
 }
 
-// autonomousMockMessages returns the text of every role message the model
-// received in the conversation marked by marker.
 func autonomousMockMessages(g Gomega, marker, role string) []string {
 	requests, err := mockLLMRequestsFor(marker)
 	g.Expect(err).NotTo(HaveOccurred())
@@ -719,8 +702,6 @@ func autonomousMockMessages(g Gomega, marker, role string) []string {
 	return texts
 }
 
-// autonomousMockToolResults returns each distinct toolName output the model
-// received in the conversation marked by marker.
 func autonomousMockToolResults(g Gomega, marker, toolName string) []string {
 	requests, err := mockLLMRequestsFor(marker)
 	g.Expect(err).NotTo(HaveOccurred())
@@ -742,7 +723,6 @@ func autonomousMockToolResults(g Gomega, marker, toolName string) []string {
 	return results
 }
 
-// autonomousChildPhases returns the phases of the Tasks delegated by parent.
 func autonomousChildPhases(g Gomega, parent string) []string {
 	cmd := exec.Command("kubectl", "get", "tasks",
 		"-l", fmt.Sprintf("orka.ai/parent-task=%s", parent),

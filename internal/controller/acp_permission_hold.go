@@ -23,19 +23,12 @@ import (
 
 const (
 	acpPermissionApprovalDomain = "acp-permission-approval-v1"
-	// acpPermissionHoldMargin ends a hold before the runtime's own permission
-	// timer answers the request, so the controller's answer always reaches a
-	// request that is still pending.
-	acpPermissionHoldMargin = 10 * time.Second
-	// acpPermissionHoldMinimum is the shortest hold worth asking a person for.
-	acpPermissionHoldMinimum = time.Second
+	acpPermissionHoldMargin     = 10 * time.Second
+	acpPermissionHoldMinimum    = time.Second
 )
 
-// acpPermissionCancelBackoff paces the retries of recording a cancelled
-// permission request, all within acpApprovalSettleTimeout.
 var acpPermissionCancelBackoff = wait.Backoff{Duration: 100 * time.Millisecond, Factor: 2, Steps: 7, Cap: 2 * time.Second}
 
-// acpPermissionHold is a permission request held for the Task's requester.
 type acpPermissionHold struct {
 	approvalID  string
 	namespace   string
@@ -58,11 +51,6 @@ type acpPermissionHold struct {
 
 type acpPermissionSend func(context.Context, harnessv2.PermissionDecision) error
 
-// resolvePromptPermission answers a runtime permission request. The frozen
-// tool policy decides first. A Task that asks for its requester's decisions
-// has every request that policy would allow held instead, off the prompt
-// stream, until the requester decides, the hold expires, or holdCtx ends with
-// the prompt.
 func (d *ACPDispatcher) resolvePromptPermission(
 	ctx context.Context,
 	holdCtx context.Context,
@@ -85,7 +73,6 @@ func (d *ACPDispatcher) resolvePromptPermission(
 	}
 	if hold == nil || !d.claimPermissionHold(hold.approvalID) {
 		if hold != nil {
-			// A replayed request already has a hold that will answer it.
 			return nil
 		}
 		return send(ctx, decision)
@@ -97,10 +84,6 @@ func (d *ACPDispatcher) resolvePromptPermission(
 	return nil
 }
 
-// planPermissionDecision returns the decision to send now, or a hold. A
-// Requester Task's frozen MCP configuration carries NativePermissionsAsk, so
-// its RuntimeSession was launched to ask before every policy-allowed acting
-// tool; the decision still rests only on the request's structured tool name.
 func (d *ACPDispatcher) planPermissionDecision(
 	holdCtx context.Context,
 	task *corev1alpha1.Task,
@@ -113,8 +96,6 @@ func (d *ACPDispatcher) planPermissionDecision(
 	if !taskPermissionDecisionsByRequester(task) || !permissionDecisionAllows(permission, decision) {
 		return decision, nil
 	}
-	// A brokered tool that requires an approval already waits for one at the
-	// broker; asking at the runtime's permission prompt too would ask twice.
 	if descriptor, ok := configuration.ToolPolicy.Descriptor(permission.ToolName); ok &&
 		descriptor.Source.Brokered() && configuration.ApprovalPolicy.Requires(permission.ToolName) {
 		return decision, nil
@@ -166,16 +147,11 @@ func (d *ACPDispatcher) planPermissionDecision(
 	return decision, hold
 }
 
-// acpPermissionApprovalID names a held request. Its own domain keeps it apart
-// from brokered tool approvals, whose recovery never adopts it.
 func acpPermissionApprovalID(namespace, taskUID string, attempt uint32, promptID string, requestID harnessv2.PermissionRequestID) string {
 	return store.CanonicalControlID(acpPermissionApprovalDomain, namespace, taskUID,
 		strconv.FormatUint(uint64(attempt), 10), promptID, store.CanonicalBytesDigest([]byte(requestID)))
 }
 
-// runPermissionHold records the held request, waits for its durable outcome,
-// and answers the runtime. Exactly one terminal approval event wins in the
-// store, so the answer always matches what the approvals API reports.
 func (d *ACPDispatcher) runPermissionHold(ctx context.Context, send acpPermissionSend, hold *acpPermissionHold) {
 	log := logf.FromContext(ctx).WithValues("namespace", hold.namespace, "task", hold.taskName, "approval", hold.approvalID)
 	if err := d.appendPermissionApprovalEvent(ctx, hold, events.ExecutionEventTypeApprovalRequested, "requested",
@@ -192,9 +168,6 @@ func (d *ACPDispatcher) runPermissionHold(ctx context.Context, send acpPermissio
 	defer deadline.Stop()
 	ticker := time.NewTicker(d.permissionPollInterval())
 	defer ticker.Stop()
-	// Past the deadline, the expiry is recorded until it is, or another
-	// outcome won. The runtime is answered only with an outcome read back
-	// from the store, never one inferred from the timer.
 	expiring, expiryRecorded := false, false
 	for {
 		if expiring && !expiryRecorded {
@@ -242,14 +215,9 @@ func (d *ACPDispatcher) answerPermissionHold(ctx context.Context, send acpPermis
 	d.publishPermissionApproval(hold, state, optionID)
 }
 
-// cancelPermissionHold records that the prompt ended before the request was
-// answered. The runtime already refused it when the prompt settled.
 func (d *ACPDispatcher) cancelPermissionHold(ctx context.Context, hold *acpPermissionHold) {
 	settleCtx, cancel := acpApprovalDetachedContext(ctx, acpApprovalSettleTimeout)
 	defer cancel()
-	// No hold remains after this, so a passing store failure would leave the
-	// durable request pending until it expires: it is retried within the
-	// settle time. A conflict means the request already ended.
 	err := retry.OnError(acpPermissionCancelBackoff, func(err error) bool {
 		return !errors.Is(err, store.ErrConflict) && settleCtx.Err() == nil
 	}, func() error {
@@ -370,7 +338,6 @@ func (d *ACPDispatcher) releasePermissionHold(id string) {
 	delete(d.permissionHolds, id)
 }
 
-// sendPermissionDecision delivers one answer to the runtime.
 func (d *ACPDispatcher) sendPermissionDecision(
 	ctx context.Context,
 	runtimeClient *harnessv2.Client,
@@ -392,10 +359,6 @@ func taskPermissionDecisionsByRequester(task *corev1alpha1.Task) bool {
 	return task != nil && taskNativePermissions(task.Spec.AgentRuntime) == harnessv2.NativePermissionsAsk
 }
 
-// taskNativePermissions is the RuntimeSession launch mode a Task's permission
-// decisions require. A requester can decide only the requests a runtime
-// sends, so a Requester Task's runtime must be launched to ask before each
-// policy-allowed native tool that acts.
 func taskNativePermissions(runtime *corev1alpha1.AgentRuntimeSpec) harnessv2.NativePermissionMode {
 	if runtime != nil && runtime.PermissionDecisions == corev1alpha1.PermissionDecisionsRequester {
 		return harnessv2.NativePermissionsAsk
@@ -403,13 +366,9 @@ func taskNativePermissions(runtime *corev1alpha1.AgentRuntimeSpec) harnessv2.Nat
 	return harnessv2.NativePermissionsPreapproved
 }
 
-// errPermissionDecisionsRuntimeUnsupported rejects a Requester Task whose
-// runtime does not advertise that it can launch a session that asks.
 var errPermissionDecisionsRuntimeUnsupported = errors.New(
 	"the runtime cannot launch a session that asks before each tool, so the requester could not decide its permission requests")
 
-// rejectPermissionDecisionsRuntime fails a Requester Task before any
-// RuntimeSession exists, instead of running its tools without asking.
 func (d *ACPDispatcher) rejectPermissionDecisionsRuntime(
 	ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence,
 ) error {
@@ -421,8 +380,6 @@ func (d *ACPDispatcher) rejectPermissionDecisionsRuntime(
 	return d.failTaskBeforeSessionBinding(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message)
 }
 
-// taskHasVerifiedRequester reports whether the API server stamped the Task's
-// requester from a verified sign-in. Admission keeps that stamp immutable.
 func taskHasVerifiedRequester(task *corev1alpha1.Task) bool {
 	if task == nil || task.Spec.RequestedBy == nil ||
 		task.Annotations[labels.AnnotationRequestedBySource] != labels.RequestedBySourceAPI {

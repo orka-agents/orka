@@ -98,7 +98,6 @@ func TestE2EWorkflowTimeoutHeadroom(t *testing.T) {
 				return parsed
 			}
 			grace := parse(job.Env["E2E_GINKGO_GRACE_PERIOD"])
-			// Matrix lanes set their own Ginkgo and Go deadlines.
 			deadlines := [][2]string{{job.Env["E2E_GINKGO_TIMEOUT"], job.Env["E2E_GO_TEST_TIMEOUT"]}}
 			if len(job.Strategy.Matrix.Include) > 0 {
 				deadlines = deadlines[:0]

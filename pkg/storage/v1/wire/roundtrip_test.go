@@ -19,8 +19,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb"
 )
 
-// roundTrip encodes value to wire bytes and decodes it back, with dynamic
-// numbers exact as a server decodes them or as float64 as a client does.
 func roundTrip(t *testing.T, codec recordCodec, value any, exact bool) (any, error) {
 	t.Helper()
 	encoded, err := codec.toWire(value)
@@ -34,9 +32,6 @@ func roundTrip(t *testing.T, codec recordCodec, value any, exact bool) (any, err
 	return codec.fromWire(decoded, exact)
 }
 
-// Every record crosses the wire with every field, including fields tagged
-// json:"-", nested records, non-nil pointers and times with nanoseconds in a
-// non-UTC zone.
 func TestEveryRecordRoundTrips(t *testing.T) {
 	require.NotEmpty(t, recordCodecs)
 	for _, codec := range recordCodecs {
@@ -57,8 +52,6 @@ func TestEveryRecordRoundTrips(t *testing.T) {
 	}
 }
 
-// Random fills either round-trip exactly or are refused as validation errors
-// before any bytes are written; they never decode to a different value.
 func FuzzRecordRoundTrip(f *testing.F) {
 	for seed := range uint64(8) {
 		f.Add(seed, uint8(seed))
@@ -146,8 +139,6 @@ func TestDurationsRefuseValuesOutsideTheGoRange(t *testing.T) {
 	require.ErrorIs(t, err, storagev1.ErrValidation)
 }
 
-// Dynamic values carry their encoding/json bytes, so the decoded types are
-// the ones a JSON text column returns in process.
 func TestJSONValuesCarryTheirEncodingJSONBytes(t *testing.T) {
 	type call struct {
 		Name string `json:"name"`
@@ -191,8 +182,6 @@ func TestJSONValuesCarryTheirEncodingJSONBytes(t *testing.T) {
 	require.Nil(t, value)
 }
 
-// A server decodes a request's numbers exactly, so an integer above 2^53 is
-// stored, and digested, as the caller wrote it.
 func TestServersDecodeDynamicNumbersExactly(t *testing.T) {
 	sent := map[string]any{"n": uint64(9007199254740993), "f": 1.1}
 	want, err := storagev1.RequestDigest("SaveThing", sent)
@@ -230,7 +219,7 @@ func TestServerInfoIsSanitized(t *testing.T) {
 }
 
 func TestUnknownFieldsAreFoundAnywhereInTheRequest(t *testing.T) {
-	unknown := []byte{0xf8, 0x07, 0x01} // field 127, varint 1
+	unknown := []byte{0xf8, 0x07, 0x01}
 	request := &storagepb.SavePlanRequest{Namespace: "n", Plan: &storagepb.PlanState{Summary: "s"}}
 	require.False(t, hasUnknownFields(request.ProtoReflect()))
 	request.Plan.ProtoReflect().SetUnknown(unknown)
@@ -258,8 +247,6 @@ func TestInvalidUTF8IsFoundAnywhereInAMessage(t *testing.T) {
 	require.False(t, invalid)
 }
 
-// The client refuses an RPC the server's revision does not have, without
-// sending it.
 func TestClientRefusesRPCsNewerThanTheServer(t *testing.T) {
 	client := &Client{serverRevision: 1}
 	newer := &method{name: "FutureWrite", fullName: "/orka.storage.v1.Future/FutureWrite", kind: storagev1.MethodWrite, since: 2}

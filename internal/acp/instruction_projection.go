@@ -8,14 +8,11 @@ import (
 	"strings"
 )
 
-// InstructionProjection is supervisor-authored input, never repository content.
-// RelativePath is beneath the private session home, outside the task workspace.
 type InstructionProjection struct {
 	RelativePath string
 	Content      string
 }
 
-// ProjectInstructions runs after child ownership finalization and before spawn.
 func ProjectInstructions(paths SessionPaths, projection InstructionProjection, gid int) error {
 	path, err := protectInstructionAncestors(paths, projection, gid)
 	if err != nil {
@@ -38,9 +35,6 @@ func ProjectInstructions(paths SessionPaths, projection InstructionProjection, g
 	return file.Sync()
 }
 
-// RestoreInstructions reestablishes protected ownership after whole-tree
-// validation. The caller must keep the child frozen until this succeeds. It
-// verifies existing bytes rather than replacing a damaged or missing projection.
 func RestoreInstructions(paths SessionPaths, projection InstructionProjection, gid int) error {
 	path, err := protectInstructionAncestors(paths, projection, gid)
 	if err != nil {
@@ -50,8 +44,6 @@ func RestoreInstructions(paths SessionPaths, projection InstructionProjection, g
 	if err != nil || !info.Mode().IsRegular() {
 		return fmt.Errorf("instruction projection is missing or not a regular file")
 	}
-	// The supervisor deliberately lacks DAC_OVERRIDE/DAC_READ_SEARCH. Reclaim
-	// the child-owned 0440 file with CHOWN before opening it; the child is frozen.
 	if err := os.Lchown(path, 0, gid); err != nil {
 		return err
 	}
@@ -117,7 +109,6 @@ func protectInstructionAncestors(paths SessionPaths, projection InstructionProje
 	return filepath.Join(dir, parts[1]), nil
 }
 
-// ValidateCopilotInstructions conservatively rejects native file-import markers.
 func ValidateCopilotInstructions(text string) error {
 	if strings.ContainsRune(text, '@') {
 		return fmt.Errorf("copilot Agent instructions must not contain @ references; inline the referenced text")

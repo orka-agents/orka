@@ -21,15 +21,11 @@ import (
 )
 
 const (
-	// HeaderName is the default HTTP header used by transaction tokens.
 	HeaderName = transactiontoken.HeaderName
 
-	// TTSTokenSourceNone disables Orka-initiated token exchanges.
-	TTSTokenSourceNone = "none"
-	// TTSTokenSourceServiceAccount uses Orka's ServiceAccount identity for exchanges.
+	TTSTokenSourceNone           = "none"
 	TTSTokenSourceServiceAccount = "serviceAccount"
-	// TTSTokenSourceIncoming uses the incoming subject token for exchanges.
-	TTSTokenSourceIncoming = "incoming"
+	TTSTokenSourceIncoming       = "incoming"
 )
 
 const (
@@ -42,7 +38,6 @@ const (
 	defaultTTSTokenSource = TTSTokenSourceServiceAccount
 )
 
-// TTSConfig controls optional vendor-neutral transaction-token service integration.
 type TTSConfig struct {
 	Endpoint      string
 	Audience      string
@@ -52,13 +47,10 @@ type TTSConfig struct {
 	ToolTokenTTL  time.Duration
 }
 
-// Enabled reports whether Orka should perform TTS exchanges.
 func (c TTSConfig) Enabled() bool {
 	return c.Endpoint != "" && c.TokenSource != TTSTokenSourceNone
 }
 
-// NewTTSConfig builds TTS integration config from flag/env values. Endpoint is
-// the exact OAuth token endpoint; Orka never appends a provider-specific path.
 func NewTTSConfig(endpoint, audience, timeout, tokenSource, childTTL, toolTTL string) (TTSConfig, error) {
 	rawEndpoint := endpoint
 	endpoint = strings.TrimSpace(endpoint)
@@ -116,8 +108,6 @@ func NewTTSConfig(endpoint, audience, timeout, tokenSource, childTTL, toolTTL st
 	}, nil
 }
 
-// SubjectTokenTypeForSource returns the default RFC 8693 subject token type
-// for an Orka TTS token source.
 func SubjectTokenTypeForSource(tokenSource string) string {
 	switch tokenSource {
 	case TTSTokenSourceServiceAccount:
@@ -138,7 +128,6 @@ func parseOptionalDuration(value string, fallback time.Duration, name string) (t
 	return d, nil
 }
 
-// ExchangeRequest describes a TTS exchange or replacement request.
 type ExchangeRequest struct {
 	SubjectToken     string
 	SubjectTokenType string
@@ -148,12 +137,10 @@ type ExchangeRequest struct {
 	RequestContext   map[string]any
 }
 
-// Exchanger exchanges subject tokens for transaction tokens.
 type Exchanger interface {
 	Exchange(ctx context.Context, req ExchangeRequest) (string, error)
 }
 
-// TTSClient is a strict RFC 8693 transaction-token service client.
 type TTSClient struct {
 	endpoint  string
 	audience  string
@@ -161,7 +148,6 @@ type TTSClient struct {
 	exchanger tokenexchange.Exchanger
 }
 
-// NewTTSClient creates a TTS client for the configured exact endpoint.
 func NewTTSClient(cfg TTSConfig) (*TTSClient, error) {
 	if !cfg.Enabled() {
 		return nil, errors.New("context token TTS is not configured")
@@ -178,8 +164,6 @@ func NewTTSClient(cfg TTSConfig) (*TTSClient, error) {
 	}, nil
 }
 
-// Exchange exchanges the subject token for a transaction token and requires
-// the strict txn_token/N_A response profile.
 func (c *TTSClient) Exchange(ctx context.Context, req ExchangeRequest) (token string, err error) {
 	start := time.Now()
 	result, reason := "success", "ok"

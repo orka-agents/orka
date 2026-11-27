@@ -16,8 +16,6 @@ import (
 	"testing"
 )
 
-// binaryFormat names the compiled-object format of the file r reads, or
-// returns "" when it is not one.
 func binaryFormat(r io.ReaderAt) (string, error) {
 	head := make([]byte, 0x40)
 	n, err := r.ReadAt(head, 0)
@@ -44,8 +42,6 @@ func binaryFormat(r io.ReaderAt) (string, error) {
 	case bytes.HasPrefix(head, []byte("!<arch>\n")):
 		return "ar archive", nil
 	case bytes.HasPrefix(head, []byte("MZ")) && len(head) == 0x40:
-		// A PE file's DOS header points at the "PE\0\0" signature, which
-		// may sit anywhere after the DOS stub.
 		offset := int64(binary.LittleEndian.Uint32(head[0x3c:0x40]))
 		if offset < 0x40 {
 			return "", nil
@@ -102,18 +98,15 @@ func TestBinaryFormat(t *testing.T) {
 	}
 }
 
-// TestNoCompiledBinaries enforces the AGENTS.md rule that build artifacts never
-// enter the repository.
 func TestNoCompiledBinaries(t *testing.T) {
 	root := repoRoot(t)
 	for _, f := range trackedFiles(t, root) {
-		// Skip symlinks (120000) and submodules (160000).
 		if f.mode != "100644" && f.mode != "100755" {
 			continue
 		}
 		file, err := os.Open(filepath.Join(root, f.path))
 		if errors.Is(err, os.ErrNotExist) {
-			continue // deleted in the working tree but still staged
+			continue
 		}
 		if err != nil {
 			t.Fatal(err)

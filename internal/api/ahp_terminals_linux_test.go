@@ -19,7 +19,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ahpSessionMembers lists the live processes in a session, read from /proc.
 func ahpSessionMembers(t *testing.T, sid int) []int {
 	t.Helper()
 	stats, err := filepath.Glob("/proc/[0-9]*/stat")
@@ -43,9 +42,6 @@ func ahpSessionMembers(t *testing.T, sid int) []int {
 	return members
 }
 
-// A terminal's session is stopped with nothing but sh: the shell and what it
-// started in the background are killed, its PID file goes, and a process
-// outside the session is left alone.
 func TestAHPStopSessionScript(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "terminal.pid")
 	shell := exec.Command("/bin/sh", "-c", `pidfile=$1; `+ahpTerminalRecordSession+`; sleep 60 & sleep 60`, "sh", pidFile)
@@ -73,8 +69,6 @@ func TestAHPStopSessionScript(t *testing.T) {
 	require.NoError(t, outside.Process.Signal(syscall.Signal(0)), "a process outside the session is left alone")
 }
 
-// ahpRecordedSession starts a session leader that records itself as a terminal
-// shell does, runs script after that, and returns it once its file is written.
 func ahpRecordedSession(t *testing.T, pidFile, script string) *exec.Cmd {
 	t.Helper()
 	shell := exec.Command("/bin/sh", "-c", `pidfile=$1; `+ahpTerminalRecordSession+`; `+script, "sh", pidFile)
@@ -93,8 +87,6 @@ func ahpRecordedSession(t *testing.T, pidFile, script string) *exec.Cmd {
 	return shell
 }
 
-// A leftover terminal whose recorded session ID a running terminal now holds
-// was reused: its file goes, and the running terminal's session is left alone.
 func TestAHPStopSessionScriptSparesAReusedSession(t *testing.T) {
 	dir := t.TempDir()
 	livePID, stalePID := filepath.Join(dir, "live.pid"), filepath.Join(dir, "stale.pid")
@@ -109,15 +101,12 @@ func TestAHPStopSessionScriptSparesAReusedSession(t *testing.T) {
 	require.GreaterOrEqual(t, len(ahpSessionMembers(t, shell.Process.Pid)), 2, "the running terminal's session is left alone")
 }
 
-// A leftover record whose session ID an unrelated session now holds, one that
-// began after the recorded shell, is not reaped.
 func TestAHPReapSparesASessionThatReusedTheID(t *testing.T) {
 	stalePID := filepath.Join(t.TempDir(), "stale.pid")
 	unrelated := exec.Command("/bin/sh", "-c", "sleep 60")
 	unrelated.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	require.NoError(t, unrelated.Start())
 	t.Cleanup(func() { _ = syscall.Kill(-unrelated.Process.Pid, syscall.SIGKILL); _ = unrelated.Wait() })
-	// The record names the same ID with another leader's start time.
 	require.NoError(t, os.WriteFile(stalePID, []byte(strconv.Itoa(unrelated.Process.Pid)+" 1\n"), 0o600))
 
 	out, err := exec.Command("/bin/sh", "-c", ahpStopSessionScript, "sh", stalePID, "reap").CombinedOutput()
@@ -126,9 +115,6 @@ func TestAHPReapSparesASessionThatReusedTheID(t *testing.T) {
 	require.NotEmpty(t, ahpSessionMembers(t, unrelated.Process.Pid), "the unrelated session is left alone")
 }
 
-// What a terminal's shell started can outlive the shell, still holding its
-// session ID. Without the leader to prove the session, a leftover record is
-// not reaped; a running terminal's is stopped.
 func TestAHPStopSessionScriptWithoutTheLeader(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "terminal.pid")
 	shell := ahpRecordedSession(t, pidFile, "sleep 60 & exit 0")
@@ -150,17 +136,11 @@ func TestAHPStopSessionScriptWithoutTheLeader(t *testing.T) {
 		"a running terminal's leftover processes are stopped")
 }
 
-// Disposing of a terminal and the end of its stream both stop its session, so
-// two runs race on its file, and rm -f fails when the file goes between its
-// check and its unlink. The run that lost still succeeds; one that cannot
-// remove the file still fails.
 func TestAHPStopSessionScriptLosesTheRaceForItsFile(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "terminal.pid")
 	ahpRecordedSession(t, pidFile, "sleep 60")
 	bin := t.TempDir()
-	// This rm removes the file, as the other run does, then fails as rm -f
-	// does when it loses the race.
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "rm"), []byte("#!/bin/sh\n/bin/rm -f \"$2\"\necho \"rm: can't remove '$2': No such file or directory\" >&2\nexit 1\n"), 0o755))
 	stop := exec.Command("/bin/sh", "-c", ahpStopSessionScript, "sh", pidFile, "stop")
 	stop.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))

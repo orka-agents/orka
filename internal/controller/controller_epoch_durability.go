@@ -18,44 +18,11 @@ import (
 )
 
 const (
-	// DefaultWatermarkInterval is how often the manager advances each
-	// dataset's write watermark and checks whether its database restarted or
-	// switched.
 	DefaultWatermarkInterval = time.Minute
-	// DefaultHoldPollInterval is how often a held manager looks for an
-	// operator's acknowledgement of the hold.
-	DefaultHoldPollInterval = 10 * time.Second
-	// storageHoldRequeue is how long a reconciler waits before it tries a side
-	// effect again while storage is held for recovery.
-	storageHoldRequeue = 30 * time.Second
+	DefaultHoldPollInterval  = 10 * time.Second
+	storageHoldRequeue       = 30 * time.Second
 )
 
-// storageTakeover is the storage side of one controller epoch. It runs
-// until its context ends:
-//
-//  1. Read the storage record Kubernetes keeps for the installation. While
-//     it holds a storage recovery hold that no operator acknowledged, keep
-//     every fence closed and wait for the acknowledgement; a hold that
-//     leaves the record unacknowledged is recorded again. Once the hold is
-//     acknowledged, advance every dataset, record what each holds now as
-//     acknowledged, and clear the hold in the same update.
-//  2. For each contract, in parallel: describe its dataset. A contract served
-//     by another dataset than the one that acknowledged it raises a hold.
-//     Then, once per dataset, read the epoch and write watermark the dataset
-//     holds; a dataset holding a lower epoch or watermark than any contract
-//     acknowledged on it raises a hold and is left as found. Otherwise
-//     advance it to the acquired epoch, record the contract's
-//     acknowledgement and open the contract's fence.
-//  3. Alongside step 2, every WatermarkInterval, for each dataset that has
-//     passed: describe it, and when its incarnation changed, check that it
-//     still holds this controller's epoch and at least its acknowledged
-//     watermark, and raise a hold for an async-replicated dataset. Then
-//     advance its write watermark with a fenced write and record the new
-//     value once the dataset acknowledged it.
-//
-// A raised hold closes every fence at once and is then recorded in
-// Kubernetes, so a restart keeps it; the fences stay closed until an
-// operator acknowledges it.
 type storageTakeover struct {
 	manager        *ControllerEpochManager
 	acquired       store.ControllerEpoch
@@ -64,36 +31,21 @@ type storageTakeover struct {
 	records        store.StorageRecordStore
 	contracts      map[string]*contractFence
 
-	mu sync.Mutex
-	// attempt numbers the takeover attempts, and ended is set once the
-	// latest one ends. A contract worker of an attempt that is no longer in
-	// progress, which can still be finishing a call, tracks nothing and
-	// opens no fence.
+	mu       sync.Mutex
 	attempt  uint64
 	ended    bool
 	datasets map[string]*trackedDataset
 }
 
-// trackedDataset is one dataset the takeover advanced.
 type trackedDataset struct {
-	dataset   EpochDataset
-	contracts []string
-	// opened holds the contracts whose acknowledgement is recorded. A passed
-	// switch check reopens only their fences.
-	opened map[string]bool
-	// incarnation is the last one checked: first the one the takeover's
-	// advance described, then each one a switch check passed.
-	incarnation string
-	// checking is set while a restart or switch the loop saw has not passed
-	// its check, so a contract acknowledged meanwhile waits for that check.
-	checking bool
-	// acknowledged is the highest write watermark recorded as acknowledged.
+	dataset      EpochDataset
+	contracts    []string
+	opened       map[string]bool
+	incarnation  string
+	checking     bool
 	acknowledged int64
 }
 
-// contractOutcome is how one contract's takeover step ended: with an
-// acknowledgement to record, a hold to raise, or an error retrying cannot
-// fix.
 type contractOutcome struct {
 	contract string
 	ack      store.StorageAcknowledgement
@@ -103,21 +55,13 @@ type contractOutcome struct {
 
 func (t *storageTakeover) run(ctx context.Context) error {
 	log := logf.FromContext(ctx)
-	// held is the hold this manager last raised or read, until it releases
-	// the hold or a record without it shows that an operator acknowledged it.
 	var held *store.StorageRecoveryHold
-	// fencingHold names the hold whose acknowledged datasets fenceHeld is
-	// advancing until stopFencing ends it. The fencing lasts until the hold
-	// is released or acknowledged, also while a hold that left the record
-	// is recorded again.
 	fencingHold, stopFencing := "", context.CancelFunc(func() {})
 	endFencing := func() {
 		stopFencing()
 		fencingHold, stopFencing = "", func() {}
 	}
 	defer endFencing()
-	// fence starts fencing the datasets that record says the recorded hold
-	// id acknowledged, unless that fencing already runs.
 	fence := func(id string, record store.StorageRecord) {
 		if fencingHold == id {
 			return
@@ -135,16 +79,8 @@ func (t *storageTakeover) run(ctx context.Context) error {
 			return err
 		}
 		if record.Hold == nil && held != nil && record.AcknowledgedHoldID != held.ID {
-			// The hold left the record without an operator acknowledging it,
-			// as an edit of the status does. The takeover step cannot detect
-			// again a switch of an async-replicated dataset that kept its
-			// epoch and watermark, so the hold is recorded again, with every
-			// fence still closed and the held datasets still being fenced,
-			// until an operator acknowledges it.
 			log.Info("The storage recovery hold left the record without being acknowledged; recording it again", "hold", held.ID)
 			hold := *held
-			// The hold was recorded before it left, so its datasets are
-			// fenced also when it left before this manager read it back.
 			fence(hold.ID, record)
 			if _, err := retryEpochStorageStep(ctx, "record the storage recovery hold again", func(ctx context.Context) (store.StorageRecoveryHold, error) {
 				return t.records.HoldStorage(ctx, t.fence, hold)
@@ -170,16 +106,10 @@ func (t *storageTakeover) run(ctx context.Context) error {
 			if err := t.release(ctx, hold.ID); err != nil {
 				return err
 			}
-			// The release succeeded only because the annotation named the
-			// hold, so a record read after the annotation is removed again
-			// does not record the released hold again.
 			held = nil
 			log.Info("Released the acknowledged storage recovery hold and recorded what each dataset holds now", "hold", hold.ID)
 			continue
 		}
-		// Each fence opens only once its dataset passes the takeover step,
-		// also after an acknowledged hold that left the record without this
-		// manager releasing it.
 		held = nil
 		endFencing()
 		t.manager.closeFences()
@@ -190,9 +120,6 @@ func (t *storageTakeover) run(ctx context.Context) error {
 		}
 		hold.ID = t.manager.holdID()
 		hold.RaisedAt = t.manager.clock()
-		// Close every fence before recording the hold, so no write reaches a
-		// dataset known to have lost writes while Kubernetes is slow. A hold
-		// that cannot be recorded stays in place until the process stops.
 		t.manager.setHold(*hold)
 		log.Error(errors.New(hold.Message), "Storage lost acknowledged writes or switched unsafely; holding storage contract writes and control-store changes for recovery",
 			"hold", hold.ID, "reason", hold.Reason, "contract", hold.Contract, "dataset", hold.DatasetID)
@@ -207,18 +134,6 @@ func (t *storageTakeover) run(ctx context.Context) error {
 	}
 }
 
-// fenceHeld advances, in the background, every dataset that serves the
-// contract the record says it acknowledged, so a replaced controller cannot
-// write to it while the installation is held. It runs only once the hold is
-// recorded, and each advance supplies the dataset's acknowledged epoch as
-// its floor: a dataset that lost that epoch refuses and keeps the evidence,
-// while one that kept it, such as one that lost only watermark advances, is
-// fenced. A contract now served by another dataset is left alone, because
-// advancing that dataset would bind it to this installation before an
-// operator decided to switch. Each advance is tried again until it
-// succeeds, the dataset refuses it for good, or ctx ends with the hold, so a
-// dataset that was unreachable when the hold was recorded is fenced once it
-// answers.
 func (t *storageTakeover) fenceHeld(ctx context.Context, record store.StorageRecord) {
 	for contract, fence := range t.contracts {
 		previous, acknowledged := record.Acknowledgement(contract)
@@ -234,8 +149,6 @@ func (t *storageTakeover) fenceHeld(ctx context.Context, record store.StorageRec
 			switch {
 			case err == nil || ctx.Err() != nil:
 			case errors.Is(err, errEpochBelowAcknowledgement):
-				// A dataset that lost its acknowledged epoch refuses the
-				// advance and keeps that evidence until the hold is released.
 				log.Info("A held storage dataset refused the advance and keeps its evidence", "reason", err.Error())
 			case errors.Is(err, storagev1.ErrDatasetMismatch):
 				log.Info("A held storage contract is served by another dataset now; leaving that dataset alone", "reason", err.Error())
@@ -246,10 +159,6 @@ func (t *storageTakeover) fenceHeld(ctx context.Context, record store.StorageRec
 	}
 }
 
-// fenceHeldDataset advances, once, the dataset serving a held contract that
-// dataset datasetID acknowledged, with floor as the acknowledged epoch. A
-// refusal is final only when the dataset holds a lower epoch than floor; one
-// that is briefly not ready is tried again.
 func (t *storageTakeover) fenceHeldDataset(ctx context.Context, dataset EpochDataset, datasetID string, floor int64) error {
 	info, err := dataset.Describe(ctx)
 	if err != nil {
@@ -270,8 +179,6 @@ func (t *storageTakeover) fenceHeldDataset(ctx context.Context, dataset EpochDat
 	return err
 }
 
-// waitForAcknowledgement returns once the hold named id is acknowledged or
-// no longer recorded.
 func (t *storageTakeover) waitForAcknowledgement(ctx context.Context, id string) error {
 	for {
 		record, err := t.records.GetStorageRecord(ctx, t.acquired.Name)
@@ -291,17 +198,11 @@ func (t *storageTakeover) waitForAcknowledgement(ctx context.Context, id string)
 	}
 }
 
-// takeoverResult is how the takeover step of the contracts ended.
 type takeoverResult struct {
 	hold *store.StorageRecoveryHold
 	err  error
 }
 
-// openAndMaintain runs the takeover step of every contract and, alongside
-// it, the watermark loop over every dataset that has passed, so a dataset
-// that opened is watched even while another is still unreachable. It returns
-// the first hold either raises, an error retrying cannot fix, or nothing once
-// ctx ends.
 func (t *storageTakeover) openAndMaintain(ctx context.Context, record store.StorageRecord) (*store.StorageRecoveryHold, error) {
 	attempt := t.startAttempt()
 	ctx, cancel := context.WithCancel(ctx)
@@ -323,9 +224,6 @@ func (t *storageTakeover) openAndMaintain(ctx context.Context, record store.Stor
 			t.endAttempt()
 			cancel()
 			if result.hold != nil {
-				// Return immediately so the caller closes all fences and
-				// publishes the hold without waiting on a potentially stuck
-				// maintenance provider call for an already-opened dataset.
 				return result.hold, nil
 			}
 			<-maintained
@@ -344,8 +242,6 @@ func (t *storageTakeover) openAndMaintain(ctx context.Context, record store.Stor
 	}
 }
 
-// startAttempt starts a takeover attempt, which tracks no dataset yet, and
-// returns its number.
 func (t *storageTakeover) startAttempt() uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -355,25 +251,16 @@ func (t *storageTakeover) startAttempt() uint64 {
 	return t.attempt
 }
 
-// endAttempt ends the takeover attempt in progress. The contract workers of
-// open are not waited for, because a provider call that ignores its context
-// would hold back the hold that ends the attempt; once it ended, they change
-// nothing.
 func (t *storageTakeover) endAttempt() {
 	t.mu.Lock()
 	t.ended = true
 	t.mu.Unlock()
 }
 
-// inProgress reports whether attempt is the takeover attempt in progress.
-// The caller holds t.mu.
 func (t *storageTakeover) inProgress(attempt uint64) bool {
 	return attempt == t.attempt && !t.ended
 }
 
-// open runs the takeover step of every contract and opens each contract's
-// fence once its own dataset passed and its acknowledgement is recorded. It
-// returns the first hold a contract raises.
 func (t *storageTakeover) open(ctx context.Context, attempt uint64, record store.StorageRecord) (*store.StorageRecoveryHold, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -404,9 +291,6 @@ func (t *storageTakeover) open(ctx context.Context, attempt uint64, record store
 	return nil, nil
 }
 
-// openContract records a contract's acknowledgement and opens its fence,
-// unless a switch check of its dataset is running, which opens it once it
-// passes.
 func (t *storageTakeover) openContract(ctx context.Context, attempt uint64, contract string, ack store.StorageAcknowledgement) error {
 	if _, err := retryEpochStorageStep(ctx, "record the "+contract+" acknowledgement", func(ctx context.Context) (struct{}, error) {
 		return struct{}{}, t.records.RecordStorageAcknowledgement(ctx, t.fence, ack)
@@ -417,8 +301,6 @@ func (t *storageTakeover) openContract(ctx context.Context, attempt uint64, cont
 	opened, current := t.acknowledged(attempt, contract, ack.DatasetID)
 	switch {
 	case !current:
-		// The attempt ended while the acknowledgement was recorded; the next
-		// attempt checks the dataset again before its fence opens.
 	case !opened:
 		log.Info("Recorded the storage acknowledgement; the write fence opens once the restarted or switched dataset passes its check")
 	default:
@@ -427,12 +309,6 @@ func (t *storageTakeover) openContract(ctx context.Context, attempt uint64, cont
 	return nil
 }
 
-// acknowledged marks contract's acknowledgement on datasetID as recorded and
-// opens its fence, unless the watermark loop is checking a restart or switch
-// of the dataset, whose check then opens it. It reports whether the fence
-// opened, and whether attempt is still in progress: a worker of an attempt
-// that ended opens nothing, and neither does one whose dataset the attempt
-// does not track.
 func (t *storageTakeover) acknowledged(attempt uint64, contract, datasetID string) (opened, current bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -454,12 +330,6 @@ func (t *storageTakeover) acknowledged(attempt uint64, contract, datasetID strin
 	return true, true
 }
 
-// release records what each dataset holds now as acknowledged and clears the
-// acknowledged hold in one update. It advances nothing: a dataset that lost
-// its acknowledged epoch keeps that evidence until the new acknowledgement is
-// recorded, because every advance supplies the recorded acknowledgement as
-// its floor. The next takeover step then advances each dataset against the
-// new record.
 func (t *storageTakeover) release(ctx context.Context, id string) error {
 	acks := make([]store.StorageAcknowledgement, 0, len(t.contracts))
 	for contract, fence := range t.contracts {
@@ -477,16 +347,11 @@ func (t *storageTakeover) release(ctx context.Context, id string) error {
 	}); err != nil {
 		return err
 	}
-	// Each contract's fence opens again only once its dataset passes the
-	// takeover step against the new record, which may name another dataset.
 	t.manager.closeFences()
 	t.manager.clearHold()
 	return nil
 }
 
-// accept returns the acknowledgement of what the dataset serving contract
-// holds now, as an operator accepted it by acknowledging the hold. A dataset
-// that holds no controller epoch has nothing to acknowledge.
 func (t *storageTakeover) accept(ctx context.Context, contract string, dataset EpochDataset) (store.StorageAcknowledgement, bool, error) {
 	info, err := t.describe(ctx, contract, dataset)
 	if err != nil {
@@ -504,8 +369,6 @@ func (t *storageTakeover) accept(ctx context.Context, contract string, dataset E
 	return ack, true, nil
 }
 
-// describe describes the dataset serving contract. An incompatible dataset
-// fails it, as it fails the takeover.
 func (t *storageTakeover) describe(ctx context.Context, contract string, dataset EpochDataset) (storagev1.ProviderInfo, error) {
 	return retryEpochStorageStep(ctx, "describe the "+contract+" dataset",
 		func(ctx context.Context) (storagev1.ProviderInfo, error) {
@@ -523,8 +386,6 @@ func (t *storageTakeover) describe(ctx context.Context, contract string, dataset
 		})
 }
 
-// held reads the controller epoch, zero when it holds none, and the write
-// watermark a dataset holds.
 func (t *storageTakeover) held(ctx context.Context, datasetID string, dataset EpochDataset) (int64, storagev1.WriteWatermark, error) {
 	epoch, err := retryEpochStorageStep(ctx, "read the controller epoch of dataset "+datasetID,
 		func(ctx context.Context) (int64, error) {
@@ -544,8 +405,6 @@ func (t *storageTakeover) held(ctx context.Context, datasetID string, dataset Ep
 	return epoch, watermark, err
 }
 
-// storedEpoch reads the controller epoch a dataset holds, zero when it holds
-// none.
 func (t *storageTakeover) storedEpoch(ctx context.Context, datasetID string, dataset EpochDataset) (int64, error) {
 	state, err := dataset.GetControllerEpochMirror(ctx, t.acquired.Name)
 	if errors.Is(err, store.ErrNotFound) {
@@ -560,8 +419,6 @@ func (t *storageTakeover) storedEpoch(ctx context.Context, datasetID string, dat
 	return state.Epoch.Epoch, nil
 }
 
-// check describes one contract's dataset, compares it with what the record
-// says it acknowledged and, when it passed, advances it.
 func (t *storageTakeover) check(
 	ctx context.Context, attempt uint64, contract string, dataset EpochDataset, record store.StorageRecord, advances *datasetAdvances,
 ) contractOutcome {
@@ -599,27 +456,14 @@ func (t *storageTakeover) check(
 	if acknowledged {
 		outcome.ack.Watermark, outcome.ack.WatermarkAcknowledgedAt = previous.Watermark, previous.WatermarkAcknowledgedAt
 	}
-	// The loop watches the dataset from the incarnation the advance
-	// described, which every contract the dataset serves shares, so a switch
-	// after it is checked even if this contract described the dataset later.
 	described := info
 	described.Incarnation = advanced.incarnation
 	t.track(attempt, contract, described, dataset, outcome.ack.Watermark)
 	return outcome
 }
 
-// errEpochBelowAcknowledgement reports that a dataset refused the advance
-// because it holds a lower controller epoch than the floor the advance
-// supplied. Retrying cannot fix it.
 var errEpochBelowAcknowledgement = errors.New("dataset holds a lower controller epoch than it acknowledged")
 
-// advance reads the epoch and write watermark a dataset holds and compares
-// them with the highest the record says any contract acknowledged on it. A
-// dataset that holds less is not advanced, so its evidence stays as found
-// even if the hold cannot be recorded; otherwise it is advanced to the
-// acquired epoch, with the acknowledged epoch as the advance's floor, so the
-// provider itself refuses to move a dataset that lost it in the meantime.
-// Every contract the dataset serves shares the result.
 func (t *storageTakeover) advance(
 	ctx context.Context, info storagev1.ProviderInfo, dataset EpochDataset, record store.StorageRecord,
 ) (datasetAdvanceResult, error) {
@@ -654,8 +498,6 @@ func (t *storageTakeover) advance(
 				DatasetID: datasetID, Epoch: t.acquired, InstallationID: t.installationID, AcknowledgedEpoch: epoch,
 			})
 			if errors.Is(err, storagev1.ErrNotReady) && epoch > 0 {
-				// The dataset may have lost the epoch since it was read, or
-				// be briefly not ready; only a lower stored epoch is final.
 				if stored, readErr := t.storedEpoch(ctx, datasetID, dataset); readErr == nil && stored < epoch {
 					refusedAt = stored
 					return state, errEpochBelowAcknowledgement
@@ -677,9 +519,6 @@ func (t *storageTakeover) advance(
 	return result, nil
 }
 
-// highestAcknowledged returns the highest controller epoch and write
-// watermark the record says any contract acknowledged on datasetID, with the
-// contract that acknowledged each.
 func highestAcknowledged(record store.StorageRecord, datasetID string) (epochContract string, epoch int64, watermarkContract string, watermark int64) {
 	for _, ack := range record.Acknowledgements {
 		if ack.DatasetID != datasetID {
@@ -695,10 +534,6 @@ func highestAcknowledged(record store.StorageRecord, datasetID string) (epochCon
 	return epochContract, epoch, watermarkContract, watermark
 }
 
-// track records a dataset the takeover advanced, for the watermark loop, and
-// a contract it serves whose acknowledgement is still to be recorded. A
-// worker of an attempt that ended tracks nothing, so the next attempt
-// watches only the datasets it advanced itself.
 func (t *storageTakeover) track(attempt uint64, contract string, info storagev1.ProviderInfo, dataset EpochDataset, acknowledged int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -716,15 +551,11 @@ func (t *storageTakeover) track(attempt uint64, contract string, info storagev1.
 	tracked.contracts = append(tracked.contracts, contract)
 	slices.Sort(tracked.contracts)
 	tracked.acknowledged = max(tracked.acknowledged, acknowledged)
-	// The state contract's dataset writes the watermark, so it waits for the
-	// fence CurrentFence also waits for.
 	if contract == storagev1.StateContract {
 		tracked.dataset = dataset
 	}
 }
 
-// maintain runs the watermark loop until ctx ends, and returns the first hold
-// it raises.
 func (t *storageTakeover) maintain(ctx context.Context) *store.StorageRecoveryHold {
 	for {
 		if hold := t.tick(ctx); hold != nil {
@@ -738,7 +569,6 @@ func (t *storageTakeover) maintain(ctx context.Context) *store.StorageRecoveryHo
 	}
 }
 
-// tick checks and advances every tracked dataset once.
 func (t *storageTakeover) tick(ctx context.Context) *store.StorageRecoveryHold {
 	t.mu.Lock()
 	ids := make([]string, 0, len(t.datasets))
@@ -758,7 +588,6 @@ func (t *storageTakeover) tick(ctx context.Context) *store.StorageRecoveryHold {
 	return nil
 }
 
-// snapshot returns a copy of the tracked dataset datasetID.
 func (t *storageTakeover) snapshot(datasetID string) (trackedDataset, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -772,9 +601,6 @@ func (t *storageTakeover) snapshot(datasetID string) (trackedDataset, bool) {
 	return copy, true
 }
 
-// startCheck marks datasetID as being checked after a restart or switch and
-// returns every contract it serves, whose fences the caller closes. A
-// contract acknowledged from now on waits for the check.
 func (t *storageTakeover) startCheck(datasetID string) []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -786,8 +612,6 @@ func (t *storageTakeover) startCheck(datasetID string) []string {
 	return slices.Clone(tracked.contracts)
 }
 
-// passCheck records that datasetID passed its check at incarnation and
-// reopens the fences of the contracts whose acknowledgement is recorded.
 func (t *storageTakeover) passCheck(datasetID, incarnation string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -803,7 +627,6 @@ func (t *storageTakeover) passCheck(datasetID, incarnation string) {
 	}
 }
 
-// update changes the tracked dataset datasetID under the lock.
 func (t *storageTakeover) update(datasetID string, change func(*trackedDataset)) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -833,12 +656,7 @@ func (t *storageTakeover) tickDataset(ctx context.Context, datasetID string) *st
 			Message: fmt.Sprintf("%s is now served by dataset %s instead of dataset %s", contract, info.DatasetID, datasetID),
 		}
 	}
-	// A check that has not finished runs again even when the dataset reports
-	// the incarnation checked last, as after a switchover that was seen and
-	// then rolled back.
 	if info.Incarnation != tracked.incarnation || tracked.checking {
-		// Nothing is written to a dataset whose database restarted or
-		// switched until it has been checked again.
 		t.manager.closeContractFences(t.startCheck(datasetID))
 		if info.State != storagev1.DatasetReady {
 			log.Info("A storage dataset restarted or switched and is not ready yet; checking again later", "state", info.State)
@@ -863,8 +681,6 @@ func (t *storageTakeover) tickDataset(ctx context.Context, datasetID string) *st
 	if watermark.DatasetID != datasetID || watermark.Value <= tracked.acknowledged {
 		return watermarkHold(contract, info, tracked.acknowledged+1, watermark.Value)
 	}
-	// The dataset acknowledged the watermark once the advance returned it,
-	// so a later switch check counts it even if recording it fails.
 	t.update(datasetID, func(tracked *trackedDataset) { tracked.acknowledged = max(tracked.acknowledged, watermark.Value) })
 	if err := t.records.RecordStorageWatermark(callCtx, t.fence, datasetID, watermark.Value, t.manager.clock()); err != nil {
 		log.Error(err, "Recording a storage dataset's write watermark failed; trying again later")
@@ -872,11 +688,6 @@ func (t *storageTakeover) tickDataset(ctx context.Context, datasetID string) *st
 	return nil
 }
 
-// checkSwitch checks a dataset whose database restarted or switched. It
-// reports whether the check finished: a read that failed leaves it
-// unfinished, so the caller neither trusts nor writes to the dataset until a
-// later check finishes. Any switch of an async-replicated dataset holds,
-// whatever the dataset holds.
 func (t *storageTakeover) checkSwitch(
 	ctx context.Context, contract string, info storagev1.ProviderInfo, tracked trackedDataset,
 ) (*store.StorageRecoveryHold, bool) {
@@ -905,11 +716,6 @@ func (t *storageTakeover) checkSwitch(
 				info.DatasetID, state.Epoch.Epoch, t.acquired.Epoch),
 		}, true
 	}
-	// A dataset that holds a later epoch, or this epoch for another holder,
-	// was taken over by another controller. This controller's fences stay
-	// closed: the check does not finish, so nothing it admits reaches a
-	// dataset it no longer owns, and it raises no hold on the new owner's
-	// behalf.
 	if state.Epoch.Epoch != t.acquired.Epoch || state.Epoch.HolderID != t.acquired.HolderID {
 		log.Info("A switched storage dataset holds another controller's epoch; keeping its fences closed",
 			"storedEpoch", state.Epoch.Epoch, "storedHolder", state.Epoch.HolderID,
@@ -936,8 +742,6 @@ func watermarkHold(contract string, info storagev1.ProviderInfo, acknowledged, s
 	}
 }
 
-// setHold closes every fence for hold at once, then returns once work
-// admitted before it has finished.
 func (m *ControllerEpochManager) setHold(hold store.StorageRecoveryHold) {
 	m.storageMu.Lock()
 	if m.hold == nil || m.hold.ID != hold.ID {
@@ -950,12 +754,6 @@ func (m *ControllerEpochManager) setHold(hold store.StorageRecoveryHold) {
 	m.drainAdmittedWork()
 }
 
-// taskSuccess says whether each surface on which a Task reports success
-// does: its phase, the workload execution outcome it recorded, and the state
-// or outcome of its ACP execution. Each is written on its own: the outcome
-// before the phase, an ACP execution before its delivery settles, and an ACP
-// Task whose delivery failed or was cancelled keeps its successful execution
-// under a failed or cancelled phase.
 type taskSuccess struct{ phase, outcome, execution bool }
 
 func taskSuccessOf(task *corev1alpha1.Task) taskSuccess {
@@ -968,17 +766,10 @@ func taskSuccessOf(task *corev1alpha1.Task) taskSuccess {
 	}
 }
 
-// reportsNew says whether s reports success on a surface that reported does
-// not.
 func (s taskSuccess) reportsNew(reported taskSuccess) bool {
 	return (s.phase && !reported.phase) || (s.outcome && !reported.outcome) || (s.execution && !reported.execution)
 }
 
-// admitTaskStatus runs write, which publishes task's status, through
-// epochs.AdmitWork when that status reports success on any surface that
-// reported did not. No Task then reports success while storage is held for
-// recovery, also when the hold is raised after the storage writes that came
-// before the status write. Other status writes run as they are.
 func admitTaskStatus(
 	ctx context.Context, epochs *ControllerEpochManager, reported taskSuccess,
 	task *corev1alpha1.Task, write func(context.Context) error,
@@ -989,8 +780,6 @@ func admitTaskStatus(
 	return write(ctx)
 }
 
-// closeFences closes every contract's write fence until it opens again, then
-// returns once work admitted before it has finished.
 func (m *ControllerEpochManager) closeFences() {
 	m.storageMu.Lock()
 	for _, fence := range m.storage {
@@ -1001,8 +790,6 @@ func (m *ControllerEpochManager) closeFences() {
 	m.drainAdmittedWork()
 }
 
-// closeContractFences closes the write fences of contracts until they open
-// again, then returns once work admitted before it has finished.
 func (m *ControllerEpochManager) closeContractFences(contracts []string) {
 	m.storageMu.Lock()
 	for _, contract := range contracts {
@@ -1015,15 +802,11 @@ func (m *ControllerEpochManager) closeContractFences(contracts []string) {
 	m.drainAdmittedWork()
 }
 
-// drainAdmittedWork waits for work AdmitWork admitted before the caller
-// published a hold or closed a fence. Work admitted later sees the change
-// and is refused, because AdmitWork checks StorageHold under the read lock.
 func (m *ControllerEpochManager) drainAdmittedWork() {
 	m.admission.Lock()
 	m.admission.Unlock() //nolint:staticcheck // An empty critical section waits for every reader.
 }
 
-// clearHold lets every opened fence through again.
 func (m *ControllerEpochManager) clearHold() {
 	m.storageMu.Lock()
 	held := m.hold != nil

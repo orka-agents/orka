@@ -29,7 +29,7 @@ func TestAgentIdentityAuditLoggerIgnoresTheDiagnosticLevel(t *testing.T) {
 			diagnosticLog := zap.New(zap.UseFlagOptions(&opts))
 
 			diagnosticLog.Info("diagnostic record")
-			for range 200 { // past the production encoder's sampling budget
+			for range 200 {
 				auditLog.Info("agent identity call issued")
 			}
 			if diagnostic.Len() != 0 {

@@ -98,8 +98,6 @@ func TestProvisionerGivesALinkItsHostOnce(t *testing.T) {
 	}
 }
 
-// Retained hosts need the full provider name before their Connection goes,
-// including hosts that no longer qualify for provisioning.
 func TestProvisionerBackfillsExistingHostProvider(t *testing.T) {
 	for _, state := range []string{"linked", "unlinked", "declined", "provider gone", "create race", "noncanonical"} {
 		t.Run(state, func(t *testing.T) {
@@ -251,8 +249,6 @@ func TestProvisionerRecreatesADeletedHost(t *testing.T) {
 	}
 }
 
-// A link blocked by another host's name tries again later, and a provider
-// change revisits every link in the namespace, whichever provider they use.
 func TestProvisionerRetriesBlockedLinks(t *testing.T) {
 	connection := linkedConnection("github")
 	taken := testHost()
@@ -277,8 +273,6 @@ func TestProvisionerRetriesBlockedLinks(t *testing.T) {
 	}
 }
 
-// Every GitHub login, managed user logins included, names a valid host, and
-// no two logins share one.
 func TestProvisionerNamesHostsForEveryLogin(t *testing.T) {
 	for login, want := range map[string]string{
 		"Alice":      "gh-alice",

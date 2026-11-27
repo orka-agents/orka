@@ -134,8 +134,6 @@ func TestSupervisorCancellationRevokesMCPBeforeCourtesyCancel(t *testing.T) {
 		t.Fatal("post-revocation request reached the broker")
 	}
 
-	// The production waiter must unblock from the real child's response. It
-	// must not hold a proxy/runtime lock needed by courtesy cancel or teardown.
 	release()
 	var settled harnessv2.CancelPromptResponse
 	decodeResponse(t, awaitRecorder(t, cancelDone, "cancellation did not settle"), &settled)
@@ -165,9 +163,6 @@ func TestSupervisorCancellationRevokesMCPBeforeCourtesyCancel(t *testing.T) {
 
 func assertMCPCancellationCleanup(t *testing.T, server *Server, cfg Config, create harnessv2.CreateRuntimeSessionRequest, state *sessionState) {
 	t.Helper()
-	// A non-success prompt schedules automatic cleanup. Wait for that attempt
-	// rather than racing it with a second delete. Non-Linux cannot prove UID
-	// descendant retirement and must retain the session without a tombstone.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		server.mu.Lock()

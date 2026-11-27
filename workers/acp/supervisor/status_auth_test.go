@@ -31,7 +31,6 @@ func TestSupervisorV2ProbeAuthenticationBoundary(t *testing.T) {
 	wrongProfileCapability := signStatus(cfg.CapabilitySecret, harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: harnessv2.ProfileDigest("sha256:" + strings.Repeat("e", 64))})
 	wrongInstanceCapability := signStatus(cfg.CapabilitySecret, harnessv2.StatusCapabilityBinding{RuntimeProfileDigest: binding.RuntimeProfileDigest, RuntimeInstanceID: "some-other-instance"})
 	replayedCapability := signStatus(cfg.CapabilitySecret, binding)
-	// Consume the replayed capability once so the boundary test's second use is a replay.
 	replayRequest := httptest.NewRequest(http.MethodGet, harnessv2.StatusPath, nil)
 	replayRequest.Header.Set("Authorization", "Bearer "+cfg.ControllerBearerToken)
 	replayRequest.Header.Set(OperationCapabilityHeader, replayedCapability)
@@ -85,8 +84,6 @@ func TestSupervisorV2ProbeAuthenticationBoundary(t *testing.T) {
 	}
 }
 
-// unreadableBody proves the mutation body is never read on the
-// unauthenticated path: any Read fails the test.
 type unreadableBody struct{ t *testing.T }
 
 func (b *unreadableBody) Read([]byte) (int, error) {

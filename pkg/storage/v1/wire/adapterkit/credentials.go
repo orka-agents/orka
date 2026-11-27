@@ -24,11 +24,6 @@ import (
 	"google.golang.org/grpc/peer"
 )
 
-// credentialStore holds the adapter's current serving certificate, accepted
-// bearer tokens and client CAs, and authenticates calls with them. Each
-// credential is reloaded from its files when they change; a file that no
-// longer parses keeps the previous value and is reported, except that a
-// bearer directory with no tokens left accepts no token.
 type credentialStore struct {
 	config  *Config
 	metrics *metrics
@@ -37,13 +32,10 @@ type credentialStore struct {
 	tokens      atomic.Pointer[[][]byte]
 	clientCAs   atomic.Pointer[x509.CertPool]
 
-	// mu guards the fingerprints of the files last loaded.
 	mu        sync.Mutex
 	loadedSum map[string][sha256.Size]byte
 }
 
-// loadCredentials reads every configured credential. A credential that is
-// missing or invalid at startup fails Serve.
 func loadCredentials(config *Config, metrics *metrics) (*credentialStore, error) {
 	c := &credentialStore{config: config, metrics: metrics, loadedSum: map[string][sha256.Size]byte{}}
 	if err := c.reloadCertificate(); err != nil {
@@ -65,7 +57,6 @@ func loadCredentials(config *Config, metrics *metrics) (*credentialStore, error)
 	return c, nil
 }
 
-// watch reloads changed credentials every interval until ctx ends.
 func (c *credentialStore) watch(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -79,7 +70,6 @@ func (c *credentialStore) watch(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// reload checks every credential once.
 func (c *credentialStore) reload(ctx context.Context) {
 	check := func(name string, reload func() error) {
 		if err := reload(); err != nil {
@@ -96,9 +86,6 @@ func (c *credentialStore) reload(ctx context.Context) {
 	}
 }
 
-// changed reports whether the fingerprint of content differs from the one
-// last loaded under name. It records nothing; loaded does once the content
-// is in use.
 func (c *credentialStore) changed(name string, content []byte) ([sha256.Size]byte, bool) {
 	sum := sha256.Sum256(content)
 	c.mu.Lock()
@@ -142,8 +129,6 @@ func (c *credentialStore) reloadTokens() error {
 		if !errors.Is(err, fs.ErrNotExist) {
 			return c.failed("bearer-tokens", err)
 		}
-		// A missing token directory means no tokens are mounted; clear any
-		// previously cached tokens so removed credentials stop authenticating.
 		entries = nil
 	}
 	var names []string
@@ -156,17 +141,12 @@ func (c *credentialStore) reloadTokens() error {
 		path := filepath.Join(c.config.BearerTokenDir, entry.Name())
 		info, err := os.Stat(path)
 		if errors.Is(err, fs.ErrNotExist) {
-			// The file was removed since the directory was listed.
 			continue
 		}
 		if err != nil {
-			// A file the adapter cannot inspect is not a removed token:
-			// keep the last good set rather than refuse every call.
 			return c.failed("bearer-tokens", err)
 		}
 		if !info.Mode().IsRegular() {
-			// Mounted Secrets link each key to a regular file; skip
-			// anything else, such as the projection's own directories.
 			continue
 		}
 		raw, err := os.ReadFile(path)
@@ -180,8 +160,6 @@ func (c *credentialStore) reloadTokens() error {
 		names = append(names, entry.Name())
 		tokens = append(tokens, token)
 	}
-	// ReadDir returns the entries sorted by name, so the fingerprint below is
-	// stable.
 	for index, name := range names {
 		fmt.Fprintf(&content, "%s\x00%d\x00", name, len(tokens[index]))
 	}
@@ -221,11 +199,6 @@ func (c *credentialStore) reloadClientCAs() error {
 	return nil
 }
 
-// parseCABundle parses every certificate in a PEM bundle. Unlike
-// x509.CertPool.AppendCertsFromPEM, which keeps whatever parses, it refuses
-// the whole bundle when any block is malformed or not a certificate, so a
-// rotation bundle with a broken entry never replaces a working pool and
-// drops a CA still in use.
 func parseCABundle(bundle []byte) (*x509.CertPool, error) {
 	pool := x509.NewCertPool()
 	parsed := 0
@@ -245,8 +218,6 @@ func parseCABundle(bundle []byte) (*x509.CertPool, error) {
 		pool.AddCert(certificate)
 		parsed++
 	}
-	// pem.Decode skips a block it cannot decode, so every block the bundle
-	// begins must have been parsed.
 	if begun := bytes.Count(bundle, []byte("-----BEGIN ")); begun != parsed {
 		return nil, fmt.Errorf("the bundle holds %d PEM blocks, of which only %d decode", begun, parsed)
 	}
@@ -261,9 +232,6 @@ func (c *credentialStore) failed(name string, err error) error {
 	return err
 }
 
-// serverTLS returns the adapter's TLS configuration: TLS 1.3 only, the
-// current serving certificate on every handshake and, with mTLS, a verified
-// client certificate from the current client CAs.
 func (c *credentialStore) serverTLS() *tls.Config {
 	config := &tls.Config{
 		MinVersion: tls.VersionTLS13,
@@ -283,8 +251,6 @@ func (c *credentialStore) serverTLS() *tls.Config {
 	return config
 }
 
-// Authenticate implements wire.Authenticator. Every configured method must
-// pass. It never logs or returns a credential value.
 func (c *credentialStore) Authenticate(ctx context.Context, _ string, header metadata.MD) error {
 	if c.config.BearerTokenDir != "" {
 		if err := c.authenticateBearer(header); err != nil {
@@ -331,10 +297,6 @@ func (c *credentialStore) authenticateCertificate(ctx context.Context) error {
 	if !ok || len(info.State.VerifiedChains) == 0 || len(info.State.VerifiedChains[0]) == 0 {
 		return errors.New("the call presents no verified client certificate")
 	}
-	// The handshake verified the chain against the client CAs of its time.
-	// A connection outlives that, so every call verifies the leaf again
-	// against the current bundle and clock: a removed CA or an expired
-	// certificate stops a connection that is already open.
 	leaf := info.State.VerifiedChains[0][0]
 	intermediates := x509.NewCertPool()
 	for _, presented := range info.State.PeerCertificates[1:] {

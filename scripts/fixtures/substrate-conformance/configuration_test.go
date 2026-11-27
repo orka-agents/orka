@@ -34,8 +34,6 @@ func TestNativeConformanceTemplatesUsePinnedProtocol(t *testing.T) {
 			require.NoError(t, protojson.Unmarshal(data, template), "conformance must emit strict upstream protojson")
 			require.Equal(t, name, template.GetMetadata().GetName())
 			require.Equal(t, image, template.GetContainers()[0].GetImage())
-			// Data-only: snapshots never capture process memory and a fresh
-			// Actor cold-boots instead of restoring a golden snapshot.
 			require.Equal(t, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
 				template.GetSnapshotConfig().GetPreferredFidelity())
 			require.Equal(t, ateapipb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_DISABLED,
@@ -47,9 +45,6 @@ func TestNativeConformanceTemplatesUsePinnedProtocol(t *testing.T) {
 	}
 }
 
-// Substrate v1 denies an Actor without an egress policy everything. The policy
-// the proof installs must compile, and must allow exactly the request the proof
-// then makes from inside the Actor.
 func TestDirectConformanceEgressAllowsOnlyTheProviderProxyProbe(t *testing.T) {
 	policy, err := workspace.CompileSubstrateActorEgressPolicy(conformanceAtespace, providerProxyEgress())
 	require.NoError(t, err)

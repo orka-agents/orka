@@ -232,8 +232,6 @@ func TestProviderProxyCancellationPreservesIndependentResults(t *testing.T) {
 			t.Cleanup(session.close)
 			barrier := newProviderCancellationBarrier(t)
 			proxy.client.Transport = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-				// The independent outcome is already known when cancellation
-				// races its delivery. A cancelled gate alone cannot relabel it.
 				session.deactivateWithCause(testPromptOneID, barrier.cause)
 				if test.transportErr != nil {
 					return nil, test.transportErr
@@ -322,7 +320,6 @@ func TestProviderProxyCancellationKeepsOldGateSeparateFromSuccessor(t *testing.T
 	if err := session.activateWithMaxTurns("successor", 50, now.Add(time.Minute), now); err != nil {
 		t.Fatal(err)
 	}
-	// A stale cancellation may neither revoke nor attach a hold to the successor.
 	session.deactivateWithCause(testPromptOneID, oldBarrier.cause)
 	if result := awaitProviderCancellationResponse(t, startProviderCancellationRequest(t, binding)); result.err != nil || result.status != http.StatusOK {
 		t.Fatalf("successor request = %+v, want HTTP 200", result)

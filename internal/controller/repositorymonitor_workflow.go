@@ -30,8 +30,6 @@ const (
 	repositoryMonitorWorkActionStatusFailed    = store.RepositoryMonitorWorkActionStatusFailed
 	repositoryMonitorWorkActionStatusBlocked   = store.RepositoryMonitorWorkActionStatusBlocked
 	repositoryMonitorWorkActionStatusCancelled = store.RepositoryMonitorWorkActionStatusCancelled
-	// Command intake writes completed only for an action it coalesced into an
-	// identical active action; the controller never writes it.
 	repositoryMonitorWorkActionStatusCompleted = store.RepositoryMonitorWorkActionStatusCompleted
 )
 
@@ -39,8 +37,6 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 	return r.recordRepositoryMonitorWorkActionStateWithMetadata(ctx, monitor, run, command, targetKind, targetNumber, targetSHA, snapshotDigest, actionKind, status, phase, taskName, reason, nil)
 }
 
-// recordRepositoryMonitorWorkActionStateWithMetadata also merges metadata
-// into the action's metadata, replacing keys it already has.
 func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionStateWithMetadata(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, targetKind string, targetNumber int64, targetSHA, snapshotDigest, actionKind, status, phase, taskName, reason string, metadata map[string]any) error {
 	if r.Store == nil || monitor == nil || command == nil {
 		return nil
@@ -72,11 +68,9 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionStateWith
 	blockedReason, actionError := repositoryMonitorWorkActionReasonFields(status, reason)
 	if existing, err := r.Store.GetWorkAction(ctx, monitor.Namespace, id); err == nil {
 		if existing.Status == repositoryMonitorWorkActionStatusCompleted {
-			// A coalesced action is final; its outcome is the action it joined.
 			return nil
 		}
 		if status == repositoryMonitorWorkActionStatusQueued {
-			// Queue recovery only fills missing actions; it must not rewind state.
 			return nil
 		}
 		verifiedUpdateBranchSuccess := desiredAction == repositoryMonitorCommandIntentUpdateBranch && status == repositoryMonitorWorkActionStatusSucceeded
@@ -157,8 +151,6 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionStateWith
 	return nil
 }
 
-// mergeRepositoryMonitorWorkActionMetadata merges metadata into the action's
-// metadata, replacing keys it already has.
 func mergeRepositoryMonitorWorkActionMetadata(action *store.WorkAction, metadata map[string]any) error {
 	if len(metadata) == 0 {
 		return nil
@@ -181,9 +173,6 @@ func mergeRepositoryMonitorWorkActionMetadata(action *store.WorkAction, metadata
 	return nil
 }
 
-// repositoryMonitorWorkActionHalted reports whether a command's work must not
-// run or advance: its action was cancelled, or command intake coalesced it
-// into an identical active action (completed), even after its run was queued.
 func (r *RepositoryMonitorReconciler) repositoryMonitorWorkActionHalted(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, commandID, actionKind string) (bool, error) {
 	if r.Store == nil || monitor == nil || strings.TrimSpace(commandID) == "" {
 		return false, nil

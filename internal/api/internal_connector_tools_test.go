@@ -62,15 +62,12 @@ func connectorToolFixtures() *corev1alpha1.Task {
 		task.Annotations = map[string]string{}
 	}
 	task.Annotations[labels.AnnotationRequestedBySource] = labels.RequestedBySourceAPI
-	// The API sealed this stamp for the Task's UID; the controller trusts
-	// the requester only through it.
 	controller.SetRequesterStampKey(testConnectorStampKey)
 	task.Annotations[labels.AnnotationRequestedByStamp] = connectors.RequesterStamp(testConnectorStampKey, task.UID, task.Spec.RequestedBy.Issuer, task.Spec.RequestedBy.Subject)
 	task.Status.ConnectionBindings = []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", Provider: "github", ConnectionName: connectors.ConnectionName("github", "https://issuer.example.test", "alice"), UID: "conn-uid", Generation: 2, GrantSequence: 1, Mode: "readOnly"}}
 	return task
 }
 
-// testConnectorStampKey is the requester stamp key the endpoint tests verify under.
 var testConnectorStampKey = []byte("0123456789abcdef0123456789abcdef")
 
 func connectorTestTool(name string, class corev1alpha1.AgentRuntimeBrokeredToolClass, policyName string) *corev1alpha1.Tool {
@@ -89,25 +86,16 @@ func connectorTestToolWithSchema(name string, class corev1alpha1.AgentRuntimeBro
 }
 
 type connectorToolAppOptions struct {
-	mode             string
-	approvalRequired []string
-	// tools is the tool list frozen into the Job; nil means every fixture tool.
-	tools []string
-	// bindingsEnv overrides the bindings frozen into the Job; nil means the
-	// Task's status bindings.
-	bindingsEnv *string
-	// parameters is the JSON Schema of every fixture connector tool.
-	parameters string
-	// transactionSecret names a Task-owned transaction-token Secret that
-	// does not exist, so authority binding fails after the approval claim.
+	mode              string
+	approvalRequired  []string
+	tools             []string
+	bindingsEnv       *string
+	parameters        string
 	transactionSecret string
-	// noLedger leaves the effect ledger unconfigured.
-	noLedger bool
-	// noGrant freezes a binding that carries no grant sequence.
-	noGrant bool
+	noLedger          bool
+	noGrant           bool
 }
 
-// connectorToolHarness is the endpoint under test with its fakes.
 type connectorToolHarness struct {
 	app     *fiber.App
 	events  *storetest.FakeExecutionEventStore
@@ -123,8 +111,6 @@ func (s staticFenceSource) CurrentFence(context.Context) (store.ControllerEpochF
 	return s.fence, nil
 }
 
-// newConnectorToolLedger opens an in-memory effect ledger with one live
-// controller epoch, the way the production controller runs.
 func newConnectorToolLedger(t *testing.T) (*sqlite.Store, store.ControllerEpochFence) {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
@@ -172,8 +158,6 @@ func newConnectorToolHarness(t *testing.T, resolver outboundaccess.Resolver, ena
 		"gh_write":  connectorTestToolWithSchema("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite, "github-conn", opts.parameters),
 		"plain":     connectorTestTool("plain", corev1alpha1.AgentRuntimeBrokeredToolClassRead, ""),
 	}
-	// The tool list, approval policy, connector tool digests, and Connection
-	// bindings the Job builder froze at dispatch.
 	frozenTools := opts.tools
 	if frozenTools == nil {
 		frozenTools = []string{"gh_search", "gh_write", "plain"}
@@ -222,11 +206,7 @@ func newConnectorToolHarness(t *testing.T, resolver outboundaccess.Resolver, ena
 			{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: "ProviderResolved", ObservedGeneration: 2},
 		}},
 	}
-	// The requester's Connection name must match the deterministic form the
-	// controller derives; override the fixture name accordingly.
 	connection.Name = connectors.ConnectionName("github", "https://issuer.example.test", "alice")
-	// The link was consented against the provider as it stands, which
-	// dispatch revalidates before treating the Connection as usable.
 	provider := acceptedTestProvider()
 	provider.Namespace = "default"
 	mode := opts.mode
@@ -261,8 +241,6 @@ func newConnectorToolHarness(t *testing.T, resolver outboundaccess.Resolver, ena
 	return harness
 }
 
-// seedApproval records a requested-then-approved approval for tool bound to
-// args, the way the worker's gate and a human decision would.
 func seedApproval(t *testing.T, eventStore *storetest.FakeExecutionEventStore, id string, args string, approve bool) {
 	t.Helper()
 	seedApprovalForTool(t, eventStore, id, args, approve, connectorTestTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite, "github-conn"))
@@ -271,8 +249,6 @@ func seedApproval(t *testing.T, eventStore *storetest.FakeExecutionEventStore, i
 func seedApprovalForTool(t *testing.T, eventStore *storetest.FakeExecutionEventStore, id string, args string, approve bool, approvedTool *corev1alpha1.Tool) {
 	t.Helper()
 	tool := approvedTool.Name
-	// The worker digests the plain spec of a connector-backed tool together
-	// with the Connection frozen into its Job.
 	targetArgs, err := approvals.TargetArguments(json.RawMessage(args), approvedTool)
 	if err != nil {
 		t.Fatal(err)
@@ -329,15 +305,12 @@ func TestExecuteConnectorToolGates(t *testing.T) {
 	if status, _ := postConnectorTool(t, app, "missing", `{}`); status != http.StatusNotFound {
 		t.Fatalf("missing tool = %d", status)
 	}
-	// gh_write is hidden from a readOnly link, so the worker cannot reach it.
 	if status, body := postConnectorTool(t, app, "gh_write", `{}`); status != http.StatusForbidden || !strings.Contains(body, "not enabled") {
 		t.Fatalf("hidden write tool = %d %s", status, body)
 	}
 	if status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{},"subject":"mallory"}`); status != http.StatusBadRequest || !strings.Contains(body, "invalid request body") {
 		t.Fatalf("unknown field = %d %s", status, body)
 	}
-	// A visible connector tool reaches resolution with the requester and the
-	// frozen binding from Task status; resolver refusal maps to 424.
 	status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"orka"},"callId":"c1","idempotencyKey":"k1"}`)
 	if status != http.StatusFailedDependency || !strings.Contains(body, "no connection") {
 		t.Fatalf("resolver refusal = %d %s", status, body)
@@ -358,7 +331,6 @@ func TestExecuteConnectorToolDisabledAndWrongCaller(t *testing.T) {
 	if status, _ := postConnectorTool(t, app, "gh_search", `{}`); status != http.StatusNotImplemented {
 		t.Fatalf("disabled = %d", status)
 	}
-	// A caller that is not the Task's worker Pod is refused before any lookup.
 	app = newConnectorToolApp(t, &stubOutboundResolver{}, true)
 	req := httptest.NewRequest(http.MethodPost, "/internal/v1/tasks/default/other-task/connector-tools/gh_search", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -376,7 +348,6 @@ func TestExecuteConnectorToolEnforcesApprovalAtTheController(t *testing.T) {
 	h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
 	app, eventStore, c := h.app, h.events, h.client
 
-	// A write tool in the frozen approval set executes only with an approval.
 	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"}}`); status != http.StatusForbidden || !strings.Contains(body, "approval is required") {
 		t.Fatalf("write without approval = %d %s", status, body)
 	}
@@ -388,18 +359,12 @@ func TestExecuteConnectorToolEnforcesApprovalAtTheController(t *testing.T) {
 		t.Fatalf("pending approval = %d %s", status, body)
 	}
 	seedApproval(t, eventStore, "ap-1", `{"q":"x"}`, true)
-	// The approval binds the exact arguments and the tool.
 	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"other"},"approvalId":"ap-1"}`); status != http.StatusForbidden || !strings.Contains(body, "does not bind") {
 		t.Fatalf("mismatched arguments = %d %s", status, body)
 	}
-	// A matching approval passes the gate and is claimed; the stub resolver
-	// then refuses before any provider request (424), which hands the claim back.
 	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1","idempotencyKey":"ap-1"}`); status != http.StatusFailedDependency || !strings.Contains(body, "no connection") {
 		t.Fatalf("approved write = %d %s", status, body)
 	}
-	// A claim whose call reached the provider never hands itself back:
-	// while its effect record is in flight under a live lease, presenting
-	// the same approval again, with any idempotency key, is refused.
 	history, err := approvals.ListEvents(context.Background(), eventStore, "default", "task-a")
 	if err != nil {
 		t.Fatal(err)
@@ -421,8 +386,6 @@ func TestExecuteConnectorToolEnforcesApprovalAtTheController(t *testing.T) {
 	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1","idempotencyKey":"fresh"}`); status != http.StatusConflict || !strings.Contains(body, "still executing") {
 		t.Fatalf("replayed approval = %d %s", status, body)
 	}
-	// A Tool retargeted after approval (same name, class, policy, and
-	// arguments) cannot ride the old approval.
 	seedApproval(t, eventStore, "ap-2", `{"q":"y"}`, true)
 	live := &corev1alpha1.Tool{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "gh_write"}, live); err != nil {
@@ -435,7 +398,6 @@ func TestExecuteConnectorToolEnforcesApprovalAtTheController(t *testing.T) {
 	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"y"},"approvalId":"ap-2"}`); status != http.StatusConflict || !strings.Contains(body, "configuration changed") {
 		t.Fatalf("retargeted tool = %d %s", status, body)
 	}
-	// Read tools outside the frozen set need no approval.
 	if status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"x"}}`); status != http.StatusFailedDependency || !strings.Contains(body, "no connection") {
 		t.Fatalf("read without approval = %d %s", status, body)
 	}
@@ -443,8 +405,6 @@ func TestExecuteConnectorToolEnforcesApprovalAtTheController(t *testing.T) {
 
 func TestExecuteConnectorToolRejectsClassDriftAfterDispatch(t *testing.T) {
 	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
-	// The Job was dispatched when gh_write was not approval-required (it was
-	// read-class then); the live Tool is write-class now.
 	app, eventStore, _ := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: nil})
 	seedApproval(t, eventStore, "ap-1", `{"q":"x"}`, true)
 	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusConflict || !strings.Contains(body, "does not cover") {
@@ -454,8 +414,6 @@ func TestExecuteConnectorToolRejectsClassDriftAfterDispatch(t *testing.T) {
 
 func TestExecuteConnectorToolRequiresDispatchedToolList(t *testing.T) {
 	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
-	// gh_search is enabled on the live Agent but was not in the list the
-	// worker was started with: an Agent edited after dispatch cannot add it.
 	app, _, _ := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readOnly", tools: []string{"plain"}})
 	if status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"x"}}`); status != http.StatusForbidden || !strings.Contains(body, "dispatched with the task's job") {
 		t.Fatalf("undispatched tool = %d %s", status, body)
@@ -466,8 +424,6 @@ func TestExecuteConnectorToolReleasesClaimWithoutProviderRequest(t *testing.T) {
 	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
 	app, eventStore, _ := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
 	seedApproval(t, eventStore, "ap-1", `{"q":"x"}`, true)
-	// Resolution fails before any provider request: the claim is handed back
-	// and the same approval can be claimed again on an exact retry.
 	for range 2 {
 		if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusFailedDependency || !strings.Contains(body, "no connection") {
 			t.Fatalf("pre-request failure = %d %s", status, body)
@@ -501,7 +457,6 @@ func TestExecuteConnectorToolValidatesArgumentsAgainstSchema(t *testing.T) {
 	if resolver.request.PolicyName != "" {
 		t.Fatal("schema-rejected arguments must not reach credential resolution")
 	}
-	// Arguments the schema admits reach resolution.
 	if status, reply := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"x","limit":3}}`); status != http.StatusFailedDependency || !strings.Contains(reply, "no connection") {
 		t.Fatalf("valid arguments = %d %s", status, reply)
 	}
@@ -510,9 +465,6 @@ func TestExecuteConnectorToolValidatesArgumentsAgainstSchema(t *testing.T) {
 func TestExecuteConnectorToolRefusesToolChangedSinceDispatch(t *testing.T) {
 	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
 	app, eventStore, c := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
-	// A read tool retargeted after dispatch: same name, class, and policy,
-	// different URL. Read tools pass no approval, so the dispatch digest is
-	// the only thing standing between the worker and the new destination.
 	live := &corev1alpha1.Tool{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "gh_search"}, live); err != nil {
 		t.Fatal(err)
@@ -524,8 +476,6 @@ func TestExecuteConnectorToolRefusesToolChangedSinceDispatch(t *testing.T) {
 	if status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"x"}}`); status != http.StatusConflict || !strings.Contains(body, "changed since dispatch") {
 		t.Fatalf("retargeted read tool = %d %s", status, body)
 	}
-	// The same drift on a write tool is refused before the approval is
-	// claimed, so the approval stays usable once the Task is re-dispatched.
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "gh_write"}, live); err != nil {
 		t.Fatal(err)
 	}
@@ -548,15 +498,11 @@ func TestExecuteConnectorToolRefusesToolChangedSinceDispatch(t *testing.T) {
 
 func TestExecuteConnectorToolRequiresJobBindingsToMatchTaskStatus(t *testing.T) {
 	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
-	// Task status names a different Connection than the one frozen into the
-	// Job: neither a rewritten status nor a recovered Job may redirect the call.
 	other := `[{"policyName":"github-conn","provider":"github","connectionName":"github-abc","uid":"other-uid","generation":2,"grantSequence":1,"mode":"readOnly"}]`
 	app, _, _ := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readOnly", bindingsEnv: &other})
 	if status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"x"}}`); status != http.StatusConflict || !strings.Contains(body, "do not match its dispatched job") {
 		t.Fatalf("mismatched bindings = %d %s", status, body)
 	}
-	// A Job dispatched without any binding for the policy can never bind a
-	// credential; the call fails closed before approval or resolution.
 	none := ""
 	app, _, _ = newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readOnly", bindingsEnv: &none})
 	if status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"x"}}`); status != http.StatusConflict {
@@ -570,9 +516,6 @@ func TestExecuteConnectorToolRequiresJobBindingsToMatchTaskStatus(t *testing.T) 
 func TestExecuteConnectorToolBindsApprovalToFrozenConnection(t *testing.T) {
 	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
 	app, eventStore, _ := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
-	// An approval requested while a different account was linked (the
-	// worker digested another Connection identity) does not authorize a
-	// call under the Connection frozen with this Job.
 	approvedTool := connectorTestTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite, "github-conn")
 	targetArgs, _ := approvals.TargetArguments(json.RawMessage(`{"q":"x"}`), approvedTool)
 	argsDigest, _ := approvals.TargetArgsDigest(targetArgs)
@@ -600,8 +543,6 @@ func TestExecuteConnectorToolReleasesClaimWhenAuthorityBindingFails(t *testing.T
 		mode: "readWrite", approvalRequired: []string{"gh_write"}, transactionSecret: "missing-tx-secret",
 	})
 	seedApproval(t, eventStore, "ap-1", `{"q":"x"}`, true)
-	// Loading the Task's transaction-token Secret fails after the claim and
-	// before any provider request: the claim is handed back each time.
 	for range 2 {
 		if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusInternalServerError || !strings.Contains(body, "bind task authority") {
 			t.Fatalf("authority binding failure = %d %s", status, body)
@@ -620,9 +561,6 @@ func TestExecuteConnectorToolRecordsApprovedCallsInEffectLedger(t *testing.T) {
 	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
 	h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
 	seedApproval(t, h.events, "ap-1", `{"q":"x"}`, true)
-	// Every approval-claimed call is reserved in the durable effect ledger
-	// under its claim before the provider is contacted; one that fails
-	// before any request settles as Failed and hands the claim back.
 	for range 2 {
 		if status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusFailedDependency || !strings.Contains(body, "no connection") {
 			t.Fatalf("pre-request failure = %d %s", status, body)
@@ -663,10 +601,6 @@ func TestExecuteConnectorToolRecordsApprovedCallsInEffectLedger(t *testing.T) {
 			t.Fatalf("effect request digest = %q, want the tool, approval, argument, spec, and connection digests bound (%q, err %v)", effect.RequestDigest, requestDigest, err)
 		}
 	}
-	// A claim that reached the provider and committed its result stays
-	// spent; a worker that lost the response (a controller restart between
-	// commit and reply) receives the committed result again from the ledger
-	// with no second request, while other arguments are still refused.
 	committed := runFor(2)
 	identity := connectorToolEffectIdentity(committed.task, committed.claim)
 	requestDigest, err := controller.ExternalEffectRequestDigest(identity, connectorToolEffectRequest(committed))
@@ -720,7 +654,6 @@ func TestExecuteConnectorToolRefusesApprovedCallsWithoutLedger(t *testing.T) {
 	if status, body := postConnectorTool(t, app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusServiceUnavailable || !strings.Contains(body, "ledger is unavailable") {
 		t.Fatalf("no ledger = %d %s", status, body)
 	}
-	// Read calls have no effect record and still run.
 	if status, body := postConnectorTool(t, app, "gh_search", `{"arguments":{"q":"x"}}`); status != http.StatusFailedDependency {
 		t.Fatalf("read without ledger = %d %s", status, body)
 	}
@@ -729,8 +662,6 @@ func TestExecuteConnectorToolRefusesApprovedCallsWithoutLedger(t *testing.T) {
 func TestExecuteConnectorToolRefusesPolicyChangedSinceDispatch(t *testing.T) {
 	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
 	app, _, c := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readOnly"})
-	// The policy keeps its name and provider but changes how the credential
-	// is injected after dispatch; the frozen dispatch digest covers it.
 	live := &corev1alpha1.OutboundAccessPolicy{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "github-conn"}, live); err != nil {
 		t.Fatal(err)
@@ -747,13 +678,9 @@ func TestExecuteConnectorToolRefusesPolicyChangedSinceDispatch(t *testing.T) {
 	}
 }
 
-// seedConnectorEffect records an effect for the claim (approval ap-1,
-// decisionSeq, releases) in the given state, the way a run that reached the
-// ledger would have.
 func seedConnectorEffect(t *testing.T, h *connectorToolHarness, decisionSeq int64, releases int, state store.ExternalEffectState, lease time.Time) {
 	t.Helper()
 	task := connectorToolFixtures()
-	// Every seeded effect belongs to the one approval-required write tool.
 	tool := h.tools["gh_write"]
 	targetArgs, _ := approvals.TargetArguments(json.RawMessage(`{"q":"x"}`), tool)
 	argsDigest, _ := approvals.TargetArgsDigest(targetArgs)
@@ -816,10 +743,6 @@ func TestExecuteConnectorToolReconcilesSpentClaimsFromTheLedger(t *testing.T) {
 			t.Fatalf("seed spent claim %d: appended = %t err = %v", releases, appended, err)
 		}
 	}
-	// The controller stopped after the durable claim: the retry reserves
-	// the record (idempotently), moves it to Failed, which fences out any
-	// request still between its claim and its call, hands the claim back
-	// and proceeds under the next claim (which the stub then refuses).
 	claimSpent(0)
 	if status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusFailedDependency || !strings.Contains(body, "no connection") {
 		t.Fatalf("unstarted claim = %d %s", status, body)
@@ -827,8 +750,6 @@ func TestExecuteConnectorToolReconcilesSpentClaimsFromTheLedger(t *testing.T) {
 	if fenced, err := h.effects.GetExternalEffect(context.Background(), mustEffectID(t, decisionSeq, 0)); err != nil || fenced.State != store.ExternalEffectFailed {
 		t.Fatalf("fenced record = %+v err = %v, want Failed so the original request cannot start", fenced, err)
 	}
-	// The same holds when the stopped request had already reserved its
-	// record (still Pending).
 	claimSpent(2)
 	seedConnectorEffect(t, h, decisionSeq, 2, store.ExternalEffectPending, time.Time{})
 	if status, body := postConnectorTool(t, h.app, "gh_write", `{"arguments":{"q":"x"},"approvalId":"ap-1"}`); status != http.StatusFailedDependency || !strings.Contains(body, "no connection") {
@@ -841,10 +762,7 @@ func TestExecuteConnectorToolReconcilesSpentClaimsFromTheLedger(t *testing.T) {
 	if err != nil || len(claims) != 8 {
 		t.Fatalf("claim/release events = %d err = %v, want each stopped claim released and each retry claimed then released", len(claims), err)
 	}
-	// The controller stopped during the call: the lease expired with the
-	// outcome unknown. The approval is spent and the worker is told so.
 	claimSpent(4)
-	// The lease must be in the future when taken; it lapses before the retry.
 	seedConnectorEffect(t, h, decisionSeq, 4, store.ExternalEffectInFlight, time.Now().Add(150*time.Millisecond))
 	time.Sleep(200 * time.Millisecond)
 	resolver.request = outboundaccess.ResolveRequest{}
@@ -896,8 +814,6 @@ func TestConnectorClaimReleasesAreScopedToTheDecision(t *testing.T) {
 		release(3), release(3), release(7),
 		{Type: events.ExecutionEventTypeApprovalExecutionUpdated, ToolCallID: "ap-2", Content: other},
 	}
-	// A late release from an older decision must never advance a newer
-	// decision's claim counter, or the newer decision could execute twice.
 	if got := connectorClaimReleases(history, "ap-1", 3); got != 2 {
 		t.Fatalf("releases for decision 3 = %d, want 2", got)
 	}
@@ -909,7 +825,6 @@ func TestConnectorClaimReleasesAreScopedToTheDecision(t *testing.T) {
 	}
 }
 
-// connectorTestPolicySpec is the connection-mode policy the fixtures use.
 func connectorTestPolicySpec() corev1alpha1.OutboundAccessPolicySpec {
 	return corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}}}
 }
@@ -917,9 +832,6 @@ func connectorTestPolicySpec() corev1alpha1.OutboundAccessPolicySpec {
 func TestExecuteConnectorToolApprovalBindsPolicyConfiguration(t *testing.T) {
 	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
 	app, eventStore, _ := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
-	// The approval was requested while the policy injected the credential
-	// differently (another output header); it does not authorize a call
-	// under the policy as it is now, even though the Tool is unchanged.
 	approvedTool := connectorTestTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite, "github-conn")
 	targetArgs, _ := approvals.TargetArguments(json.RawMessage(`{"q":"x"}`), approvedTool)
 	argsDigest, _ := approvals.TargetArgsDigest(targetArgs)
@@ -943,8 +855,6 @@ func TestExecuteConnectorToolApprovalBindsPolicyConfiguration(t *testing.T) {
 	}
 }
 
-// A binding without a grant sequence never came from the controller's freeze
-// (a linked Connection always carries one), so nothing executes under it.
 func TestExecuteConnectorToolRefusesBindingWithoutGrant(t *testing.T) {
 	resolver := &stubOutboundResolver{}
 	app, _, _ := newConnectorToolAppWithOptions(t, resolver, true, connectorToolAppOptions{mode: "readOnly", noGrant: true})
@@ -954,8 +864,6 @@ func TestExecuteConnectorToolRefusesBindingWithoutGrant(t *testing.T) {
 	if resolver.request.PolicyName != "" {
 		t.Fatal("resolution must not be attempted for a binding without a grant")
 	}
-	// A dispatched binding resolves with the checked policy pinned, so the
-	// resolver refuses a policy object replaced between check and execute.
 	resolver = &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
 	app = newConnectorToolApp(t, resolver, true)
 	if status, _ := postConnectorTool(t, app, "gh_search", `{"arguments":{}}`); status != http.StatusFailedDependency {
@@ -966,8 +874,6 @@ func TestExecuteConnectorToolRefusesBindingWithoutGrant(t *testing.T) {
 	}
 }
 
-// A Tool CR carries no upper bound on its timeout; the connector call and
-// its effect lease are clamped to the provider maximum.
 func TestConnectorToolTimeoutClamps(t *testing.T) {
 	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{Timeout: &metav1.Duration{Duration: 3 * time.Hour}}}}
 	if got := connectorToolTimeout(tool); got != connectorToolMaxTimeout {
@@ -982,9 +888,6 @@ func TestConnectorToolTimeoutClamps(t *testing.T) {
 	}
 }
 
-// TestConnectorBindingDigestSeparatesGrants covers a re-link of the same
-// Connection object: each consent is a distinct grant, so the audit digest
-// recorded with an approved call differs, as the ACP broker's does.
 func TestConnectorBindingDigestSeparatesGrants(t *testing.T) {
 	first := corev1alpha1.ConnectionBinding{PolicyName: "github-conn", UID: "conn-uid", Generation: 3, GrantSequence: 1}
 	relinked := first
@@ -998,8 +901,6 @@ func TestConnectorBindingDigestSeparatesGrants(t *testing.T) {
 	}
 }
 
-// revokingResolver resolves a usable linked-account credential but, while it
-// does (as a slow refresh would), the worker Pod loses its authority.
 type revokingResolver struct {
 	client client.Client
 }
@@ -1012,10 +913,6 @@ func (r *revokingResolver) Resolve(ctx context.Context, _ outboundaccess.Resolve
 	return outboundaccess.Resolution{Adapter: outboundaccess.AdapterConnection, CredentialHeader: "Authorization", CredentialValue: "Bearer gho_person"}, nil
 }
 
-// TestExecuteConnectorToolRechecksAuthorityAtTheSendBoundary covers a Task
-// whose worker loses its authority while the call resolves its credential:
-// the request never leaves, the approved write is reported refused rather
-// than attempted, its effect settles Failed, and the approval is handed back.
 func TestExecuteConnectorToolRechecksAuthorityAtTheSendBoundary(t *testing.T) {
 	resolver := &revokingResolver{}
 	h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
@@ -1034,10 +931,6 @@ func TestExecuteConnectorToolRechecksAuthorityAtTheSendBoundary(t *testing.T) {
 	}
 }
 
-// TestSettlePendingConnectorEffectLeavesInFlightRecords covers settling a
-// claim's reserved record when its call never started: only a record still
-// Pending moves; one another execution holds in flight is left alone and
-// reported, so its approval is never reopened while it may reach the provider.
 func TestSettlePendingConnectorEffectLeavesInFlightRecords(t *testing.T) {
 	h := newConnectorToolHarness(t, &stubOutboundResolver{}, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
 	task := connectorToolFixtures()
@@ -1062,9 +955,6 @@ func TestSettlePendingConnectorEffectLeavesInFlightRecords(t *testing.T) {
 	}
 }
 
-// TestExecuteConnectorToolRefusesARecreatedTool covers a Tool deleted and
-// recreated with the same spec after dispatch: the running Job's dispatch
-// identity names the old object, so the new one is refused.
 func TestExecuteConnectorToolRefusesARecreatedTool(t *testing.T) {
 	resolver := &stubOutboundResolver{err: errors.New("the requester has no connection to this provider")}
 	h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
@@ -1086,8 +976,6 @@ func TestExecuteConnectorToolRefusesARecreatedTool(t *testing.T) {
 	}
 }
 
-// withdrawingResolver deletes the approved Tool, and optionally recreates it
-// under the same name, while the call resolves its credential.
 type withdrawingResolver struct {
 	client   client.Client
 	recreate bool
@@ -1105,10 +993,6 @@ func (r *withdrawingResolver) Resolve(ctx context.Context, _ outboundaccess.Reso
 	return outboundaccess.Resolution{Adapter: outboundaccess.AdapterConnection, CredentialHeader: "Authorization", CredentialValue: "Bearer gho_person"}, nil
 }
 
-// TestExecuteConnectorToolRechecksTheToolAtTheSendBoundary covers a Tool
-// withdrawn, or deleted and recreated, while an approved call resolves its
-// credential: the request never leaves with the definition checked earlier,
-// and the approval is handed back.
 func TestExecuteConnectorToolRechecksTheToolAtTheSendBoundary(t *testing.T) {
 	for _, recreate := range []bool{false, true} {
 		resolver := &withdrawingResolver{recreate: recreate}
@@ -1129,9 +1013,6 @@ func TestExecuteConnectorToolRechecksTheToolAtTheSendBoundary(t *testing.T) {
 	}
 }
 
-// policyWithdrawingResolver deletes the Tool's outbound access policy while
-// the credential resolves, as an administrator withdrawing it during a slow
-// token refresh would.
 type policyWithdrawingResolver struct{ client client.Client }
 
 func (r *policyWithdrawingResolver) Resolve(ctx context.Context, req outboundaccess.ResolveRequest) (outboundaccess.Resolution, error) {
@@ -1142,10 +1023,6 @@ func (r *policyWithdrawingResolver) Resolve(ctx context.Context, req outboundacc
 	return outboundaccess.Resolution{Adapter: outboundaccess.AdapterConnection, CredentialHeader: "Authorization", CredentialValue: "Bearer gho_person"}, nil
 }
 
-// TestExecuteConnectorToolRechecksThePolicyAtTheSendBoundary covers the
-// policy withdrawn while an approved call resolves its credential: the
-// request never leaves under the policy checked earlier, and the approval
-// is handed back.
 func TestExecuteConnectorToolRechecksThePolicyAtTheSendBoundary(t *testing.T) {
 	resolver := &policyWithdrawingResolver{}
 	h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
@@ -1168,9 +1045,6 @@ func (r *connectionDisconnectingResolver) Resolve(ctx context.Context, req outbo
 	return outboundaccess.Resolution{Adapter: outboundaccess.AdapterConnection, CredentialHeader: "Authorization", CredentialValue: "Bearer gho_person"}, nil
 }
 
-// TestExecuteConnectorToolRechecksTheConnectionAtTheSendBoundary covers a
-// disconnect while an approved call resolves its credential: the released
-// token never reaches the provider, and the approval is handed back.
 func TestExecuteConnectorToolRechecksTheConnectionAtTheSendBoundary(t *testing.T) {
 	resolver := &connectionDisconnectingResolver{}
 	h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
@@ -1182,9 +1056,6 @@ func TestExecuteConnectorToolRechecksTheConnectionAtTheSendBoundary(t *testing.T
 	}
 }
 
-// TestExecuteConnectorToolRefusesTrailingRequestData covers a request body
-// with data after its JSON object: it is not a valid request and is refused
-// before anything is loaded or executed.
 func TestExecuteConnectorToolRefusesTrailingRequestData(t *testing.T) {
 	h := newConnectorToolHarness(t, &stubOutboundResolver{}, true, connectorToolAppOptions{mode: "readOnly"})
 	status, body := postConnectorTool(t, h.app, "gh_search", `{"arguments":{"q":"x"}} trailing`)
@@ -1193,8 +1064,6 @@ func TestExecuteConnectorToolRefusesTrailingRequestData(t *testing.T) {
 	}
 }
 
-// deadlineResolver records the deadline the call resolves its credential
-// under and refuses, so nothing is sent.
 type deadlineResolver struct{ deadline time.Time }
 
 func (r *deadlineResolver) Resolve(ctx context.Context, _ outboundaccess.ResolveRequest) (outboundaccess.Resolution, error) {
@@ -1202,9 +1071,6 @@ func (r *deadlineResolver) Resolve(ctx context.Context, _ outboundaccess.Resolve
 	return outboundaccess.Resolution{}, errors.New("the requester has no connection to this provider")
 }
 
-// TestExecuteConnectorToolBoundsReadCalls covers a read call, which takes
-// no approval claim: it runs under the connector timeout bound like a
-// claimed call does.
 func TestExecuteConnectorToolBoundsReadCalls(t *testing.T) {
 	resolver := &deadlineResolver{}
 	h := newConnectorToolHarness(t, resolver, true, connectorToolAppOptions{mode: "readOnly"})
@@ -1217,10 +1083,6 @@ func TestExecuteConnectorToolBoundsReadCalls(t *testing.T) {
 	}
 }
 
-// TestExecuteConnectorToolReportsAnUnreplayableReceipt covers an approved
-// call whose effect already succeeded but whose result was kept only as a
-// receipt: the replay reports that the result cannot be replayed, and the
-// terminal record is neither settled nor its claim handed back.
 func TestExecuteConnectorToolReportsAnUnreplayableReceipt(t *testing.T) {
 	h := newConnectorToolHarness(t, &stubOutboundResolver{}, true, connectorToolAppOptions{mode: "readWrite", approvalRequired: []string{"gh_write"}})
 	seedApproval(t, h.events, "ap-1", `{"q":"x"}`, true)

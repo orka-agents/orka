@@ -63,8 +63,6 @@ func TestSessionTurnCleanupReceiptAllowsTaskReclamationAfterSessionDeletion(t *t
 				}
 			}
 
-			// Reopen the on-disk database and reconstruct the composite store,
-			// preserving only authoritative Kubernetes resources across restart.
 			var sequence int
 			var databaseName, databasePath string
 			if err := db.QueryRowContext(ctx, "PRAGMA database_list").Scan(&sequence, &databaseName, &databasePath); err != nil {
@@ -279,8 +277,6 @@ func TestSessionTurnCleanupReceiptAndDeletionCommitAtomically(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, kubeClient, persistence, db, fence := newSessionCleanupTestStore(t, nil)
 	fixture := seedFinalizedSessionReclaimTurn(t, ctx, kubeStore, kubeClient, fence, false)
-	// Abort after receipt insertion and outbox deletion, while the cleanup
-	// transaction is deleting its turn. Neither earlier write may survive.
 	execSessionCleanupMutation(t, ctx, db, `CREATE TRIGGER fail_session_cleanup BEFORE DELETE ON session_turns
 		BEGIN SELECT RAISE(ABORT, 'injected Session cleanup failure'); END`)
 	if err := kubeStore.ReclaimSession(ctx, sessionTurnCleanupRequest(fixture, fence)); err == nil {

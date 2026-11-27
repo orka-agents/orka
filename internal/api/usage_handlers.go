@@ -149,9 +149,6 @@ func (h *Handlers) authorizeUsageContextToken(c fiber.Ctx) error {
 			return err
 		}
 	}
-	// A counts-only archive cannot reconstruct effective Agent/Provider/tool
-	// policy after objects are deleted. Object-constrained tokens therefore
-	// cannot authorize an aggregate, even with list scopes.
 	if ui := GetUserInfo(c); h.contextTokenAuthorization.Enabled() && ui != nil && ui.AuthType == AuthTypeContextToken && ui.ContextToken != nil {
 		for key := range ui.ContextToken.TransactionContext {
 			if key != toolNamespaceArg {
@@ -239,8 +236,6 @@ func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData, asO
 		linkedWorks[key] = append(linkedWorks[key], link.WorkID)
 	}
 	ui := GetUserInfo(c)
-	// The report's own records count against the budget the session lookup
-	// shares with them; the placeholders added below repeat observations.
 	loaded := len(data.Works) + len(data.Tasks) + len(data.Observations) + len(data.Links) + len(data.PullRequests)
 	ahpObserved := ahpObservedTasks(data.Observations)
 	for _, task := range data.Tasks {
@@ -281,15 +276,10 @@ func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData, asO
 			for _, workID := range linkedWorks[pr] {
 				hiddenWorks[workID] = true
 			}
-			// Shared PRs need only one pass, even when many denied Tasks target them.
 			delete(linkedWorks, pr)
 		}
 	}
-	// The controller registers Tasks before dispatch. An observation with no
-	// retained Task identity has no verifiable access boundary yet.
 	placeholders := map[string]int{}
-	// The rows before this are the report's own; those after stand in for
-	// rows the report did not load.
 	persisted := len(data.Tasks)
 	for _, observation := range data.Observations {
 		key := observation.Namespace + "/" + observation.TaskUID
@@ -300,15 +290,9 @@ func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData, asO
 		if !ahp || !ahpPerson(ui) {
 			continue
 		}
-		// Usage with no Task, such as a chat's in an AHP session, names no
-		// requester, so it is no person's.
 		if observation.TaskUID == "" {
 			data.HiddenTasks[usage.ObservationTaskKey(observation)] = true
 		}
-		// Neither such usage nor one whose Task's row is gone, as retention
-		// may leave it, tells how much it used of its session's counter: it
-		// joins the report as a hidden row of the session, so the session's
-		// counters credit nothing to a person's turns.
 		taskKey := usage.ObservationTaskKey(observation)
 		if i, added := placeholders[taskKey]; added {
 			data.Tasks[i].StartedAt = minTime(data.Tasks[i].StartedAt, observation.ObservedAt)
@@ -329,10 +313,6 @@ func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData, asO
 	return nil
 }
 
-// hideAHPSessionBaselines hides the first total of each AHP session's
-// counters from a person's report. It may hold the usage of an earlier turn
-// the person may not see, also once retention removed that turn's row, and
-// then nothing would show it is not theirs.
 func hideAHPSessionBaselines(data *store.UsageData) {
 	for _, observation := range data.Observations {
 		if session, ahp := ahpSessionName(observation.SessionName); ahp && observation.Scope == store.UsageScopeSession {
@@ -344,9 +324,6 @@ func hideAHPSessionBaselines(data *store.UsageData) {
 	}
 }
 
-// ahpObservedTasks returns the Tasks whose usage names an AHP session. A
-// Task's row may name none while its usage does, as for a Task a chat in that
-// session created: its observations show it is AHP usage.
 func ahpObservedTasks(observations []store.UsageObservation) map[string]bool {
 	observed := map[string]bool{}
 	for _, observation := range observations {
@@ -357,21 +334,11 @@ func ahpObservedTasks(observations []store.UsageObservation) map[string]bool {
 	return observed
 }
 
-// ahpUsageTaskHidden reports AHP usage the caller may not see: a person sees
-// it only when it names them as its requester. observed reports usage of the
-// Task that names an AHP session.
 func ahpUsageTaskHidden(ui *UserInfo, task store.UsageTask, observed bool) bool {
 	_, ahp := ahpSessionName(task.SessionName)
 	return ahpPerson(ui) && (ahp || task.AHPTurn || observed) && ahpUsageHidden(ui, task.Requester)
 }
 
-// addHiddenAHPSessionTasks adds, hidden, the rows of Tasks in the report's AHP
-// sessions that the report did not select and the person may not see, such
-// as an operator's turn from before the report's period. A session's usage
-// counter spans its turns, so the report then credits nothing on it to a
-// visible Task: a gain on it may be such a Task's. data.Tasks[:persisted] are
-// the report's own rows; the rest are hidden placeholders for observations
-// whose Task rows the report did not load.
 func (h *Handlers) addHiddenAHPSessionTasks(c fiber.Ctx, ui *UserInfo, data *store.UsageData, persisted int, asOf time.Time, remaining int) error {
 	backend, ok := h.executionEventStore.(store.UsageStore)
 	if !ok {
@@ -386,12 +353,6 @@ func (h *Handlers) addHiddenAHPSessionTasks(c fiber.Ctx, ui *UserInfo, data *sto
 			sessions[namespace][session] = true
 		}
 	}
-	// The report's rows carry their namespace's verified UID, which keeps
-	// out an earlier namespace's rows of the same name.
-	// loaded counts, per namespace, the report's rows in its AHP sessions:
-	// the lookup returns them again, and they are already in the budget. A
-	// placeholder is no row the report loaded: the lookup returns its Task's
-	// row only if that row is retained, and then it is a new record.
 	known, placeholder, namespaceUIDs, loaded := map[string]bool{}, map[string]bool{}, map[string]string{}, map[string]int{}
 	for i, task := range data.Tasks {
 		key := task.Namespace + "/" + task.TaskUID
@@ -412,11 +373,6 @@ func (h *Handlers) addHiddenAHPSessionTasks(c fiber.Ctx, ui *UserInfo, data *sto
 		}
 		namespaceUIDs[observation.Namespace] = cmp.Or(namespaceUIDs[observation.Namespace], observation.NamespaceUID)
 	}
-	// remaining is what the report's record limit leaves: one budget covers
-	// every team of the report and the records it already loaded. Each
-	// lookup may also return the report's own rows again, which it skips, so
-	// only rows the report did not load count against the budget. Turns that
-	// started after asOf are outside the report and not looked up.
 	tooLarge := fiber.NewError(fiber.StatusUnprocessableEntity, "usage selection exceeds 20000 retained records; narrow the date, team, repository, model, or asOf filters")
 	remaining = max(remaining, 0)
 	for _, namespace := range slices.Sorted(maps.Keys(sessions)) {
@@ -437,7 +393,6 @@ func (h *Handlers) addHiddenAHPSessionTasks(c fiber.Ctx, ui *UserInfo, data *sto
 				return tooLarge
 			}
 			remaining--
-			// A placeholder already hides the Task.
 			if placeholder[key] || !ahpUsageHidden(ui, row.Requester) {
 				continue
 			}
@@ -449,7 +404,6 @@ func (h *Handlers) addHiddenAHPSessionTasks(c fiber.Ctx, ui *UserInfo, data *sto
 	return nil
 }
 
-// usageRepositoryFoldKey preserves strings.EqualFold matching in the PR index.
 func usageRepositoryFoldKey(repository string) string {
 	return strings.Map(func(r rune) rune {
 		key := r

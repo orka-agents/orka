@@ -27,7 +27,6 @@ func TestStageCopiesAndReplacesTheTokenAndTheAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		// The second run replaces files the first left behind.
 		if err := stage([]string{"--token-from", from, "--token-to", tokenTo, "--agent-to", agentTo}); err != nil {
 			t.Fatal(err)
 		}

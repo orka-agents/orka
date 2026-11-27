@@ -207,8 +207,6 @@ func (r *RepositoryMonitorReconciler) ensureNoExistingCommandRunBlocksQueue(ctx 
 }
 
 func (r *RepositoryMonitorReconciler) queueRepositoryMonitorCommandWorkAction(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command store.CommandEvent, run *store.MonitorRun) error {
-	// Restore a partial or legacy handoff before inventory can publish readiness,
-	// including when its command run was already queued.
 	return r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, &command, command.Kind, command.Number, command.HeadSHA, command.IssueSnapshotDigest, repositoryMonitorCommandActionKind(command.Intent), repositoryMonitorWorkActionStatusQueued, "", "", "")
 }
 
@@ -277,8 +275,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCommandWorkActionTerminal
 		}
 		return true, nil
 	case repositoryMonitorWorkActionStatusCompleted:
-		// Command intake coalesced this command into an identical active
-		// action after the command was listed; record the outcome intake does.
 		command.Status = repositoryMonitorCommandCompleted
 		command.Error = store.RepositoryMonitorCoalescedCommandError(action.DependsOnActionID)
 		if err := r.Store.UpdateCommandEvent(ctx, &command); err != nil {
@@ -321,7 +317,6 @@ func repositoryMonitorCommandActionKind(intent string) string {
 	case repositoryMonitorCommandIntentFix:
 		return "pr_repair"
 	case repositoryMonitorRetiredApprovePlanIntent:
-		// Retired plan approval keeps the identity of persisted work actions.
 		return "approve"
 	default:
 		return strings.TrimSpace(intent)

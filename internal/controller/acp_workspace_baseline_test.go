@@ -18,11 +18,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// Every turn of one logical Session must present the exact repo-less protocol
-// baseline the runtime session was created with: the supervisor rejects a
-// workspace delta whose VerifiedBaseline differs from the creation baseline,
-// so a task-scoped identity fails every repo-less continuation with a digest
-// conflict.
 func TestRepoLessWorkspaceBaselineIsStableAcrossSessionTurns(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

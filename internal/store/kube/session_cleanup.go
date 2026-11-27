@@ -19,19 +19,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ErrSessionCleanupStoreNotConfigured is returned when a standalone
-// Kubernetes store has no SQLite cleanup persistence adapter.
 var ErrSessionCleanupStoreNotConfigured = errors.New("session cleanup persistence is not configured")
 
-// ReclaimSession persists a durable cleanup intent before retiring the runtime.
-// Runtime I/O holds only the per-Session lock. Reclamation reacquires the same
-// controller epoch and revalidates the entire intent before removing authority.
 func (s *Store) ReclaimSession(ctx context.Context, request store.ReclaimSessionRequest) error {
 	return s.reclaimSession(ctx, request, nil)
 }
 
-// ReclaimGatewaySession is the retention-only entry point. The generic Session
-// API cannot opt into Gateway cleanup or replay its durable intents.
 func (s *Store) ReclaimGatewaySession(ctx context.Context, request store.ReclaimGatewaySessionRequest) error {
 	candidate := request.Session
 	operationID, operationDigest := store.GatewaySessionCleanupOperation(
@@ -68,10 +61,8 @@ func (s *Store) reclaimSession(ctx context.Context, request store.ReclaimSession
 		return err
 	}
 	if intent == nil {
-		return nil // The original operation already completed.
+		return nil
 	}
-	// Keep an immutable representation before calling runtime code. JSON also
-	// preserves the persisted equivalence of omitted and empty optional slices.
 	expected, err := json.Marshal(intent)
 	if err != nil {
 		return err
@@ -177,9 +168,6 @@ func (s *Store) ensureCompletedSessionKubernetesStateAbsent(ctx context.Context,
 	return nil
 }
 
-// ResumeSessionCleanups replays every durable intent under the current
-// controller epoch. Individual failures are joined so one blocked Session does
-// not prevent independent cleanup plans from making progress.
 func (s *Store) ResumeSessionCleanups(ctx context.Context, fence store.ControllerEpochFence) error {
 	if err := s.requireClient(); err != nil {
 		return err
@@ -234,8 +222,6 @@ func (s *Store) prepareSessionCleanupIntent(ctx context.Context, request store.R
 			return nil, identityErr
 		}
 		if sessionUID == "" && gateway != nil {
-			// Legacy Gateway rows may predate the transcript UID binding. The
-			// SQLite transaction requires every stored turn to prove this UID.
 			sessionUID = gateway.SessionUID
 		}
 		if strings.TrimSpace(sessionUID) != "" {

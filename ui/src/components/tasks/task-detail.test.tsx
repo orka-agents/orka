@@ -35,7 +35,6 @@ describe('TaskDetail', () => {
     useUIStore.setState({ sidebarCollapsed: false, theme: 'light', namespace: 'default' })
     useAuthStore.setState({ token: 'test-token' })
     mockNavigate.mockClear()
-    // Most tests read the Task resource, which the Spec tab shows.
     mockSearch.current = { tab: 'spec' }
     vi.mocked(toast.success).mockClear()
     vi.mocked(toast.error).mockClear()
@@ -73,12 +72,9 @@ describe('TaskDetail', () => {
     })
     expect(screen.getByText(/scope missing/)).toBeInTheDocument()
     expect(screen.queryByText('Task not found')).not.toBeInTheDocument()
-    // A titled page like the other detail views: heading, tab title, back link.
     expect(screen.getByRole('heading', { level: 1, name: 'Could not load task' })).toBeInTheDocument()
     expect(document.title).toBe('Could not load task · Orka')
     expect(screen.getByRole('link', { name: /back to tasks/i })).toHaveAttribute('href', '/tasks')
-    // Nothing keeps polling once access is forbidden: no task retries and no
-    // hidden dependent 403 traffic beyond a single request that raced the lookup.
     await new Promise((resolve) => setTimeout(resolve, 300))
     const snapshot = { ...hits }
     await new Promise((resolve) => setTimeout(resolve, 200))
@@ -122,15 +118,11 @@ describe('TaskDetail', () => {
     await waitFor(() => {
       expect(screen.getByText('Task not found')).toBeInTheDocument()
     })
-    // Let the trace hook's single 100ms retry settle, then confirm nothing
-    // else fires: no 5s polling, no dependent refetches.
     await new Promise((resolve) => setTimeout(resolve, 300))
     const snapshot = { ...hits }
     await new Promise((resolve) => setTimeout(resolve, 200))
     expect(hits).toEqual(snapshot)
     expect(hits.task).toBe(1)
-    // Dependent panels wait for the task to load, so a task that never
-    // existed generates no events/trace/approvals/artifacts requests at all.
     expect(hits.events ?? 0).toBe(0)
     expect(hits.trace ?? 0).toBe(0)
     expect(hits.approvals ?? 0).toBe(0)
@@ -144,7 +136,6 @@ describe('TaskDetail', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       render(<TaskDetail taskId="broken" />)
-      // The detail read retries a failed load three times before giving up.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(10_000)
       })
@@ -174,15 +165,11 @@ describe('TaskDetail', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       const { container } = render(<TaskDetail taskId="broken" />)
-      // The first load and its three retries (1s, 2s, 4s backoff) settle into the error page.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(8_000)
       })
       expect(screen.getByText('The task could not be loaded')).toBeInTheDocument()
       const settledHits = hits
-      // The 5s poll (re-armed when the error landed) starts another load
-      // that is still retrying: the error page and its back link stay up
-      // instead of the loading skeleton.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_500)
       })
@@ -190,7 +177,6 @@ describe('TaskDetail', () => {
       expect(screen.getByText('The task could not be loaded')).toBeInTheDocument()
       expect(screen.getByRole('link', { name: /back to tasks/i })).toBeInTheDocument()
       expect(container.querySelector('[data-slot="skeleton"]')).toBeNull()
-      // A later successful load replaces the error page with the task.
       failing = false
       await act(async () => {
         await vi.advanceTimersByTimeAsync(10_000)
@@ -211,7 +197,6 @@ describe('TaskDetail', () => {
       expect(screen.getByText('Task not found')).toBeInTheDocument()
     })
     expect(screen.getByText(/No task named "nonexistent" exists in this namespace/)).toBeInTheDocument()
-    // Like the 403/500 pages, the missing-task page has a top-level heading.
     expect(screen.getByRole('heading', { level: 1, name: 'Task not found' })).toBeInTheDocument()
     const back = screen.getByRole('link', { name: /back to tasks/i })
     expect(back).toHaveAttribute('href', '/tasks')
@@ -250,7 +235,6 @@ describe('TaskDetail', () => {
 
     await user.click(screen.getByRole('button', { name: /Cancel task/ }))
     const dialog = await screen.findByRole('dialog')
-    // The reason typed for the replaced Task is not carried over.
     expect(within(dialog).getByRole('textbox')).toHaveValue('')
     await user.click(within(dialog).getByRole('button', { name: 'Cancel task' }))
     await waitFor(() => expect(cancelled).toEqual({ uid: 'uid-second' }))
@@ -332,13 +316,12 @@ describe('TaskDetail', () => {
     await waitFor(() => {
       expect(screen.getByText('my-task')).toBeInTheDocument()
     })
-    // One named link, not a button nested in a link.
     const back = screen.getByRole('link', { name: 'Back to tasks' })
     expect(back).toHaveAttribute('href', '/tasks')
     expect(back.querySelector('button')).toBeNull()
     expect(screen.getByText('Metadata')).toBeInTheDocument()
     expect(screen.getByText('uid-123')).toBeInTheDocument()
-    expect(screen.getByText('2')).toBeInTheDocument() // attempts
+    expect(screen.getByText('2')).toBeInTheDocument()
   })
 
   it('shows container config for container type', async () => {
@@ -475,7 +458,7 @@ describe('TaskDetail', () => {
   })
 
   it('falls back to the Overview when ?tab names an unavailable panel', async () => {
-    mockSearch.current = { tab: 'plan' } // the task has no plan, so no Plan tab
+    mockSearch.current = { tab: 'plan' }
     server.use(
       http.get('/api/v1/tasks/:id', () =>
         HttpResponse.json({
@@ -549,7 +532,6 @@ describe('TaskDetail', () => {
     renderRaw(<QueryClientProvider client={client}><TaskDetail taskId="finishing" /></QueryClientProvider>)
     await waitFor(() => expect(artifactRequests).toBe(1))
 
-    // The task finishes; refetch only the task, well inside the 5s poll.
     phase = 'Succeeded'
     await act(async () => {
       await client.invalidateQueries({ queryKey: ['task'] })
@@ -558,7 +540,6 @@ describe('TaskDetail', () => {
   })
 
   it('keeps polling artifacts while the task is Finalizing', async () => {
-    // Finalizing is when the run publishes its PR and artifacts.
     mockSearch.current = { tab: 'overview' }
     const hits = { artifacts: 0 }
     server.use(
@@ -639,10 +620,8 @@ describe('TaskDetail', () => {
     await user.click(screen.getByRole('button', { name: /confirm delete/i }))
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to delete task: not authorized to delete tasks'))
     expect(mockNavigate).not.toHaveBeenCalled()
-    // The confirm is disarmed so the header is usable again.
     expect(screen.queryByRole('button', { name: /confirm delete/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^delete/i })).toBeEnabled()
-    // Focus returns to Delete instead of dropping to the page.
     expect(screen.getByRole('button', { name: /^delete/i })).toHaveFocus()
   })
 
@@ -659,7 +638,6 @@ describe('TaskDetail', () => {
     )
     render(<TaskDetail taskId="focus-task" />)
     const deleteButton = await screen.findByRole('button', { name: /^delete/i })
-    // The task loaded with focus on the page, and arming nothing moved it.
     expect(deleteButton).not.toHaveFocus()
 
     await user.click(deleteButton)
@@ -726,7 +704,6 @@ describe('TaskDetail', () => {
     const user = userEvent.setup()
     render(<TaskDetail taskId="parked" />)
     expect(await screen.findByRole('tab', { name: 'Approvals 1 pending' })).toBeInTheDocument()
-    // Off the Overview the parked sign-off keeps its count.
     await user.click(screen.getByRole('tab', { name: 'Logs' }))
     expect(screen.getByRole('tab', { name: 'Approvals 1 pending' })).toBeInTheDocument()
     expect(approvalRequests).toBeGreaterThan(0)
@@ -798,7 +775,6 @@ describe('TaskDetail', () => {
     const rect = (left: number, right: number) => ({ left, right, top: 0, bottom: 20, width: right - left, height: 20, x: left, y: 0, toJSON: () => ({}) }) as DOMRect
     const scrollWidth = vi.spyOn(Element.prototype, 'scrollWidth', 'get').mockReturnValue(600)
     const clientWidth = vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(300)
-    // The tab bar spans 0-300px; the Logs tab sits past its right edge.
     const bounds = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
       if (this.getAttribute('role') === 'tab') return this.textContent === 'Logs' ? rect(400, 460) : rect(10, 70)
       return rect(0, 300)
@@ -808,7 +784,6 @@ describe('TaskDetail', () => {
       render(<TaskDetail taskId="test-task" />)
       const logs = await screen.findByRole('tab', { name: 'Logs' })
       const scroller = screen.getByRole('tablist').parentElement!
-      // The initially active Overview tab is already in view.
       expect(scroller.scrollLeft).toBe(0)
       await user.click(logs)
       await waitFor(() => expect(scroller.scrollLeft).toBe(160))
@@ -824,8 +799,6 @@ describe('TaskDetail', () => {
     const rect = (left: number, right: number) => ({ left, right, top: 0, bottom: 20, width: right - left, height: 20, x: left, y: 0, toJSON: () => ({}) }) as DOMRect
     const scrollWidth = vi.spyOn(Element.prototype, 'scrollWidth', 'get').mockReturnValue(600)
     const clientWidth = vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(300)
-    // The tab bar spans 0-300px. The Approvals tab fits until the "2 pending"
-    // badge renders and pushes its right edge to 340px.
     const bounds = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
       if (this.getAttribute('role') === 'tab') {
         if (!this.textContent?.startsWith('Approvals')) return rect(10, 70)
@@ -859,7 +832,6 @@ describe('TaskDetail', () => {
       render(<TaskDetail taskId="gated" />)
       await screen.findByRole('tab', { name: 'Approvals' })
       const scroller = screen.getByRole('tablist').parentElement!
-      // Without the badge the selected tab is already in view.
       expect(scroller.scrollLeft).toBe(0)
       releaseApprovals()
       await screen.findByRole('tab', { name: 'Approvals 2 pending' })
@@ -980,7 +952,6 @@ describe('TaskDetail', () => {
     await waitFor(() => {
       expect(screen.getByText('time-task')).toBeInTheDocument()
     })
-    // 120s → "2m ago", 7200s → "2h ago", 172800s → "2d ago"
     expect(screen.getByText('2m ago')).toBeInTheDocument()
     expect(screen.getByText('2h ago')).toBeInTheDocument()
     expect(screen.getByText('2d ago')).toBeInTheDocument()
@@ -1024,7 +995,6 @@ describe('TaskDetail', () => {
     render(<TaskDetail taskId="auto" />)
     await waitFor(() => expect(screen.getByText('auto')).toBeInTheDocument())
     await userEvent.click(screen.getByRole('tab', { name: /plan/i }))
-    // RunTimeline shows the iteration + plan summary + progress bar.
     expect(await screen.findAllByText('Iteration 3')).toHaveLength(1)
     expect(screen.getAllByText('converging on the goal').length).toBeGreaterThan(0)
     expect(screen.getAllByRole('progressbar', { name: /goal progress/i }).length).toBeGreaterThan(0)

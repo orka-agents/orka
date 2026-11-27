@@ -61,7 +61,6 @@ func TestBoundReviewPullRequestResult(t *testing.T) {
 	if got := boundReviewPullRequestResult(result, len(encoded)); got.Truncated {
 		t.Fatal("a result within the limit must not be truncated")
 	}
-	// Patches go first, then the diff, and the result always fits.
 	for _, limit := range []int{len(encoded) - 1, 200_000, 4096, 512} {
 		got := boundReviewPullRequestResult(result, limit)
 		out, _ := json.Marshal(got)
@@ -92,7 +91,6 @@ func TestBoundGetIssueResult(t *testing.T) {
 	if got := boundGetIssueResult(result, len(encoded)); got.Truncated {
 		t.Fatal("a result within the limit must not be truncated")
 	}
-	// The oldest comments go first and the newest stay; then the body.
 	got := boundGetIssueResult(result, len(encoded)-1)
 	if out, _ := json.Marshal(got); len(out) > len(encoded)-1 || !got.Truncated || len(got.Comments) != 4 || got.Comments[0].CreatedAt != "tt" || got.Body != result.Body || got.CommentCount != 5 {
 		t.Fatalf("one comment: len=%d %+v", len(out), got)

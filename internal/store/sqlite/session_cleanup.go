@@ -13,7 +13,6 @@ import (
 
 var _ store.SessionCleanupPersistenceStore = (*Store)(nil)
 
-// GetSessionCleanupIntent returns the durable cross-store cleanup plan.
 func (s *Store) GetSessionCleanupIntent(ctx context.Context, namespace, sessionName string) (*store.SessionCleanupIntent, error) {
 	var encoded []byte
 	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
@@ -33,8 +32,6 @@ func (s *Store) GetSessionCleanupIntent(ctx context.Context, namespace, sessionN
 	return &intent, nil
 }
 
-// ListSessionCleanupIntents returns every pending durable cleanup plan in
-// deterministic order for controller-startup recovery.
 func (s *Store) ListSessionCleanupIntents(ctx context.Context) ([]store.SessionCleanupIntent, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT plan FROM session_cleanup_intents ORDER BY namespace, session_name`,
@@ -61,8 +58,6 @@ func (s *Store) ListSessionCleanupIntents(ctx context.Context) ([]store.SessionC
 	return intents, rows.Err()
 }
 
-// GetSessionCleanupCompletion returns the durable deletion tombstone retained
-// after the Session row and intent have been atomically removed.
 func (s *Store) GetSessionCleanupCompletion(ctx context.Context, namespace, sessionName string) (*store.SessionCleanupCompletion, error) {
 	completion := &store.SessionCleanupCompletion{}
 	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
@@ -80,16 +75,11 @@ func (s *Store) GetSessionCleanupCompletion(ctx context.Context, namespace, sess
 	return completion, nil
 }
 
-// HasSessionCleanupFenceForUID reports whether a Session UID belongs to a
-// pending or completed deletion and may not acquire new Kubernetes authority.
 func (s *Store) HasSessionCleanupFenceForUID(ctx context.Context, sessionUID string) (bool, error) {
 	sessionUID = strings.TrimSpace(sessionUID)
 	if sessionUID == "" {
 		return false, nil
 	}
-	// Completion replaces the intent in one commit, so both are read from one
-	// snapshot; otherwise a cleanup finishing between the two reads would leave
-	// the UID looking unfenced.
 	var fenced bool
 	err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
 		var count int
@@ -126,8 +116,6 @@ func (s *Store) HasSessionCleanupFenceForUID(ctx context.Context, sessionUID str
 	return fenced, err
 }
 
-// GetSessionCleanupIdentity returns the Kubernetes Session UID already bound
-// to a transcript row, including a bind-before-control crash residue.
 func (s *Store) GetSessionCleanupIdentity(ctx context.Context, namespace, sessionName string) (string, error) {
 	var sessionUID string
 	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
@@ -139,9 +127,6 @@ func (s *Store) GetSessionCleanupIdentity(ctx context.Context, namespace, sessio
 	return sessionUID, err
 }
 
-// BindSessionCleanupIdentity records the Kubernetes Session UID on the
-// transcript row so deletion cannot confuse a pre-cutover replacement with the
-// control record left by an older Session incarnation.
 func (s *Store) BindSessionCleanupIdentity(ctx context.Context, namespace, sessionName, sessionUID string) error {
 	return writeOperationErr(ctx, s, "BindSessionCleanupIdentity", func(ctx context.Context) error {
 		return s.bindSessionCleanupIdentityWrite(ctx, namespace, sessionName, sessionUID)
@@ -169,9 +154,6 @@ func (s *Store) bindSessionCleanupIdentityWrite(ctx context.Context, namespace, 
 	if err := store.ValidateControlIdentifier("session UID", sessionUID); err != nil {
 		return err
 	}
-	// The update and the check that tells a missing Session from a conflict
-	// share one transaction, so a Session created after the update is not
-	// reported as a conflict.
 	return s.writeTransaction(ctx, func(q taskDataExecutor) error {
 		result, err := q.ExecContext(ctx,
 			`UPDATE sessions SET control_session_uid = ?
@@ -211,8 +193,6 @@ func (s *Store) bindSessionCleanupIdentityWrite(ctx context.Context, namespace, 
 	})
 }
 
-// HasSessionCleanupIntent reports whether new work must be refused for a
-// Session whose deletion has crossed the durable intent boundary.
 func (s *Store) HasSessionCleanupIntent(ctx context.Context, namespace, sessionName string) (bool, error) {
 	return sessionCleanupIntentExists(ctx, s.taskDataExecutor(ctx), strings.TrimSpace(namespace), strings.TrimSpace(sessionName))
 }
@@ -228,8 +208,6 @@ func sessionCleanupIntentExists(ctx context.Context, q controlQueryRower, namesp
 	return count > 0, nil
 }
 
-// PrepareSessionCleanup atomically re-proves SQLite quiescence and records the
-// exact Kubernetes cleanup plan before any authoritative object is deleted.
 func (s *Store) PrepareSessionCleanup(ctx context.Context, intent store.SessionCleanupIntent) (*store.SessionCleanupIntent, error) {
 	return writeOperation(ctx, s, "PrepareSessionCleanup", nil, func(ctx context.Context) (*store.SessionCleanupIntent, error) {
 		return s.prepareSessionCleanupWrite(ctx, intent)
@@ -277,8 +255,6 @@ func (s *Store) prepareSessionCleanupWrite(ctx context.Context, intent store.Ses
 	return &intent, nil
 }
 
-// CompleteSessionCleanup removes SQLite-owned turn/outbox/transcript state only
-// after the caller has reclaimed the exact Kubernetes plan in the intent.
 func (s *Store) CompleteSessionCleanup(ctx context.Context, request store.CompleteSessionCleanupRequest) error {
 	return writeOperationErr(ctx, s, "CompleteSessionCleanup", func(ctx context.Context) error {
 		return s.completeSessionCleanupWrite(ctx, request)
@@ -513,9 +489,6 @@ func normalizeSessionCleanupIntent(intent *store.SessionCleanupIntent) error {
 			return store.ValidationErrorf("session cleanup Lease fence is incomplete")
 		}
 	} else {
-		// A Session cancelled before its first runtime admission still owns
-		// an empty generation-zero Lease. Reclamation checks its exact UID,
-		// generation, and unheld state before deleting it.
 		if intent.ExpectedLeaseGeneration < 0 {
 			return store.ValidationErrorf("session cleanup Lease generation must not be negative")
 		}
@@ -597,8 +570,6 @@ func validateSessionCleanupEligibilityTx(ctx context.Context, tx *sql.Tx, intent
 	} else if intent.Gateway != nil {
 		return store.ConflictErrorf("Gateway cleanup cannot reclaim a different Session type")
 	}
-	// The plan's preparation time is the time of the request; a provider never
-	// judges a lease on its own clock.
 	if err := ensureSessionLockQuiescentTx(
 		ctx, tx, intent.Namespace, intent.SessionName, activeTask, activeTaskUID, activeTaskExpiresAt, intent.PreparedAt,
 	); err != nil {
@@ -641,9 +612,6 @@ func validateSessionCleanupEligibilityTx(ctx context.Context, tx *sql.Tx, intent
 			var marker struct {
 				Kind string `json:"kind"`
 			}
-			// OutcomeUnknown is a finalized v2 turn. The coordinated cleanup
-			// still requires quiescent controls and exact runtime retirement;
-			// completion archives the unchanged terminal projection.
 			if err := json.Unmarshal([]byte(terminalContent), &marker); err != nil {
 				return store.ErrConflict
 			}

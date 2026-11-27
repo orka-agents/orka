@@ -63,7 +63,6 @@ func TestCompatCoordinatorToolsExcludeKubernetesTools(t *testing.T) {
 				}
 				switch modelCalls.Add(1) {
 				case 1:
-					// Also attempt an unadvertised custom tool to verify rejection.
 					_ = anthropictest.WriteMessage(w, fmt.Sprintf(`{"id":"msg-tools","type":"message","role":"assistant","model":"test-model","content":[{"type":"tool_use","id":"custom-call","name":"example-lookup","input":{"query":"test"}},{"type":"tool_use","id":"remote-call","name":"remote-lookup","input":{}},{"type":"tool_use","id":"builtin-call","name":"file_read","input":{"path":%q}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`, file.Name()))
 				case 2:
 					_ = anthropictest.WriteMessage(w, fmt.Sprintf(`{"id":"msg-result","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":%q}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`, goalStateSentinel+"\n"+fileContent))

@@ -17,36 +17,23 @@ import (
 	"github.com/orka-agents/orka/internal/cli/client"
 )
 
-// agentHostAPIPath is the signed-in person's own agent host.
 const agentHostAPIPath = "/api/v1/agent-hosts/me"
 
-// agentHostInvitesAPIPath starts and reads invites.
 const agentHostInvitesAPIPath = "/api/v1/agent-hosts/invites"
 
-// agentHostPhaseFailed is the phase of a host that cannot run until its cause
-// is fixed.
 const agentHostPhaseFailed = "Failed"
 
-// agentHostReasonConnectionUnavailable is a host's reason while its link is
-// gone; linking again clears it.
 const agentHostReasonConnectionUnavailable = "ConnectionUnavailable"
 
-// Failures a new link can clear: the host's link was gone, gave another
-// GitHub account, or gave a token that never expires.
 const (
 	agentHostReasonGitHubIdentityChanged   = "GitHubIdentityChanged"
 	agentHostReasonGitHubTokenNeverExpires = "GitHubTokenNeverExpires"
 )
 
-// A sign-in that just succeeded also supersedes this reason on a host kept
-// from before: its account is a member again. The host recovers at its next
-// reconcile.
 const agentHostReasonGitHubMembershipEnded = "GitHubMembershipEnded"
 
-// agentHostReadyPollInterval paces waiting for a host after linking.
 var agentHostReadyPollInterval = 2 * time.Second
 
-// agentHostView is the API's view of the person's own agent host.
 type agentHostView struct {
 	Name              string `json:"name"`
 	Namespace         string `json:"namespace"`
@@ -152,8 +139,6 @@ func newHostDeleteCmd() *cobra.Command {
 	return cmd
 }
 
-// getOwnAgentHost reads the person's host with c. Callers keep one client
-// for a whole command: credentials read from stdin are read once.
 func getOwnAgentHost(ctx context.Context, c *client.Client) (agentHostView, error) {
 	raw, err := c.DoJSON(ctx, http.MethodGet, agentHostAPIPath, nil, nil)
 	if err != nil {
@@ -189,16 +174,10 @@ func printAgentHost(out io.Writer, host agentHostView) {
 	}
 }
 
-// waitForAgentHost waits until the host fed by connection, the link just made
-// to a provider that serves agent hosts, is ready, and says how the Copilot
-// app lists it. A Failed host is waited on only for a reason the new link
-// clears or one of the stale reasons.
 func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client, connection string, stale ...string) error {
 	out := cmd.OutOrStdout()
 	fmt.Fprintln(out, "Waiting for your agent host...") //nolint:errcheck
 	woken := false
-	// The last failure seen that the new link or sign-in may clear: it is
-	// waited out, and reported if the wait ends on it.
 	var failed *agentHostView
 	for {
 		host, err := getOwnAgentHost(ctx, c)
@@ -206,14 +185,8 @@ func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client,
 			failed = nil
 		}
 		switch {
-		// Until the new link's host exists, the API can answer with a host
-		// kept from another link, ready or failed; it is not the one to use.
 		case err == nil && host.Connection != connection:
-		// A host being deleted is not the one to use; its replacement follows.
 		case err == nil && host.Deleting:
-		// An operator's suspension is theirs to lift, and is checked first: a
-		// host just suspended can still report the Ready of its last run. A
-		// host that idled out is woken once, as 'orka host wake' would.
 		case err == nil && host.OperatorSuspended:
 			return fmt.Errorf("an operator suspended your agent host %s; ask them to resume it", host.Name)
 		case err == nil && host.Ready:
@@ -225,15 +198,10 @@ func waitForAgentHost(ctx context.Context, cmd *cobra.Command, c *client.Client,
 			}
 			woken = true
 			fmt.Fprintln(out, "Your agent host idled out; waking it.") //nolint:errcheck
-		// A host kept from an earlier link still shows the failure that link
-		// left until the controller sees the new one.
 		case err == nil && host.Phase == agentHostPhaseFailed && (linkMayClear(host.Reason) || slices.Contains(stale, host.Reason)):
 			failed = &host
 		case err == nil && host.Phase == agentHostPhaseFailed:
 			return fmt.Errorf("your agent host %s failed: %s: %s", host.Name, host.Reason, host.Message)
-		// The host is created moments after the link; until then the API
-		// answers 404. A request cut short by the deadline ends the wait
-		// below.
 		case err != nil && ctx.Err() == nil && !strings.Contains(err.Error(), "HTTP 404"):
 			return err
 		}
@@ -266,7 +234,6 @@ func agentHostError(err error) error {
 	return err
 }
 
-// inviteView is an invite and how it ended.
 type inviteView struct {
 	ID              string    `json:"id"`
 	Login           string    `json:"login"`
@@ -278,11 +245,8 @@ type inviteView struct {
 	AgentHost       bool      `json:"agentHost"`
 }
 
-// controllerWide sends no namespace: invites act in the namespace the
-// controller watches, which the CLI's default namespace would contradict.
 var controllerWide = map[string]string{"namespace": ""}
 
-// invitePollInterval paces waiting for an invite's outcome.
 var invitePollInterval = 3 * time.Second
 
 func newHostInviteCmd() *cobra.Command {

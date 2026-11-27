@@ -21,14 +21,10 @@ export function builtInAgentRuntimeLabel(type: BuiltInAgentRuntimeType) {
   return BUILT_IN_AGENT_RUNTIME_LABELS[type].compact;
 }
 
-// The provider an Agent resolves through: its Provider resource reference, or
-// the legacy inline model.provider when no reference is set.
 export function agentProviderName(agent: Agent) {
   return agent.spec.providerRef?.name || agent.spec.model?.provider || undefined;
 }
 
-// Readiness comes from the controller's Ready condition; an Agent that has not
-// been reconciled yet has none and reports no readiness either way.
 export function agentReadiness(agent: Agent) {
   const condition = agent.status?.conditions?.find((c) => c.type === "Ready");
   if (!condition) return undefined;

@@ -25,9 +25,6 @@ import (
 
 const routedTestRouterURL = "https://atenet-router.ate-system.svc:443"
 
-// routedRecordingTransport stands in for the controller's pod-certificate
-// router transport. The challenge read answers 404 (bootstrap already closed)
-// so startup reaches the authenticated probe; everything else stops here.
 type routedRecordingTransport struct{ requests []*http.Request }
 
 func (t *routedRecordingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -49,13 +46,10 @@ func (f *externalRuntimePoolFixture) advertiseSubstrateV1Backend(t *testing.T) {
 	if err := f.r.Update(t.Context(), provider); err != nil {
 		t.Fatal(err)
 	}
-	// A native runtime on this backend resolves only fully qualified names.
 	f.r.ControllerAPIURL = "http://orka-api.default.svc.cluster.local:8080"
 	f.r.ProviderProxy.BaseURL = "http://provider-auth-proxy.orka-system.svc.cluster.local:8080"
 }
 
-// withdrawEgressCredentialInjection models a gateway-enforcing provider that
-// cannot inject the provider-proxy token.
 func (f *externalRuntimePoolFixture) withdrawEgressCredentialInjection(t *testing.T) {
 	t.Helper()
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
@@ -70,8 +64,6 @@ func (f *externalRuntimePoolFixture) withdrawEgressCredentialInjection(t *testin
 	}
 }
 
-// useShortServiceOrigins configures Core's origins with the short
-// "<service>.<namespace>.svc" names that Pods resolve through their search path.
 func (f *externalRuntimePoolFixture) useShortServiceOrigins() {
 	f.r.ControllerAPIURL = "http://orka-api.default.svc:8080"
 	f.r.ProviderProxy.BaseURL = "http://provider-auth-proxy.orka-system.svc:8080"
@@ -94,8 +86,6 @@ func newRoutedRuntimeFixture(t *testing.T, substrateV1 bool, mutate func(*worksp
 	return routeRuntimeFixture(t, f, mutate)
 }
 
-// routeRuntimeFixture publishes and materializes a native fixture as a routed
-// process.
 func routeRuntimeFixture(t *testing.T, f *externalRuntimePoolFixture, mutate func(*workspacev1alpha1.AllocationObservation)) *routedRuntimeFixture {
 	t.Helper()
 	router := &routedRecordingTransport{}
@@ -133,13 +123,11 @@ func TestExternalRuntimeEgressAdmitsCoreOriginsAndRejectsInexpressibleOnes(t *te
 	if !reflect.DeepEqual(policy.Rules, want) {
 		t.Fatalf("egress rules = %#v, want %#v", policy.Rules, want)
 	}
-	// A cluster domain other than cluster.local is the operator's to choose.
 	r.ControllerAPIURL = "https://orka-api.orka-system.svc.corp.example"
 	if _, err := r.externalRuntimeEgress(cfg, nil); err != nil {
 		t.Fatalf("custom cluster domain refused: %v", err)
 	}
 
-	// One origin serving both roles yields one grant.
 	r.ControllerAPIURL = "http://provider-auth-proxy.orka-system.svc.cluster.local:8080/api"
 	if policy, err = r.externalRuntimeEgress(cfg, nil); err != nil || len(policy.Rules) != 1 {
 		t.Fatalf("shared origin = %#v, %v", policy, err)
@@ -198,8 +186,6 @@ func TestExternalRuntimeEgressAdmitsTelemetryCollectorOnlyWhenOptedIn(t *testing
 		t.Fatalf("egress rules = %#v, want %#v", policy.Rules, want)
 	}
 
-	// The opt-in fails closed: an inexpressible projected collector refuses
-	// admission instead of silently dropping or widening the allowlist.
 	values["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = "http://10.0.0.7:4318/v1/traces"
 	if _, err := r.externalRuntimeEgressWithEnv(cfg, nil, getenv); err == nil || !strings.Contains(err.Error(), "telemetry collector") {
 		t.Fatalf("IP collector admitted: %v", err)
@@ -212,17 +198,12 @@ func TestExternalRuntimeEgressAdmitsTelemetryCollectorOnlyWhenOptedIn(t *testing
 	if _, err := r.externalRuntimeEgressWithEnv(cfg, nil, getenv); err == nil {
 		t.Fatal("collector sharing a core origin with a conflicting protocol was admitted")
 	}
-	// Without a projected collector there is nothing to admit.
 	clear(values)
 	if policy, err = r.externalRuntimeEgressWithEnv(cfg, nil, getenv); err != nil || !reflect.DeepEqual(policy.Rules, core) {
 		t.Fatalf("no collector: egress rules = %#v, %v", policy, err)
 	}
 }
 
-// A native runtime behind the Substrate egress gateway cannot resolve a short
-// "<service>.<namespace>.svc" name: its resolver's search suffixes are refused
-// and cluster DNS answers only the fully qualified form. Admission refuses such
-// an origin and names the flag and the form to use.
 func TestExternalRuntimeEgressRefusesShortServiceNames(t *testing.T) {
 	const (
 		controllerFQDN = "http://orka-api.orka-system.svc.cluster.local:8080"
@@ -254,7 +235,6 @@ func TestExternalRuntimeNetworkShapeFollowsProviderAndStaysFrozen(t *testing.T) 
 	v1 := &workspacev1alpha1.ExecutionWorkspaceProvider{Status: workspacev1alpha1.ExecutionWorkspaceProviderStatus{
 		SupportedFeatures: []workspacev1alpha1.ExecutionWorkspaceFeature{workspacev1alpha1.WorkspaceFeatureEgressAllowlist},
 	}}
-	// A backend version string alone never selects the egress shape.
 	legacy := &workspacev1alpha1.ExecutionWorkspaceProvider{Status: workspacev1alpha1.ExecutionWorkspaceProviderStatus{
 		Backend: &workspacev1alpha1.ExecutionWorkspaceBackendStatus{APIVersions: []string{"ateapi.v1.0.0"}},
 	}}
@@ -318,8 +298,6 @@ func TestExternalRuntimePoolPublishesEgressAllowlistForSubstrateV1Native(t *test
 	}
 }
 
-// Admission fails closed: the pool reports the misconfiguration and publishes
-// no request, rather than starting a runtime that can reach nothing.
 func TestExternalRuntimePoolRefusesShortServiceNamesForSubstrateV1Native(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	f.advertiseNativeProcess(t)
@@ -341,7 +319,6 @@ func TestExternalRuntimePoolRefusesShortServiceNamesForSubstrateV1Native(t *test
 func TestExternalRuntimePoolKeepsNetworkPolicyForPodBackedSubstrateV1Provider(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	f.advertiseSubstrateV1Backend(t)
-	// Pods resolve short Service names through their search path.
 	f.useShortServiceOrigins()
 	runtime := f.publish(t).Spec.Workload.Runtime
 	if runtime.Egress != nil || runtime.NetworkPolicy == nil || len(runtime.NetworkPolicy.Ingress) == 0 {
@@ -381,7 +358,6 @@ func TestExternalRoutedStartupUsesOnlyConfiguredRouterWithTarget(t *testing.T) {
 	if err != nil || evidence == nil || evidence.RouterTarget != "orka-atespace/actor-1" || evidence.Endpoint != routedTestRouterURL {
 		t.Fatalf("bound evidence = %#v, %v", evidence, err)
 	}
-	// v1 has no direct worker ingress: Core creates no worker grants.
 	if _, err := externalSavedIngressTargets(&pool); err != nil || pool.Annotations[externalProcessIngressTargetsAnnotation] != "" {
 		t.Fatal("routed startup froze worker ingress targets")
 	}
@@ -397,7 +373,6 @@ func TestExternalRoutedStartupUsesOnlyConfiguredRouterWithTarget(t *testing.T) {
 	assertRoutedPoolTransports(t, f, &pool, w)
 }
 
-// Dispatcher, probe, drain and cleanup paths reuse the bound router target.
 func assertRoutedPoolTransports(t *testing.T, f *routedRuntimeFixture, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) {
 	t.Helper()
 	endpoint, err := runtimePoolWorkspaceStartupEndpoint(t.Context(), f.r.Client, pool)
@@ -420,7 +395,6 @@ func assertRoutedPoolTransports(t *testing.T, f *routedRuntimeFixture, pool *cor
 	if f.direct.calls != 0 {
 		t.Fatal("pool probe dialed the router URL without the routed transport")
 	}
-	// Retirement drain derives the same route from exact startup evidence.
 	f.router.requests = nil
 	_, _ = f.r.externalStartupSupervisorClient(pool, w.Status.Allocation.Startup).Probe(t.Context(), endpoint, "token", []byte(strings.Repeat("s", 32)))
 	for _, request := range f.router.requests {
@@ -432,7 +406,6 @@ func assertRoutedPoolTransports(t *testing.T, f *routedRuntimeFixture, pool *cor
 		t.Fatal("retirement drain did not use the routed transport")
 	}
 
-	// Egress-shaped cleanup has no frozen worker targets to resolve.
 	cfg, err := f.r.runtimePoolConfigForDeletion(pool)
 	if err != nil {
 		t.Fatal(err)
@@ -527,7 +500,6 @@ func TestExternalRouterTransportPinsOriginAndTarget(t *testing.T) {
 			t.Errorf("%s: routed client was built", name)
 		}
 	}
-	// Default HTTPS port and trailing slash normalize; nothing else does.
 	pinned := &RuntimePoolSubstrateRouter{URL: "https://atenet-router.ate-system.svc", HTTPClient: server.Client()}
 	if _, err := pinned.pinnedEndpoint("https://ATENET-router.ate-system.svc:443/"); err != nil {
 		t.Fatalf("equivalent router URL refused: %v", err)
@@ -542,14 +514,10 @@ func TestExternalRouterTransportPinsOriginAndTarget(t *testing.T) {
 	}
 }
 
-// Retirement drain sends the pool's controller bearer. Provider startup
-// evidence that changed after binding must not redirect it to another Actor,
-// even when it keeps the bound instance identity.
 func TestExternalRetirementDrainRequiresBoundStartupEvidence(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		mutate func(*workspacev1alpha1.StartupEvidence)
-		// unbound drops the pool's saved binding.
+		name    string
+		mutate  func(*workspacev1alpha1.StartupEvidence)
 		unbound bool
 	}{
 		{name: "no binding was saved", mutate: func(*workspacev1alpha1.StartupEvidence) {}, unbound: true},
@@ -590,7 +558,6 @@ func TestExternalRetirementDrainRequiresBoundStartupEvidence(t *testing.T) {
 			if len(f.router.requests) != 0 || f.direct.calls != 0 {
 				t.Fatalf("changed evidence carried controller credentials: routed=%d direct=%d", len(f.router.requests), f.direct.calls)
 			}
-			// The exact bound evidence still reaches its own Actor.
 			_, _ = f.r.externalStartupSupervisorClient(bound, w.Status.Allocation.Startup).Probe(t.Context(), routedTestRouterURL, "token", []byte(strings.Repeat("s", 32)))
 			if len(f.router.requests) == 0 || f.router.requests[0].Header.Get(daemonprotocol.TargetActorHeader) != "orka-atespace/actor-1" {
 				t.Fatal("bound evidence did not reach its routed target")
@@ -599,9 +566,6 @@ func TestExternalRetirementDrainRequiresBoundStartupEvidence(t *testing.T) {
 	}
 }
 
-// Gateway-backed pool policies are not admission intent. Their cleanup must
-// not depend on the live provider-proxy credential or settings, which may
-// have been removed or changed since they were written.
 func TestExternalGatewayBackedPolicyCleanupNeedsNoLiveProxyConfiguration(t *testing.T) {
 	f := newRoutedRuntimeFixture(t, true, nil)
 	w := f.currentWorkspace(t)
@@ -633,7 +597,6 @@ func TestExternalGatewayBackedPolicyCleanupNeedsNoLiveProxyConfiguration(t *test
 	if len(listOwned()) == 0 {
 		t.Fatal("fixture created no gateway-backed pool policies")
 	}
-	// The credential is gone and every proxy/controller input changed.
 	f.r.ProviderProxy.BearerToken, f.r.ProviderProxy.BearerTokenFile = nil, ""
 	f.r.ProviderProxy.Namespace, f.r.ProviderProxy.BaseURL = "moved-proxy", "http://provider-auth-proxy.moved-proxy.svc:9090"
 	f.r.ProviderProxy.PodLabels = map[string]string{"app": "moved"}
@@ -655,9 +618,9 @@ func TestRuntimePoolProviderProxyServiceHostAcceptsAnyClusterDomain(t *testing.T
 		"proxy.orka-system.svc.cluster.local":      true,
 		"proxy.orka-system.svc.corp.example":       true,
 		"a.proxy.orka-system.svc":                  true,
-		"orka-system.svc":                          false, // no Service name
+		"orka-system.svc":                          false,
 		".orka-system.svc":                         false,
-		"proxy.other.svc.cluster.local":            false, // another namespace
+		"proxy.other.svc.cluster.local":            false,
 		"proxy.orka-system.svcx":                   false,
 		"proxy.orka-system.svc.":                   false,
 		"proxy.orka-system.svc..cluster.local":     false,

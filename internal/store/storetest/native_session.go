@@ -11,8 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// NativeSessionSnapshot builds a verified paginated bundle from a synthetic
-// provider rollout, with no external client, credentials, or network access.
 func NativeSessionSnapshot(t *testing.T, text string) harnessv2.NativeSessionSnapshot {
 	t.Helper()
 	const threadID = "0195e76b-7c5e-7123-8123-456789abcdef"

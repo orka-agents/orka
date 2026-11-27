@@ -70,9 +70,6 @@ for failure in delete list retained; do
 done
 printf '%s\n' 'ok - Kind deletion failure, failed readback and retained exact cluster fail cleanup'
 
-# Exercise the real EXIT handler without creating a cluster or starting a
-# provider. Exit 90 is the workflow contract: cleanup failures cannot be
-# hidden by its external-upstream retry.
 body="$(awk '/^on_exit\(\) \{/,/^\}$/' "${root}/scripts/live-copilot-proxy-e2e.sh")"
 [[ -n "${body}" ]]
 eval "${body}"

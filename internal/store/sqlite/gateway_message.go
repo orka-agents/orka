@@ -18,9 +18,6 @@ import (
 
 const gatewayDeliveryKindMessage = protocol.DeliveryKindMessage
 
-// CROSS JOIN keeps both lifetime counts event-first, using the Task identity
-// index before probing its deliveries. A reorderable join can scan the entire
-// namespace's delivery history while holding the store's single connection.
 const gatewayMessageCountSQL = `SELECT COUNT(*) FROM gateway_events event
 		CROSS JOIN gateway_deliveries delivery ON event.namespace = delivery.namespace AND event.id = delivery.event_id
 		WHERE event.namespace = ? AND event.task_name = ? AND event.task_uid = ? AND delivery.kind = ?`
@@ -31,9 +28,6 @@ const gatewayMessageBudgetSQL = `SELECT
 		EXISTS (SELECT 1 FROM gateway_deliveries d WHERE d.namespace = event.namespace AND d.id = ? AND d.event_id = event.id AND d.kind = ?)
 		FROM gateway_events event WHERE event.namespace = ? AND event.namespace_uid = ? AND event.id = ? AND event.task_name = ? AND event.task_uid = ?`
 
-// EnqueueGatewayMessage serializes eligibility, dedupe, quota and insertion with
-// terminal projection and cleanup. Reuse the authorized task-data writer rather
-// than nesting BeginTx (the store uses a single SQLite connection).
 func (s *Store) EnqueueGatewayMessage(ctx context.Context, request store.GatewayMessageEnqueue) (*store.GatewayDelivery, bool, error) {
 	result, err := writeOperation(ctx, s, "EnqueueGatewayMessage", nil, func(ctx context.Context) (resultPair[*store.GatewayDelivery, bool], error) {
 		first, second, err := s.enqueueGatewayMessageWrite(ctx, request)
@@ -134,8 +128,6 @@ func enqueueGatewayMessageTx(ctx context.Context, tx *sql.Tx, request store.Gate
 		if existing.Kind != gatewayDeliveryKindMessage || existing.EventID != event.ID || existing.Text != request.Text {
 			return nil, false, store.ErrDuplicateMismatch
 		}
-		// A replay is a receipt lookup, even after closure or exhaustion; it
-		// neither requeues the row nor consumes another lifetime quota slot.
 		return existing, false, nil
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, false, err
@@ -166,16 +158,12 @@ func enqueueGatewayMessageTx(ctx context.Context, tx *sql.Tx, request store.Gate
 	return createGatewayDeliveryTx(ctx, tx, delivery)
 }
 
-// gatewayMessageDeliveryID is shared by admission and budget replay detection.
-// The length-delimited identity includes event and Task incarnations, never text.
 func gatewayMessageDeliveryID(namespace, namespaceUID, eventID, taskUID, requestID string) string {
 	identity, _ := json.Marshal([]string{namespace, namespaceUID, eventID, taskUID, requestID})
 	digest := sha256.Sum256(identity)
 	return "gdm-" + hex.EncodeToString(digest[:])
 }
 
-// GetGatewayMessageBudget never admits, reserves, or consumes a message slot.
-// Reuse an authorized writer when supplied, including its revocation fence.
 func (s *Store) GetGatewayMessageBudget(ctx context.Context, request store.GatewayMessageBudgetQuery) (*store.GatewayMessageBudget, error) {
 	var budget *store.GatewayMessageBudget
 	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
@@ -196,7 +184,6 @@ func (s *Store) getGatewayMessageBudgetUnfenced(ctx context.Context, request sto
 	}
 	id := gatewayMessageDeliveryID(request.Namespace, request.NamespaceUID, request.EventID, request.TaskUID, request.RequestID)
 	var budget store.GatewayMessageBudget
-	// One statement keeps the identity, lifetime count and replay snapshot consistent.
 	err := q.QueryRowContext(ctx, gatewayMessageBudgetSQL,
 		gatewayDeliveryKindMessage, id, gatewayDeliveryKindMessage, request.Namespace, request.NamespaceUID, request.EventID, request.TaskName, request.TaskUID).Scan(&budget.Accepted, &budget.RequestExists)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -208,10 +195,6 @@ func (s *Store) getGatewayMessageBudgetUnfenced(ctx context.Context, request sto
 	return &budget, nil
 }
 
-// advanceGatewayDeliveryOrderTx makes created_at a per-event logical admission
-// clock for messages and their terminal successor. It is persisted, assigned
-// under the writer, and strictly advances despite tied/backwards wall clocks.
-// Retention keeps the whole event's evidence until every row can be removed.
 func advanceGatewayDeliveryOrderTx(ctx context.Context, tx *sql.Tx, delivery *store.GatewayDelivery) error {
 	var latest time.Time
 	err := tx.QueryRowContext(ctx, `SELECT created_at FROM gateway_deliveries

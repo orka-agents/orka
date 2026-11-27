@@ -28,7 +28,6 @@ async function json<T = unknown>(path: string, init?: RequestInit): Promise<T> {
 
 const post = (body: unknown): RequestInit => ({ method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } })
 
-/** Moves the demo clock forward; only Date is faked so request latency still elapses. */
 function advanceClock(ms: number) {
   vi.setSystemTime(Date.now() + ms)
 }
@@ -115,7 +114,6 @@ describe('demo task API', () => {
     const pending = approvals.find((a) => a.status === 'pending')
     expect(pending?.id).toBe('apr-rollback-checkout')
 
-    // The cross-Task inbox and attention view list the same pending request.
     const inbox = await json<{ items: Array<{ kind: string; approval?: { id: string; canApprove: boolean | null } }> }>('/approvals?status=pending')
     expect(inbox.items.map((item) => item.approval?.id)).toContain('apr-rollback-checkout')
     const attention = await json<{ items: Array<{ kind: string; task?: { name: string } }>; incomplete: boolean }>('/attention')
@@ -182,7 +180,6 @@ describe('demo task API', () => {
     const child = createDemoTask({ agent: 'docs', prompt: 'Draft the release notes', parent })
     const finished = createDemoTask({ agent: 'triage', prompt: 'List release blockers', parent })
     cancelDemoTask(finished, 'Cancelled: stopped earlier')
-    // A finished child's own running child is still cancelled.
     const grandchild = createDemoTask({ agent: 'docs', prompt: 'Summarize the blockers', parent: finished })
     advanceClock(10_000)
     expect(taskSchema.parse(await json(`/tasks/${child}`)).status?.phase).toBe('Running')
@@ -196,7 +193,6 @@ describe('demo task API', () => {
     expect(taskSchema.parse(await json(`/tasks/${finished}`)).status?.message).toBe('Cancelled: stopped earlier')
     expect(taskSchema.parse(await json(`/tasks/${grandchild}`)).status?.phase).toBe('Cancelled')
 
-    // A stale confirmation is refused even once the Task is already cancelled.
     expect((await call(`/tasks/${parent}/cancel`, post({ uid: 'replaced-uid' }))).status).toBe(409)
   })
 
@@ -206,7 +202,6 @@ describe('demo task API', () => {
     const forked = taskSchema.parse(await json(`/tasks/${fork.newTaskName}`))
     expect(forked.spec).toMatchObject({ type: 'container', image: 'ghcr.io/northwind-labs/checkout-migrate:v42', command: ['migrate', 'up'] })
 
-    // The fork events land after the outcome; the stream still reports the outcome.
     const frames = new SSEFrameBuffer().push(await (await call(`/tasks/${source}/stream?after=0`)).text())
     const events = frames.flatMap((frame) => (frame.kind === 'event' ? [frame.event] : []))
     const complete = frames.find((frame) => frame.kind === 'complete')

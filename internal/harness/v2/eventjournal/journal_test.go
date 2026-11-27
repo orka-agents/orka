@@ -1269,17 +1269,11 @@ func TestJournalReturnsPersistentAppendFailureAfterOneRetry(t *testing.T) {
 	}
 }
 
-// stallingAppendEventStore commits an append and then, like a store whose
-// reply is stuck behind a stalled connection pool, returns only when the
-// caller's context ends. Its lists fail on an ended context, as
-// database/sql does before it waits for a connection.
 type stallingAppendEventStore struct {
 	store.ExecutionEventStore
 	listStarted chan struct{}
 	blockList   bool
-	// failAppends makes an append fail at once, without committing.
 	failAppends bool
-	// skipCommit makes an append wait out its context without committing.
 	skipCommit  bool
 	appendCalls int
 	listCalls   int
@@ -1347,8 +1341,6 @@ func TestJournalReconcilesAnAppendThatOutlivedItsDeadline(t *testing.T) {
 	}
 }
 
-// An append that waited out its caller's deadline and did not commit is
-// reconciled once, and not retried under the ended context.
 func TestJournalDoesNotRetryAnAppendAfterItsDeadline(t *testing.T) {
 	base := storetest.NewFakeExecutionEventStore()
 	eventStore := &stallingAppendEventStore{ExecutionEventStore: base, skipCommit: true}
@@ -1381,13 +1373,10 @@ func TestJournalReconcileStopsWhenTheCallerCancels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Only the reconcile lists from here on; it blocks until its context ends.
 	eventStore.listStarted, eventStore.blockList = make(chan struct{}, 1), true
 	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
 		Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{InputTokens: 10},
 	})
-	// The deadline is shorter than the reconcile budget, so the reconcile is
-	// detached from it, and still ends when the caller cancels.
 	ctx, cancel := context.WithTimeout(t.Context(), mappedAppendReconcileTimeout/2)
 	defer cancel()
 	go func() {

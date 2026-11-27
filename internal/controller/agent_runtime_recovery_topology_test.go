@@ -20,8 +20,6 @@ func foundryRecoveryPodSpec(local corev1.PodSpec) corev1.PodSpec {
 			ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: "api://AzureADTokenExchange", Path: "token", ExpirationSeconds: new(int64(3600))},
 		}}}}},
 	}
-	// Broker first also proves that recovery patches/selects the supervisor by
-	// its configured name rather than accidentally changing the first container.
 	result.Containers = append([]corev1.Container{{Name: "broker", Image: "docker.io/example/broker@" + testControllerDigest("broker"),
 		Env:          []corev1.EnvVar{{Name: "AZURE_FEDERATED_TOKEN_FILE", Value: "/identity/token"}},
 		VolumeMounts: []corev1.VolumeMount{{Name: "ledger", MountPath: "/ledger"}, {Name: "azure-identity", MountPath: "/identity", ReadOnly: true}},
@@ -97,8 +95,6 @@ func TestAgentRuntimeRecoveryRejectsSupervisorServiceAccountToken(t *testing.T) 
 		})
 	}
 
-	// Exercise enrollment with matching Deployment, ReplicaSet, and Pod specs;
-	// the token must prevent admission before any boot witness is published.
 	deployment := &appsv1.Deployment{}
 	if err := f.r.Get(t.Context(), client.ObjectKey{Namespace: defaultNS, Name: "runtime"}, deployment); err != nil {
 		t.Fatal(err)
@@ -128,7 +124,6 @@ func configureFoundryRuntimeRecoveryFixture(t *testing.T, f *runtimeRecoveryFixt
 	t.Helper()
 	f.server.Close()
 	f.config.Profile.ProviderKind = "foundry"
-	// Broker identity in these fixtures reports this same configuration digest.
 	f.config.Profile.AgentConfigurationDigest = testControllerDigest("foundry-agent")
 	server, err := conformancetest.NewServer(f.config)
 	if err != nil {

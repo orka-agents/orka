@@ -119,7 +119,6 @@ func TestRemoteMCPArgumentsMatchExactReviewedSchema(t *testing.T) {
 			e := remoteTestExecutor(t, f.serve(t))
 			tool := remoteTestTool(t)
 			tool.Spec.Parameters.Raw = []byte(schema)
-			// Discovery must not validate synthetic {} against required call arguments.
 			if err := e.VerifyRemoteMCPTool(t.Context(), tool); err != nil {
 				t.Fatal("reviewed schema could not be exposed")
 			}

@@ -34,8 +34,6 @@ const (
 
 var anthropicLog = logf.Log.WithName("anthropic-compat")
 
-// AnthropicCompatHandler implements Anthropic-compatible /v1/messages endpoints.
-// This allows Anthropic-compatible clients to use Orka as a custom provider.
 type AnthropicCompatHandler struct {
 	client                    client.Client
 	apiReader                 client.Reader
@@ -49,7 +47,6 @@ type AnthropicCompatHandler struct {
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
-// NewAnthropicCompatHandler creates an Anthropic-compatible API handler.
 func NewAnthropicCompatHandler(c client.Client, apiReader client.Reader, watchNamespace string, enforceNamespaceIsolation bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore, kubeClientOpt ...kubernetes.Interface) *AnthropicCompatHandler {
 	var kubeClient kubernetes.Interface
 	if len(kubeClientOpt) > 0 {
@@ -68,7 +65,6 @@ func NewAnthropicCompatHandler(c client.Client, apiReader client.Reader, watchNa
 	}
 }
 
-// AnthropicRequest represents an incoming Anthropic Messages API request.
 type AnthropicRequest struct {
 	Model         string             `json:"model"`
 	Messages      []AnthropicMessage `json:"messages"`
@@ -85,15 +81,11 @@ type AnthropicRequest struct {
 	Thinking      *AnthropicThinking `json:"thinking,omitempty"`
 }
 
-// AnthropicMessage is a single message in an Anthropic conversation.
-// Content is json.RawMessage because it can be a string or []ContentBlock.
 type AnthropicMessage struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
 }
 
-// AnthropicContentBlock represents a typed content block in Anthropic messages.
-// The Type field determines which other fields are populated.
 type AnthropicContentBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text,omitempty"`
@@ -106,32 +98,27 @@ type AnthropicContentBlock struct {
 	Source    *ImageSource    `json:"source,omitempty"`
 }
 
-// ImageSource represents a base64-encoded image source in an Anthropic content block.
 type ImageSource struct {
 	Type      string `json:"type"`
 	MediaType string `json:"media_type"`
 	Data      string `json:"data"`
 }
 
-// AnthropicTool defines a tool available for the model to call.
 type AnthropicTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema"`
 }
 
-// AnthropicThinking configures extended thinking.
 type AnthropicThinking struct {
 	Type         string `json:"type"`
 	BudgetTokens int    `json:"budget_tokens,omitempty"`
 }
 
-// AnthropicMetadata contains request metadata.
 type AnthropicMetadata struct {
 	UserID string `json:"user_id,omitempty"`
 }
 
-// AnthropicResponse is the non-streaming response from the Anthropic Messages API.
 type AnthropicResponse struct {
 	ID           string                  `json:"id"`
 	Type         string                  `json:"type"`
@@ -143,7 +130,6 @@ type AnthropicResponse struct {
 	Usage        AnthropicUsage          `json:"usage"`
 }
 
-// AnthropicUsage contains token usage statistics.
 type AnthropicUsage struct {
 	InputTokens              int `json:"input_tokens"`
 	OutputTokens             int `json:"output_tokens"`
@@ -151,7 +137,6 @@ type AnthropicUsage struct {
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 }
 
-// AnthropicStreamEvent is a single SSE event in an Anthropic streaming response.
 type AnthropicStreamEvent struct {
 	Type         string                 `json:"type"`
 	Message      *AnthropicResponse     `json:"message,omitempty"`
@@ -161,7 +146,6 @@ type AnthropicStreamEvent struct {
 	Usage        *AnthropicUsage        `json:"usage,omitempty"`
 }
 
-// AnthropicDelta carries incremental updates within a streaming event.
 type AnthropicDelta struct {
 	Type         string  `json:"type,omitempty"`
 	Text         string  `json:"text,omitempty"`
@@ -171,25 +155,21 @@ type AnthropicDelta struct {
 	StopSequence *string `json:"stop_sequence,omitempty"`
 }
 
-// AnthropicError is the standard error response format for the Anthropic API.
 type AnthropicError struct {
 	Type  string               `json:"type"`
 	Error AnthropicErrorDetail `json:"error"`
 }
 
-// AnthropicErrorDetail contains the error type and message.
 type AnthropicErrorDetail struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
 }
 
-// parseAnthropicContent handles both string and []ContentBlock formats for message content.
 func parseAnthropicContent(raw json.RawMessage) ([]AnthropicContentBlock, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
 
-	// Try string first
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return []AnthropicContentBlock{
@@ -197,7 +177,6 @@ func parseAnthropicContent(raw json.RawMessage) ([]AnthropicContentBlock, error)
 		}, nil
 	}
 
-	// Try []ContentBlock
 	var blocks []AnthropicContentBlock
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		return nil, fmt.Errorf("content must be a string or array of content blocks: %w", err)
@@ -205,19 +184,16 @@ func parseAnthropicContent(raw json.RawMessage) ([]AnthropicContentBlock, error)
 	return blocks, nil
 }
 
-// parseAnthropicSystem handles both string and []ContentBlock formats for the system field.
 func parseAnthropicSystem(raw json.RawMessage) (string, error) {
 	if len(raw) == 0 {
 		return "", nil
 	}
 
-	// Try string first
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return s, nil
 	}
 
-	// Try []ContentBlock and concatenate text blocks
 	var blocks []AnthropicContentBlock
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		return "", fmt.Errorf("system must be a string or array of content blocks: %w", err)
@@ -232,7 +208,6 @@ func parseAnthropicSystem(raw json.RawMessage) (string, error) {
 	return strings.Join(parts, "\n"), nil
 }
 
-// HandleMessages handles POST /anthropic/v1/messages.
 func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 	start := time.Now()
 
@@ -277,8 +252,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 			}
 			return authorizeChatProviderUse(c, h.kubeClient, "anthropicMessages", provider)
 		},
-		RequireModel: true,
-		// Enforced scoped context tokens get no implicit Provider selection.
+		RequireModel:            true,
 		RequireExplicitProvider: requestRequiresExplicitProvider(c, h.contextTokenAuthorization),
 	})
 	if err != nil {
@@ -316,8 +290,6 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		compReq.Temperature = *req.Temperature
 	}
 
-	// Inject Orka tools and run the server-side agentic loop by default.
-	// Set X-Orka-Tools: disabled to use as a transparent proxy instead.
 	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, compReq, compatCoordinatorSetup{
 		Namespace:           namespace,
 		ToolUseAction:       "anthropicTools",
@@ -328,7 +300,6 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		return anthropicContextTokenAuthorizationError(c, err)
 	}
 
-	// Build ToolContext for coordinator tools (create_agent_task, wait_for_task, etc.)
 	var proxyToolCtx *tools.ToolContext
 	if orkaToolsEnabled {
 		proxyToolCtx = newCompatProxyToolContext(compatProxyToolContextConfig{
@@ -361,7 +332,6 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 
 	var resp *llm.CompletionResponse
 	if orkaToolsEnabled {
-		// Run the agentic tool loop (executes tools server-side until final text response)
 		resp, err = runNonStreamingToolLoop(ctx, provider, compReq, model, h.config, proxyToolCtx)
 		if err != nil {
 			anthropicLog.Error(err, "tool loop failed")
@@ -369,7 +339,6 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		}
 		resp = stripGoalStateSentinelFromResponse(resp)
 	} else {
-		// Transparent proxy: single LLM call, return response directly
 		resp, err = provider.Complete(ctx, compReq)
 		if err != nil {
 			anthropicLog.Error(err, "completion failed")
@@ -402,7 +371,6 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 	return c.JSON(result)
 }
 
-// HandleListModels handles GET /anthropic/v1/models.
 func (h *AnthropicCompatHandler) HandleListModels(c fiber.Ctx) error {
 	ctx := c.Context()
 
@@ -462,7 +430,6 @@ func (h *AnthropicCompatHandler) HandleListModels(c fiber.Ctx) error {
 	})
 }
 
-// convertAnthropicMessages converts Anthropic messages to internal llm.Message format.
 func convertAnthropicMessages(msgs []AnthropicMessage) ([]llm.Message, error) {
 	var messages []llm.Message
 
@@ -474,14 +441,12 @@ func convertAnthropicMessages(msgs []AnthropicMessage) ([]llm.Message, error) {
 
 		switch m.Role {
 		case chatRoleUser:
-			// Separate tool_result blocks from other content
 			var textParts []string
 			for _, b := range blocks {
 				switch b.Type {
 				case "tool_result":
 					resultContent := ""
 					if b.Content != nil {
-						// tool_result content can be string or []ContentBlock
 						var s string
 						if json.Unmarshal(b.Content, &s) == nil {
 							resultContent = s
@@ -535,7 +500,6 @@ func convertAnthropicMessages(msgs []AnthropicMessage) ([]llm.Message, error) {
 			messages = append(messages, msg)
 
 		default:
-			// Pass through unknown roles
 			var textParts []string
 			for _, b := range blocks {
 				if b.Type == oaiContentTypeText {
@@ -552,7 +516,6 @@ func convertAnthropicMessages(msgs []AnthropicMessage) ([]llm.Message, error) {
 	return messages, nil
 }
 
-// convertAnthropicTools converts Anthropic tool definitions to internal llm.Tool format.
 func convertAnthropicTools(inputTools []AnthropicTool) []llm.Tool {
 	if len(inputTools) == 0 {
 		return nil
@@ -579,7 +542,6 @@ func mapAnthropicCompletionStopReason(resp *llm.CompletionResponse) (string, boo
 	)
 }
 
-// convertToAnthropicResponse converts an internal CompletionResponse to Anthropic format.
 func convertToAnthropicResponse(resp *llm.CompletionResponse, model, stopReason string) AnthropicResponse {
 	id := "msg_" + uuid.New().String()
 
@@ -610,10 +572,6 @@ func convertToAnthropicResponse(resp *llm.CompletionResponse, model, stopReason 
 	}
 }
 
-// anthropicUsage is a completion's usage in Anthropic's shape: input_tokens
-// leaves out the cache reads and writes, which come beside it. An inclusive
-// count, as OpenAI's is, has them taken out, as the streaming path does; one
-// smaller than its own breakdown is reported whole, without one.
 func anthropicUsage(resp *llm.CompletionResponse) AnthropicUsage {
 	usage := AnthropicUsage{InputTokens: resp.InputTokens, OutputTokens: resp.OutputTokens}
 	var read, write int
@@ -633,7 +591,6 @@ func anthropicUsage(resp *llm.CompletionResponse) AnthropicUsage {
 	return usage
 }
 
-// anthropicError returns an error in Anthropic API format.
 func anthropicError(c fiber.Ctx, status int, errType, message string) error {
 	return c.Status(status).JSON(AnthropicError{
 		Type: apiFieldError,
@@ -644,23 +601,18 @@ func anthropicError(c fiber.Ctx, status int, errType, message string) error {
 	})
 }
 
-// stripClientToolMessages removes tool_use and tool_result messages from client history
-// so the LLM doesn't see stale references to tools it no longer has access to.
 func stripClientToolMessages(messages []llm.Message) []llm.Message {
 	filtered := make([]llm.Message, 0, len(messages))
 	for _, m := range messages {
-		// Skip tool result messages (from client tool execution)
 		if m.Role == chatRoleTool {
 			continue
 		}
-		// For assistant messages, strip tool calls but keep text content
 		if m.Role == chatRoleAssistant && len(m.ToolCalls) > 0 {
 			if m.Content == "" {
 				continue
 			}
 			m = llm.Message{Role: m.Role, Content: m.Content}
 		}
-		// Prevent consecutive same-role messages (merge into previous)
 		if len(filtered) > 0 && filtered[len(filtered)-1].Role == m.Role {
 			filtered[len(filtered)-1].Content += "\n" + m.Content
 			continue

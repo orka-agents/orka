@@ -12,9 +12,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-// A first turn whose attachment is staged and whose pool is activated waits
-// for the publication to install it instead of attaching separately, which
-// would force a re-admission before that publication.
 func TestFirstTurnWaitsForTheStagedInstall(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -73,8 +70,6 @@ func TestFirstTurnStopsWaitingForTheStagedInstall(t *testing.T) {
 	}
 }
 
-// The creation pass starts the runtime at once even though the informer cache
-// has not seen the workspace it just created.
 func TestSpeculativeStartSeesAWorkspaceTheCacheHasNotSeen(t *testing.T) {
 	t.Parallel()
 	f := newSpeculativeTaskFixture(t)

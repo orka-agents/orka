@@ -61,8 +61,6 @@ func TestWorkspaceStatusUpdatePreservesControllerAuthority(t *testing.T) {
 					}
 					reads++
 					if reads == 4 && test.change != nil {
-						// Return the last authorized Task while a controller change
-						// commits before the worker can publish its status update.
 						changed := current.DeepCopy()
 						test.change(changed)
 						require.NoError(t, c.Status().Update(ctx, changed))

@@ -11,9 +11,6 @@ import (
 	"testing"
 )
 
-// The contract, its provider suite and its wire library must be usable by a
-// separately built provider, so no package in the storage module may depend
-// on Orka's internal packages or anything outside the module.
 func TestStorageModuleImportsOnlyItselfAndItsDependencies(t *testing.T) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
@@ -56,9 +53,6 @@ func TestStorageModuleImportsOnlyItselfAndItsDependencies(t *testing.T) {
 	}
 }
 
-// An adapter that imports the contract inherits the module's requirements,
-// so they stay limited to gRPC, protobuf, the google.rpc status types and the
-// assertion library the shared suite uses.
 func TestStorageModuleRequiresOnlyTheWireDependencies(t *testing.T) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {

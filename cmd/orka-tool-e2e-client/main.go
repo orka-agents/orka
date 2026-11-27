@@ -79,9 +79,6 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("tool %s/%s is not available: %s", namespace, name, tool.Status.Error)
 	}
 
-	// Substrate MCP actors accept only the Orka manager's router identity. The
-	// client calls the authenticated Orka API MCP proxy with its own
-	// ServiceAccount token, exactly like an AI worker.
 	if worker.IsSubstrateMCPActorTool(tool) && strings.TrimSpace(os.Getenv(workerenv.ControllerURL)) == "" {
 		return fmt.Errorf("%s (the Orka API base URL) is required for Substrate MCP tools", workerenv.ControllerURL)
 	}

@@ -11,7 +11,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire"
 )
 
-// stalledWriter is a response writer whose client stops reading.
 type stalledWriter struct {
 	header  http.Header
 	writing chan struct{}
@@ -26,8 +25,6 @@ func (w *stalledWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-// A scrape that stalls while its response is written never delays the calls
-// that record metrics.
 func TestStalledScrapesDoNotBlockCalls(t *testing.T) {
 	m := newMetrics()
 	handler := probeHandler(&readiness{metrics: m}, m)

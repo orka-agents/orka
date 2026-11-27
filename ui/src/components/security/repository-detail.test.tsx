@@ -106,7 +106,6 @@ describe('RepositoryDetail', () => {
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('Could not load findings')
     expect(alert).toHaveTextContent('findings store unavailable')
-    // Only the recommended list, which did load, may say it is empty.
     expect(screen.getAllByText('No findings to display.')).toHaveLength(1)
   })
 
@@ -146,7 +145,6 @@ describe('RepositoryDetail', () => {
 
     expect(await screen.findByText('Not authorized to view repository payments-main')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Repository not found' })).not.toBeInTheDocument()
-    // The access error keeps the page chrome: a heading, tab title, and a way back.
     expect(screen.getByRole('heading', { level: 1, name: 'Could not load repository' })).toBeInTheDocument()
     expect(document.title).toBe('Could not load repository · Orka')
     expect(screen.getByRole('link', { name: 'Back to Security' })).toHaveAttribute('href', '/security')

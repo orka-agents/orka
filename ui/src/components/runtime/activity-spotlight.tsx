@@ -14,27 +14,16 @@ import type { Task } from '@/schemas/task'
 import type { ExecutionEvent } from '@/schemas/execution-event'
 
 interface ActivitySpotlightProps {
-  /** The current active task, or null when nothing is running. */
   task: Task | null
-  /** Latest execution event for the active task, if known. */
   latestEvent?: ExecutionEvent
-  /** True while a live stream/poll is following the namespace. */
   following: boolean
-  /** True when the focused event stream failed and the headline may be stale. */
   eventError?: boolean
 }
 
-/**
- * Hero panel: who is active, what they're doing, how long, and whether we're
- * live. Idle (no running task) shows a clear, non-misleading resting state.
- */
 export function ActivitySpotlight({ task, latestEvent, following, eventError = false }: ActivitySpotlightProps) {
   const [now, setNow] = useState(() => Date.now())
   const phase = task?.status?.phase
   const running = phase === 'Running'
-  // A task parked on an approval or on a Pod that cannot start says so in
-  // status.message; the last event ("AI worker completed", "Task started
-  // with Job ...") would read as if it were still progressing.
   const waitingForApproval = task ? isWaitingForApproval(task) : false
   const podWaiting = task ? podWaitingMessage(task) : undefined
   const headline = running && !waitingForApproval && !podWaiting
@@ -43,8 +32,6 @@ export function ActivitySpotlight({ task, latestEvent, following, eventError = f
   const justUpdated = useFreshness(headline)
 
   useEffect(() => {
-    // Only tick for a running task with a clock: terminal tasks freeze at
-    // completionTime, waiting tasks are not active, and startTime-less tasks render "—".
     if (!task || phase !== 'Running' || elapsedSeconds(task, now) === null) return
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
@@ -66,9 +53,6 @@ export function ActivitySpotlight({ task, latestEvent, following, eventError = f
   }
 
   const agent = task.spec.agentRef?.name || UNASSIGNED_AGENT
-  // For terminal tasks freeze the clock at completionTime (the run's duration);
-  // a running task ticks against now. Pending/Scheduled tasks are waiting, not
-  // active, even when opened in the task detail Runtime tab.
   const terminal = isTaskTerminal(phase)
   const endMs = terminal && task.status?.completionTime ? new Date(task.status.completionTime).getTime() : now
   const elapsed = formatElapsed(running || terminal ? elapsedSeconds(task, endMs) : null)
@@ -104,9 +88,6 @@ export function ActivitySpotlight({ task, latestEvent, following, eventError = f
           </Link>
           <StatusDot phase={task.status?.phase} />
         </div>
-        {/* The row wraps as a whole (badges drop below on a phone); the
-            agent name stays on one line and truncates, full name in its
-            title, instead of breaking mid-name. */}
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
           <span className="min-w-0 max-w-full truncate" title={agent}>{agent}</span>
           <span aria-hidden="true">·</span>
@@ -117,8 +98,6 @@ export function ActivitySpotlight({ task, latestEvent, following, eventError = f
           <p className="text-sm text-destructive" role="alert">Unable to load events</p>
         )}
         {podWaiting ? (
-          // The pull or config error detail is the actionable part, so it
-          // wraps instead of truncating.
           <p className="flex items-start gap-1.5 break-words text-sm text-status-pending" role="status">
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
             <span className="min-w-0">{podWaiting}</span>

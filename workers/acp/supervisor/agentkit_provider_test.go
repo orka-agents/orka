@@ -209,8 +209,6 @@ func TestSupervisorAgentKitPassesLifecycleConformance(t *testing.T) {
 		t.Skip("workspace freeze and descendant cleanup proof require Linux")
 	}
 	server, cfg, profile := newTestAgentKitServer(t)
-	// The ACP child uses a distinct UID and must traverse the test-owned
-	// ancestors of its session tree.
 	testDir := filepath.Dir(cfg.SessionBaseDir)
 	for _, dir := range []string{testDir, filepath.Dir(testDir)} {
 		if err := os.Chmod(dir, 0711); err != nil {

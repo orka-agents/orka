@@ -8,9 +8,6 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 )
 
-// An eviction or upgrade drain of a detached warm runtime ends its window at
-// once, so the frozen Suspend applies inside the drain's deadline rather
-// than when a window longer than that deadline would have ended.
 func TestRuntimeDrainEndsAWarmWindowAndSuspendsAtOnce(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -34,7 +31,6 @@ func TestRuntimeDrainEndsAWarmWindowAndSuspendsAtOnce(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
 			f := newExternalRuntimePoolFixture(t)
-			// A one-hour window: longer than the 30-minute eviction deadline.
 			window := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
 			f.suspendCapableWorkspace(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
 				w.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
@@ -50,7 +46,6 @@ func TestRuntimeDrainEndsAWarmWindowAndSuspendsAtOnce(t *testing.T) {
 			if !open || deadline.After(time.Now()) || ended.Annotations[acpWorkspaceWarmWindowDrainedAnnotation] == "" {
 				t.Fatalf("drain left the window open until %s", ended.Annotations[acpWorkspaceSuspendAtAnnotation])
 			}
-			// A second pass never moves the deadline again.
 			runtimePoolReconcile(t, f.r, f.pool)
 			if again := f.currentWorkspace(t); again.Annotations[acpWorkspaceSuspendAtAnnotation] != ended.Annotations[acpWorkspaceSuspendAtAnnotation] {
 				t.Fatal("a later pass rewrote the drained deadline")
@@ -73,8 +68,6 @@ func TestRuntimeDrainEndsAWarmWindowAndSuspendsAtOnce(t *testing.T) {
 	}
 }
 
-// A drain of an attached runtime, or of a workspace with no open window, is
-// left to the ordinary retirement path.
 func TestRuntimeDrainLeavesAttachedAndColdWorkspacesAlone(t *testing.T) {
 	for _, test := range []struct {
 		name   string

@@ -78,8 +78,6 @@ describe('cancel dialog target', () => {
   it('lets a replaced Task\'s late close leave its successor\'s dialog open', () => {
     expect(nextCancelTarget(null, 'ns/build/uid-1', true)).toBe('ns/build/uid-1')
     expect(nextCancelTarget('ns/build/uid-1', 'ns/build/uid-1', false)).toBeNull()
-    // The Task was replaced and its successor's dialog opened before the
-    // old request answered.
     expect(nextCancelTarget('ns/build/uid-2', 'ns/build/uid-1', false)).toBe('ns/build/uid-2')
   })
 })

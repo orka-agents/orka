@@ -9,8 +9,6 @@ import (
 	"strings"
 )
 
-// IsSubcommand reports whether name is one of the toolbox subcommands handled
-// before the supervisor hardens its process or reads its configuration.
 func IsSubcommand(name string) bool {
 	switch name {
 	case HandoffSubcommand, CopySubcommand, CheckSubcommand:
@@ -20,9 +18,6 @@ func IsSubcommand(name string) bool {
 	}
 }
 
-// Run executes one toolbox subcommand and returns the process exit code. On
-// failure it prints exactly one stable FAIL line to stderr and, best effort,
-// to the container termination log.
 func Run(name string, args []string, stdout, stderr io.Writer) int {
 	err := run(name, args, stdout)
 	if err == nil {
@@ -134,7 +129,6 @@ func (m *mountFlags) Set(value string) error {
 	return nil
 }
 
-// MountFlagValue renders one --mount argument for CheckSubcommand.
 func MountFlagValue(mountPath string, pathEntries []string) string {
 	return mountPath + ":" + strings.Join(pathEntries, ",")
 }

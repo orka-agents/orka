@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-# The caller gives each attempt a fresh directory containing only allowlisted
-# cleanup JSON. Never copy kubeconfigs, credentials, command output or logs here.
 e2e_cleanup_evidence_passed() {
   local evidence_dir="$1"
   local reports=("${evidence_dir}"/cleanup-*.json)

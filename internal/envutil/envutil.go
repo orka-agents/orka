@@ -1,7 +1,3 @@
-// Package envutil parses process environment variables with the canonical,
-// fail-closed rules shared by the Orka binaries. Blank values always yield the
-// fallback; malformed values are reported to the caller, which decides whether
-// to exit or degrade.
 package envutil
 
 import (
@@ -13,7 +9,6 @@ import (
 	"time"
 )
 
-// String returns the trimmed value of name, or fallback when it is unset or blank.
 func String(name, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 		return value
@@ -21,8 +16,6 @@ func String(name, fallback string) string {
 	return fallback
 }
 
-// Int parses name as a canonical base-10 platform-sized integer. Non-canonical
-// spellings such as a leading "+" or zero padding are rejected.
 func Int(name string, fallback int) (int, error) {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
@@ -35,7 +28,6 @@ func Int(name string, fallback int) (int, error) {
 	return value, nil
 }
 
-// Int64 parses name as a canonical base-10 64-bit integer.
 func Int64(name string, fallback int64) (int64, error) {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
@@ -48,7 +40,6 @@ func Int64(name string, fallback int64) (int64, error) {
 	return value, nil
 }
 
-// Duration parses name with time.ParseDuration.
 func Duration(name string, fallback time.Duration) (time.Duration, error) {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
@@ -61,7 +52,6 @@ func Duration(name string, fallback time.Duration) (time.Duration, error) {
 	return value, nil
 }
 
-// Bool parses name with strconv.ParseBool; blank is false.
 func Bool(name string) (bool, error) {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
@@ -74,8 +64,6 @@ func Bool(name string) (bool, error) {
 	return value, nil
 }
 
-// MustInt is Int for process startup: a malformed value exits the
-// process with "invalid NAME".
 func MustInt(name string, fallback int) int {
 	value, err := Int(name, fallback)
 	if err != nil {
@@ -84,8 +72,6 @@ func MustInt(name string, fallback int) int {
 	return value
 }
 
-// MustPositiveInt is Int for process startup: a malformed or non-positive
-// value exits the process with "invalid NAME".
 func MustPositiveInt(name string, fallback int) int {
 	value, err := Int(name, fallback)
 	if err != nil || value < 1 {
@@ -94,8 +80,6 @@ func MustPositiveInt(name string, fallback int) int {
 	return value
 }
 
-// MustInt64 is Int64 for process startup: a malformed value exits the
-// process with "invalid NAME".
 func MustInt64(name string, fallback int64) int64 {
 	value, err := Int64(name, fallback)
 	if err != nil {
@@ -104,8 +88,6 @@ func MustInt64(name string, fallback int64) int64 {
 	return value
 }
 
-// MustDuration is Duration for process startup: a malformed value exits the
-// process with "invalid NAME".
 func MustDuration(name string, fallback time.Duration) time.Duration {
 	value, err := Duration(name, fallback)
 	if err != nil {

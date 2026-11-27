@@ -124,9 +124,6 @@ type HTTPExecution struct {
 type HTTPForwardProtocol string
 
 const (
-	// HTTPForwardProtocolAzureResourceManager serves the Azure CLI (az): the
-	// runtime presents itself as an Azure cloud whose Resource Manager endpoint
-	// and managed identity are local, and forwards Resource Manager requests.
 	HTTPForwardProtocolAzureResourceManager HTTPForwardProtocol = "AzureResourceManager"
 )
 
@@ -150,12 +147,8 @@ type HTTPForward struct {
 type HTTPForwardWriteApproval string
 
 const (
-	// HTTPForwardWriteApprovalRequired holds each write until a person
-	// approves it.
 	HTTPForwardWriteApprovalRequired HTTPForwardWriteApproval = "Required"
-	// HTTPForwardWriteApprovalNone sends writes without approval; the
-	// credential's own permissions are the only limit.
-	HTTPForwardWriteApprovalNone HTTPForwardWriteApproval = "None"
+	HTTPForwardWriteApprovalNone     HTTPForwardWriteApproval = "None"
 )
 
 // HTTPForwardWrites configures forwarded writes.
@@ -166,8 +159,6 @@ type HTTPForwardWrites struct {
 	Approval HTTPForwardWriteApproval `json:"approval,omitempty"`
 }
 
-// WriteApprovalRequired reports whether forwarded writes wait for approval.
-// An unset approval is Required.
 func (w *HTTPForwardWrites) WriteApprovalRequired() bool {
 	return w == nil || w.Approval != HTTPForwardWriteApprovalNone
 }
@@ -277,12 +268,9 @@ type SubstrateMCPActor struct {
 type SubstrateActorEgressScheme string
 
 const (
-	// SubstrateActorEgressSchemeHTTP allows cleartext HTTP to the host.
-	SubstrateActorEgressSchemeHTTP SubstrateActorEgressScheme = "http"
-	// SubstrateActorEgressSchemeHTTPS allows HTTPS intercepted by the gateway.
+	SubstrateActorEgressSchemeHTTP  SubstrateActorEgressScheme = "http"
 	SubstrateActorEgressSchemeHTTPS SubstrateActorEgressScheme = "https"
-	// SubstrateActorEgressSchemeTLS allows TLS passed through without decryption.
-	SubstrateActorEgressSchemeTLS SubstrateActorEgressScheme = "tls"
+	SubstrateActorEgressSchemeTLS   SubstrateActorEgressScheme = "tls"
 )
 
 // SubstrateActorEgressRule allows one host name on explicit ports.

@@ -21,9 +21,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// lastUsedRaceClient lands a concurrent LastUsed write of newer just before
-// the first Agent status update, so that update conflicts and its retry must
-// re-read the Agent.
 func lastUsedRaceClient(t *testing.T, agent *corev1alpha1.Agent, newer metav1.Time) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -65,9 +62,6 @@ func agentLastUsed(t *testing.T, c client.Client, agent *corev1alpha1.Agent) tim
 	return current.Status.LastUsed.Time
 }
 
-// Tasks of one Agent can complete out of order, concurrently when Tasks
-// reconcile in parallel. An earlier completion's timestamp must never move
-// LastUsed backward, which would expire the Agent's TTL early.
 func TestUpdateAgentLastUsedNeverMovesBackward(t *testing.T) {
 	base := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
 	earlier, newer := metav1.NewTime(base), metav1.NewTime(base.Add(time.Minute))
@@ -90,8 +84,6 @@ func TestUpdateAgentLastUsedNeverMovesBackward(t *testing.T) {
 	}
 }
 
-// The Agent controller's status pass captures LastUsed before its write; a
-// conflict retry must keep a newer LastUsed a Task completion recorded since.
 func TestAgentStatusUpdateKeepsNewerLastUsed(t *testing.T) {
 	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent"}}
 	newer := metav1.NewTime(time.Now().Add(time.Hour).Truncate(time.Second))

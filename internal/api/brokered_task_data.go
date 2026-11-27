@@ -37,9 +37,6 @@ func (a brokeredTaskDataAccess) withData(ctx context.Context, backing any, autho
 	return a.guard(ctx, func(guardCtx context.Context) error {
 		var err error
 		for range 3 {
-			// Brokered coordination can access data from several Tasks. Fence
-			// namespace cleanup; every Kubernetes read runs with no store
-			// transaction open.
 			err = dataAccess.WithAuthorizedTaskDataAccess(guardCtx, a.taskKey.Namespace, "", func(authCtx context.Context) ([]store.TaskJobIdentity, error) {
 				task, err := a.activeTask(authCtx)
 				if err != nil {

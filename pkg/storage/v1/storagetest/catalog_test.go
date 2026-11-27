@@ -93,8 +93,6 @@ func TestCallWriteCarriesTheEnvelopeAndReportsWrittenArguments(t *testing.T) {
 	require.Panics(t, func() { requireSameOutcome(&panickingT{t}, outcome, replay) }, "a different written ID is a different outcome")
 }
 
-// panickingT turns a failed assertion into a panic, so a test can check that
-// an assertion helper fails.
 type panickingT struct{ *testing.T }
 
 func (p *panickingT) Errorf(format string, args ...any) { panic(fmt.Sprintf(format, args...)) }

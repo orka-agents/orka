@@ -12,8 +12,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// recordingIdentityStore records the transcript messages each attempt of a
-// write reached the store with, and the records the create methods received.
 type recordingIdentityStore struct {
 	*lossyStore
 	appended  [][]store.SessionMessage
@@ -74,10 +72,6 @@ func newIdentityFixture(t *testing.T) (*lossyFixture, *recordingIdentityStore) {
 	return f, recording
 }
 
-// The client gives a transcript message without an ID a UUIDv7 and the
-// operation's issue time before the request digest, so every attempt sends
-// the same messages. A message with an ID keeps its zero timestamp, and the
-// caller's slice is left as it was.
 func TestClientAssignsTranscriptMessageIdentity(t *testing.T) {
 	f, recording := newIdentityFixture(t)
 	ctx := t.Context()
@@ -120,7 +114,6 @@ func TestClientAssignsTranscriptMessageIdentity(t *testing.T) {
 	}
 }
 
-// A chat turn's messages get identities in the same way.
 func TestClientAssignsChatTurnMessageIdentity(t *testing.T) {
 	f := newLossyFixture(t)
 	ctx := t.Context()
@@ -149,8 +142,6 @@ func TestClientAssignsChatTurnMessageIdentity(t *testing.T) {
 	}
 }
 
-// SendMessage stamps the creation time with the operation's issue time, and
-// the caller receives the assigned ID.
 func TestClientStampsSentMessages(t *testing.T) {
 	f := newLossyFixture(t)
 	sent := message("hello")
@@ -170,9 +161,6 @@ func TestClientStampsSentMessages(t *testing.T) {
 	}
 }
 
-// Memories, memory proposals and dropped findings get their IDs and times
-// from the client, in the formats a provider would use: the provider already
-// receives them, with the operation's issue time, so it assigns nothing.
 func TestClientAssignsRecordIdentities(t *testing.T) {
 	f, recording := newIdentityFixture(t)
 	ctx := t.Context()
@@ -219,8 +207,6 @@ func TestClientAssignsRecordIdentities(t *testing.T) {
 	}
 }
 
-// A plain GetMessages lists the inbox without a write, and both forms are
-// bounded to MaxMessageBatch messages.
 func TestGetMessagesMapsOntoBoundedProviderReads(t *testing.T) {
 	f := newLossyFixture(t)
 	ctx := t.Context()

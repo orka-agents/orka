@@ -33,43 +33,26 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// The Azure CLI reaches Azure Resource Manager through a forwarding Tool. The
-// supervisor presents itself to az as an Azure cloud whose Resource Manager
-// endpoint and managed identity are this loopback listener: az logs in with
-// `az login --identity`, receives a session-scoped placeholder token, and
-// sends every Resource Manager request here. Each request becomes one broker
-// call to the forwarding Tool, so the controller checks the prompt's frozen
-// tool policy, attaches the real credential, and sends the request to the
-// Tool's origin. The real credential never enters the runtime.
 const (
-	azureCloudName          = "OrkaAzure"
-	azureIdentityPath       = "/msi/token"
-	azureMetadataPath       = "/metadata/endpoints"
-	azureIdentityHeaderName = "X-Identity-Header"
-	azureTokenLifetime      = time.Hour
-	// azurePlaceholderAlgorithm marks the placeholder as unsigned: az decodes
-	// it without verifying, and nothing else accepts it.
+	azureCloudName            = "OrkaAzure"
+	azureIdentityPath         = "/msi/token"
+	azureMetadataPath         = "/metadata/endpoints"
+	azureIdentityHeaderName   = "X-Identity-Header"
+	azureTokenLifetime        = time.Hour
 	azurePlaceholderAlgorithm = "none"
 )
 
-// azureManagementAudiences are the token resources az asks the managed
-// identity for when it talks to Resource Manager.
 var azureManagementAudiences = map[string]bool{
 	"https://management.core.windows.net/": true, "https://management.core.windows.net": true,
 	"https://management.azure.com/": true, "https://management.azure.com": true,
 }
 
-// systemCABundles are the usual locations of the image's trust store. The
-// gateway's CA is appended to the first one found, so az still trusts every
-// other HTTPS endpoint.
 var systemCABundles = []string{
 	"/etc/ssl/certs/ca-certificates.crt",
 	"/etc/pki/tls/certs/ca-bundle.crt",
 	"/etc/ssl/cert.pem",
 }
 
-// azureGatewayAuthority is the loopback TLS identity shared by every session
-// of one supervisor boot. It is generated in memory and never persisted.
 type azureGatewayAuthority struct {
 	once      sync.Once
 	err       error
@@ -138,68 +121,38 @@ func randomSerial() *big.Int {
 	return serial
 }
 
-// azureGateway serves az for one RuntimeSession.
 type azureGateway struct {
-	session  *mcpProxySession
-	toolName string
-	// writeToolName carries the Tool's writes, or is empty when the Tool
-	// forwards reads only.
-	writeToolName  string
-	origin         string
-	listener       net.Listener
-	server         *http.Server
-	base           string
-	identityHeader string
-	tokenSecret    string
-	closeOnce      sync.Once
-	// ctx ends when the gateway closes, stopping a sign-in in flight.
-	ctx    context.Context
-	cancel context.CancelFunc
-	// profileDir is the child's ~/.azure, opened at setup, so writes to
-	// az's profile cannot be redirected by a link the child plants. uid
-	// and gid own the profile.
-	profileDir *os.Root
-	uid, gid   int
-	// signInMu guards the sign-in state: the attempt in flight, if any,
-	// and whether one has written the identity's subscriptions.
-	signInMu      sync.Mutex
-	signInAttempt *azureSignIn
-	signedIn      bool
-	// autoSignInTried records that a prompt start has already tried to sign
-	// az in. It is tried once, whatever its outcome: after a failure the
-	// agent may sign in itself and choose a subscription, which a later
-	// automatic discovery must not overwrite.
+	session         *mcpProxySession
+	toolName        string
+	writeToolName   string
+	origin          string
+	listener        net.Listener
+	server          *http.Server
+	base            string
+	identityHeader  string
+	tokenSecret     string
+	closeOnce       sync.Once
+	ctx             context.Context
+	cancel          context.CancelFunc
+	profileDir      *os.Root
+	uid, gid        int
+	signInMu        sync.Mutex
+	signInAttempt   *azureSignIn
+	signedIn        bool
 	autoSignInTried bool
-	// throttled counts, per write call ID, the throttled answers Azure gave
-	// it. Azure did not process a throttled request, so the client's retry
-	// is a new attempt under a new call ID rather than a replay.
-	throttledMu sync.Mutex
-	throttled   map[string]int
-	// writePrompts records, per write call ID, the prompt that first sent
-	// it. Its retries share that ID, but the broker scopes a call to its
-	// prompt, so a resend during a later prompt would be a second write.
-	writePromptsMu sync.Mutex
-	writePrompts   map[string]harnessv2.PromptID
+	throttledMu     sync.Mutex
+	throttled       map[string]int
+	writePromptsMu  sync.Mutex
+	writePrompts    map[string]harnessv2.PromptID
 }
 
-// maxAzureWritePrompts bounds the writes one session remembers. A session
-// forgets none, since a forgotten write could be sent again by a resend in
-// a later prompt; past the bound it refuses new writes instead.
 const maxAzureWritePrompts = 16384
 
-// errAzureWriteFromEarlierPrompt refuses a write first sent during an
-// earlier prompt; errAzureTooManyWrites refuses a write the session cannot
-// remember.
 var (
 	errAzureWriteFromEarlierPrompt = errors.New("the write was first sent during an earlier prompt")
 	errAzureTooManyWrites          = errors.New("the session sent too many writes to remember another")
 )
 
-// admitWrite records the prompt a joinable write is sent under, and refuses
-// it when an earlier prompt already sent it: a later prompt is a different
-// call to the broker, which would send the write again. The session
-// remembers every write for its whole life, which is as long as any az
-// process that could resend one runs.
 func (g *azureGateway) admitWrite(callID string, prompt harnessv2.PromptID) error {
 	g.writePromptsMu.Lock()
 	defer g.writePromptsMu.Unlock()
@@ -219,14 +172,10 @@ func (g *azureGateway) admitWrite(callID string, prompt harnessv2.PromptID) erro
 	return nil
 }
 
-// maxAzureThrottledWrites bounds the throttled-write memory of one session.
 const maxAzureThrottledWrites = 256
 
-// azureJoinableWritePrefix starts the call ID of a write that retries join.
 const azureJoinableWritePrefix = "az-w-"
 
-// attemptCallID returns the call ID and number of the current attempt of a
-// joinable write: a write Azure throttled is retried as a new attempt.
 func (g *azureGateway) attemptCallID(write bool, callID string) (string, int) {
 	if !write || !strings.HasPrefix(callID, azureJoinableWritePrefix) {
 		return callID, 0
@@ -239,17 +188,6 @@ func (g *azureGateway) attemptCallID(write bool, callID string) (string, int) {
 	return callID, 0
 }
 
-// noteAnswer records a throttled answer to a joinable write: Azure did not
-// process that attempt, so the client's retry is sent again as the next one.
-// Only the current attempt's 429 advances it; a late 429 of an earlier
-// attempt, which another request may have joined, never does, so a write
-// that later succeeded is never sent again.
-//
-// It reports false when it cannot record the throttle because the session
-// already tracks its most writes. Tracked writes keep their place, since
-// forgetting one could resend a write that already succeeded, so the
-// caller must answer with an error az does not retry: a retry would only
-// rejoin, and replay, the throttled attempt.
 func (g *azureGateway) noteAnswer(write bool, callID string, attempt, status int) bool {
 	if !write || status != http.StatusTooManyRequests || !strings.HasPrefix(callID, azureJoinableWritePrefix) {
 		return true
@@ -270,10 +208,6 @@ func (g *azureGateway) noteAnswer(write bool, callID string, attempt, status int
 	return true
 }
 
-// azureForwardingTool returns the session's Azure forwarding Tool, if any,
-// and the name of its write tool when it allows writes. A session with two
-// Tools would leave the Tool, and so the identity, az acts as to chance, so
-// it is refused, as is a write tool without its Tool.
 func azureForwardingTool(configuration harnessv2.MCPPolicyConfiguration) (harnessv2.MCPToolDescriptor, string, bool, error) {
 	var found []harnessv2.MCPToolDescriptor
 	writes := map[string]bool{}
@@ -344,9 +278,6 @@ func newAzureGateway(authority *azureGatewayAuthority, session *mcpProxySession,
 	return gateway, nil
 }
 
-// attachAzureGateway starts the session's Azure gateway when its tool policy
-// allows an Azure forwarding Tool, and returns the environment az needs. The
-// gateway closes with the session.
 func (s *Server) attachAzureGateway(session *mcpProxySession, configuration harnessv2.MCPPolicyConfiguration, home string, uid, gid int) (map[string]string, error) {
 	descriptor, writeToolName, ok, err := azureForwardingTool(configuration)
 	if err != nil || !ok {
@@ -389,10 +320,6 @@ func (g *azureGateway) close() {
 	})
 }
 
-// prepareHome writes az's configuration into the session home, selecting the
-// gateway as the active cloud and the placeholder account as az's sign-in,
-// and returns the child environment az needs. The files are written before
-// session ownership is finalized, so the child owns them.
 func (g *azureGateway) prepareHome(home string, caPEM []byte) (map[string]string, error) {
 	dir := filepath.Join(home, ".azure")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -455,9 +382,6 @@ func (g *azureGateway) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// serveIdentity answers az's managed-identity request with a placeholder
-// bearer: a JWT-shaped string az can decode, whose signature is this
-// session's secret. It authorizes nothing outside this gateway.
 func (g *azureGateway) serveIdentity(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet || !constantTimeEqual(r.Header.Get(azureIdentityHeaderName), g.identityHeader) {
 		writeAzureError(w, http.StatusUnauthorized, "OrkaIdentityUnauthorized", "The managed identity request is not from this session.")
@@ -536,11 +460,6 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 	}
 	request := harnessv2.MCPForwardRequest{Method: r.Method, Path: r.URL.EscapedPath(), Query: r.URL.RawQuery}
 	if write {
-		// az --if-match and --if-none-match guard a write; dropping them
-		// would run it unguarded. Reads keep ignoring them. A header sent
-		// more than once is one list (RFC 9110), so every value is kept: an
-		// If-None-Match cut to its first value would allow an overwrite the
-		// client ruled out.
 		request.IfMatch = strings.Join(r.Header.Values("If-Match"), ", ")
 		request.IfNoneMatch = strings.Join(r.Header.Values("If-None-Match"), ", ")
 	}
@@ -571,8 +490,6 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 	}
 	callID, attempt := g.attemptCallID(write, baseCallID)
 	joinable := write && strings.HasPrefix(baseCallID, azureJoinableWritePrefix)
-	// Forwarded calls share the runtime-wide MCP limit with tool calls, so
-	// a larger pool keeps the same backpressure on the broker.
 	if g.session.proxy != nil {
 		if !tryAcquireMCPSlot(g.session.proxy.slots) {
 			w.Header().Set("Retry-After", "1")
@@ -615,7 +532,6 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method == http.MethodHead {
-		// A HEAD answer has no body; it reports the length the service gave.
 		if length, err := strconv.ParseInt(forwarded.Headers[harnessv2.ForwardHeadContentLength], 10, 64); err == nil && length >= 0 {
 			w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 		}
@@ -628,8 +544,6 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 	_, _ = io.WriteString(w, answer)
 }
 
-// writeAzureCallError answers a request whose broker call failed before it
-// returned an answer.
 func writeAzureCallError(w http.ResponseWriter, err error, write bool, toolName string) {
 	switch {
 	case errors.Is(err, errAzureWriteFromEarlierPrompt):
@@ -645,8 +559,6 @@ func writeAzureCallError(w http.ResponseWriter, err error, write bool, toolName 
 		writeAzureError(w, http.StatusForbidden, "OrkaNotAuthorized",
 			"Orka allows az only while this session's prompt is running and the Task allows tool "+strconv.Quote(toolName)+".")
 	case write:
-		// The broker records a failed write as an unknown outcome, so a
-		// retry could only replay that; a 5xx would make az retry it.
 		writeAzureError(w, http.StatusConflict, "OrkaOutcomeUnknown",
 			"The request may have reached Azure. Check the resource before repeating it.")
 	default:
@@ -654,22 +566,16 @@ func writeAzureCallError(w http.ResponseWriter, err error, write bool, toolName 
 	}
 }
 
-// writeAzureToolError answers a request the broker answered with a tool
-// error. A decided or possibly delivered write gets a status az does not
-// retry, since a retry could only replay the recorded outcome.
 func writeAzureToolError(w http.ResponseWriter, write bool, result json.RawMessage) {
 	code, message := brokerErrorCode(result), brokerErrorMessage(result)
 	switch {
 	case code == harnessv2.MCPToolErrorCodeConnectionRequired:
-		// The broker's message already says who must do what; the agent
-		// should not retry or try to sign az in itself.
 		writeAzureError(w, http.StatusForbidden, "OrkaConnectionRequired", message+". Retrying or running az login will not help.")
 	case code == "approval_declined" || code == "approval_expired" || code == "approval_cancelled" || code == "approval_stale":
 		writeAzureError(w, http.StatusForbidden, "OrkaApprovalNotGranted", "Orka did not send the request: "+message)
 	case code == "tool_failed_without_effect":
 		writeAzureError(w, http.StatusForbidden, "OrkaToolRefused", "Orka refused the request without sending it: "+message)
 	case code == "tool_outcome_unknown" || (write && code == "tool_execution_failed"):
-		// A failed execution was delivered, so a write may have reached Azure.
 		writeAzureError(w, http.StatusConflict, "OrkaOutcomeUnknown",
 			"The request may have reached Azure. Check the resource before repeating it.")
 	default:
@@ -677,13 +583,8 @@ func writeAzureToolError(w http.ResponseWriter, write bool, result json.RawMessa
 	}
 }
 
-// azureNextLinkFields are the paging fields Resource Manager responses use.
 var azureNextLinkFields = map[string]bool{"nextLink": true, "@odata.nextLink": true}
 
-// rewriteLink points one URL on the Tool's origin, such as a nextLink or a
-// long-running operation URL, at the gateway, so az keeps following it
-// through Orka instead of calling the service directly. Any other value,
-// including a URL on another host, is returned unchanged.
 func (g *azureGateway) rewriteLink(value string) string {
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.User != nil || !strings.EqualFold(parsed.Scheme, providerProxyTLSScheme) ||
@@ -695,9 +596,6 @@ func (g *azureGateway) rewriteLink(value string) string {
 	return rewritten.String()
 }
 
-// rewriteBody rewrites only paging links in a JSON response. Resource data,
-// such as a tag or deployment output that happens to name the Resource
-// Manager origin, is returned exactly as the service sent it.
 func (g *azureGateway) rewriteBody(body string) string {
 	decoder := json.NewDecoder(strings.NewReader(body))
 	decoder.UseNumber()
@@ -750,18 +648,10 @@ func brokerErrorCode(result json.RawMessage) string {
 	return failure.Code
 }
 
-// azureClientRequestIDHeader names the request ID the Azure SDK sets once per
-// operation and keeps across its retries.
 const azureClientRequestIDHeader = "X-Ms-Client-Request-Id"
 
-// maxAzureRequestBodyBytes bounds a write's body so its arguments fit the
-// broker's argument limit.
 const maxAzureRequestBodyBytes = harnessv2.MaxMCPArgumentsBytes - 8<<10
 
-// readAzureRequestBody reads a write's JSON body. A read carries none: a
-// chunked request reports an unknown length (-1) and may still carry one
-// that forwarding would drop, so only a read known to be empty passes. It
-// returns a nonzero status, with an error code and message, to refuse.
 func readAzureRequestBody(r *http.Request, write bool) (string, int, string, string) {
 	if !write {
 		if r.ContentLength != 0 {
@@ -786,10 +676,6 @@ func readAzureRequestBody(r *http.Request, write bool) (string, int, string, str
 	return string(raw), 0, "", ""
 }
 
-// azureCallID names one forwarded request. A read gets a fresh ID. A write
-// with the SDK's request ID gets an ID derived from it and the request, so a
-// retry of the same write joins its pending approval or recorded result
-// instead of writing twice; a write without one is never joined.
 func azureCallID(write bool, clientRequestID string, request harnessv2.MCPForwardRequest) (string, error) {
 	clientRequestID = strings.TrimSpace(clientRequestID)
 	if !write || clientRequestID == "" {
@@ -799,8 +685,6 @@ func azureCallID(write bool, clientRequestID string, request harnessv2.MCPForwar
 		}
 		return "az-" + hex.EncodeToString(raw), nil
 	}
-	// The digest below makes the call ID joinable: retries of the same
-	// write share it.
 	body := sha256.Sum256([]byte(request.Body))
 	digest := sha256.Sum256([]byte(strings.Join([]string{
 		"orka.azure-gateway.write.v1", clientRequestID, request.Method, request.Path, request.Query, hex.EncodeToString(body[:]),

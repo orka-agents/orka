@@ -368,9 +368,6 @@ func TestAgentRuntimeServiceBackendConformanceCoversEveryPin(t *testing.T) {
 	}
 }
 
-// The conformance server supplies real capability/status and admission routes.
-// This proxy supplies the two existing-prompt responses needed to exercise the
-// dispatcher's installed before-mutation callback through the public v2 client.
 func newBackendExistingWorkFixture(t *testing.T) (*backendConformanceFixture, *ACPDispatcher, harnessv2.MCPPolicyConfiguration, *atomic.Int32) {
 	t.Helper()
 	f := newBackendConformanceFixture(t)
@@ -381,8 +378,6 @@ func newBackendExistingWorkFixture(t *testing.T) (*backendConformanceFixture, *A
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	calls := &atomic.Int32{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Upstream may flush acceptance before its transport finishes reading
-		// the forwarded body. Keep HTTP/1 from closing that body during the flush.
 		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
 			t.Errorf("enable full-duplex proxy: %v", err)
 			return
@@ -519,8 +514,6 @@ func TestACPDispatcherExternalServiceExistingWorkDoesNotRequireAdmissionConforma
 					if _, _, _, _, err := d.externalRuntimeClient(t.Context(), f.runtime, configuration, true); err == nil {
 						t.Fatal("new admission client accepted unconformed runtime")
 					}
-					// Even a client constructed for existing work must recheck
-					// admission conformance when asked to create a new session.
 					task := &corev1alpha1.Task{}
 					task.UID = "new-task"
 					task.Status.Execution = &corev1alpha1.TaskExecutionStatus{Attempt: 1, PromptID: "new-prompt"}

@@ -21,9 +21,6 @@ import (
 
 const brokerLoopPath = "/__e2e/model-loop"
 
-// These are deliberately public broker calls, not a model-visible capability
-// or a private executor accessor. Parent and child prompts remain held by the
-// conformant backend; the test cancels them after observing the model loop.
 type brokerLoopConfig struct {
 	modelURL, brokerURL, namespace string
 	capability                     []byte
@@ -170,8 +167,6 @@ func (p *brokerPromptRecorder) runModelLoop(
 			return
 		}
 		for _, selected := range message.ToolCalls {
-			// Do not prefilter a model-selected name against discovery. The public
-			// broker must enforce the frozen policy, including unlisted names.
 			result, callErr := call(selected.Function.Name, selected.Function.Arguments, false)
 			if callErr != nil {
 				fail("broker_transport_or_schema")

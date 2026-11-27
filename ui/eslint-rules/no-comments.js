@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 const directive = new RegExp(
   "^[\\s*]*(?:" +
     [
@@ -19,6 +21,33 @@ const blockDirective = /^\s*(?:eslint|globals?|exported)(?=\s|$)/;
 
 const deprecation = /^[\s*]*(?:Deprecated:|@deprecated\b)/m;
 
+const noticeParagraphs = JSON.parse(
+  readFileSync(
+    new URL("../../hack/commentlint/scan/notices.json", import.meta.url),
+    "utf8",
+  ),
+).paragraphs.map((pattern) => new RegExp(pattern, "u"));
+
+function onlyNotices(text) {
+  const paragraphs = text
+    .split(/\n\s*\n/)
+    .map((paragraph) => paragraph.split(/\s+/).filter(Boolean).join(" "))
+    .filter((paragraph) => paragraph !== "");
+  return (
+    paragraphs.length > 0 &&
+    paragraphs.every((paragraph) =>
+      noticeParagraphs.some((pattern) => pattern.test(paragraph)),
+    )
+  );
+}
+
+function plainText(comment) {
+  return comment.value
+    .split("\n")
+    .map((line) => line.replace(/^\s*\*?\s?/, ""))
+    .join("\n");
+}
+
 export const noComments = {
   meta: {
     type: "suggestion",
@@ -38,15 +67,35 @@ export const noComments = {
       Program() {
         const firstToken = sourceCode.ast.tokens[0];
         const codeStart = firstToken ? firstToken.range[0] : Infinity;
-        for (const comment of sourceCode.getAllComments()) {
-          const licenseHeader =
-            comment.range[1] <= codeStart && /copyright/i.test(comment.value);
+        const comments = sourceCode.getAllComments();
+        const leading = comments.filter(
+          (comment) =>
+            comment.type !== "Shebang" &&
+            comment.range[1] <= codeStart &&
+            !directive.test(comment.value) &&
+            !deprecation.test(comment.value),
+        );
+        const header = new Set(
+          onlyNotices(
+            leading
+              .map((comment, index) => {
+                const previous = leading[index - 1];
+                const gap =
+                  previous && comment.loc.start.line - previous.loc.end.line > 1;
+                return (gap ? "\n" : "") + plainText(comment);
+              })
+              .join("\n"),
+          )
+            ? leading
+            : [],
+        );
+        for (const comment of comments) {
           if (
             comment.type === "Shebang" ||
             directive.test(comment.value) ||
             (comment.type === "Block" && blockDirective.test(comment.value)) ||
             deprecation.test(comment.value) ||
-            licenseHeader
+            header.has(comment)
           ) {
             continue;
           }

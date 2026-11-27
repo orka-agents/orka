@@ -49,7 +49,6 @@ func TestNewLoggingMiddleware_LogsInfo(t *testing.T) {
 		return c.SendString("OK")
 	})
 
-	// Test multiple status codes
 	tests := []struct {
 		name   string
 		path   string
@@ -263,7 +262,6 @@ func TestNewTracingMiddleware_ErrorStatus(t *testing.T) {
 }
 
 func TestNewTracingMiddleware_WithoutRequestID(t *testing.T) {
-	// Test tracing middleware without requestid middleware to cover the empty reqID branch
 	app := fiber.New()
 	app.Use(NewTracingMiddleware())
 	app.Get("/no-reqid", func(c fiber.Ctx) error {
@@ -318,9 +316,6 @@ func TestNewTracingMiddleware_PropagatesSpanContextToHandlers(t *testing.T) {
 }
 
 func TestEffectiveStatusCodeMapsHandlerErrors(t *testing.T) {
-	// Handler errors are mapped to a response status only after middleware
-	// unwinds, so the raw response code is still 200 when middleware records
-	// telemetry; effectiveStatusCode must report the code the client receives.
 	tests := []struct {
 		name string
 		err  error
@@ -356,10 +351,6 @@ func TestEffectiveStatusCodeMapsHandlerErrors(t *testing.T) {
 }
 
 func TestEffectiveStatusCodeReportsSPAFallbackAsSuccess(t *testing.T) {
-	// When the app serves the dashboard, a 404 on a non-API path is served as
-	// index.html with 200 by the app error handler after middleware unwinds;
-	// telemetry must not record a successful SPA navigation as a failure. API
-	// and probe paths keep 404, and so does every path without the dashboard.
 	tests := []struct {
 		name      string
 		path      string

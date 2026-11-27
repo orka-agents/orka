@@ -15,9 +15,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// Keyed lists compare without regard to order, but init containers run in
-// order and an environment value can refer to an earlier one, so an update
-// that only reorders them must be refused like any other change.
 func TestAgentHostTemplateSpecRefusesReordering(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "crd", "bases", "core.orka.ai_agenthosttemplates.yaml"))
 	require.NoError(t, err)
@@ -87,8 +84,6 @@ func TestAgentHostTemplateSpecRefusesReordering(t *testing.T) {
 
 const testTemplateImageDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-// A host takes its token from a Secret or a Connection, never both, and a
-// Connection-fed host keeps its Connection for life.
 func TestAgentHostSpecTokenSourceRules(t *testing.T) {
 	validator, structural := loadSpecCELValidator(t, "core.orka.ai_agenthosts.yaml")
 	spec := func(secret, connection string) map[string]any {

@@ -16,8 +16,6 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
-// The chart forces enforce mode. These exercise the existing controller deputy
-// with that mode: a context token is a separate grant, not the worker's RBAC.
 func TestRestrictedWorkerContextGrantHTTP(t *testing.T) {
 	for _, tc := range []struct {
 		name, scope, namespace, taskType string

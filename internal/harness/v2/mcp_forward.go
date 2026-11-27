@@ -12,8 +12,6 @@ import (
 	"unicode/utf8"
 )
 
-// MCPForwardProtocolAzureResourceManager is the only client protocol a runtime
-// serves for a forwarding Tool: the Azure CLI against Azure Resource Manager.
 const MCPForwardProtocolAzureResourceManager = "AzureResourceManager"
 
 const (
@@ -21,45 +19,26 @@ const (
 	maxForwardQueryBytes = 4 << 10
 )
 
-// MCPForwardInputSchema is the fixed argument schema of every forwarding
-// Tool's reads. The runtime builds these arguments from a client request; the
-// model never sees the Tool.
 var MCPForwardInputSchema = json.RawMessage(`{"type":"object","additionalProperties":false,"required":["method","path"],"properties":{"method":{"type":"string","enum":["GET","HEAD"]},"path":{"type":"string"},"query":{"type":"string"}}}`)
 
-// MCPForwardWriteInputSchema is the fixed argument schema of a forwarding
-// Tool's write tool: a write method and an optional JSON body. The body is
-// JSON in the arguments, not a string, so the structural redaction that
-// approval previews and events apply reaches its credential-named fields.
 var MCPForwardWriteInputSchema = json.RawMessage(`{"type":"object","additionalProperties":false,"required":["method","path"],"properties":{"method":{"type":"string","enum":["PUT","PATCH","DELETE","POST"]},"path":{"type":"string"},"query":{"type":"string"},"body":{"type":["object","array"]},"ifMatch":{"type":"string"},"ifNoneMatch":{"type":"string"}}}`)
 
-// MCPForwardWriteSuffix ends the name of a forwarding Tool's write tool. A
-// colon cannot appear in a Kubernetes name, so the derived name never meets
-// a real Tool.
 const MCPForwardWriteSuffix = ":write"
 
-// MCPForwardWriteToolName names the write tool of the forwarding Tool name.
 func MCPForwardWriteToolName(name string) string {
 	return name + MCPForwardWriteSuffix
 }
 
-// MCPForwardToolResource returns the Tool resource a forwarding tool name
-// belongs to: the name itself, or the name a write tool was derived from.
 func MCPForwardToolResource(name string) string {
 	return strings.TrimSuffix(name, MCPForwardWriteSuffix)
 }
 
-// MCPToolForward marks a forwarding Tool in a prompt's tool policy. The
-// runtime serves Protocol on loopback and sends each client request through
-// the broker as a call to this Tool; responses name Origin, which the runtime
-// rewrites to its local endpoint. Write marks the derived tool that carries
-// the Tool's write requests.
 type MCPToolForward struct {
 	Protocol string `json:"protocol"`
 	Origin   string `json:"origin"`
 	Write    bool   `json:"write,omitempty"`
 }
 
-// InputSchema returns the fixed argument schema of the forwarding tool.
 func (f MCPToolForward) InputSchema() json.RawMessage {
 	if f.Write {
 		return MCPForwardWriteInputSchema
@@ -77,8 +56,6 @@ func (f MCPToolForward) Validate() error {
 	return nil
 }
 
-// ForwardOrigin parses an origin-only HTTPS URL, such as
-// https://management.azure.com, and returns it without a trailing slash.
 func ForwardOrigin(raw string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
@@ -89,31 +66,21 @@ func ForwardOrigin(raw string) (string, error) {
 	return "https://" + ForwardHost(parsed.Host), nil
 }
 
-// ForwardHost lowercases a host and drops the default HTTPS port, so
-// https://host and https://host:443 name the same origin.
 func ForwardHost(host string) string {
 	return strings.TrimSuffix(strings.ToLower(host), ":443")
 }
 
-// MCPForwardRequest is the argument object of a forwarding Tool call. Only a
-// write carries a body, which is JSON text.
 type MCPForwardRequest struct {
-	Method string `json:"method"`
-	Path   string `json:"path"`
-	Query  string `json:"query,omitempty"`
-	// Body is a write's JSON object or array body.
-	Body json.RawMessage `json:"body,omitempty"`
-	// IfMatch and IfNoneMatch are a write's preconditions, such as the
-	// ETag az --if-match sends, so a guarded write never runs unguarded.
-	IfMatch     string `json:"ifMatch,omitempty"`
-	IfNoneMatch string `json:"ifNoneMatch,omitempty"`
+	Method      string          `json:"method"`
+	Path        string          `json:"path"`
+	Query       string          `json:"query,omitempty"`
+	Body        json.RawMessage `json:"body,omitempty"`
+	IfMatch     string          `json:"ifMatch,omitempty"`
+	IfNoneMatch string          `json:"ifNoneMatch,omitempty"`
 }
 
-// maxForwardPreconditionBytes bounds an If-Match or If-None-Match value.
 const maxForwardPreconditionBytes = 1024
 
-// validForwardPrecondition reports whether value is a header value an ETag
-// precondition can be: printable ASCII, bounded, with no line breaks.
 func validForwardPrecondition(value string) bool {
 	if len(value) > maxForwardPreconditionBytes {
 		return false
@@ -126,14 +93,11 @@ func validForwardPrecondition(value string) bool {
 	return true
 }
 
-// forwardBodyIsStructured reports whether body is one JSON object or array.
 func forwardBodyIsStructured(body json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(body)
 	return json.Valid(trimmed) && len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')
 }
 
-// ForwardWriteMethod reports whether method is a write a forwarding Tool's
-// write tool carries.
 func ForwardWriteMethod(method string) bool {
 	switch method {
 	case http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodPost:
@@ -142,7 +106,6 @@ func ForwardWriteMethod(method string) bool {
 	return false
 }
 
-// DecodeMCPForwardRequest strictly decodes and validates forwarding arguments.
 func DecodeMCPForwardRequest(arguments json.RawMessage) (MCPForwardRequest, error) {
 	decoder := json.NewDecoder(bytes.NewReader(arguments))
 	decoder.DisallowUnknownFields()
@@ -156,10 +119,6 @@ func DecodeMCPForwardRequest(arguments json.RawMessage) (MCPForwardRequest, erro
 	return request, request.Validate()
 }
 
-// Validate keeps a forwarded request on the Tool's origin: a read or write
-// method, an absolute path with no dot segments, encoded separators, or
-// characters that a server could read differently, a well-formed query, and,
-// for a write only, a JSON body.
 func (r MCPForwardRequest) Validate() error {
 	write := ForwardWriteMethod(r.Method)
 	if !write && r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -177,8 +136,6 @@ func (r MCPForwardRequest) Validate() error {
 	return validateForwardQuery(r.Query)
 }
 
-// ValidateFor checks the request and that forward is the tool for its
-// method: reads go to a forwarding Tool, writes to its write tool.
 func (r MCPForwardRequest) ValidateFor(forward MCPToolForward) error {
 	if err := r.Validate(); err != nil {
 		return err
@@ -192,7 +149,6 @@ func (r MCPForwardRequest) ValidateFor(forward MCPToolForward) error {
 	return nil
 }
 
-// Target returns the request URL on origin.
 func (r MCPForwardRequest) Target(origin string) (*url.URL, error) {
 	if err := r.Validate(); err != nil {
 		return nil, err
@@ -281,24 +237,17 @@ func isHexDigit(c byte) bool {
 	return ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F')
 }
 
-// MCPForwardResponse is the result of a forwarding Tool call: the upstream
-// status, the response headers a client needs, and the body.
 type MCPForwardResponse struct {
 	Status  int               `json:"status"`
 	Headers map[string]string `json:"headers,omitempty"`
 	Body    string            `json:"body,omitempty"`
 }
 
-// ForwardResponseHeaders lists the upstream response headers a forwarding
-// Tool returns. Everything else, including any Set-Cookie, is dropped.
 var ForwardResponseHeaders = []string{
 	"Content-Type", "Etag", "Location", "Azure-Asyncoperation", "Retry-After",
 	"X-Ms-Request-Id", "X-Ms-Correlation-Request-Id", ForwardHeadContentLength,
 }
 
-// ForwardHeadContentLength carries the upstream length of a HEAD response,
-// which has no body to measure. Other responses are measured where they are
-// served.
 const ForwardHeadContentLength = "Content-Length"
 
 func (r MCPForwardResponse) Validate() error {
@@ -317,7 +266,6 @@ func (r MCPForwardResponse) Validate() error {
 	return nil
 }
 
-// DecodeMCPForwardResponse strictly decodes a forwarding Tool result.
 func DecodeMCPForwardResponse(result json.RawMessage) (MCPForwardResponse, error) {
 	decoder := json.NewDecoder(bytes.NewReader(result))
 	decoder.DisallowUnknownFields()
