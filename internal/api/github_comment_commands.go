@@ -25,6 +25,7 @@ const (
 	githubCommandEventSourceComment    = "github_comment"
 	githubWebhookUserTypeBot           = "Bot"
 	githubCommentCommandMaxCommandWord = 32
+	githubInstallationTokenPrefix      = "ghs_"
 )
 
 var repositoryMonitorCommentIntents = []string{
@@ -301,6 +302,9 @@ func (h *Handlers) repositoryMonitorCommentFromMonitorIdentity(ctx context.Conte
 	token, err := h.repositoryMonitorGitHubToken(ctx, monitor)
 	if err != nil {
 		return false, err
+	}
+	if strings.HasPrefix(token, githubInstallationTokenPrefix) {
+		return false, nil
 	}
 	baseURL := strings.TrimRight(osGetenv(githubAPIBaseURLEnv), "/")
 	if baseURL == "" {

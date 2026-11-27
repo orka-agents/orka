@@ -384,6 +384,28 @@ func TestGitHubCommentCommand_FailedIdentityLookupRefusesTheCommand(t *testing.T
 	}
 }
 
+func TestGitHubCommentCommand_InstallationTokenSkipsTheIdentityLookup(t *testing.T) {
+	env := newCommentTestEnv(t, nil)
+	env.github.identityStatus = http.StatusForbidden
+	secret := githubWebhookGitSecret()
+	if err := env.client.Get(t.Context(), crclient.ObjectKeyFromObject(secret), secret); err != nil {
+		t.Fatalf("get forge secret: %v", err)
+	}
+	secret.Data["token"] = []byte(githubInstallationTokenPrefix + "fixture")
+	if err := env.client.Update(t.Context(), secret); err != nil {
+		t.Fatalf("update forge secret: %v", err)
+	}
+	if status, response := env.deliver(t, "delivery-installation-token", commentTestPayload{body: "/orka plan"}); status != http.StatusCreated {
+		t.Fatalf("status = %d response = %#v, want an installation-token monitor to accept a maintainer command", status, response)
+	}
+	if env.github.identityCalls.Load() != 0 {
+		t.Fatal("an installation token must not call the authenticated-user endpoint")
+	}
+	if commands := env.commands(t); len(commands) != 1 || commands[0].Status != githubCommandStatusAccepted {
+		t.Fatalf("commands = %#v, want one accepted command", commands)
+	}
+}
+
 func TestGitHubCommentCommand_EditedAndDeletedCommentsAreIgnored(t *testing.T) {
 	for _, action := range []string{"edited", "deleted"} {
 		t.Run(action, func(t *testing.T) {
