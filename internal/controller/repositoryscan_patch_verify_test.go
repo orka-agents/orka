@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -34,6 +35,7 @@ func TestIngestPatchTaskControllerVerificationFailBeforePass(t *testing.T) {
 	server, pr := newPatchCommitServerWithPullRequest(t, []repositoryScanCommitFileResponse{file}, &seenToken)
 	pr.commitDiff = testPatchFullDiff
 	fixture := patchFixtureWithForgeSecret(t, "verify-fail-pass", server, true)
+	fixture.scan.Spec.PublicationReadCredentialRef = &corev1.LocalObjectReference{Name: "pub-read-secret"}
 	fixture.scan.Spec.PatchVerification = &corev1alpha1.RepositoryScanPatchVerificationSpec{
 		Image:                 testPatchVerificationImage,
 		Command:               "pytest tests/test_security.py",
@@ -101,6 +103,13 @@ func TestIngestPatchTaskControllerVerificationFailBeforePass(t *testing.T) {
 	}
 	if patchedTask.Spec.Workspace == nil || patchedTask.Spec.Workspace.Ref == "" {
 		t.Fatalf("patched verification workspace missing commit pin: %#v", patchedTask.Spec.Workspace)
+	}
+	if patchedTask.Spec.Workspace.ReadCredentialRef == nil || patchedTask.Spec.Workspace.ReadCredentialRef.Name != fixture.scan.Spec.PublicationReadCredentialRef.Name {
+		t.Fatalf("patched verification readCredentialRef = %#v, want %q", patchedTask.Spec.Workspace.ReadCredentialRef, fixture.scan.Spec.PublicationReadCredentialRef.Name)
+	}
+	patchedTask.Spec = taskSpecWithServerDefaults(patchedTask.Spec)
+	if !patchVerifyTaskMatchesDesired(fixture.scan, patchedTask, buildDesiredPatchVerifyTask(fixture.scan, task, fixture.finding, patchVerifyPhasePatched, strings.Repeat("b", 40), true)) {
+		t.Fatal("expected patchVerifyTaskMatchesDesired to accept server-defaulted task spec")
 	}
 
 	patchedTask.Status.Phase = corev1alpha1.TaskPhaseSucceeded

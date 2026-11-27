@@ -241,9 +241,11 @@ func buildDesiredPatchVerifyTask(
 ) *corev1alpha1.Task {
 	taskName := patchVerifyTaskName(scan.Name, finding.ID, patchTask.Name, phase, commitSHA, scan.Spec.PatchVerification.Image, scan.Spec.PatchVerification.Command)
 	workspace := repositoryScanTaskWorkspaceAtCommit(scan, corev1alpha1.WorkspaceIntentRead, commitSHA)
-	if useTargetRepo && strings.TrimSpace(scan.Spec.ForkRepo) != "" {
-		workspace.GitRepo = security.CanonicalRepositoryCloneURL(scan.Spec.ForkRepo)
-		workspace.Branch = ""
+	if useTargetRepo {
+		if strings.TrimSpace(scan.Spec.ForkRepo) != "" {
+			workspace.GitRepo = security.CanonicalRepositoryCloneURL(scan.Spec.ForkRepo)
+			workspace.Branch = ""
+		}
 		if scan.Spec.PublicationReadCredentialRef != nil {
 			workspace.ReadCredentialRef = workspaceCredentialReference(scan.Spec.PublicationReadCredentialRef)
 		}
@@ -292,13 +294,15 @@ func patchVerifyTaskMatchesDesired(scan *corev1alpha1.RepositoryScan, existing, 
 	if existing.Annotations[labels.AnnotationWorkspaceInitContainer] != scheduledRunLabelValue {
 		return false
 	}
-	if existing.Spec.Type != desired.Spec.Type ||
-		strings.TrimSpace(existing.Spec.Image) != strings.TrimSpace(desired.Spec.Image) ||
-		!reflect.DeepEqual(existing.Spec.Command, desired.Spec.Command) ||
-		!reflect.DeepEqual(existing.Spec.Args, desired.Spec.Args) {
+	have := taskSpecWithServerDefaults(existing.Spec)
+	want := taskSpecWithServerDefaults(desired.Spec)
+	if have.Type != want.Type ||
+		strings.TrimSpace(have.Image) != strings.TrimSpace(want.Image) ||
+		!reflect.DeepEqual(have.Command, want.Command) ||
+		!reflect.DeepEqual(have.Args, want.Args) {
 		return false
 	}
-	return reflect.DeepEqual(existing.Spec.Workspace, desired.Spec.Workspace)
+	return reflect.DeepEqual(have.Workspace, want.Workspace)
 }
 
 func (r *RepositoryScanReconciler) ensurePatchVerifyTask(

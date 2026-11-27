@@ -559,21 +559,8 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	if taskNeedsWorkspaceInitContainer(task) {
 		b.addWorkspaceInitContainer(job, task, validationTask)
 	}
-	if patchVerifyTask {
-		applyRepositoryMonitorValidationStorageBounds(job)
-	}
-	if validationTask {
-		applyRepositoryMonitorValidationDefaultTolerations(&job.Spec.Template.Spec)
-		if err := b.addRepositoryMonitorValidationCommand(job, task); err != nil {
-			return nil, err
-		}
-		if err := b.addRepositoryMonitorValidationNetworkGate(job, task); err != nil {
-			return nil, err
-		}
-		if err := applyRepositoryMonitorValidationProcessLimit(job, task); err != nil {
-			return nil, err
-		}
-		applyRepositoryMonitorValidationStorageBounds(job)
+	if err := b.applyRepositoryValidationJobHardening(job, task, validationTask, patchVerifyTask); err != nil {
+		return nil, err
 	}
 
 	if err := b.addSkillVolumes(ctx, job, task, agent); err != nil {
@@ -594,6 +581,31 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	}
 
 	return job, nil
+}
+
+func (b *JobBuilder) applyRepositoryValidationJobHardening(job *batchv1.Job, task *corev1alpha1.Task, validationTask, patchVerifyTask bool) error {
+	if patchVerifyTask {
+		applyRepositoryMonitorValidationDefaultTolerations(&job.Spec.Template.Spec)
+		if err := applyRepositoryMonitorValidationProcessLimit(job, task); err != nil {
+			return err
+		}
+		applyRepositoryMonitorValidationStorageBounds(job)
+	}
+	if !validationTask {
+		return nil
+	}
+	applyRepositoryMonitorValidationDefaultTolerations(&job.Spec.Template.Spec)
+	if err := b.addRepositoryMonitorValidationCommand(job, task); err != nil {
+		return err
+	}
+	if err := b.addRepositoryMonitorValidationNetworkGate(job, task); err != nil {
+		return err
+	}
+	if err := applyRepositoryMonitorValidationProcessLimit(job, task); err != nil {
+		return err
+	}
+	applyRepositoryMonitorValidationStorageBounds(job)
+	return nil
 }
 
 func (b *JobBuilder) buildPodSecurityContext() *corev1.PodSecurityContext {
