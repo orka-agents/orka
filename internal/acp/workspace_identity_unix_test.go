@@ -19,8 +19,6 @@ func directoryInode(t *testing.T, path string) uint64 {
 	return uint64(stat.Ino) //nolint:unconvert // Ino width differs across Unix platforms.
 }
 
-// recreateWithInode deletes nothing itself: it creates directories under root
-// until one is given the wanted inode number, and reports whether one was.
 func recreateWithInode(t *testing.T, root, prefix string, want uint64) (string, bool) {
 	t.Helper()
 	for attempt := range 64 {
@@ -35,10 +33,6 @@ func recreateWithInode(t *testing.T, root, prefix string, want uint64) (string, 
 	return "", false
 }
 
-// A device and inode pair names a directory only while the inode stays
-// allocated. The session child owns its workspace, so it can delete it and
-// create directories until one is given the recorded number. The identity must
-// therefore hold the directory open.
 func TestRecordWorkspaceIdentityHoldsTheDirectoryAgainstInodeReuse(t *testing.T) {
 	root := t.TempDir()
 	probe := filepath.Join(root, "probe")

@@ -76,10 +76,8 @@ describe('KanbanBoard', () => {
     render(<KanbanBoard />)
     await waitFor(() => expect(screen.getByText('sched-task')).toBeInTheDocument())
     expect(screen.getByText('cancel-task')).toBeInTheDocument()
-    // Column headers exist for the new phases.
     expect(screen.getByText('Scheduled')).toBeInTheDocument()
     expect(screen.getByText('Cancelled')).toBeInTheDocument()
-    // The Pending column stays empty — Scheduled/Cancelled are NOT mis-bucketed.
     expect(screen.getByText('No pending tasks')).toBeInTheDocument()
   })
 
@@ -178,7 +176,6 @@ describe('KanbanBoard', () => {
       expect(chip).toHaveTextContent('1')
     })
     expect(chip).toHaveClass('text-status-running')
-    // Not the column's own tint: tint on tint fails AA contrast.
     expect(chip).toHaveClass('bg-card')
     expect(chip).not.toHaveClass('bg-status-running-bg')
     expect(chip.className).not.toMatch(/bg-(yellow|blue|green|red)-/)
@@ -189,13 +186,11 @@ describe('KanbanBoard', () => {
     await waitFor(() => {
       expect(screen.getByText('Running')).toBeInTheDocument()
     })
-    // Exactly one live indicator, and it lives in the Running column header.
     const indicators = screen.getAllByTestId('live-indicator')
     expect(indicators).toHaveLength(1)
     const indicator = indicators[0]
     expect(indicator.className).toContain('bg-live')
     expect(indicator.className).toContain('animate-pulse-live')
-    // It sits beside the "Running" heading, not Pending/Succeeded/Failed.
     expect(indicator.parentElement?.textContent).toContain('Running')
     for (const terminal of ['Pending', 'Succeeded', 'Failed']) {
       const header = screen.getByText(terminal).parentElement!
@@ -246,7 +241,6 @@ describe('KanbanBoard', () => {
         HttpResponse.json({ error: { code: 500, message: 'etcd unavailable' } }, { status: 500 }),
       ),
     )
-    // The hook retries server errors; skip the backoff so the error settles.
     const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0, gcTime: 0 } } })
     rawRender(<QueryClientProvider client={client}><KanbanBoard /></QueryClientProvider>)
     expect(await screen.findByText('Could not load tasks')).toBeInTheDocument()
@@ -370,7 +364,6 @@ describe('KanbanBoard', () => {
         return HttpResponse.json({
           namespace: 'default', generatedAt: now, total: 2, counts: { monitorBlocked: 2 }, incomplete: false,
           sources: { approvals: 'included', monitors: 'included' }, metadata: second ? {} : { continue: 'next' },
-          // The action was updated between pages while still blocked, so it sorts again after the cursor.
           items: second
             ? [{ ...blocked('Monitor review blocked on pull_request #8'), id: 'monitor:repo:a2', monitor: { name: 'repo', actionID: 'a2' } }, blocked('Monitor review blocked again')]
             : [blocked('Monitor review blocked first')],
@@ -407,7 +400,6 @@ describe('KanbanBoard', () => {
 
   describe('attention view classification', () => {
     const now = new Date().toISOString()
-    // A parked sign-off has phase Succeeded: without the ranking it would land in Done.
     let tasksServed = false
     const tasks = () =>
       http.get('/api/v1/tasks', () => {
@@ -438,7 +430,6 @@ describe('KanbanBoard', () => {
       render(<KanbanBoard view="attention" />)
       const done = await screen.findByRole('region', { name: 'Done' })
       const working = screen.getByRole('region', { name: 'Agent working' })
-      // Wait for the Task list so the lanes would classify if they were not waiting.
       await waitFor(() => expect(tasksServed).toBe(true))
       await new Promise((r) => setTimeout(r, 50))
       for (const lane of [done, working]) {
@@ -509,7 +500,6 @@ describe('KanbanBoard', () => {
       await waitFor(() => expect(needsYou).toHaveTextContent('Nothing else needs you right now, but approvals were not checked'))
       expect(needsYou).not.toHaveTextContent('Nothing needs you right now')
       expect(screen.getByText(/Approvals could not be read/)).toHaveTextContent('in Needs you as Waiting for approval')
-      // The fixture's Task state shows no approval wait, so it is Done.
       await waitFor(() => expect(screen.getByRole('region', { name: 'Done' })).toHaveTextContent('parked-signoff'))
     })
 

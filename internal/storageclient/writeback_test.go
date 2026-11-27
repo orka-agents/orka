@@ -9,10 +9,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// digestCheckingStore recomputes the request digest of each attempt of a
-// write-back method from the arguments that attempt carries, as a provider
-// behind a transport that rebuilds the request would, and records whether it
-// matches the digest in the attempt's envelope.
 type digestCheckingStore struct {
 	*lossyStore
 	matched map[string][]bool
@@ -69,11 +65,6 @@ func requireEveryAttemptMatched(t *testing.T, checking *digestCheckingStore, met
 	}
 }
 
-// A write that fills in the record it is given, as SendMessage assigns an ID
-// and CreateMonitorRun a phase and start time, retries a lost response with
-// the request its digest covers: each attempt gets a fresh copy of the
-// caller's record, and the caller's record receives the stored values only
-// once the write has succeeded.
 func TestLostResponseRetriesWriteBackWithTheOriginalRequest(t *testing.T) {
 	t.Run("SendMessage", func(t *testing.T) {
 		f, checking := newDigestFixture(t)
@@ -105,8 +96,6 @@ func TestLostResponseRetriesWriteBackWithTheOriginalRequest(t *testing.T) {
 		}
 	})
 
-	// A write whose outcome stays unknown leaves the caller's record as it
-	// was, even though an attempt committed and filled in its own copy.
 	t.Run("unknown outcome", func(t *testing.T) {
 		f, _ := newDigestFixture(t)
 		f.lossy.plan("SendMessage", stepLoseThenDown)

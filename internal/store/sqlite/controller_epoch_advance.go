@@ -13,10 +13,6 @@ import (
 
 var _ storagev1.ControllerEpochAdvancer = (*Store)(nil)
 
-// AdvanceControllerEpoch implements storagev1.ControllerEpochAdvancer. The
-// store has one connection, so the advance is serialized with every write
-// operation: a write that checked the previous fence has committed or rolled
-// back before the advance runs, and every later write checks the new one.
 func (s *Store) AdvanceControllerEpoch(
 	ctx context.Context, request storagev1.AdvanceControllerEpochRequest,
 ) (storagev1.ControllerEpochMirrorState, error) {
@@ -64,8 +60,6 @@ func (s *Store) AdvanceControllerEpoch(
 			return err
 		}
 		if binding.installation == "" {
-			// The dataset now belongs to this installation, which has not
-			// bound it itself: no record and switch generation 0.
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE store_dataset SET installation_id = ?, bound_at_ns = ? WHERE singleton = 1`,
 				request.InstallationID, now.UnixNano(),
@@ -82,10 +76,6 @@ func (s *Store) AdvanceControllerEpoch(
 	return state, nil
 }
 
-// advanceControllerEpochTx stores epoch under the forward-only rules: a
-// first epoch is stored, a lower one is fenced, an identical one changes
-// nothing, any other record at the same epoch conflicts, and a higher one
-// replaces the stored epoch and records it as previous.
 func advanceControllerEpochTx(ctx context.Context, tx *sql.Tx, epoch storagev1.ControllerEpoch, now time.Time) error {
 	current, err := getControllerEpoch(ctx, tx, epoch.Name)
 	switch {
@@ -124,7 +114,6 @@ func advanceControllerEpochTx(ctx context.Context, tx *sql.Tx, epoch storagev1.C
 	return rowsAffectedExactlyOne(result, "controller epoch")
 }
 
-// GetControllerEpochMirror implements storagev1.ControllerEpochAdvancer.
 func (s *Store) GetControllerEpochMirror(ctx context.Context, name string) (storagev1.ControllerEpochMirrorState, error) {
 	name, err := store.NormalizeControllerEpochName(name)
 	if err != nil {
@@ -142,8 +131,6 @@ func (s *Store) GetControllerEpochMirror(ctx context.Context, name string) (stor
 	return state, nil
 }
 
-// getControllerEpochMirrorState reads the epoch the dataset holds under name,
-// with the dataset and installation it belongs to.
 func getControllerEpochMirrorState(ctx context.Context, q taskDataExecutor, name string) (storagev1.ControllerEpochMirrorState, error) {
 	epoch, err := getControllerEpoch(ctx, q, name)
 	if err != nil {
@@ -174,8 +161,6 @@ func getControllerEpochMirrorState(ctx context.Context, q taskDataExecutor, name
 	return state, nil
 }
 
-// readDatasetInstallation returns the installation the dataset is bound to,
-// or "" when it is bound to none.
 func readDatasetInstallation(ctx context.Context, q controlQueryRower) (string, error) {
 	var installation string
 	if err := q.QueryRowContext(ctx, `SELECT installation_id FROM store_dataset WHERE singleton = 1`).Scan(&installation); err != nil {

@@ -333,7 +333,6 @@ func assertCodexPermissionUngranted(t *testing.T, state *sessionState, mapped *h
 	if !ok || pending.toolName != mapped.PermissionRequested.ToolName {
 		t.Fatalf("pending identity does not match emitted permission: %+v", mapped.PermissionRequested)
 	}
-	// This fixture disables implicit native grants, so every grant needs a descriptor.
 	if _, allowed := state.mcpProxy.configuration.ToolPolicy.Descriptor(pending.toolName); allowed {
 		t.Fatalf("untrusted identity queued an authorized permission for %q", pending.toolName)
 	}

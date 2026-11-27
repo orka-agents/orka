@@ -10,7 +10,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// Retention expires inactive reporting cohorts independently of Task TTLs.
 type Retention struct {
 	Store  store.UsageStore
 	Period time.Duration

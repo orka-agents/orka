@@ -73,7 +73,6 @@ func TestReleaseChatTurnPreservesSessionCleanupIdentity(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("AcquireChatTurn(first turn): created=%v, err=%v", created, err)
 	}
-	// Control creation binds the transcript after the chat turn created it.
 	control, err := kubeStore.CreateSessionControl(ctx, &controlstore.SessionControl{
 		Namespace: session.Namespace, SessionName: name, SessionUID: name + "-uid",
 		RequestDigest: testDigest(name), Availability: controlstore.SessionAvailable, CreatedAt: testNow,

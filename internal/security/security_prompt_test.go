@@ -9,9 +9,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// TestReviewSlicePromptMetadataIgnoresStoreBookkeeping proves the prompt
-// projection is stable across the mutable fields the scan run updates, so
-// the controller can rebuild the exact prompt of a Task it created earlier.
 func TestReviewSlicePromptMetadataIgnoresStoreBookkeeping(t *testing.T) {
 	now := time.Now()
 	slice := store.ReviewSlice{SchemaVersion: 1, ID: "slice_1", RepositoryScan: "scan", Source: "mapper", Title: "t", Kind: "source", Confidence: "high",

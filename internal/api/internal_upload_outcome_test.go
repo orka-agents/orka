@@ -19,9 +19,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// uploadOutcomeApp serves the worker result and artifact upload routes with
-// the server's error handler over a storage client whose writes the returned
-// injector controls.
 func uploadOutcomeApp(t *testing.T) (*fiber.App, *storagefault.Injector, *storageclient.Client) {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
@@ -58,10 +55,6 @@ func postUpload(t *testing.T, app *fiber.App, path, body string) (*http.Response
 	return resp, string(data)
 }
 
-// A result or artifact upload whose write committed but whose outcome the
-// storage client could not read answers 409 without a retry hint: a new HTTP
-// request carries a new operation ID and a later order stamp, so it would not
-// replay the committed write but run again.
 func TestInternalUploadsAnswerUnknownOutcomeWithoutRetryHint(t *testing.T) {
 	for _, upload := range []struct {
 		name, method, path string
@@ -89,9 +82,6 @@ func TestInternalUploadsAnswerUnknownOutcomeWithoutRetryHint(t *testing.T) {
 		t.Run(upload.name, func(t *testing.T) {
 			app, injector, stores := uploadOutcomeApp(t)
 			write := storagefault.Match{Methods: []string{upload.method}}
-			// The first attempt commits and loses its response; every later
-			// attempt, including the client's replay after it resolves the
-			// operation as committed, is refused, so the outcome cannot be read.
 			refused := injector.Inject(storagefault.Fault{
 				Match: write, Action: storagefault.Fail(fmt.Errorf("%w: refused by the test", store.ErrConflict)),
 			})

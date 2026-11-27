@@ -141,7 +141,6 @@ func TestDeleteToolTool_Execute(t *testing.T) {
 				t.Errorf("expected message 'Tool deleted', got %v", data[messageField])
 			}
 
-			// Verify the tool is actually deleted
 			deleted := &corev1alpha1.Tool{}
 			err = fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyToolName, Namespace: defaultNamespace}, deleted)
 			if err == nil {

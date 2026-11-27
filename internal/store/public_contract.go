@@ -4,9 +4,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// These records, errors and interfaces are defined by the public storage
-// contract in pkg/storage/v1. The aliases keep their established internal
-// names for Orka callers.
 type (
 	SessionLineage                            = storagev1.SessionLineage
 	ClaimSessionLineageRequest                = storagev1.ClaimSessionLineageRequest
@@ -364,7 +361,6 @@ func ValidationErrorf(format string, args ...any) error {
 	return storagev1.ValidationErrorf(format, args...)
 }
 
-// Unexported helpers retained for internal callers of moved validation.
 func validateControlIdentifier(field, value string) error {
 	return storagev1.ValidateControlIdentifier(field, value)
 }
@@ -431,8 +427,6 @@ func UsageWorkID(namespace, monitorUID, repository, kind string, number int64) s
 	return storagev1.UsageWorkID(namespace, monitorUID, repository, kind, number)
 }
 
-// IsMemoryConsolidationProposalType reports whether proposalType is one of
-// the consolidation proposal types, which change existing memories.
 func IsMemoryConsolidationProposalType(proposalType string) bool {
 	return storagev1.IsMemoryConsolidationProposalType(proposalType)
 }

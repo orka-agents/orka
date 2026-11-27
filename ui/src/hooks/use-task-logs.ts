@@ -13,8 +13,6 @@ interface InFlightLogRequest {
   timeoutId: ReturnType<typeof setTimeout> | null
 }
 
-// Blank lines are part of the output; only the empty remainder after a
-// trailing newline is dropped.
 function splitLogLines(text: string): string[] {
   if (!text) return []
   const lines = text.split(/\r?\n/)
@@ -30,8 +28,6 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
   const [isStreaming, setIsStreaming] = useState(false)
   const [isLive, setIsLive] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // A 404 means the task has no logs to serve (no Job or pod yet, or none
-  // recorded); it carries the server's reason and is not a failure.
   const [unavailable, setUnavailable] = useState<string | null>(null)
   const inFlightRef = useRef<InFlightLogRequest | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -95,14 +91,12 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
       setUnavailable(null)
 
       if (running) {
-        // For running tasks, parse JSON response and replace logs
         const data = await response.json()
         if (controller.signal.aborted) return
         const text: string = data.logs ?? ''
         setLogs(splitLogLines(text))
         setIsLive(true)
       } else {
-        // For completed tasks, use streaming reader or text fallback
         const reader = response.body?.getReader()
         if (!reader) {
           const text = await response.text()
@@ -130,7 +124,6 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
 
           if (buffer) allLines.push(buffer)
 
-          // Try parsing as JSON in case of completed task response
           if (allLines.length === 1) {
             try {
               const data = JSON.parse(allLines[0])
@@ -177,7 +170,6 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
   useEffect(() => {
     fetchLogs()
 
-    // Set up polling for running tasks
     if (pollRef.current) {
       clearInterval(pollRef.current)
       pollRef.current = null
@@ -204,7 +196,6 @@ export function useTaskLogs(taskId: string, enabled = true, taskPhase?: TaskPhas
     }
   }, [fetchLogs, enabled, taskPhase])
 
-  // When task completes, stop polling and do a final fetch
   useEffect(() => {
     if (!isTaskInFlight(taskPhase) && isLive) {
       setIsLive(false)

@@ -254,8 +254,6 @@ func TestAnthropicStreamingToolLoopReportsCumulativeInputUsage(t *testing.T) {
 				for i, response := range tt.responses {
 					if i == 0 {
 						response.StopReason = "tool_use"
-						// This tool is not exposed, so execution only returns an error
-						// result to the next model turn without invoking a real tool.
 						response.ToolCalls = []llm.ToolCall{{ID: "usage-tool", Name: "unavailable", Arguments: json.RawMessage(`{}`)}}
 					} else {
 						response.Content = goalStateSentinel + "\nDone."
@@ -407,8 +405,6 @@ func assertAnthropicStreamUsage(t *testing.T, body []byte, want map[string]int64
 		require.NoError(t, json.Unmarshal(raw, &actual))
 		require.Equal(t, expected, actual, field)
 	}
-	// Exercise the real client accumulator, which replaces the initial zero
-	// input count with the cumulative provider count from message_delta.
 	require.Equal(t, want["input_tokens"], message.Usage.InputTokens)
 	require.Equal(t, want["output_tokens"], message.Usage.OutputTokens)
 	require.Equal(t, want["cache_read_input_tokens"], message.Usage.CacheReadInputTokens)

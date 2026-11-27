@@ -29,9 +29,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// setupTestHandlersWithArtifactStore creates Handlers backed by an in-memory
-// SQLite store that implements ArtifactStore, plus any runtime objects for the
-// fake k8s client.
 func setupTestHandlersWithArtifactStore(objs ...runtime.Object) (*Handlers, *fiber.App, *storageclient.Client) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -45,8 +42,6 @@ func setupTestHandlersWithArtifactStore(objs ...runtime.Object) (*Handlers, *fib
 	app := fiber.New()
 	return handlers, app, ss
 }
-
-// ---------- Internal: UploadArtifact ----------
 
 func TestUploadArtifact(t *testing.T) {
 	h, app, ss := setupTestInternalHandlers()
@@ -63,7 +58,6 @@ func TestUploadArtifact(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
 
-		// Verify data was stored
 		data, ct, err := ss.GetArtifact(context.Background(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task"}, Filename: "output.txt"})
 		require.NoError(t, err)
 		require.Equal(t, body, data)
@@ -75,7 +69,6 @@ func TestUploadArtifact(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost,
 			"/internal/v1/artifacts/default/my-task/data.bin",
 			bytes.NewReader(body))
-		// No Content-Type header set
 
 		resp, err := app.Test(req)
 		require.NoError(t, err)
@@ -89,8 +82,6 @@ func TestUploadArtifact(t *testing.T) {
 
 func TestUploadArtifactTooLarge(t *testing.T) {
 	h, _, _ := setupTestInternalHandlers()
-	// Use a custom app with a large enough body limit so the handler's own
-	// size check is exercised rather than Fiber's built-in limit.
 	app := fiber.New(fiber.Config{BodyLimit: 20 << 20})
 	app.Use(func(c fiber.Ctx) error {
 		c.Locals(UserInfoContextKey, internalCallerAuthWorkerUser("my-task-pod", "my-task-pod-uid"))
@@ -98,7 +89,7 @@ func TestUploadArtifactTooLarge(t *testing.T) {
 	})
 	app.Post("/internal/v1/artifacts/:namespace/:taskName/:filename", h.UploadArtifact)
 
-	body := make([]byte, 10<<20+1) // 10MB + 1 byte
+	body := make([]byte, 10<<20+1)
 	req := httptest.NewRequest(http.MethodPost,
 		"/internal/v1/artifacts/default/my-task/big.bin",
 		bytes.NewReader(body))
@@ -160,7 +151,7 @@ func TestUploadArtifactStoreNotEnabled(t *testing.T) {
 	baseHandlers, app, ss := setupTestInternalHandlers()
 	h := NewInternalHandlers(ss, ss, ss, ss, nil, InternalHandlersConfig{
 		Client: baseHandlers.k8sClient, APIReader: baseHandlers.apiReader,
-	}) // nil artifact store
+	})
 
 	app.Post("/internal/v1/artifacts/:namespace/:taskName/:filename", h.UploadArtifact)
 
@@ -174,8 +165,6 @@ func TestUploadArtifactStoreNotEnabled(t *testing.T) {
 	require.Equal(t, http.StatusNotImplemented, resp.StatusCode)
 }
 
-// ---------- Public: ListTaskArtifacts ----------
-
 func TestListTaskArtifacts(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-task", Namespace: "default"},
@@ -183,7 +172,6 @@ func TestListTaskArtifacts(t *testing.T) {
 	h, app, ss := setupTestHandlersWithArtifactStore(task)
 	app.Get("/api/v1/tasks/:id/artifacts", h.ListTaskArtifacts)
 
-	// Pre-populate artifacts
 	ctx := context.Background()
 	require.NoError(t, ss.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task"}, Filename: "output.txt", ContentType: "text/plain", Data: []byte("hello")}))
 	require.NoError(t, ss.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "my-task"}, Filename: "report.json", ContentType: "application/json", Data: []byte(`{"ok":true}`)}))
@@ -207,9 +195,6 @@ func TestListTaskArtifacts(t *testing.T) {
 	require.True(t, names["report.json"])
 }
 
-// The artifact list keeps the createdAt wire format it had when the field was
-// a string: RFC 3339 in UTC, to the second, as SQLite's CURRENT_TIMESTAMP
-// stores it.
 func TestListTaskArtifactsKeepsCreatedAtFormat(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-task", Namespace: "default"},
@@ -262,7 +247,7 @@ func TestListTaskArtifactsEmpty(t *testing.T) {
 }
 
 func TestListTaskArtifactsTaskNotFound(t *testing.T) {
-	h, app, _ := setupTestHandlersWithArtifactStore() // no task objects
+	h, app, _ := setupTestHandlersWithArtifactStore()
 	app.Get("/api/v1/tasks/:id/artifacts", h.ListTaskArtifacts)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/nonexistent/artifacts", nil)
@@ -270,8 +255,6 @@ func TestListTaskArtifactsTaskNotFound(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
-
-// ---------- Public: DownloadTaskArtifact ----------
 
 func TestDownloadTaskArtifact(t *testing.T) {
 	task := &corev1alpha1.Task{
@@ -310,7 +293,7 @@ func TestDownloadTaskArtifactNotFound(t *testing.T) {
 }
 
 func TestDownloadTaskArtifactTaskNotFound(t *testing.T) {
-	h, app, _ := setupTestHandlersWithArtifactStore() // no task objects
+	h, app, _ := setupTestHandlersWithArtifactStore()
 	app.Get("/api/v1/tasks/:id/artifacts/:filename", h.DownloadTaskArtifact)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/nonexistent/artifacts/file.txt", nil)
@@ -330,7 +313,7 @@ func TestDownloadTaskArtifactStoreNotConfigured(t *testing.T) {
 
 	db, _ := sqlite.NewDB(":memory:")
 	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
-	h := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss}) // nil artifact store
+	h := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
 	app.Get("/api/v1/tasks/:id/artifacts/:filename", h.DownloadTaskArtifact)

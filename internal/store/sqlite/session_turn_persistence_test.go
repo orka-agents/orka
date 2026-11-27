@@ -105,9 +105,7 @@ func TestSessionTurnFinalizationRecordsTaskTokenUsageOnce(t *testing.T) {
 				attemptID, counterID string
 				input, output        int64
 			}{
-				// An earlier attempt's usage belongs to that attempt's own turn.
 				{attemptID: "0/earlier-prompt", counterID: taskUID + "/earlier-prompt", input: 500, output: 50},
-				// This turn's cumulative counter counts its final value once.
 				{attemptID: "1/prompt", counterID: taskUID + "/prompt", input: 30, output: 4},
 				{attemptID: "1/prompt", counterID: taskUID + "/prompt", input: 120, output: 9},
 			} {
@@ -121,7 +119,6 @@ func TestSessionTurnFinalizationRecordsTaskTokenUsageOnce(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			// Replaying the finalization must not count the turn again.
 			for range 2 {
 				var err error
 				if persistenceOnly {

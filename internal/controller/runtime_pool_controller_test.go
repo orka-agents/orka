@@ -183,7 +183,6 @@ func TestRuntimePoolReconcilerWaitsForProviderProxy(t *testing.T) {
 		}
 	}
 
-	// Configuring the gateway later lets the existing pool start.
 	r.ProviderProxy = configuredProxy
 	runtimePoolReconcile(t, r, pool)
 	gotPool = runtimePoolTestGetPool(t, r, pool)
@@ -212,7 +211,6 @@ func TestRuntimePoolNamespaceRejectsArbitraryOverride(t *testing.T) {
 		t.Fatalf("arbitrary runtimeNamespace error = %v, want not-permitted rejection", err)
 	}
 
-	// With no configured runtime namespace, only the pool's own namespace is allowed.
 	unconfigured := &RuntimePoolReconciler{}
 	pool.Spec.RuntimeNamespace = acpTestRuntimeNamespace
 	if _, err := unconfigured.runtimePoolNamespace(pool); err == nil {
@@ -641,8 +639,6 @@ func TestRuntimePoolReconcilerPrunesStaleEpochSecretsAfterAuthenticatedRollout(t
 		t.Fatalf("replacement Deployment controller epoch = %q, want 8", got)
 	}
 
-	// The old ReplicaSet remains able to create Pods after the old Pod has gone,
-	// so its projected/envFrom Secret references must retain the old credentials.
 	runtimePoolReconcile(t, r, pool)
 	runtimePoolTestAssertSecretsExist(t, r, pool.Namespace, "while an old ReplicaSet could create Pods", oldAuthName, oldProviderName)
 	currentReplicaSet := &appsv1.ReplicaSet{}
@@ -687,8 +683,6 @@ func TestRuntimePoolReconcilerPrunesStaleEpochSecretsAfterAuthenticatedRollout(t
 	if err := r.Status().Update(context.Background(), currentDeployment); err != nil {
 		t.Fatalf("observe current Deployment generation: %v", err)
 	}
-	// A follow-up reconcile observes no live workload reference and may safely
-	// remove the old immutable credentials.
 	runtimePoolReconcile(t, r, pool)
 	var secrets corev1.SecretList
 	if err := r.List(context.Background(), &secrets, client.InNamespace(pool.Namespace), client.MatchingLabels{
@@ -1321,9 +1315,6 @@ func TestFinishRuntimePoolStatusCountsScaleToZeroOnceForStaleReconcile(t *testin
 	if _, err := r.finishRuntimePoolStatus(context.Background(), &current, stopped, runtimePoolRequeue); err != nil {
 		t.Fatalf("first stopped status patch: %v", err)
 	}
-	// The stale writer loses the optimistic lock; that is a normal race, so
-	// it requeues quietly instead of surfacing a reconcile error, and it
-	// must not count the scale-to-zero a second time.
 	result, err := r.finishRuntimePoolStatus(context.Background(), stale, stopped, runtimePoolRequeue)
 	if err != nil || result.RequeueAfter != runtimePoolConflictRequeue {
 		t.Fatalf("stale stopped status patch = (%+v, %v), want quiet requeue", result, err)
@@ -1810,7 +1801,6 @@ func TestRuntimePoolReconcilerUnhealthySupervisorClearsReadinessBeforeRecycle(t 
 	if got := runtimePoolReadyReplicas(status); got != 0 {
 		t.Fatalf("ready replicas = %d, want 0 after unhealthy Pod deletion", got)
 	}
-	// API deletion alone is not process-death evidence for enrolled native Pods.
 	runtimePoolTestCompleteDeletedBoot(t, r, pool, &pod)
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("unhealthy runtime Pod still exists, err=%v", err)
@@ -1846,7 +1836,6 @@ func TestRuntimePoolReconcilerClearsProbePressureAfterActivePodDisappears(t *tes
 	if err := r.Delete(context.Background(), &pod); err != nil {
 		t.Fatalf("delete active runtime Pod: %v", err)
 	}
-	// Model the kubelet lifetime observation before testing post-loss metrics.
 	runtimePoolTestCompleteDeletedBoot(t, r, pool, &pod)
 
 	runtimePoolReconcile(t, r, pool)
@@ -1939,7 +1928,6 @@ func TestRuntimePoolReconcilerRecyclesPodAfterInPlaceSupervisorRestart(t *testin
 	if got.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopping || got.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed || got.Status.ActiveInstance != nil {
 		t.Fatalf("status after restart Pod recycle = %s/%s active=%#v, want Stopping/Closed with no active instance", got.Status.Lifecycle, got.Status.AdmissionState, got.Status.ActiveInstance)
 	}
-	// API deletion alone is not process-death evidence for enrolled native Pods.
 	runtimePoolTestCompleteDeletedBoot(t, r, pool, &pod)
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("in-place restarted runtime Pod still exists, err=%v", err)
@@ -1990,8 +1978,6 @@ func TestRuntimePoolReconcilerRecyclesInPlaceRestartDuringRollout(t *testing.T) 
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), retained); err != nil || retained.DeletionTimestamp.IsZero() || !controllerutil.ContainsFinalizer(retained, runtimePoolBootPodFinalizer) {
 		t.Fatalf("rollout restart must retain the Pod until exact container termination: %v", err)
 	}
-	// A new supervisor boot did not prove that the original process tree died.
-	// Model the kubelet's positive evidence separately from API deletion.
 	runtimePoolTestTerminateBootPod(t, r, retained)
 	if err := r.reconcileNativeRuntimePoolRetirement(t.Context(), pool); err != nil {
 		t.Fatal(err)
@@ -2583,7 +2569,6 @@ func TestRuntimePoolReconcilerReprobesBootingSupervisorQuickly(t *testing.T) {
 		t.Fatalf("booting requeue = %s, want %s", result.RequeueAfter, runtimePoolBootingRequeue)
 	}
 
-	// Once the supervisor is ready the pool serves.
 	probe.Status.Lifecycle = harnessv2.SupervisorLifecycleReady
 	supervisor.probe = probe
 	runtimePoolReconcile(t, r, pool)

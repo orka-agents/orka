@@ -14,23 +14,15 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// A recovery pass that reaches a Session Task after its live settlement
-// finished must keep that settlement: the finalized SessionTurn's projection
-// is the durable record, as a standalone projection is for a Task without a
-// Session. Rewriting the Task would report a successful turn as one whose
-// live settlement was interrupted.
 func TestACPRecoveryKeepsALiveSessionSettlement(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		// projected is the delivery state the live settlement projected.
+		name      string
 		projected store.PromptDeliveryState
-		// phase is the Task's phase when recovery reaches it.
-		phase corev1alpha1.TaskPhase
-		kept  bool
+		phase     corev1alpha1.TaskPhase
+		kept      bool
 	}{
 		{name: "matching", projected: store.PromptDeliveryReadValidated, phase: corev1alpha1.TaskPhaseSucceeded, kept: true},
 		{name: "projection-differs", projected: store.PromptDeliveryNoChange, phase: corev1alpha1.TaskPhaseSucceeded, kept: false},
-		// The projection has not reached the Task yet: recovery settles it.
 		{name: "task-not-settled", projected: store.PromptDeliveryReadValidated, phase: corev1alpha1.TaskPhaseRunning, kept: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -58,7 +50,6 @@ func TestACPRecoveryKeepsALiveSessionSettlement(t *testing.T) {
 				State: corev1alpha1.TaskDeliveryState(attempt.DeliveryState), Outcome: corev1alpha1.TaskDeliveryOutcome(attempt.DeliveryState),
 				LastTransitionTime: &settledAt,
 			}
-			// The Task as the live settlement left it.
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{Namespace: control.Namespace, Name: "recovery-settlement", UID: types.UID(attempt.Key.TaskUID)},
 				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "inspect pwd",

@@ -22,8 +22,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// resourceBackend serves a listing, a session config and watches that report
-// one change and then wait to be released.
 type resourceBackend struct {
 	*extendedBackend
 	released chan struct{}
@@ -57,8 +55,6 @@ func (b *resourceBackend) WatchResources(ctx context.Context, _ Principal, param
 	}
 }
 
-// retryingWatchBackend reports one change once told to, again on every tick
-// until it is recorded, as a poller that keeps its baseline does.
 type retryingWatchBackend struct {
 	*extendedBackend
 	report   chan struct{}
@@ -86,8 +82,6 @@ func (b *retryingWatchBackend) WatchResources(ctx context.Context, _ Principal, 
 	return nil
 }
 
-// A change a watch cannot record is reported as not recorded, so the watcher
-// reports it again instead of losing it.
 func TestAWatchChangeThatCannotBeRecordedIsReportedAgain(t *testing.T) {
 	env, extended := newExtendedEnv(t)
 	backend := &retryingWatchBackend{extendedBackend: extended, report: make(chan struct{})}
@@ -166,7 +160,6 @@ func TestResourceListsWatchesAndSessionConfig(t *testing.T) {
 		}
 	}
 
-	// Unsubscribing releases the watch and its channel.
 	require.NoError(t, client.Notify(ctx, "unsubscribe", ahptypes.UnsubscribeParams(watch)))
 	select {
 	case <-backend.released:
@@ -206,7 +199,6 @@ func TestLeftoverChannelsAreSweptOnce(t *testing.T) {
 	}
 }
 
-// failingChannelListStore refuses to list channels while armed.
 type failingChannelListStore struct {
 	store.AHPStore
 	armed atomic.Bool
@@ -219,8 +211,6 @@ func (s *failingChannelListStore) ListAHPChannels(ctx context.Context, userKey, 
 	return s.AHPStore.ListAHPChannels(ctx, userKey, prefix)
 }
 
-// A sweep that fails runs again on the user's next initialize, and spares the
-// resource watches this process opened meanwhile.
 func TestAFailedSweepRunsAgainAndSparesLiveWatches(t *testing.T) {
 	env, extended := newExtendedEnv(t)
 	backend := &resourceBackend{extendedBackend: extended, released: make(chan struct{})}
@@ -260,9 +250,6 @@ func TestAFailedSweepRunsAgainAndSparesLiveWatches(t *testing.T) {
 	require.NoError(t, err, "a watch open in this process is not swept")
 }
 
-// A watch whose channel cannot be deleted when its connection closes leaves
-// the channel to the user's next initialize, which sweeps it: a reconnect
-// must not find it and take the watch to be running.
 func TestAWatchChannelLeftBehindIsSweptLater(t *testing.T) {
 	env, extended := newExtendedEnv(t)
 	backend := &resourceBackend{extendedBackend: extended, released: make(chan struct{})}
@@ -299,8 +286,6 @@ func TestAWatchChannelLeftBehindIsSweptLater(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrNotFound)
 }
 
-// A watch its backend refuses is refused with the backend's reason, as
-// invalid parameters, and leaves no channel.
 func TestARefusedWatchReportsItsReason(t *testing.T) {
 	env, extended := newExtendedEnv(t)
 	backend := &resourceBackend{extendedBackend: extended, released: make(chan struct{})}
@@ -327,13 +312,10 @@ func TestIdleConnectionsArePinged(t *testing.T) {
 	ctx := ctx5(t)
 	_, err := client.Initialize(ctx, "client-a", ahptypes.SupportedProtocolVersions(), nil)
 	require.NoError(t, err)
-	// A client that answers pings stays connected well past several of them.
 	time.Sleep(300 * time.Millisecond)
 	require.NoError(t, client.Request(ctx, "ping", map[string]any{}, nil))
 }
 
-// gatedChannelListStore holds the first listing of terminal channels until
-// released, so a sweep can be caught while it runs.
 type gatedChannelListStore struct {
 	store.AHPStore
 	entered, release chan struct{}
@@ -352,8 +334,6 @@ func (s *gatedChannelListStore) ListAHPChannels(ctx context.Context, userKey, pr
 	return s.AHPStore.ListAHPChannels(ctx, userKey, prefix)
 }
 
-// A connection that arrives while another's sweep runs waits for it, so it
-// never sees a channel the sweep is about to remove.
 func TestAConnectionWaitsForTheSweepInProgress(t *testing.T) {
 	env, _ := newExtendedEnv(t)
 	gated := &gatedChannelListStore{AHPStore: env.host.cfg.Store, entered: make(chan struct{}), release: make(chan struct{})}

@@ -105,7 +105,6 @@ func TestSessionManager_IsLocked_NotLocked(t *testing.T) {
 	sm, ss := setupSessionManager()
 	ctx := context.Background()
 
-	// Create session with no active task
 	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 		Namespace:   "default",
 		Name:        "test-session",
@@ -137,7 +136,6 @@ func TestSessionManager_IsLocked_LockedByOther(t *testing.T) {
 	sm, ss := setupSessionManager()
 	ctx := context.Background()
 
-	// Create session locked by another task
 	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 		Namespace:   "default",
 		Name:        "test-session",
@@ -170,7 +168,6 @@ func TestSessionManager_IsLocked_LockedBySelf(t *testing.T) {
 	sm, ss := setupSessionManager()
 	ctx := context.Background()
 
-	// Create session locked by this task
 	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 		Namespace:   "default",
 		Name:        "test-session",
@@ -233,7 +230,6 @@ func TestSessionManager_AcquireLock_CreateSession(t *testing.T) {
 		t.Fatalf("AcquireLock() error = %v", err)
 	}
 
-	// Verify session was created with lock
 	session, err := sm.GetSession(context.Background(), "default", "new-session")
 	if err != nil {
 		t.Fatalf("GetSession() error = %v", err)
@@ -268,7 +264,6 @@ func TestSessionManager_AcquireLock_AlreadyLockedByOther(t *testing.T) {
 	sm, ss := setupSessionManager()
 	ctx := context.Background()
 
-	// Create session locked by another task
 	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
 		Namespace:   "default",
 		Name:        "test-session",
@@ -332,7 +327,6 @@ func TestSessionManager_ReleaseLock_NotOwner(t *testing.T) {
 	sm, ss := setupSessionManager()
 	ctx := context.Background()
 
-	// Create session locked by another task
 	ss.CreateSession(ctx, &store.SessionRecord{ //nolint:errcheck
 		Namespace:   "default",
 		Name:        "test-session",
@@ -357,7 +351,6 @@ func TestSessionManager_ReleaseLock_NotOwner(t *testing.T) {
 		t.Errorf("ReleaseLock() error = %v", err)
 	}
 
-	// Verify lock was not released (still held by other-task)
 	session, _ := sm.GetSession(ctx, "default", "test-session")
 	if session.ActiveTask != "other-task" {
 		t.Error("Lock should not be released by non-owner")
@@ -408,7 +401,6 @@ func TestSessionManager_LoadTranscript_WithMessages(t *testing.T) {
 	sm, ss := setupSessionManager()
 	ctx := context.Background()
 
-	// Create session with messages
 	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 		Namespace:   "default",
 		Name:        "test-session",
@@ -444,7 +436,6 @@ func TestSessionManager_LoadTranscript_MaxMessages(t *testing.T) {
 	sm, ss := setupSessionManager()
 	ctx := context.Background()
 
-	// Create session with messages
 	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 		Namespace:   "default",
 		Name:        "test-session",
@@ -514,7 +505,6 @@ func TestSessionManager_DeleteSession(t *testing.T) {
 		t.Fatalf("DeleteSession() error = %v", err)
 	}
 
-	// Verify session was deleted
 	_, err = sm.GetSession(ctx, "default", "test-session")
 	if err == nil {
 		t.Error("Session should be deleted")
@@ -602,14 +592,12 @@ func TestSessionManager_AppendMessages_WithPromptAndResult(t *testing.T) {
 	sm, ss := setupSessionManager()
 	ctx := context.Background()
 
-	// Create session
 	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 		Namespace:   "default",
 		Name:        "test-session",
 		SessionType: "task",
 	}))
 
-	// Save result
 	require.NoError(t, ss.SaveResult(ctx, defaultNS, testTask, []byte("Here is the answer")))
 
 	task := &corev1alpha1.Task{
@@ -638,7 +626,6 @@ func TestSessionManager_AppendMessages_WithPromptAndResult(t *testing.T) {
 		t.Fatalf("AppendMessages() error = %v", err)
 	}
 
-	// Verify messages were appended
 	msgs, err := ss.LoadTranscript(ctx, "default", "test-session", 0)
 	if err != nil {
 		t.Fatalf("LoadTranscript() error = %v", err)
@@ -764,7 +751,6 @@ func TestSessionManager_AppendMessages_NoPromptNoResult(t *testing.T) {
 		t.Fatalf("AppendMessages() error = %v", err)
 	}
 
-	// No messages should have been appended
 	msgs, err := ss.LoadTranscript(ctx, "default", "test-session", 0)
 	if err != nil {
 		t.Fatalf("LoadTranscript() error = %v", err)
@@ -829,7 +815,6 @@ func TestSessionManagerNativeAIGatewayFinalization(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, created)
 	require.Equal(t, store.GatewayEventQueued, queued.State)
-	// A non-nil interface with no implementation panics if generic finalization reads the result.
 	unreadResultStore := struct{ store.ResultStore }{}
 	for _, appendEnabled := range []bool{false, true} {
 		task.Spec.SessionRef.Append = appendEnabled
@@ -983,8 +968,6 @@ func TestSessionManagerDefersGatewayTranscriptAndLockFinalization(t *testing.T) 
 		ObjectMeta: metav1.ObjectMeta{
 			Name: claimed.TaskName, Namespace: event.Namespace, UID: types.UID(taskUID),
 		},
-		// Use an admitted but malformed policy to prove generic finalization does
-		// not revalidate the policy before deferring to Gateway projection.
 		Spec: corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{
 			Name: event.SessionName, Create: true, Append: true, MaxMessages: 1,
 		}},

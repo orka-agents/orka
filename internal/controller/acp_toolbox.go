@@ -8,25 +8,17 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// ACPToolboxMountMethod selects how toolbox files reach the runtime Pod.
 type ACPToolboxMountMethod string
 
 const (
-	// ACPToolboxMountCopy copies each toolbox into a scratch volume with an
-	// init-container copier. It works on every supported Kubernetes version.
-	ACPToolboxMountCopy ACPToolboxMountMethod = "copy"
-	// ACPToolboxMountImageVolume mounts each toolbox image directly as a
-	// read-only image volume. It needs Kubernetes 1.36 or newer.
+	ACPToolboxMountCopy        ACPToolboxMountMethod = "copy"
 	ACPToolboxMountImageVolume ACPToolboxMountMethod = "imageVolume"
 
-	// ACPToolboxImageVolumeMinimumServerVersion is the first Kubernetes minor
-	// where image volumes with subPath are generally available.
 	ACPToolboxImageVolumeMinimumServerVersion = "1.36"
 
 	acpToolboxUnavailablePrefix = corev1alpha1.RuntimePoolReasonToolboxUnavailable + ": "
 )
 
-// ParseACPToolboxMountMethod accepts the two documented mount methods.
 func ParseACPToolboxMountMethod(raw string) (ACPToolboxMountMethod, error) {
 	switch method := ACPToolboxMountMethod(strings.TrimSpace(raw)); method {
 	case "", ACPToolboxMountCopy:
@@ -38,35 +30,16 @@ func ParseACPToolboxMountMethod(raw string) (ACPToolboxMountMethod, error) {
 	}
 }
 
-// ACPToolboxPolicy is the controller-wide toolbox configuration. It is shared
-// by Agent admission, Task planning, and RuntimePool materialization so every
-// gate rejects the same inputs with the same message.
 type ACPToolboxPolicy struct {
-	// Enabled turns the feature on. Off by default.
-	Enabled bool
-	// SkillsEnabled additionally admits runtime.skills, which reuse the
-	// toolbox image delivery, registry allowlist, pull secrets, node
-	// selector, and mount method. Off by default; requires Enabled.
-	SkillsEnabled bool
-	// AllowedRegistries lists registry hosts or host/path prefixes whose
-	// images may be used. Empty means no image is allowed.
+	Enabled           bool
+	SkillsEnabled     bool
 	AllowedRegistries []string
-	// ImagePullSecrets names Secrets in the runtime namespace added to the
-	// Pod's imagePullSecrets. They are never mounted into a container.
-	ImagePullSecrets []string
-	// NodeSelector is merged into the runtime Pod node selector when the Pod
-	// carries toolboxes.
-	NodeSelector map[string]string
-	// MountMethod selects copy or imageVolume.
-	MountMethod ACPToolboxMountMethod
-	// UnavailableReason, when set, explains why toolbox mounting cannot be
-	// used on this controller even though the feature is enabled (for
-	// example, imageVolume on a server older than 1.36). Agents with
-	// toolboxes are rejected with it.
+	ImagePullSecrets  []string
+	NodeSelector      map[string]string
+	MountMethod       ACPToolboxMountMethod
 	UnavailableReason string
 }
 
-// Toolboxes returns the Agent's declared toolboxes, or nil.
 func agentToolboxes(agent *corev1alpha1.Agent) []corev1alpha1.AgentToolbox {
 	if agent == nil || agent.Spec.Runtime == nil {
 		return nil
@@ -74,8 +47,6 @@ func agentToolboxes(agent *corev1alpha1.Agent) []corev1alpha1.AgentToolbox {
 	return agent.Spec.Runtime.Toolboxes
 }
 
-// RuntimeToolboxesFromAgent converts Agent toolboxes into the profile shape,
-// preserving declared order.
 func RuntimeToolboxesFromAgent(toolboxes []corev1alpha1.AgentToolbox) []harnessv2.RuntimeToolbox {
 	if len(toolboxes) == 0 {
 		return nil
@@ -124,9 +95,6 @@ func runtimeToolboxesFromPool(toolboxes []corev1alpha1.RuntimePoolToolbox) []har
 	return result
 }
 
-// ValidateAgentToolboxes applies the full toolbox policy to an Agent: feature
-// gate, mounting availability, shape rules, and the registry allowlist. An
-// Agent without toolboxes always passes.
 func (p ACPToolboxPolicy) ValidateAgentToolboxes(agent *corev1alpha1.Agent) error {
 	toolboxes := agentToolboxes(agent)
 	if len(toolboxes) == 0 {
@@ -159,12 +127,6 @@ func (p ACPToolboxPolicy) ValidateAgentToolboxes(agent *corev1alpha1.Agent) erro
 	return nil
 }
 
-// ToolboxImageAllowed reports whether image matches one allowlist entry. An
-// entry is a registry host (with optional port) optionally followed by
-// repository path segments. The host must match exactly and path segments
-// match whole segments only, so registry.example.com.evil.io never matches
-// registry.example.com and registry.example.com/tools-evil never matches
-// registry.example.com/tools. No network calls are made.
 func ToolboxImageAllowed(image string, allowed []string) bool {
 	image = strings.TrimSpace(image)
 	repository, _, found := strings.Cut(image, "@")
@@ -195,10 +157,6 @@ func ToolboxImageAllowed(image string, allowed []string) bool {
 	return false
 }
 
-// agentToolboxPlanRejection returns the planning-time rejection for Agent
-// toolboxes on execution paths that cannot host them. It repeats the
-// admission checks so a Task never reaches a RuntimePool with toolboxes it
-// cannot bind, even if the Agent was admitted under a different policy.
 func (p ACPToolboxPolicy) agentToolboxPlanRejection(task *corev1alpha1.Task, agent *corev1alpha1.Agent, external bool) string {
 	if len(agentToolboxes(agent)) == 0 {
 		return ""
@@ -216,28 +174,17 @@ func (p ACPToolboxPolicy) agentToolboxPlanRejection(task *corev1alpha1.Task, age
 }
 
 const (
-	// acpToolboxPromptNoteMaxBytes bounds the Orka-generated toolbox note.
-	// Four toolboxes with eight 256-byte entries each stay well inside it.
-	acpToolboxPromptNoteMaxBytes = 8192
-	acpToolboxPromptNoteHeader   = "Extra command-line tools are installed for this task:\n"
-	// The PATH sentence is chosen from the listed folders so the note never
-	// claims a mounted-only folder is on PATH.
+	acpToolboxPromptNoteMaxBytes   = 8192
+	acpToolboxPromptNoteHeader     = "Extra command-line tools are installed for this task:\n"
 	acpToolboxPromptNoteAllOnPath  = "These folders are on PATH. "
 	acpToolboxPromptNoteSomeOnPath = "Folders not marked otherwise are on PATH. "
 	acpToolboxPromptNoteFooter     = "Run `ls <folder>` to see what is available. There is no internet access, so you can't install new packages."
 )
 
-// acpToolboxNoteDue reports whether a prompt starts a provider process's
-// conversation: always for standalone Tasks, and for a Session runtime until
-// its current process accepted a prompt.
 func acpToolboxNoteDue(session *acpTaskSession) bool {
 	return session == nil || !session.Binding.PromptDelivered
 }
 
-// acpToolboxPromptNote renders the short Orka-generated note that tells the
-// agent which toolbox folders are on PATH. It lists folders from the frozen
-// profile only, never file names from inside the untrusted image, and is
-// empty without toolboxes or when newProcess is false.
 func acpToolboxPromptNote(toolboxes []harnessv2.RuntimeToolbox, newProcess bool) string {
 	if !newProcess || len(toolboxes) == 0 {
 		return ""
@@ -253,8 +200,6 @@ list:
 		lines := toolboxes[i].PathDirs()
 		mounted := len(lines) == 0
 		if mounted {
-			// A toolbox without pathEntries is mounted but contributes nothing
-			// to PATH; say so instead of implying its tools are on PATH.
 			lines = []string{toolboxes[i].MountPath + " (mounted, not on PATH)"}
 		}
 		for _, dir := range lines {

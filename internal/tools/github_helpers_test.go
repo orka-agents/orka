@@ -418,14 +418,7 @@ func TestResolveReadRepoAndToken_TaskName_EmptySelectedKeyDoesNotUseSibling(t *t
 	}
 }
 
-// TestResolveReadRepoAndToken_TaskName_ToolContextNamespace pins the namespace
-// resolution order for the proxy use case: when the controller process runs
-// create_pull_request server-side, it has no per-request env vars, so the
-// helper must read namespace from ToolContext (set by the proxy from the
-// request context). Falling back to ORKA_TASK_NAMESPACE / "default" silently
-// resolved the wrong Task and broke the chat-to-PR demo after every retry.
 func TestResolveReadRepoAndToken_TaskName_ToolContextNamespace(t *testing.T) {
-	// Intentionally point env var at the wrong namespace to prove ToolContext wins.
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 	t.Setenv("GITHUB_TOKEN", "")
 
@@ -467,15 +460,12 @@ func TestResolveReadRepoAndToken_TaskName_ToolContextNamespace(t *testing.T) {
 }
 
 func TestResolveReadRepoAndToken_TokenFromFile(t *testing.T) {
-	// Create a temp directory to simulate /secrets/git/token
 	tmpDir := t.TempDir()
 	tokenFile := filepath.Join(tmpDir, tokenKey)
 	if err := os.WriteFile(tokenFile, []byte("file-token\n"), 0o600); err != nil {
 		t.Fatalf("failed to write token file: %v", err)
 	}
 
-	// We can't easily override /secrets/git/token path, so test resolveToken directly
-	// by setting GITHUB_TOKEN and verifying it's returned as fallback
 	t.Setenv("GITHUB_TOKEN", "env-fallback-token")
 
 	token := resolveToken()
@@ -512,7 +502,6 @@ func TestResolveReadRepoAndToken_BaseURLOverride(t *testing.T) {
 }
 
 func TestResolveReadRepoAndToken_ErrorNoRepoURL(t *testing.T) {
-	// Ensure ORKA_GIT_REPO is not set
 	t.Setenv("ORKA_GIT_REPO", "")
 
 	_, _, _, _, err := resolveReadRepoAndToken(context.Background(), nil, "list_pull_requests", "", "", "")
@@ -555,7 +544,6 @@ func TestResolveReadRepoAndToken_ErrorTaskNotFound(t *testing.T) {
 }
 
 func TestResolveReadRepoAndToken_ErrorNoToken(t *testing.T) {
-	// Clear all token sources
 	t.Setenv("GITHUB_TOKEN", "")
 
 	_, _, _, _, err := resolveReadRepoAndToken(context.Background(), nil, "list_pull_requests", "", "https://github.com/o/r", "")
@@ -723,8 +711,6 @@ func (f *fakeLinkedAccounts) BuiltinToolCredential(_ context.Context, toolName s
 	return f.credential, f.bound, f.err
 }
 
-// linkedAccountFixture is a Task with a workspace and read Secret, in a
-// fake client, for the linked-account helper tests.
 func linkedAccountFixture(t *testing.T) (client.Client, *corev1alpha1.Task) {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -744,8 +730,6 @@ func linkedAccountFixture(t *testing.T) (client.Client, *corev1alpha1.Task) {
 func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	k8sClient, task := linkedAccountFixture(t)
 
-	// A bound link supplies the token; the Task's Secret is never read and
-	// the workspace still scopes the repository.
 	linked := &fakeLinkedAccounts{credential: LinkedAccountCredential{AccessToken: "linked-token", Provider: "github"}, bound: true}
 	ctx := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, LinkedAccounts: linked, RequireGitHubTaskCredentials: true})
 	owner, repo, token, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", "", "", "")
@@ -755,7 +739,6 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", "", "https://github.com/other/repo", ""); err == nil {
 		t.Fatal("a linked account must not widen the repository scope")
 	}
-	// Nor may another Task's workspace lend its scope to the linked token.
 	other := task.DeepCopy()
 	other.Name, other.ResourceVersion = "other-task", ""
 	other.Spec.Workspace.GitRepo = "https://github.com/other/repo"
@@ -768,21 +751,15 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	if _, repo, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err != nil || repo != "taskrepo" {
 		t.Fatalf("own task_name: repo=%q err=%v", repo, err)
 	}
-	// Outside a Task (chat and the proxies) only a Task this turn created
-	// for the same person may lend its repository scope to the link.
 	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
 	outsideCtx := &ToolContext{Namespace: defaultNamespace, LinkedAccounts: linked, Requester: requester, CreatedTasks: NewCreatedTasks()}
 	outside := WithToolContext(context.Background(), outsideCtx)
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
 		t.Fatalf("task_name outside a task err = %v", err)
 	}
-	// Naming no Task outside one is refused too: the readers that take an
-	// unscoped repo_url would otherwise point the link at any repository.
 	if _, _, _, _, err := resolveReadRepoAndToken(outside, k8sClient, "get_issue", "", "https://github.com/other/repo", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
 		t.Fatalf("unscoped repo_url outside a task err = %v", err)
 	}
-	// A Task this turn created in another namespace is resolved from the
-	// record (name alone is what the tool receives) and read from there.
 	elsewhere := task.DeepCopy()
 	elsewhere.Name, elsewhere.Namespace, elsewhere.UID, elsewhere.ResourceVersion = "elsewhere-task", "elsewhere", "other-uid", ""
 	elsewhere.Spec.RequestedBy = requester
@@ -794,7 +771,6 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	if _, repo, token, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", "elsewhere-task", "", ""); err != nil || repo != "elserepo" || token != "linked-token" {
 		t.Fatalf("other-namespace created task: repo=%q token=%q err=%v", repo, token, err)
 	}
-	// A workspace edited after creation no longer scopes the linked token.
 	drifted := &corev1alpha1.Task{}
 	if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: "elsewhere-task", Namespace: "elsewhere"}, drifted); err != nil {
 		t.Fatal(err)
@@ -810,21 +786,18 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	if err := k8sClient.Update(context.Background(), drifted); err != nil {
 		t.Fatal(err)
 	}
-	// The same name recorded in two namespaces is ambiguous and refused.
 	twin := elsewhere.DeepCopy()
 	twin.Namespace, twin.UID = "third", "third-uid"
 	outsideCtx.RecordCreatedTask(twin)
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", "elsewhere-task", "", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
 		t.Fatalf("ambiguous created task err = %v", err)
 	}
-	// A recorded identity that no longer matches the live object is refused.
 	replaced := task.DeepCopy()
 	replaced.UID = "replaced-uid"
 	outsideCtx.RecordCreatedTask(replaced)
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "identity changed") {
 		t.Fatalf("replaced task err = %v", err)
 	}
-	// A Task created this turn but stamped for somebody else (or nobody) is refused.
 	outsideCtx.RecordCreatedTask(task)
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "not requested by the person") {
 		t.Fatalf("unstamped created task err = %v", err)
@@ -837,7 +810,6 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	if _, repo, token, _, err := resolveScopedReadRepoAndToken(outside, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err != nil || repo != "taskrepo" || token != "linked-token" {
 		t.Fatalf("created task scope: repo=%q token=%q err=%v", repo, token, err)
 	}
-	// No record set at all (a context the API did not build) never accepts one.
 	bare := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, LinkedAccounts: linked, Requester: requester})
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(bare, k8sClient, "list_pull_requests", testMyTaskName, "", ""); err == nil || !strings.Contains(err.Error(), "created in this conversation") {
 		t.Fatalf("bare context err = %v", err)
@@ -847,9 +819,6 @@ func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 func TestResolveRepoAndToken_LinkedAccountChildAndTransactionScope(t *testing.T) {
 	k8sClient, task := linkedAccountFixture(t)
 	linked := &fakeLinkedAccounts{credential: LinkedAccountCredential{AccessToken: "linked-token", Provider: "github"}, bound: true}
-	// A child this Task controls may supply the scope (a coordinator opening
-	// its coder's pull request) as long as the child's repositories are
-	// within the parent's own; a child of somebody else may not.
 	child := task.DeepCopy()
 	child.Name, child.ResourceVersion, child.UID = "child-task", "", "child-uid"
 	child.OwnerReferences = []metav1.OwnerReference{{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: testMyTaskName, UID: "task-uid", Controller: new(true)}}
@@ -864,8 +833,6 @@ func TestResolveRepoAndToken_LinkedAccountChildAndTransactionScope(t *testing.T)
 	if _, _, _, _, err := resolveForgeRepoAndToken(stranger, k8sClient, "create_pull_request", "child-task", "", ""); err == nil || !strings.Contains(err.Error(), "child tasks") {
 		t.Fatalf("foreign child err = %v", err)
 	}
-	// A child the coordinator pointed at another repository (delegate_task
-	// takes model-supplied repositories) never widens the linked scope.
 	wide := child.DeepCopy()
 	wide.Name, wide.ResourceVersion, wide.UID = "wide-child", "", "wide-uid"
 	wide.Spec.Workspace.GitRepo = "https://github.com/taskorg/otherrepo"
@@ -875,7 +842,6 @@ func TestResolveRepoAndToken_LinkedAccountChildAndTransactionScope(t *testing.T)
 	if _, _, _, _, err := resolveForgeRepoAndToken(owned, k8sClient, "create_pull_request", "wide-child", "", ""); err == nil || !strings.Contains(err.Error(), "outside the current task's repository scope") {
 		t.Fatalf("wide child err = %v", err)
 	}
-	// A transaction's repository context never widens a linked token's scope.
 	transacted := task.DeepCopy()
 	transacted.Name, transacted.ResourceVersion, transacted.UID = "tx-task", "", "tx-uid"
 	transacted.Spec.Transaction = &corev1alpha1.TaskTransaction{Context: map[string]string{"repo": "https://github.com/txorg/txrepo"}}
@@ -887,18 +853,11 @@ func TestResolveRepoAndToken_LinkedAccountChildAndTransactionScope(t *testing.T)
 		t.Fatal("transaction repo context must not scope a linked token")
 	}
 	txSecret := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: "tx-task", LinkedAccounts: unboundFor(t)})
-	// (The scope is accepted; only the credential lookup fails here, as
-	// before, because the transaction scope carries no Secret reference.)
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(txSecret, k8sClient, "list_pull_requests", "", "https://github.com/txorg/txrepo", ""); err == nil || strings.Contains(err.Error(), "repository scope") {
 		t.Fatalf("transaction scope under Task credentials must be unchanged: err=%v", err)
 	}
 }
 
-// TestResolveRepoAndToken_LinkedAccountChildReadOnceUncached covers a child
-// Task deleted and recreated under the same name: a linked call judges the
-// child through the uncached reader rather than a stale cache, and scopes
-// the token with the very object whose ownership it validated, never a
-// second read of the name that may by then be the replacement.
 func TestResolveRepoAndToken_LinkedAccountChildReadOnceUncached(t *testing.T) {
 	k8sClient, task := linkedAccountFixture(t)
 	linked := &fakeLinkedAccounts{credential: LinkedAccountCredential{AccessToken: "linked-token", Provider: "github"}, bound: true}
@@ -908,8 +867,6 @@ func TestResolveRepoAndToken_LinkedAccountChildReadOnceUncached(t *testing.T) {
 	if err := k8sClient.Create(context.Background(), child); err != nil {
 		t.Fatal(err)
 	}
-	// The uncached reader sees the replacement: the same name, owned by
-	// someone else. The stale client still holds the original child.
 	replacement := child.DeepCopy()
 	replacement.UID = "replacement-uid"
 	replacement.OwnerReferences[0].UID = "someone-else"
@@ -919,8 +876,6 @@ func TestResolveRepoAndToken_LinkedAccountChildReadOnceUncached(t *testing.T) {
 	if _, _, _, _, err := resolveForgeRepoAndToken(ctx, k8sClient, "create_pull_request", "child-task", "", ""); err == nil || !strings.Contains(err.Error(), "child tasks") {
 		t.Fatalf("replaced child through the uncached reader: err = %v, want refusal", err)
 	}
-	// A child that changes between reads is read only once: the validated
-	// object's workspace scopes the call.
 	var childReads atomic.Int32
 	swapping := interceptor.NewClient(fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(task.DeepCopy(), child.DeepCopy()).Build(), interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -939,7 +894,6 @@ func TestResolveRepoAndToken_LinkedAccountChildReadOnceUncached(t *testing.T) {
 
 func TestResolveRepoAndToken_LinkedAccountFailsClosed(t *testing.T) {
 	k8sClient, _ := linkedAccountFixture(t)
-	// No link bound: the Task Secret path is unchanged.
 	unbound := &fakeLinkedAccounts{}
 	ctx := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, LinkedAccounts: unbound})
 	if _, _, token, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", "", "", ""); err != nil || token != "task-secret-token" {
@@ -949,7 +903,6 @@ func TestResolveRepoAndToken_LinkedAccountFailsClosed(t *testing.T) {
 		t.Fatal("unbound forge mutation still needs the forge credential")
 	}
 
-	// A bound link that cannot be used fails closed: no Secret fallback.
 	broken := &fakeLinkedAccounts{err: errors.New("connection revoked")}
 	ctx = WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, TaskID: testMyTaskName, LinkedAccounts: broken})
 	if _, _, _, _, err := resolveScopedReadRepoAndToken(ctx, k8sClient, "list_pull_requests", "", "", ""); err == nil || !strings.Contains(err.Error(), "connection revoked") {
@@ -980,15 +933,11 @@ func TestReadGitHubResponseRefusesOversizedDocuments(t *testing.T) {
 	if data, err := readGitHubResponse(strings.NewReader(exact), 64); err != nil || len(data) != 64 {
 		t.Fatalf("a document exactly at the limit must be read: len=%d err=%v", len(data), err)
 	}
-	// One byte over is refused whole rather than decoded cut in half.
 	if _, err := readGitHubResponse(strings.NewReader(exact+"y"), 64); err == nil || !strings.Contains(err.Error(), "exceeds 64 bytes") {
 		t.Fatalf("oversized err = %v", err)
 	}
 }
 
-// TestLoadGitHubTaskScopesFencesTheCurrentTaskUID covers a current Task
-// deleted and recreated under the same name after the call was
-// authenticated: the replacement's workspace never scopes the call.
 func TestLoadGitHubTaskScopesFencesTheCurrentTaskUID(t *testing.T) {
 	task, secret := githubRepoTaskWithSecret("https://github.com/orka-agents/orka")
 	task.UID = "replacement-uid"

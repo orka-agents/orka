@@ -6,9 +6,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// PlanACPRuntime is a test-only convenience wrapper: production planning goes
-// through PlanACPRuntimeWithConfiguration with a resolved session
-// configuration, which this helper builds from the Agent's inline systemPrompt.
 func PlanACPRuntime(task *corev1alpha1.Task, agent *corev1alpha1.Agent, images ACPRuntimeImages) (ACPRuntimePlan, error) {
 	if err := ValidateOpenCodeAgentSpec(agent); err != nil {
 		return ACPRuntimePlan{}, err

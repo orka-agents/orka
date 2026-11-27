@@ -89,8 +89,6 @@ func newCompatRouterIntegration(t *testing.T) *compatRouterIntegration {
 				}
 				if task, ok := obj.(*corev1alpha1.Task); ok {
 					f.created.Add(1)
-					// Complete the fixture immediately; deployed tests separately
-					// require a real controller, worker Pod and persisted result.
 					task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 					task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
 					if err := c.Status().Update(ctx, task); err != nil {
@@ -273,7 +271,6 @@ func TestCompatRouterInstallationRBACAndMissingProvider(t *testing.T) {
 			require.Zero(t, f.created.Load(), "chat permission must not confer Task creation permission")
 		}
 	}
-	// The other installation still has the same Provider and Secret names.
 	require.NoError(t, f.clients["team-a"].Delete(t.Context(), &corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: "team-a"}}))
 	for _, path := range []string{"/openai/v1/chat/completions", "/anthropic/v1/messages"} {
 		before := f.modelCalls.Load()

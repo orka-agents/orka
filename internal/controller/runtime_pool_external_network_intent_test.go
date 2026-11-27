@@ -43,7 +43,7 @@ func TestExternalRuntimePoolSpoofedPolicyCannotWidenFrozenNetworkIntent(t *testi
 			}
 			assertExternalRuntimePoolMaterializationNetwork(t, w.Spec.Workload, native)
 			if native {
-				return // Native provider separately enforces these admitted rules.
+				return
 			}
 			frozen := w.Spec.Workload.DeepCopy()
 			f.materialize(t)

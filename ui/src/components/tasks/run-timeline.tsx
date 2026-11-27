@@ -7,19 +7,11 @@ interface TimelineEvent {
   key: string
   label: string
   detail?: string
-  /** ISO timestamp used for chronological ordering (optional). */
   at?: string
-  /**
-   * Ordering bucket. Everything shares bucket 0 and sorts purely by timestamp;
-   * the terminal marker is pinned to bucket 1 so it always renders last, even
-   * when an earlier event is undated or its completion time precedes a
-   * still-running synthetic event.
-   */
   bucket: number
   status: 'done' | 'active' | 'pending' | 'failed' | 'cancelled'
 }
 
-/** A condition as carried on task.status.conditions[]. */
 interface Condition {
   type: string
   status: string
@@ -28,12 +20,6 @@ interface Condition {
   lastTransitionTime?: string
 }
 
-/**
- * Derive an ordered list of timeline events from a task's conditions and
- * iteration. Events sort chronologically by timestamp; the synthetic
- * "Iteration N" event is anchored to the latest known time so it slots after
- * the work that preceded it, and the terminal marker is always pinned last.
- */
 function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
   const events: TimelineEvent[] = []
   const phase = task.status?.phase
@@ -56,7 +42,6 @@ function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
     })
   }
 
-  // Merge status conditions as timestamped events.
   const conditions = (task.status?.conditions ?? []) as Condition[]
   const conditionTimes: number[] = []
   for (const c of conditions) {
@@ -74,9 +59,6 @@ function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
     })
   }
 
-  // The current iteration, with the plan summary as its detail. Anchor it to
-  // the latest known activity time (newest condition, else startTime) so it
-  // sorts after the work that led to it rather than floating to the end.
   const iteration = task.status?.iteration ?? 0
   if (iteration > 0) {
     const terminal = isTaskTerminal(phase)
@@ -99,9 +81,6 @@ function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
     })
   }
 
-  // Terminal marker — pinned to the last bucket so it always renders last,
-  // with phase-correct styling. Cancelled is terminal too (a user-stopped run),
-  // shown neutrally rather than as a failure.
   if (isTaskTerminal(phase)) {
     events.push({
       key: 'terminal',
@@ -117,8 +96,6 @@ function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
     })
   }
 
-  // Sort by bucket (terminal last), then chronologically within a bucket;
-  // undated events keep insertion order via the stable index tiebreak.
   return events
     .map((e, i) => ({ e, i }))
     .sort((a, b) => {
@@ -167,17 +144,6 @@ interface RunTimelineProps {
   className?: string
 }
 
-/**
- * Autonomous-loop timeline — renders a run as a plan→act→re-plan→converge
- * story instead of a lone "Iteration: 4" metadata field.
- *
- * Vertical stepper: Created → Started → (conditions, by lastTransitionTime) →
- * Iteration N (plan summary) → terminal (Succeeded/Failed), with a goal
- * progress bar carrying iteration tick marks and explicit goal-complete styling.
- *
- * Handles a missing `plan` gracefully (falls back to a conditions-only
- * timeline). Intended to be gated by the caller on `iteration > 0`.
- */
 export function RunTimeline({
   task,
   plan,
@@ -221,7 +187,6 @@ export function RunTimeline({
               )}
               style={{ width: `${Math.min(100, Math.max(0, progressPct))}%` }}
             />
-            {/* Iteration tick marks. */}
             {iteration > 1 &&
               Array.from({ length: iteration - 1 }).map((_, i) => (
                 <span

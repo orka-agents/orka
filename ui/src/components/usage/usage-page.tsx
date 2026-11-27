@@ -35,13 +35,10 @@ function UsagePageContent({ namespace }: { namespace: string }) {
     queryKey: ['usage', namespace, filters, page],
     queryFn: () => api.get<UsageReport>('/usage', { namespace, ...filters, offset: String(page.offset), asOf: page.asOf, limit: '25' }),
     refetchInterval: page.asOf ? false : 60000,
-    // Keep expanded details mounted while pinning the report they already display.
     placeholderData: (previous) => page.asOf && previous?.selection.asOf === page.asOf && previous.page.offset === page.offset ? previous : undefined,
   })
   function apply(event: FormEvent) {
     event.preventDefault()
-    // ISO dates compare as strings; an empty or inverted range would only
-    // come back as a server error.
     if (draft.from >= draft.until) {
       setRangeError('The start date must be before the exclusive end date.')
       return
@@ -260,8 +257,6 @@ function OtherContent({ group, namespace, selection, onPaginate }: { group: Usag
   </>
 }
 
-// Task names are reused, so a usage record links to the live Task only when
-// it is the same object (by UID). Checked once, when the record is expanded.
 function TaskRecordLink({ task, taskName }: { task: UsageTask; taskName: string }) {
   const setNamespace = useUIStore((s) => s.setNamespace)
   const { data, error, isPending } = useQuery({

@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Shared logging and precondition helpers for E2E and release scripts.
-# Source this file; do not execute it. Scripts that need a different log
-# format (for example timestamped output) may redefine log after sourcing.
 
 log() {
   printf '==> %s\n' "$*" >&2

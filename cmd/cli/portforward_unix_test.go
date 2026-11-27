@@ -16,10 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// requirePS skips a test that reads processes with ps when ps cannot run here.
-// Only Linux may lack a usable ps (busybox rejects -ww and -p): the CLI reads
-// /proc there and never runs ps. The probe runs ps itself, so a broken
-// psOwnerAndArgs fails the tests rather than skipping them.
 func requirePS(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("ps"); err != nil {
@@ -33,9 +29,6 @@ func requirePS(t *testing.T) {
 	}
 }
 
-// Both ways of reading a process find the fake forward's owner and arguments,
-// even when COLUMNS is narrower than the command line and the longest
-// namespace and Service names make it longer than a single -w allows.
 func TestProcessOwnerAndArgs(t *testing.T) {
 	t.Setenv("COLUMNS", "20")
 	namespace, service := strings.Repeat("n", 63), strings.Repeat("s", 63)
@@ -60,8 +53,6 @@ func TestProcessOwnerAndArgs(t *testing.T) {
 	}
 }
 
-// processStartMark reads when a live process started: the same each time, and
-// different for a process started later. An exited process has none.
 func TestProcessStartMark(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		requirePS(t)
@@ -75,7 +66,6 @@ func TestProcessStartMark(t *testing.T) {
 	first := startFakePortForward(t, []string{"kubectl", "first"})
 	firstMark := processStartMark(first.Process.Pid)
 	require.NotEmpty(t, firstMark)
-	// ps reports start times to the second; /proc counts clock ticks.
 	if runtime.GOOS == "linux" {
 		time.Sleep(100 * time.Millisecond)
 	} else {
@@ -92,8 +82,6 @@ func TestProcessStartMark(t *testing.T) {
 	require.Empty(t, processStartMark(first.Process.Pid))
 }
 
-// psStartMark, which the CLI uses where there is no /proc, reads the same start
-// time whatever the time zone it runs in, and none once the process exits.
 func TestPSStartMark(t *testing.T) {
 	requirePS(t)
 	if runtime.GOOS == "linux" {
@@ -116,8 +104,6 @@ func TestPSStartMark(t *testing.T) {
 	require.Empty(t, psStartMark(pid))
 }
 
-// The owner comes from the process, not from the CLI: /proc and ps agree on
-// the owner of PID 1, which normally belongs to another user.
 func TestProcessOwnerComesFromTheProcess(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("only Linux reads the owner from /proc")

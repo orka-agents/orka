@@ -29,9 +29,6 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-// Only model decisions and Kubernetes object storage are substituted. NewServer
-// installs production routes/middleware/auth, and the real OIDC verifier reads
-// the ephemeral issuer's JWKS over HTTP. No handler is manually registered.
 func setupProductionResponses(t *testing.T, upstream http.HandlerFunc) (*Server, string) {
 	t.Helper()
 	h, _ := setupResponsesHTTP(t, upstream)
@@ -40,7 +37,6 @@ func setupProductionResponses(t *testing.T, upstream http.HandlerFunc) (*Server,
 	return server, issuer.issueToken(t, testOIDCTokenOptions{Namespace: "default"})
 }
 
-// Independent upstream wire data: never use the production response builder.
 func responsesFixtureResponse(content string, calls ...llm.ToolCall) map[string]any {
 	output := []any{}
 	if content != "" {
@@ -67,8 +63,6 @@ func productionResponsesRequest(t *testing.T, url, token, body string, disabled 
 	if disabled {
 		req.Header.Set("X-Orka-Tools", "disabled")
 	}
-	// Own the pool so concurrent fixtures do not leave speculative or idle
-	// connections on the default transport when the test server shuts down.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	defer transport.CloseIdleConnections()
 	resp, err := (&http.Client{Timeout: 15 * time.Second, Transport: transport}).Do(req)
@@ -86,7 +80,6 @@ func TestResponsesProductionRouteAndAuthentication(t *testing.T) {
 		require.Equal(t, "/v1/responses", r.URL.Path)
 		var input map[string]any
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&input))
-		// Chat Completions has its separate historical store default.
 		if input["store"] != nil {
 			require.Equal(t, false, input["store"])
 		}
@@ -237,8 +230,6 @@ func TestResponsesProductionTimeoutAndCleanup(t *testing.T) {
 	}
 }
 
-// The client keeps the TCP connection open but never reads the response. Small
-// real socket buffers make backpressure deterministic without a fake writer.
 func TestResponsesProductionBackpressureReleasesConnection(t *testing.T) {
 	for _, target := range []string{responsesPath, responsesPath + "#suffix", "/OPENAI/V1/RESPONSES/", responsesPath + "?namespace=default", "http://localhost/openai/v1/responses?namespace=default#suffix"} {
 		t.Run(target, func(t *testing.T) { checkResponsesBackpressure(t, target) })
@@ -377,7 +368,6 @@ func TestResponsesProductionFragmentedMultipleToolContinuation(t *testing.T) {
 			{"type": "response.function_call_arguments.delta", "item_id": "item-second", "output_index": 1, "delta": "{\"n\":"},
 			{"type": "response.function_call_arguments.delta", "item_id": "item-first", "output_index": 0, "delta": "好\"}"},
 			{"type": "response.function_call_arguments.delta", "item_id": "item-second", "output_index": 1, "delta": "2}"},
-			// Completion order differs from start order. Arguments must stay with IDs.
 			{"type": "response.function_call_arguments.done", "item_id": "item-second", "output_index": 1, "arguments": second["arguments"]},
 			{"type": "response.output_item.done", "output_index": 1, "item": second},
 			{"type": "response.function_call_arguments.done", "item_id": "item-first", "output_index": 0, "arguments": first["arguments"]},
@@ -467,7 +457,6 @@ func TestResponsesProductionUnsupportedContract(t *testing.T) {
 		`"input":[{"type":"function_call_output","call_id":"missing","output":"result"}]`, `"parallel_tool_calls":false`, `"tool_choice":"required"`,
 	} {
 		t.Run(field, func(t *testing.T) {
-			// Later duplicates deliberately exercise the JSON parser's actual last-value behavior.
 			body := `{"model":"fixture/test-model","store":false,"input":"hello",` + field + `}`
 			status, header, data := productionResponsesRequest(t, url, token, body, true)
 			require.Equal(t, 400, status, string(data))
@@ -482,9 +471,6 @@ func TestResponsesProductionUnsupportedContract(t *testing.T) {
 	require.Zero(t, calls.Load(), "rejected state reached provider")
 }
 
-// Force reuse before the asynchronous stream consumes the parsed request. This
-// directly invokes the production Fiber entry with a real fasthttp RequestCtx;
-// separate TCP tests establish the listener seam. No handler or parser is stubbed.
 func TestResponsesProductionRequestBufferLifetime(t *testing.T) {
 	server, token := setupProductionResponses(t, func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any
@@ -521,7 +507,6 @@ func TestResponsesProductionRequestBufferLifetime(t *testing.T) {
 			server.app.Handler()(&requestCtx)
 			require.Equal(t, 200, requestCtx.Response.StatusCode())
 			require.True(t, requestCtx.Response.IsBodyStream())
-			// Mutate the original backing array, not a replacement allocation.
 			copy(borrowed, strings.ReplaceAll(body, "original-", "recycled-"))
 			require.Contains(t, string(requestCtx.Request.Body()), "recycled-input")
 			require.Contains(t, string(requestCtx.Request.Body()), "recycled-schema")

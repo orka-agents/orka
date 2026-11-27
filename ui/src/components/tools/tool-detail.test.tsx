@@ -117,26 +117,20 @@ describe('ToolDetail', () => {
       expect(screen.getByText('my-tool')).toBeInTheDocument()
     })
 
-    // Description
     expect(screen.getByText('A custom tool')).toBeInTheDocument()
 
-    // Custom badge
     expect(screen.getByText('Custom')).toBeInTheDocument()
 
-    // HTTP config
     expect(screen.getByText('HTTP Configuration')).toBeInTheDocument()
     expect(screen.getByText('http://example.com/api')).toBeInTheDocument()
     expect(screen.getByText('POST')).toBeInTheDocument()
     expect(screen.getByText('30s')).toBeInTheDocument()
 
-    // Headers
     expect(screen.getByText(/X-Custom/)).toBeInTheDocument()
 
-    // Parameters
     expect(screen.getByText('Parameters (JSON Schema)')).toBeInTheDocument()
     expect(screen.getByText(/query/)).toBeInTheDocument()
 
-    // Status
     expect(screen.getByText('Status')).toBeInTheDocument()
     expect(screen.getByText('Yes')).toBeInTheDocument()
   })
@@ -293,7 +287,6 @@ describe('ToolDetail', () => {
     expect(screen.getByText('Built-in')).toBeInTheDocument()
     expect(screen.getByText('Create a new task')).toBeInTheDocument()
 
-    // Should NOT show HTTP Configuration for built-in tools
     expect(screen.queryByText('HTTP Configuration')).not.toBeInTheDocument()
   })
 })

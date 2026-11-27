@@ -140,7 +140,6 @@ func (h *harness) put(credential store.ConnectorCredential) {
 		h.t.Fatal(err)
 	}
 	if credential.AuthorityDigest == "" || credential.RevocationDigest == "" {
-		// Issued by the fixture provider unless a test says otherwise.
 		provider := &corev1alpha1.ConnectorProvider{}
 		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
 			h.t.Fatal(err)
@@ -155,8 +154,6 @@ func (h *harness) put(credential store.ConnectorCredential) {
 	if err := h.store.PutConnectorCredential(context.Background(), ref, credential); err != nil {
 		h.t.Fatal(err)
 	}
-	// A put is a committed consent: the status mirrors custody's grant, as
-	// the API's completion does.
 	held, err := h.store.GetConnectorCredential(context.Background(), ref)
 	if err != nil {
 		h.t.Fatal(err)
@@ -168,8 +165,6 @@ func (h *harness) put(credential store.ConnectorCredential) {
 	}
 }
 
-// request freezes the grant custody holds right now (every put is a new
-// grant), so a Task dispatched after the latest consent is modeled.
 func (h *harness) request() outboundaccess.ConnectionCredentialRequest {
 	grant := int64(1)
 	if ref, err := connectors.CredentialRef(h.connection); err == nil {
@@ -206,7 +201,6 @@ func TestResolveReturnsFreshCredentialWithoutRefresh(t *testing.T) {
 	if h.refresher.calls.Load() != 0 {
 		t.Fatal("fresh credential must not be refreshed")
 	}
-	// No expiry reported by the provider also means no refresh.
 	h.put(store.ConnectorCredential{AccessToken: "gho_forever"})
 	if got, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err != nil || got.AccessToken != "gho_forever" || h.refresher.calls.Load() != 0 {
 		t.Fatalf("credential without expiry = %+v err = %v calls = %d", got, err, h.refresher.calls.Load())
@@ -231,8 +225,6 @@ func TestResolveRefreshesNearExpiryAndWritesBack(t *testing.T) {
 	if err != nil || stored.AccessToken != "gho_new" || stored.RefreshToken != "ghr_new" || stored.TokenType != "bearer" || len(stored.Scopes) != 1 {
 		t.Fatalf("stored = %+v err = %v", stored, err)
 	}
-	// The refreshed row keeps the grant and the revocation identity, so a
-	// later disconnect can still revoke the rotated material.
 	if stored.RevocationDigest != "revocation-1" || stored.GrantSequence != 1 {
 		t.Fatalf("stored revocation digest = %q grant = %d, want carried over", stored.RevocationDigest, stored.GrantSequence)
 	}
@@ -244,7 +236,6 @@ func TestResolveRefreshesNearExpiryAndWritesBack(t *testing.T) {
 		t.Fatalf("state = %q", updated.Status.State)
 	}
 
-	// A provider that does not rotate the refresh token keeps the old one.
 	h.refresher.response = connectors.TokenResponse{AccessToken: "gho_third", ExpiresAt: h.now.Add(time.Hour)}
 	h.put(store.ConnectorCredential{AccessToken: "gho_stale", RefreshToken: "ghr_keep", ExpiresAt: h.now.Add(-time.Minute)})
 	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err != nil {
@@ -268,7 +259,6 @@ func TestResolveRevokedRefreshShredsCustody(t *testing.T) {
 	if _, err := h.store.GetConnectorCredential(context.Background(), ref); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("custody after revocation err = %v, want ErrNotFound", err)
 	}
-	// The shred leaves no tombstone: the person can consent again.
 	h.put(store.ConnectorCredential{AccessToken: "gho_reconsented"})
 	if err := h.store.DeleteConnectorCredential(context.Background(), ref.ConnectionUID); err != nil {
 		t.Fatal(err)
@@ -278,7 +268,6 @@ func TestResolveRevokedRefreshShredsCustody(t *testing.T) {
 	if updated.Status.State != corev1alpha1.ConnectionStateRevoked || ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != corev1alpha1.ConnectionReasonRevoked {
 		t.Fatalf("status after revocation = %+v", updated.Status)
 	}
-	// The link is now not Ready, so the next call fails before any refresh.
 	calls := h.refresher.calls.Load()
 	_, err = h.source.ResolveConnectionCredential(context.Background(), h.request())
 	if err == nil || !strings.Contains(err.Error(), "not ready") {
@@ -346,8 +335,6 @@ func TestResolveFailsClosedOnIdentityAndBindingMismatch(t *testing.T) {
 			t.Fatalf("%s must fail closed", name)
 		}
 	}
-	// A re-link of the same Connection object is a new grant the frozen
-	// snapshot never bound, even though UID and generation are unchanged.
 	relinked := h.reload()
 	relinked.Status.GrantSequence++
 	if err := h.client.Status().Update(context.Background(), relinked); err != nil {
@@ -361,7 +348,6 @@ func TestResolveFailsClosedOnIdentityAndBindingMismatch(t *testing.T) {
 	if err := h.client.Status().Update(context.Background(), relinked); err != nil {
 		t.Fatal(err)
 	}
-	// A Connection whose scopes no longer cover its mode is not usable.
 	stale := h.reload()
 	meta.SetStatusCondition(&stale.Status.Conditions, metav1.Condition{Type: corev1alpha1.ConnectionConditionScopesGranted, Status: metav1.ConditionFalse, Reason: corev1alpha1.ConnectionReasonConsentRequired})
 	if err := h.client.Status().Update(context.Background(), stale); err != nil {
@@ -401,10 +387,6 @@ func TestResolveRefreshIsSingleFlight(t *testing.T) {
 	}
 }
 
-// TestRefreshFlightLeavesAnotherGrantAlone covers a re-consent that commits
-// after a call read custody but before its refresh flight re-reads it: the
-// flight must not refresh the new grant on the old call's behalf, where an
-// invalid_grant would shred the credential the person just consented.
 func TestRefreshFlightLeavesAnotherGrantAlone(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
@@ -428,9 +410,6 @@ func TestRefreshFlightLeavesAnotherGrantAlone(t *testing.T) {
 	}
 }
 
-// TestRefreshLosesToConcurrentReconsent models a tool call refreshing while
-// the owner completes a new consent: the refresh result must not overwrite
-// the newer material, and an invalid_grant for the old token must not shred it.
 func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
@@ -439,8 +418,6 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 		h.put(store.ConnectorCredential{AccessToken: "gho_reconsented", RefreshToken: "ghr_reconsented", ExpiresAt: h.now.Add(2 * time.Hour)})
 	}
 	h.refresher.onRefresh = reconsent
-	// The newer consent is another grant this Task never bound, so the
-	// call is refused rather than handed the re-consented material.
 	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "re-linked") {
 		t.Fatalf("refresh losing to a re-consent err = %v, want refusal", err)
 	}
@@ -448,9 +425,6 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 	if stored.AccessToken != "gho_reconsented" || stored.RefreshToken != "ghr_reconsented" {
 		t.Fatalf("custody after lost race = %+v", stored)
 	}
-	// The pair the losing refresh obtained cannot be stored; it is kept in
-	// retirement custody for disconnect rather than revoked now, since a
-	// provider may revoke the whole grant, including the winner's tokens.
 	h.refresher.mu.Lock()
 	revoked := strings.Join(h.refresher.revoked, ",")
 	h.refresher.mu.Unlock()
@@ -462,9 +436,6 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 		t.Fatalf("retired = %+v err = %v, want the losing refresh's material kept for disconnect", retired, err)
 	}
 
-	// A mode change and re-consent that land during the refresh are seen:
-	// the generation no longer matches the frozen binding, so nothing is
-	// released even though custody now holds fresh material.
 	h.put(store.ConnectorCredential{AccessToken: "gho_old3", RefreshToken: "ghr_old3", ExpiresAt: h.now.Add(-time.Minute)})
 	h.refresher.onRefresh = func() {
 		reconsent()
@@ -474,8 +445,6 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Either fence may refuse first: the re-consent changed the grant and
-	// the mode change bumped the generation.
 	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil ||
 		!strings.Contains(err.Error(), "changed after this Task started") && !strings.Contains(err.Error(), "re-linked") {
 		t.Fatalf("generation change during refresh err = %v", err)
@@ -488,8 +457,6 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 	}
 	h.put(store.ConnectorCredential{AccessToken: "gho_old4", RefreshToken: "ghr_old4", ExpiresAt: h.now.Add(-time.Minute)})
 
-	// The same for a late invalid_grant: the newer consent survives and the
-	// stale flight is refused rather than handed its material.
 	h.put(store.ConnectorCredential{AccessToken: "gho_old2", RefreshToken: "ghr_old2", ExpiresAt: h.now.Add(-time.Minute)})
 	h.refresher.err = &connectors.OAuthError{StatusCode: 400, Code: "invalid_grant"}
 	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "re-linked") {
@@ -503,9 +470,6 @@ func TestRefreshLosesToConcurrentReconsent(t *testing.T) {
 	}
 }
 
-// TestRefreshRefusesChangedProviderAuthority covers a provider whose OAuth
-// client was rotated after consent: the held refresh token belongs to the old
-// client and is never sent to the new token endpoint.
 func TestRefreshRefusesChangedProviderAuthority(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
@@ -526,9 +490,6 @@ func TestRefreshRefusesChangedProviderAuthority(t *testing.T) {
 	}
 }
 
-// TestRefreshWithNarrowedScopesFailsClosed covers a provider that narrows the
-// grant on refresh: the narrowed scopes are recorded, ScopesGranted is
-// withdrawn, and nothing is released for the mode.
 func TestRefreshWithNarrowedScopesFailsClosed(t *testing.T) {
 	h := newHarness(t)
 	provider := &corev1alpha1.ConnectorProvider{}
@@ -546,9 +507,6 @@ func TestRefreshWithNarrowedScopesFailsClosed(t *testing.T) {
 		t.Fatalf("narrowed refresh err = %v", err)
 	}
 	live := h.reload()
-	// The rotated material is sealed even though it is not released: the
-	// provider may have invalidated the previous refresh token, and only
-	// what custody holds can be revoked later.
 	ref, _ := connectors.CredentialRef(live)
 	if held, err := h.store.GetConnectorCredential(context.Background(), ref); err != nil || held.AccessToken != "gho_narrow" {
 		t.Fatalf("custody after narrowed refresh = %+v err = %v, want the rotated material sealed", held, err)
@@ -563,16 +521,11 @@ func TestRefreshWithNarrowedScopesFailsClosed(t *testing.T) {
 	}
 }
 
-// TestRevocationVerdictYieldsToConcurrentReconsent covers a consent that
-// completes between the custody shred and the Revoked status write: the
-// fenced patch conflicts and the fresh link keeps its Ready status.
 func TestRevocationVerdictYieldsToConcurrentReconsent(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
 	h.refresher.err = &connectors.OAuthError{StatusCode: 400, Code: "invalid_grant"}
 	h.refresher.onRefresh = func() {
-		// The owner re-consents while the refresh is in flight: new custody
-		// and a new status write land before the stale verdict.
 		h.put(store.ConnectorCredential{AccessToken: "gho_new", RefreshToken: "ghr_new"})
 		live := h.reload()
 		linked := metav1.NewTime(h.now)
@@ -581,8 +534,6 @@ func TestRevocationVerdictYieldsToConcurrentReconsent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// The fresh link is another grant this Task never bound: the call is
-	// refused, the verdict yields, and the fresh material stays sealed.
 	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "re-linked") {
 		t.Fatalf("resolve during re-consent err = %v, want refusal", err)
 	}
@@ -595,10 +546,6 @@ func TestRevocationVerdictYieldsToConcurrentReconsent(t *testing.T) {
 	}
 }
 
-// TestResolveJudgesProviderWithoutRefresh covers a fresh (non-expiring)
-// credential: the provider is still validated on every resolution, so a
-// retargeted tool set or a rotated client refuses the token even before
-// the Connection's status catches up.
 func TestResolveJudgesProviderWithoutRefresh(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr_fresh", ExpiresAt: h.now.Add(time.Hour), Scopes: []string{"read:user"}})
@@ -609,7 +556,6 @@ func TestResolveJudgesProviderWithoutRefresh(t *testing.T) {
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
 		t.Fatal(err)
 	}
-	// A new credential-receiving destination the person never consented to.
 	retargeted := provider.DeepCopy()
 	retargeted.Spec.Tools = append(retargeted.Spec.Tools, corev1alpha1.ConnectorTool{
 		Name: "gh_extra", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP, Description: "x",
@@ -624,7 +570,6 @@ func TestResolveJudgesProviderWithoutRefresh(t *testing.T) {
 	if h.refresher.calls.Load() != 0 {
 		t.Fatal("no refresh may run against an unconsented provider")
 	}
-	// A rotated OAuth client refuses the token issued by the old one.
 	rotated := retargeted.DeepCopy()
 	rotated.Spec.Tools = provider.Spec.Tools
 	rotated.Spec.OAuth.ClientID = "rotated-client"
@@ -636,11 +581,6 @@ func TestResolveJudgesProviderWithoutRefresh(t *testing.T) {
 	}
 }
 
-// TestRefreshLosesToReconsentOnRetargetedProvider covers a provider whose
-// client and tool destination both change while a refresh is in flight and
-// the person re-consents to the new provider: the newer credential is
-// returned only if the executing tool is still what the new provider
-// declares, judged against the same provider state as the credential.
 func TestRefreshLosesToReconsentOnRetargetedProvider(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute), Scopes: []string{"read:user"}})
@@ -654,7 +594,6 @@ func TestRefreshLosesToReconsentOnRetargetedProvider(t *testing.T) {
 		if err := h.client.Update(context.Background(), provider); err != nil {
 			t.Fatal(err)
 		}
-		// Re-consent to provider B lands newer material and a matching consent record.
 		h.put(store.ConnectorCredential{AccessToken: "gho_b", RefreshToken: "ghr_b", ExpiresAt: h.now.Add(time.Hour), Scopes: []string{"read:user"}})
 		live := h.reload()
 		live.Status.Consent = connectors.ConsentFor(provider)
@@ -662,19 +601,12 @@ func TestRefreshLosesToReconsentOnRetargetedProvider(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// The re-consent is another grant this Task never bound; it is refused
-	// on that ground before its material could be paired with a
-	// destination the person did not consent to for it.
 	_, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
 	if err == nil || (!strings.Contains(err.Error(), "re-linked") && !strings.Contains(err.Error(), "does not match the endpoint declared")) {
 		t.Fatalf("credential from a retargeted re-consent must not be paired with the old destination: err = %v", err)
 	}
 }
 
-// TestRefreshScopeFieldPresenceIsHonored covers the two ways a refresh
-// response can carry no scopes: an omitted field inherits the previous
-// grant (RFC 6749 §5.1), while an explicitly empty one is a grant of
-// nothing and fails closed.
 func TestRefreshScopeFieldPresenceIsHonored(t *testing.T) {
 	h := newHarness(t)
 	provider := &corev1alpha1.ConnectorProvider{}
@@ -705,10 +637,6 @@ func TestRefreshScopeFieldPresenceIsHonored(t *testing.T) {
 	}
 }
 
-// TestRevocationVerdictSurvivesUnrelatedStatusWrite covers a status write
-// that is not a re-consent (a periodic reconciler pass) landing between the
-// custody shred and the Revoked verdict: the fenced patch conflicts, custody
-// still holds nothing newer, so the verdict is retried and recorded.
 func TestRevocationVerdictSurvivesUnrelatedStatusWrite(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
@@ -731,10 +659,6 @@ func TestRevocationVerdictSurvivesUnrelatedStatusWrite(t *testing.T) {
 	}
 }
 
-// TestRefreshWaiterReturnsWhenItsContextEnds covers a caller whose own
-// context is cancelled while the shared refresh is still talking to the
-// provider: the caller returns at once and the flight keeps running for the
-// callers that still need it.
 func TestRefreshWaiterReturnsWhenItsContextEnds(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
@@ -763,7 +687,6 @@ func TestRefreshWaiterReturnsWhenItsContextEnds(t *testing.T) {
 		t.Fatal("a cancelled caller must not wait for the detached refresh")
 	}
 	close(release)
-	// The flight itself completed and wrote the refreshed material back.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		got, err := h.source.ResolveConnectionCredential(context.Background(), h.request())
@@ -777,11 +700,6 @@ func TestRefreshWaiterReturnsWhenItsContextEnds(t *testing.T) {
 	}
 }
 
-// TestRefreshLosingToDisconnectRevokesRotatedTokens covers a disconnect
-// that fences custody while the provider is rotating the material: the
-// rotated pair cannot be stored, and because it derives from this
-// Connection's own committed grant it is revoked rather than left live
-// outside the disconnect's revocation set.
 func TestRefreshLosingToDisconnectRevokesRotatedTokens(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
@@ -805,10 +723,6 @@ func TestRefreshLosingToDisconnectRevokesRotatedTokens(t *testing.T) {
 	}
 }
 
-// TestRefreshWithinSkewIsSealedButNotReleased covers a provider that
-// accepts the refresh but issues a token already inside the refresh skew:
-// the material is sealed (it is the current grant) but not handed to a call
-// it would expire during.
 func TestRefreshWithinSkewIsSealedButNotReleased(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
@@ -823,11 +737,6 @@ func TestRefreshWithinSkewIsSealedButNotReleased(t *testing.T) {
 	}
 }
 
-// TestRevocationVerdictYieldsToReconsentAfterShred covers the ABA case: the
-// revoked row was version 1, custody was shredded, and a new consent
-// committed a fresh row before the stale flight's shred and verdict landed.
-// Versions never repeat for a Connection, so the stale shred misses the
-// fresh row, its material is returned, and the fresh link stays Ready.
 func TestRevocationVerdictYieldsToReconsentAfterShred(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
@@ -835,9 +744,6 @@ func TestRevocationVerdictYieldsToReconsentAfterShred(t *testing.T) {
 	live := h.reload()
 	ref, _ := connectors.CredentialRef(live)
 	h.refresher.onRefresh = func() {
-		// Between the shred and the verdict: the previous row is gone and a
-		// re-consent commits a new row at the same version number, then a
-		// status write bumps the resourceVersion so the verdict conflicts.
 		if err := h.store.ShredConnectorCredential(context.Background(), string(live.UID), 1); err != nil {
 			t.Fatal(err)
 		}
@@ -849,8 +755,6 @@ func TestRevocationVerdictYieldsToReconsentAfterShred(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// The re-consented row is another grant this Task never bound: the
-	// stale flight is refused and the fresh row survives its shred.
 	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "re-linked") {
 		t.Fatalf("resolve during re-consent err = %v, want refusal", err)
 	}
@@ -862,10 +766,6 @@ func TestRevocationVerdictYieldsToReconsentAfterShred(t *testing.T) {
 	}
 }
 
-// TestRefreshLosingToDisconnectSkipsMovedRevocationEndpoint covers a
-// revocation endpoint moved after consent (refresh stays allowed): the pair a
-// losing refresh cannot store is not sent to the new endpoint, because the
-// sealed revocation identity no longer matches the provider's.
 func TestRefreshLosingToDisconnectSkipsMovedRevocationEndpoint(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute), RevocationDigest: "revocation-at-consent"})
@@ -885,9 +785,6 @@ func TestRefreshLosingToDisconnectSkipsMovedRevocationEndpoint(t *testing.T) {
 	}
 }
 
-// TestRefreshHorizonCoversTheToolTimeout covers a long curated request: a
-// token that would expire before the Tool's timeout elapses is refreshed
-// even though it is outside the plain refresh skew.
 func TestRefreshHorizonCoversTheToolTimeout(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_short", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(3 * time.Minute)})
@@ -895,7 +792,6 @@ func TestRefreshHorizonCoversTheToolTimeout(t *testing.T) {
 	if got, err := h.source.ResolveConnectionCredential(context.Background(), req); err != nil || got.AccessToken != "gho_short" || h.refresher.calls.Load() != 0 {
 		t.Fatalf("default 30s timeout: got %+v err = %v calls = %d, want the token released unrefreshed", got, err, h.refresher.calls.Load())
 	}
-	// The provider curates a five-minute bound for this tool.
 	provider := &corev1alpha1.ConnectorProvider{}
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
 		t.Fatal(err)
@@ -914,8 +810,6 @@ func TestRefreshHorizonCoversTheToolTimeout(t *testing.T) {
 	}
 }
 
-// curateSlowTool declares a ten-minute tool on the fixture provider and
-// returns a request bound to it.
 func (h *harness) curateSlowTool() outboundaccess.ConnectionCredentialRequest {
 	h.t.Helper()
 	provider := &corev1alpha1.ConnectorProvider{}
@@ -929,8 +823,6 @@ func (h *harness) curateSlowTool() outboundaccess.ConnectionCredentialRequest {
 	if err := h.client.Update(context.Background(), provider); err != nil {
 		h.t.Fatal(err)
 	}
-	// The consent covered the provider's tools when it was granted; the
-	// fixture records the widened authority as if the person re-consented.
 	live := h.reload()
 	live.Status.Consent = connectors.ConsentFor(provider)
 	if err := h.client.Status().Update(context.Background(), live); err != nil {
@@ -941,10 +833,6 @@ func (h *harness) curateSlowTool() outboundaccess.ConnectionCredentialRequest {
 	return req
 }
 
-// TestSharedRefreshIsJudgedAgainstEachCallersHorizon covers a flight started
-// by a short request whose token also reaches a long request waiting on it:
-// the long request judges the shared result against its own horizon and is
-// refused rather than released a token that expires mid-request.
 func TestSharedRefreshIsJudgedAgainstEachCallersHorizon(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(30 * time.Second)})
@@ -954,8 +842,6 @@ func TestSharedRefreshIsJudgedAgainstEachCallersHorizon(t *testing.T) {
 	entered := make(chan struct{}, 2)
 	h.source.flightEntered = func() { entered <- struct{}{} }
 	h.refresher.onRefresh = func() {
-		// The long request joins the flight the short one started; the
-		// refresh holds until both callers are in it.
 		go func() {
 			_, err := h.source.ResolveConnectionCredential(context.Background(), slow)
 			joined <- err
@@ -980,10 +866,6 @@ func TestSharedRefreshIsJudgedAgainstEachCallersHorizon(t *testing.T) {
 	}
 }
 
-// TestNonrefreshableTokenWithinHorizonKeepsTheLinkReady covers a token with
-// no refresh token that is still valid but not for a long request: the call
-// is refused with a request-specific reason and the link stays Ready for
-// shorter requests, instead of being marked Expired.
 func TestNonrefreshableTokenWithinHorizonKeepsTheLinkReady(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_5m", TokenType: "bearer", ExpiresAt: h.now.Add(5 * time.Minute)})
@@ -1002,8 +884,6 @@ func TestNonrefreshableTokenWithinHorizonKeepsTheLinkReady(t *testing.T) {
 	}
 }
 
-// flakyCustody fails the next replace or the next few retirements, as a
-// transient store error would.
 type flakyCustody struct {
 	*storageclient.Client
 	failReplace bool
@@ -1033,10 +913,6 @@ func (f *flakyCustody) RetireConnectorCredential(ctx context.Context, ref store.
 	return f.Client.RetireConnectorCredential(ctx, ref, credential)
 }
 
-// TestRefreshKeepsIssuedMaterialWhenCustodyWriteFails covers a refresh the
-// provider completed but custody could not store: the issued pair is kept in
-// sealed retirement custody, retried past a transient failure, so disconnect
-// can still revoke it.
 func TestRefreshKeepsIssuedMaterialWhenCustodyWriteFails(t *testing.T) {
 	previous := refreshRetireBackoff
 	refreshRetireBackoff = time.Millisecond
@@ -1062,9 +938,6 @@ func TestRefreshKeepsIssuedMaterialWhenCustodyWriteFails(t *testing.T) {
 	}
 }
 
-// TestRefreshRetirementIsBounded covers a custody store that blocks while
-// the issued pair is retired: the retirement gives up within its own bound,
-// so the refresh flight is released instead of holding every caller.
 func TestRefreshRetirementIsBounded(t *testing.T) {
 	previousTimeout, previousBackoff := refreshRetireTimeout, refreshRetireBackoff
 	refreshRetireTimeout, refreshRetireBackoff = 50*time.Millisecond, time.Millisecond
@@ -1091,8 +964,6 @@ func TestRefreshRetirementIsBounded(t *testing.T) {
 	}
 }
 
-// disconnectingCustody starts a disconnect the moment custody is read, as a
-// finalizer racing a resolution would.
 type disconnectingCustody struct {
 	*storageclient.Client
 	onRead func()
@@ -1107,9 +978,6 @@ func (d *disconnectingCustody) GetConnectorCredential(ctx context.Context, ref s
 	return credential, err
 }
 
-// TestResolveRechecksDisconnectAfterReadingCustody covers a disconnect that
-// begins after the Connection was read but before custody was: the fresh
-// token is not released.
 func TestResolveRechecksDisconnectAfterReadingCustody(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
@@ -1128,9 +996,6 @@ func TestResolveRechecksDisconnectAfterReadingCustody(t *testing.T) {
 	}
 }
 
-// TestRequireLiveConnectionRechecksTheFrozenLink covers the Delegated
-// post-exchange re-check: it passes for the frozen, Ready link and refuses
-// once the link is being deleted, without reading custody.
 func TestRequireLiveConnectionRechecksTheFrozenLink(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
@@ -1165,11 +1030,6 @@ func TestRequireLiveConnectionRechecksTheFrozenLink(t *testing.T) {
 	}
 }
 
-// TestRequireLiveConnectionTrustsCustodyOverLaggingStatus covers a
-// re-consent that commits in custody while a delegated exchange runs and
-// before the Connection's status shows it: the status still names the
-// frozen grant, but the credential the exchange used is no longer the
-// person's current grant, so the re-check refuses it.
 func TestRequireLiveConnectionTrustsCustodyOverLaggingStatus(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
@@ -1178,7 +1038,6 @@ func TestRequireLiveConnectionTrustsCustodyOverLaggingStatus(t *testing.T) {
 	if err != nil || used.AccessToken != "gho_old" {
 		t.Fatalf("credential = %+v, %v", used, err)
 	}
-	// The re-consent commits custody only; its status write is still pending.
 	ref, err := connectors.CredentialRef(h.reload())
 	if err != nil {
 		t.Fatal(err)
@@ -1195,17 +1054,14 @@ func TestRequireLiveConnectionTrustsCustodyOverLaggingStatus(t *testing.T) {
 		t.Fatalf("err = %v, want the stale grant refused as a re-linked Connection", err)
 	}
 
-	// Custody that cannot report its grant fails closed.
 	h.source.Credentials = grantlessCustody{h.store}
 	if err := h.source.RequireLiveConnection(context.Background(), h.request()); err == nil {
 		t.Fatal("custody without a grant read must fail closed")
 	}
 }
 
-// grantlessCustody hides the grant read.
 type grantlessCustody struct{ store.ConnectorCredentialStore }
 
-// countingCustody counts custody reads.
 type countingCustody struct {
 	*storageclient.Client
 	reads int
@@ -1221,9 +1077,6 @@ func (c *countingCustody) GetConnectorCredentialGrant(ctx context.Context, ref s
 	return c.Client.GetConnectorCredentialGrant(ctx, ref)
 }
 
-// TestResolveRefusesWritesOnReadOnlyLinksBeforeCustody covers a write tool
-// on a readOnly link near expiry: it is refused before custody is read, so it
-// can never refresh, rotate, or shred the credential.
 func TestResolveRefusesWritesOnReadOnlyLinksBeforeCustody(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(30 * time.Second), Scopes: []string{"repo"}})
@@ -1250,13 +1103,11 @@ func TestResolveGitHubPersonCredential(t *testing.T) {
 	if err != nil || got.AccessToken != "gho_fresh" || h.refresher.calls.Load() != 0 {
 		t.Fatalf("fresh credential = %+v err = %v calls = %d", got, err, h.refresher.calls.Load())
 	}
-	// A token that would expire within the horizon is refreshed first.
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(5 * time.Minute)})
 	got, err = h.source.ResolveGitHubPersonCredential(ctx, testNamespace, "github", testIssuer, testSubject, 10*time.Minute)
 	if err != nil || got.AccessToken != "gho_new" || h.refresher.calls.Load() != 1 {
 		t.Fatalf("refreshed credential = %+v err = %v calls = %d", got, err, h.refresher.calls.Load())
 	}
-	// A link that is not Ready serves nothing.
 	live := h.reload()
 	live.Status.Conditions[0].Status = metav1.ConditionFalse
 	if err := h.client.Status().Update(ctx, live); err != nil {
@@ -1285,8 +1136,6 @@ func TestResolveGitHubPersonCredentialRefusesOtherIssuers(t *testing.T) {
 	}
 }
 
-// A Connection deleted and recreated under the same name while its credential
-// is refreshed is another person's consent, even at the same grant sequence.
 func TestResolveGitHubPersonCredentialRefusesAReplacedConnection(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
@@ -1314,10 +1163,6 @@ func TestResolveGitHubPersonCredentialRefusesAReplacedConnection(t *testing.T) {
 	}
 }
 
-// TestRequireLiveConnectionRechecksTheProvider covers a provider that changes
-// during a Delegated exchange, before the Connection's status catches up: a
-// provider that no longer declares the Tool, or is deleted, refuses the
-// credential the exchange produced.
 func TestRequireLiveConnectionRechecksTheProvider(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
@@ -1344,10 +1189,6 @@ func TestRequireLiveConnectionRechecksTheProvider(t *testing.T) {
 	}
 }
 
-// TestRequireLiveConnectionRefusesScopesThePersonDidNotGrant covers a
-// provider that starts requiring a scope during the exchange, which the
-// consent fence does not cover: the credential is refused until the person
-// consents again.
 func TestRequireLiveConnectionRefusesScopesThePersonDidNotGrant(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
@@ -1363,7 +1204,6 @@ func TestRequireLiveConnectionRefusesScopesThePersonDidNotGrant(t *testing.T) {
 	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "did not grant") {
 		t.Fatalf("a newly required scope: err = %v, want a refusal", err)
 	}
-	// The person consents again: custody and the status both hold the scope.
 	h.put(store.ConnectorCredential{AccessToken: "gho_regranted", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour), Scopes: []string{"read:org"}})
 	live := h.reload()
 	live.Status.GrantedScopes = append(live.Status.GrantedScopes, "read:org")
@@ -1375,10 +1215,6 @@ func TestRequireLiveConnectionRefusesScopesThePersonDidNotGrant(t *testing.T) {
 	}
 }
 
-// TestRequireLiveConnectionRefusesARefreshThatNarrowedScopes covers a refresh
-// that commits narrower scopes under the same grant while the Connection's
-// status still shows the old ones: custody's scopes no longer cover the mode,
-// so the exchanged credential is refused.
 func TestRequireLiveConnectionRefusesARefreshThatNarrowedScopes(t *testing.T) {
 	h := newHarness(t)
 	provider := &corev1alpha1.ConnectorProvider{}
@@ -1420,7 +1256,6 @@ func TestRequireLiveConnectionRefusesARefreshThatNarrowedScopes(t *testing.T) {
 	}
 }
 
-// grantReadHook runs a change while custody answers a grant read.
 type grantReadHook struct {
 	*storageclient.Client
 	during func()
@@ -1434,10 +1269,6 @@ func (h grantReadHook) GetConnectorCredentialGrant(ctx context.Context, ref stor
 	return grant, err
 }
 
-// TestRequireLiveConnectionRefusesALinkThatChangedDuringTheGrantRead covers a
-// person disconnecting while custody reports the grant it held: the grant
-// still matches, but the Connection is no longer Ready, so the exchanged
-// credential is refused.
 func TestRequireLiveConnectionRefusesALinkThatChangedDuringTheGrantRead(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
@@ -1459,9 +1290,6 @@ func TestRequireLiveConnectionRefusesALinkThatChangedDuringTheGrantRead(t *testi
 	}
 }
 
-// requireDisconnectedDuringRefresh resolves a credential whose refresh a
-// disconnect wins, and requires the typed connection-required refusal the
-// broker reports as OrkaConnectionRequired, not a plain error.
 func requireDisconnectedDuringRefresh(t *testing.T, h *harness) {
 	t.Helper()
 	_, err := h.source.ResolveConnectionCredential(context.Background(), h.request())

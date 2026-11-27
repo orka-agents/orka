@@ -167,7 +167,6 @@ func TestListToolsTool_Execute(t *testing.T) {
 			if !ok {
 				t.Fatalf("expected data array, got %T", res.Data)
 			}
-			// Built-in tools are listed first, followed by the namespace's Tool CRDs.
 			if len(data) != len(agentBuiltinToolNames)+tt.wantCount {
 				t.Fatalf("got %d tools, want %d built-in plus %d custom", len(data), len(agentBuiltinToolNames), tt.wantCount)
 			}
@@ -178,7 +177,6 @@ func TestListToolsTool_Execute(t *testing.T) {
 				}
 			}
 
-			// Verify specific fields for single tool test
 			if tt.name == "single tool" {
 				toolData := data[len(agentBuiltinToolNames)].(map[string]any)
 				if toolData[nameField] != testMyToolName {

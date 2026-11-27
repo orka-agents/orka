@@ -101,7 +101,7 @@ func TestAgentCopilotSoulReadinessMatchesPlanning(t *testing.T) {
 			r := newAgentSoulWatchReconciler(t, objects...)
 			task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent}}
 			configuration, err := resolveACPAgentSessionConfiguration(ctx, r.Client, task, agent)
-			require.NoError(t, err) // Generic soul resolution permits @; Copilot planning does not.
+			require.NoError(t, err)
 			require.Equal(t, agentcontext.Compose(test.role, expectedSoul), configuration.SystemPrompt)
 			_, planErr := PlanACPRuntimeWithConfiguration(task, agent, ACPRuntimeImages{Copilot: "docker.io/example/copilot@sha256:" + strings.Repeat("c", 64)}, configuration)
 			if test.wantReady {

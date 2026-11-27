@@ -201,7 +201,6 @@ func TestNativeSessionSizePolicyStreamingEnvelope(t *testing.T) {
 	require.NoError(t, ordinary.SetDeadline(time.Now().Add(5*time.Second)))
 	_, err = fmt.Fprintf(ordinary, "POST /api/v1/tasks HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", token, defaultAPIRequestBodyLimit+1)
 	require.NoError(t, err)
-	// fasthttp pre-reads at most 8 KiB even for fixed-length streams.
 	_, err = ordinary.Write(bytes.Repeat([]byte{' '}, 8<<10))
 	require.NoError(t, err)
 	response, err = http.ReadResponse(bufio.NewReader(ordinary), nil)

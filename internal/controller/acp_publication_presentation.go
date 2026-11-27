@@ -12,11 +12,8 @@ import (
 	"github.com/orka-agents/orka/internal/security"
 )
 
-// maxTaskPublicationCommitMessageBytes is the publisher's commit message limit.
 const maxTaskPublicationCommitMessageBytes = 4096
 
-// Validate the selected text before reserving SCM effects. Inspect the full
-// prompt line before truncation so a truncated credential cannot escape detection.
 func validateTaskPullRequestText(task *corev1alpha1.Task) error {
 	if task == nil || task.Spec.Workspace == nil {
 		return nil
@@ -44,9 +41,6 @@ func validateTaskPullRequestText(task *corev1alpha1.Task) error {
 	return publisher.ValidatePullRequestText(title, workspace.PRBody)
 }
 
-// New fields require a peer that advertises them. During rollout, ordinary
-// Tasks can keep using the legacy wire shape; explicit overrides wait before
-// prompt admission and are checked again before any branch publication.
 func (d *ACPDispatcher) pullRequestPresentationCapability(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
 	if err := validateTaskPullRequestText(task); err != nil {
 		return false, err

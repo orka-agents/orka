@@ -309,9 +309,6 @@ func TestExecutionWorkspaceDisabledProviderMaintenanceIntentMatrix(t *testing.T)
 				Namespace: workspace.Namespace,
 				Name:      workspace.Name,
 			}}
-			// A newly quarantined generation must be observed before core publishes
-			// the provider-visible denial condition. Existing maintenance intents
-			// converge idempotently through the same two reconciliation passes.
 			for range 2 {
 				if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
 					t.Fatalf("Reconcile: %v", err)

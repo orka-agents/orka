@@ -155,9 +155,6 @@ func TestIsAllowedWebhookURL_BlocksSelectorlessServices(t *testing.T) {
 	}
 }
 
-// isAllowedWebhookURL applies the production destination policy that runs
-// before any network I/O; public names are checked again at dial time.
-// Every case runs as a Task in the default namespace.
 func isAllowedWebhookURL(ctx context.Context, kubeClient ctrlclient.Reader, rawURL string) error {
 	_, err := resolveWebhookTarget(ctx, kubeClient, rawURL, defaultNS, taskwebhook.PublicAddressPolicy)
 	return err

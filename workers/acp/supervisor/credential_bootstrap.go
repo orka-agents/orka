@@ -22,35 +22,15 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// Credential bootstrap lets a provider-hosted supervisor boot with no
-// credentials at all: execution-workspace providers materialize the workload
-// from an operator-visible template (and may build a per-template golden
-// snapshot by booting and checkpointing an instance), so nothing secret may
-// exist in the process until the controller seeds it. The awaiting-bootstrap
-// phase serves only a minimal health probe and a one-time credential PUT. The
-// provider-visible template carries a public per-instance nonce and Ed25519
-// public key; the controller signs the nonce plus exact request body with a key
-// derived from a separate controller-only bootstrap seed. A captured golden
-// snapshot therefore contains only a waiting supervisor and non-secret
-// verification material.
-
 const (
-	// EnvCredentialBootstrapNonce enables the awaiting-bootstrap phase. The
-	// value is public per-instance entropy bound into the controller signature.
-	EnvCredentialBootstrapNonce = "ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE"
-	// EnvCredentialBootstrapPublicKey carries the non-secret per-instance Ed25519
-	// key that authenticates the controller's one-time bootstrap request.
+	EnvCredentialBootstrapNonce     = "ORKA_ACP_CREDENTIAL_BOOTSTRAP_NONCE"
 	EnvCredentialBootstrapPublicKey = harnessv2.CredentialBootstrapPublicKeyEnv
 
 	credentialBootstrapMaxBodyBytes = 64 << 10
 )
 
-// CredentialBootstrapRequest is the one-time seeding payload.
 type CredentialBootstrapRequest = harnessv2.CredentialBootstrapRequest
 
-// CredentialBootstrapConfigured reports whether the supervisor must wait for
-// controller-seeded credentials before loading its configuration: the nonce is
-// set and no credential file or read-once bootstrap variable is present.
 func CredentialBootstrapConfigured() bool {
 	if strings.TrimSpace(os.Getenv(EnvCredentialBootstrapNonce)) == "" {
 		return false
@@ -77,10 +57,6 @@ type credentialBootstrapState struct {
 	received  chan struct{}
 }
 
-// handle implements the one-time, idempotent seeding endpoint: the first
-// controller-signed payload wins; an identical repeat is acknowledged so a
-// controller retry after an ambiguous response converges; a different payload
-// conflicts so the controller can recycle the exact instance.
 func (s *credentialBootstrapState) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && s.receiver != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -176,11 +152,6 @@ func (s *credentialBootstrapState) handler() http.Handler {
 	return mux
 }
 
-// AwaitCredentialBootstrap serves the awaiting-bootstrap phase on the
-// supervisor listen address until the controller seeds credentials, then
-// shuts the phase server down and returns the seeded values. The caller
-// exports them as the read-once bootstrap variables and proceeds with the
-// normal configuration load.
 func AwaitCredentialBootstrap(ctx context.Context) (CredentialBootstrapRequest, error) {
 	nonce := strings.TrimSpace(os.Getenv(EnvCredentialBootstrapNonce))
 	if nonce == "" {
@@ -224,8 +195,6 @@ func AwaitCredentialBootstrap(ctx context.Context) (CredentialBootstrapRequest, 
 		_ = server.Close()
 		return CredentialBootstrapRequest{}, fmt.Errorf("credential bootstrap was not seeded: %w", ctx.Err())
 	}
-	// Release the listener so the fully configured supervisor can bind the
-	// same address; in-flight bootstrap responses have already been written.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {

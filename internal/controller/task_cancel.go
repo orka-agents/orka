@@ -21,11 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// cancelTaskStatus ends a Task as Cancelled with reason. It revokes the
-// Task's job authority first, and a Task with ACP execution is written under
-// the controller epoch guard, as every ACP terminal projection must be. The
-// ACP dispatcher sees the Cancelled phase, stops the run, and settles it; the
-// MCP broker refuses further calls for the Task.
 func cancelTaskStatus(
 	ctx context.Context,
 	c client.Client,
@@ -53,9 +48,6 @@ func cancelTaskStatus(
 	return write(ctx)
 }
 
-// requestedAgentTaskCancellation returns the message of a cancel request on a
-// Pending or Running Agent Task. Other Task types are completed through
-// requestedTaskCancellation and the native terminal path.
 func requestedAgentTaskCancellation(task *corev1alpha1.Task) (string, bool) {
 	message, ok := task.Annotations[labels.AnnotationCancelRequested]
 	if !ok || task.Spec.Type != corev1alpha1.TaskTypeAgent {
@@ -70,9 +62,6 @@ func requestedAgentTaskCancellation(task *corev1alpha1.Task) (string, bool) {
 	return boundACPStatusMessage(message), true
 }
 
-// cancelRequestedAgentTask ends an Agent Task whose cancellation was
-// requested, re-reading it so a Task that finished or was replaced meanwhile
-// is left alone.
 func (r *TaskReconciler) cancelRequestedAgentTask(ctx context.Context, task *corev1alpha1.Task) error {
 	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
 	var cancelled *corev1alpha1.Task
@@ -90,13 +79,6 @@ func (r *TaskReconciler) cancelRequestedAgentTask(ctx context.Context, task *cor
 			return nil
 		}
 		if current.Status.Execution == nil {
-			// Cancelled before its execution status was projected, for
-			// example while its class workspace was being attached or after
-			// a status write that followed the PromptAttempt was lost: settle
-			// any attempt persisted before the status, which recovery never
-			// visits, and record the terminal execution a queued timeout
-			// records, so cleanup recognizes it and terminal settlement
-			// revokes a linked attachment.
 			attempt, err := r.settleUnprojectedACPAttempt(ctx, current, acpCancelledReason, requested, "cancelled-before-status")
 			if err != nil {
 				return err

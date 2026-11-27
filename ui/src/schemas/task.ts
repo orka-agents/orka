@@ -200,9 +200,6 @@ export const childTaskStatusSchema = z.object({
   result: z.string().optional(),
 })
 
-// Mirrors the safe, non-secret surface of api/v1alpha1 ExecutionWorkspaceStatus.
-// Provider credentials and unsafe identifiers are deliberately excluded — only
-// provider-neutral lifecycle/placement/density metadata is parsed for UI.
 const executionWorkspacePlacementSchema = z.object({
   workerNamespace: z.string().optional(),
   workerPool: z.string().optional(),
@@ -250,15 +247,12 @@ export const taskSpecSchema = z.object({
   prompt: z.string().optional(),
   agentRuntime: agentRuntimeSpecSchema.optional(),
   workspace: workspaceConfigSchema.optional(),
-  // Cron scheduling: a scheduled Task creates one child Task per tick.
   schedule: z.string().optional(),
   suspend: z.boolean().optional(),
   timeZone: z.string().optional(),
   concurrencyPolicy: z.string().optional(),
 })
 
-// The authoritative execution route. Snapshot metadata and abbreviated
-// digests only — snapshot bodies are never exposed through ordinary surfaces.
 const agentExecutionBindingSchema = z.object({
   schemaVersion: z.number(),
   contractVersion: harnessContractVersionSchema,
@@ -291,7 +285,6 @@ const agentExecutionBindingSchema = z.object({
   boundAt: z.string(),
 })
 
-// A data-only parked turn. Only the fields the dashboard reads are listed.
 const taskWaitStatusSchema = z.object({
   state: z.string().optional(),
   kind: z.string().optional(),
@@ -338,7 +331,6 @@ export const k8sMetadataSchema = z.object({
   namespace: z.string().optional(),
   uid: z.string().optional(),
   creationTimestamp: z.string().optional(),
-  // Set once a delete is accepted; the object lingers until finalizers finish.
   deletionTimestamp: z.string().optional(),
   labels: z.record(z.string()).optional(),
   annotations: z.record(z.string()).optional(),

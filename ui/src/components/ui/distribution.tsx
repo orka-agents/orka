@@ -12,11 +12,6 @@ interface DistributionProps {
   className?: string
 }
 
-/**
- * Horizontal phase-distribution bar — proportional segments colored by the
- * shared status tokens, with a small legend. Each segment's width is its share
- * of the total; an all-zero/empty input degrades to a neutral empty track.
- */
 export function Distribution({ segments, className }: DistributionProps) {
   const total = segments.reduce((sum, s) => sum + Math.max(0, s.count), 0)
 

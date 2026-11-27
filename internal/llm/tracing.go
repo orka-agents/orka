@@ -21,7 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
-// TracingProvider wraps an LLM Provider with OpenTelemetry GenAI tracing.
 type TracingProvider struct {
 	inner Provider
 
@@ -45,9 +44,6 @@ var noopTracingSpan = trace.SpanFromContext(context.Background())
 
 const unknownStopReasonErrorType = "unknown_stop_reason"
 
-// NewTracingProvider returns a Provider that records a GenAI span and metrics
-// for every LLM call once an OpenTelemetry provider is configured. Legacy llm.*
-// attributes are dual-emitted during migration.
 func NewTracingProvider(p Provider) Provider {
 	tp := &TracingProvider{inner: p}
 	tp.ensureTelemetry()
@@ -391,16 +387,12 @@ func completionOutcomeErrorType(outcome CompletionOutcome, reason string) string
 	}
 }
 
-// Provider SDK stop reasons and response statuses that the completion outcome
-// map does not classify. They are fixed enum values, so telemetry keeps them.
 var unclassifiedProviderStopReasons = map[string]struct{}{
-	"model_context_window_exceeded": {}, // Anthropic
-	"in_progress":                   {}, // OpenAI Responses status
-	"queued":                        {}, // OpenAI Responses status
+	"model_context_window_exceeded": {},
+	"in_progress":                   {},
+	"queued":                        {},
 }
 
-// Other unknown stop reasons can contain arbitrary text from an
-// OpenAI-compatible endpoint, so they are reported as unknown_stop_reason.
 func telemetryStopReason(reason string) string {
 	normalized := strings.ToLower(strings.TrimSpace(reason))
 	if completionOutcomeForStopReason(reason) != CompletionOutcomeUnknown {
@@ -440,7 +432,6 @@ func requestAttributes(req *CompletionRequest, providerName string, stream bool)
 		attribute.String(genai.AttrProviderName, providerName),
 		attribute.String(genai.AttrRequestModel, requestModel(req)),
 		attribute.Bool(genai.AttrRequestStream, stream),
-		// Legacy attrs during migration.
 		attribute.String("llm.provider", providerName),
 		attribute.String("llm.model", requestModel(req)),
 	}
@@ -470,7 +461,6 @@ func setResponseAttributes(span trace.Span, resp *CompletionResponse, providerNa
 		attribute.String(genai.AttrProviderName, providerName),
 		attribute.Int("llm.tool_calls", len(resp.ToolCalls)),
 	}
-	// GenAI input tokens count the whole prompt, cache reads and writes too.
 	if input := resp.PromptTokens(); input > 0 {
 		attrs = append(attrs,
 			attribute.Int(genai.AttrUsageInputTokens, input),

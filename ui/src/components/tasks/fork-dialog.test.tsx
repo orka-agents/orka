@@ -140,7 +140,6 @@ describe('ForkDialog', () => {
         ),
       ),
     )
-    // Mirror how TaskEventTimeline keeps the dialog mounted across open/close.
     function Harness() {
       const [open, setOpen] = useState(true)
       return (
@@ -152,23 +151,18 @@ describe('ForkDialog', () => {
     }
     const user = userEvent.setup()
     render(<Harness />)
-    // Fork succeeds -> success screen with the new task link.
     await user.click(screen.getByRole('button', { name: /create fork/i }))
     await waitFor(() => expect(screen.getByRole('link', { name: /tk-fork-xyz/ })).toBeInTheDocument())
-    // Close via the footer Close button (distinct from the dialog's X, which is
-    // also labelled "Close"); pick the one with visible text.
     const closeButtons = screen.getAllByRole('button', { name: 'Close' })
     const footerClose = closeButtons.find((b) => b.textContent === 'Close')!
     await user.click(footerClose)
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    // Reopen -> fresh form, not the stale success screen.
     await user.click(screen.getByRole('button', { name: 'reopen' }))
     await waitFor(() => expect(screen.getByRole('button', { name: /create fork/i })).toBeInTheDocument())
     expect(screen.queryByRole('link', { name: /tk-fork-xyz/ })).not.toBeInTheDocument()
   })
 
   it('returns focus to the button that opened it on Cancel and on Escape', async () => {
-    // Opened from state, like the timeline and runtime controls: no DialogTrigger.
     function Harness() {
       const [open, setOpen] = useState(false)
       return (
@@ -201,7 +195,6 @@ describe('ForkDialog', () => {
       http.post(`${API}/tasks/:id/fork`, async ({ request }) => {
         keys.push(request.headers.get('Idempotency-Key') ?? '')
         attempts += 1
-        // Fail the first attempt so the user retries from the error state.
         if (attempts === 1) return new HttpResponse('temporary failure', { status: 503 })
         return HttpResponse.json(
           {
@@ -216,19 +209,16 @@ describe('ForkDialog', () => {
     render(<ForkDialog taskId="tk" event={makeEvent({ seq: 2 })} open onOpenChange={() => {}} />)
     await user.click(screen.getByRole('button', { name: /create fork/i }))
     await waitFor(() => expect(screen.getByText(/temporary failure/i)).toBeInTheDocument())
-    // Retry the same submission.
     await user.click(screen.getByRole('button', { name: /create fork/i }))
     await waitFor(() => expect(screen.getByRole('link', { name: /tk-fork-1/ })).toBeInTheDocument())
     expect(keys).toHaveLength(2)
     expect(keys[0]).toBeTruthy()
-    // The retry must carry the SAME key so the backend collapses the duplicate.
     expect(keys[1]).toBe(keys[0])
   })
 
   it('ignores an async fork result that resolves after the dialog was closed', async () => {
     server.use(
       http.post(`${API}/tasks/:id/fork`, async () => {
-        // Resolve slowly so we can close the dialog mid-flight.
         await delay(80)
         return HttpResponse.json(
           {
@@ -251,13 +241,9 @@ describe('ForkDialog', () => {
     const user = userEvent.setup()
     render(<Harness />)
     await user.click(screen.getByRole('button', { name: /create fork/i }))
-    // Close the dialog while the request is still in flight (Escape, a Radix
-    // affordance that isn't disabled during submission).
     await user.keyboard('{Escape}')
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    // Give the in-flight request time to resolve against the now-closed dialog.
     await new Promise((r) => setTimeout(r, 150))
-    // Reopen — the stale success screen must NOT appear; a fresh form shows.
     await user.click(screen.getByRole('button', { name: 'reopen' }))
     await waitFor(() => expect(screen.getByRole('button', { name: /create fork/i })).toBeInTheDocument())
     expect(screen.queryByRole('link', { name: /tk-fork-late/ })).not.toBeInTheDocument()
@@ -284,15 +270,12 @@ describe('ForkDialog', () => {
     render(<ForkDialog taskId="tk" event={makeEvent({ seq: 2 })} open onOpenChange={() => {}} />)
     await user.click(screen.getByRole('button', { name: /create fork/i }))
     await waitFor(() => expect(screen.getByText(/ambiguous failure/i)).toBeInTheDocument())
-    // Edit the prompt before retrying — the new overrides must NOT collapse onto
-    // the original fork, so the key must change.
     await user.type(screen.getByLabelText(/prompt override/i), 'different prompt')
     await user.click(screen.getByRole('button', { name: /create fork/i }))
     await waitFor(() => expect(screen.getByRole('link', { name: /tk-fork-2/ })).toBeInTheDocument())
     expect(keys).toHaveLength(2)
     expect(keys[0]).toBeTruthy()
     expect(keys[1]).toBeTruthy()
-    // Editing invalidated the key, so the retry carries a DIFFERENT one.
     expect(keys[1]).not.toBe(keys[0])
   })
 
@@ -303,8 +286,6 @@ describe('ForkDialog', () => {
       http.post(`${API}/tasks/:id/fork`, async ({ request }) => {
         keys.push(request.headers.get('Idempotency-Key') ?? '')
         attempt += 1
-        // First attempt is slow so we can close mid-flight; it still succeeds
-        // server-side (the client ignores the result).
         if (attempt === 1) await delay(80)
         return HttpResponse.json(
           {
@@ -326,20 +307,15 @@ describe('ForkDialog', () => {
     }
     const user = userEvent.setup()
     render(<Harness />)
-    // Start a blank-name fork (slow), then close via Escape while it's pending.
     await user.click(screen.getByRole('button', { name: /create fork/i }))
     await user.keyboard('{Escape}')
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    // Let the in-flight request settle (it created the fork server-side).
     await new Promise((r) => setTimeout(r, 150))
-    // Reopen and re-submit the same blank-name fork.
     await user.click(screen.getByRole('button', { name: 'reopen' }))
     await waitFor(() => expect(screen.getByRole('button', { name: /create fork/i })).toBeInTheDocument())
     await user.click(screen.getByRole('button', { name: /create fork/i }))
     await waitFor(() => expect(keys.length).toBe(2))
     expect(keys[0]).toBeTruthy()
-    // The retry must reuse the SAME key so the backend collapses the duplicate,
-    // even though the dialog was reset on the pending close.
     expect(keys[1]).toBe(keys[0])
   })
 
@@ -348,7 +324,6 @@ describe('ForkDialog', () => {
     server.use(
       http.post(`${API}/tasks/:id/fork`, async ({ request }) => {
         keys.push(request.headers.get('Idempotency-Key') ?? '')
-        // First request is slow so we can close mid-flight; it succeeds server-side.
         if (keys.length === 1) await delay(80)
         return HttpResponse.json(
           {
@@ -359,8 +334,6 @@ describe('ForkDialog', () => {
         )
       }),
     )
-    // The dialog stays mounted while the launching event (checkpoint) changes,
-    // mirroring opening "Fork from here" on a different timeline row.
     function Harness() {
       const [open, setOpen] = useState(true)
       const [seq, setSeq] = useState(4)
@@ -373,18 +346,14 @@ describe('ForkDialog', () => {
     }
     const user = userEvent.setup()
     render(<Harness />)
-    // Start a blank-name fork on checkpoint seq 4, close via Escape while pending.
     await user.click(screen.getByRole('button', { name: /create fork/i }))
     await user.keyboard('{Escape}')
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     await new Promise((r) => setTimeout(r, 150))
-    // Reopen on a DIFFERENT checkpoint (seq 10) and submit without editing.
     await user.click(screen.getByRole('button', { name: 'reopen-other' }))
     await waitFor(() => expect(screen.getByRole('button', { name: /create fork/i })).toBeInTheDocument())
     await user.click(screen.getByRole('button', { name: /create fork/i }))
     await waitFor(() => expect(keys.length).toBe(2))
-    // A different checkpoint must carry a DIFFERENT key, so the backend's
-    // key-derived auto-name doesn't collide with the first fork.
     expect(keys[1]).not.toBe(keys[0])
   })
 
@@ -395,8 +364,6 @@ describe('ForkDialog', () => {
       http.post(`${API}/tasks/:id/fork`, async ({ request }) => {
         keys.push(request.headers.get('Idempotency-Key') ?? '')
         attempt += 1
-        // The first attempt fails the client (e.g. the response was lost) even
-        // though the backend may have created the fork; the second succeeds.
         if (attempt === 1) return new HttpResponse('gateway timeout', { status: 504 })
         return HttpResponse.json(
           {
@@ -418,21 +385,15 @@ describe('ForkDialog', () => {
     }
     const user = userEvent.setup()
     render(<Harness />)
-    // Submit a blank-name fork that fails, then close the dialog from the error
-    // state (a non-pending, non-success close).
     await user.click(screen.getByRole('button', { name: /create fork/i }))
     await waitFor(() => expect(screen.getByText(/gateway timeout/i)).toBeInTheDocument())
     await user.keyboard('{Escape}')
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    // Reopen and re-submit the same blank-name fork.
     await user.click(screen.getByRole('button', { name: 'reopen' }))
     await waitFor(() => expect(screen.getByRole('button', { name: /create fork/i })).toBeInTheDocument())
     await user.click(screen.getByRole('button', { name: /create fork/i }))
     await waitFor(() => expect(keys.length).toBe(2))
     expect(keys[0]).toBeTruthy()
-    // The retry must reuse the SAME key so the backend collapses the duplicate
-    // onto the possibly-already-created fork, even though the error close reset
-    // the dialog.
     expect(keys[1]).toBe(keys[0])
   })
 
@@ -461,15 +422,12 @@ describe('ForkDialog', () => {
     }
     const user = userEvent.setup()
     render(<Harness />)
-    // First fork succeeds, then close from the success screen.
     await user.click(screen.getByRole('button', { name: /create fork/i }))
     await waitFor(() => expect(screen.getByRole('link', { name: /tk-fork-1/ })).toBeInTheDocument())
     const closeButtons = screen.getAllByRole('button', { name: 'Close' })
     const footerClose = closeButtons.find((b) => b.textContent === 'Close')!
     await user.click(footerClose)
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    // Reopen and fork the same checkpoint again — this is a NEW fork, so the
-    // confirmed success must have cleared the key and a fresh one is minted.
     await user.click(screen.getByRole('button', { name: 'reopen' }))
     await waitFor(() => expect(screen.getByRole('button', { name: /create fork/i })).toBeInTheDocument())
     await user.click(screen.getByRole('button', { name: /create fork/i }))

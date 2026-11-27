@@ -19,8 +19,6 @@ import (
 func interruptedRuntimeRecoveryEnrollment(t *testing.T, point string) (*runtimeRecoveryFixture, agentRuntimeBootWitness) {
 	t.Helper()
 	f := newRuntimeRecoveryFixture(t)
-	// Retain compatibility with witness-first enrollment written by older
-	// controllers; new enrollment publishes only after Pod retention.
 	legacy := unadmittedRecoveryWitness(t, f)
 	digest, err := runtimeWitnessDigest(legacy)
 	if err != nil {

@@ -4,9 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package credential resolves a person's linked-account access token for a
-// tool call, refreshing it lazily with single-flight per Connection and
-// writing rotated material back to custody. It runs only in the controller.
 package credential
 
 import (
@@ -33,15 +30,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// DefaultRefreshSkew refreshes tokens that expire within this window so a
-// call does not start with a token that dies mid-request.
 const DefaultRefreshSkew = 60 * time.Second
 
-// Refresher performs the OAuth refresh grant. *connectors.OAuthClient
-// satisfies it.
-// Revoker revokes a token at the provider. *connectors.OAuthClient
-// implements it; a Source whose OAuth client does not can only let tokens
-// it could not store expire.
 type Revoker interface {
 	Revoke(ctx context.Context, cfg connectors.OAuthProviderConfig, token string) error
 }
@@ -50,20 +40,15 @@ type Refresher interface {
 	Refresh(ctx context.Context, cfg connectors.OAuthProviderConfig, refreshToken string) (connectors.TokenResponse, error)
 }
 
-// Source implements outboundaccess.ConnectionCredentialSource.
 type Source struct {
-	// Client reads Connections and writes their status.
-	Client client.Client
-	// APIReader reads provider client secrets uncached.
+	Client      client.Client
 	APIReader   client.Reader
 	Credentials store.ConnectorCredentialStore
 	OAuth       Refresher
 	Now         func() time.Time
 	RefreshSkew time.Duration
 
-	flights singleflight.Group
-	// flightEntered, when set, runs once a caller has started or joined the
-	// Connection's refresh flight; tests use it to order callers.
+	flights       singleflight.Group
 	flightEntered func()
 }
 
@@ -79,8 +64,6 @@ func (s *Source) now() time.Time {
 	return time.Now()
 }
 
-// reader is the uncached API reader when configured, so identity and
-// readiness checks never trust a lagging cache. Status writes use Client.
 func (s *Source) reader() client.Reader {
 	if s.APIReader != nil {
 		return s.APIReader
@@ -95,7 +78,6 @@ func (s *Source) skew() time.Duration {
 	return DefaultRefreshSkew
 }
 
-// ResolveConnectionCredential implements outboundaccess.ConnectionCredentialSource.
 func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundaccess.ConnectionCredentialRequest) (outboundaccess.ConnectionCredential, error) {
 	if s == nil || s.Client == nil || s.Credentials == nil {
 		return outboundaccess.ConnectionCredential{}, errors.New("connection credential source is not configured")
@@ -110,8 +92,6 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 	if err != nil {
 		return outboundaccess.ConnectionCredential{}, err
 	}
-	// A write on a readOnly link is refused before custody is read, so a call
-	// that can never run never refreshes, rotates, or shreds the credential.
 	if req.Tool.Class == corev1alpha1.AgentRuntimeBrokeredToolClassWrite &&
 		(connection.Spec.Mode == "" || connection.Spec.Mode == corev1alpha1.ConnectionModeReadOnly) {
 		return outboundaccess.ConnectionCredential{}, errors.New("connection is readOnly; write tools are not available")
@@ -127,16 +107,9 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 		}
 		return outboundaccess.ConnectionCredential{}, err
 	}
-	// Custody, not only status, is fenced to the frozen grant: a consent
-	// that committed between the Connection read and this read (its status
-	// write may still be pending) holds another grant's material.
 	if err := frozenGrantHolds(req, credential); err != nil {
 		return outboundaccess.ConnectionCredential{}, err
 	}
-	// The provider is judged on every resolution, not only when refreshing:
-	// status can trail a provider change by one reconcile, and the held
-	// material must never be released against a client or destination set
-	// the person did not consent to.
 	if _, err := s.validateProvider(ctx, connection, credential, &req.Tool); err != nil {
 		return outboundaccess.ConnectionCredential{}, err
 	}
@@ -146,20 +119,12 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 		if err != nil {
 			return outboundaccess.ConnectionCredential{}, err
 		}
-		// The refresh carries the grant forward; a re-consent that won the
-		// race returns its own grant's material, which this Task never bound.
 		if err := frozenGrantHolds(req, credential); err != nil {
 			return outboundaccess.ConnectionCredential{}, err
 		}
-		// The flight may have been started by a caller with a shorter
-		// horizon; its result is judged against this call's own.
 		if s.expiresWithin(credential, horizon) {
 			return outboundaccess.ConnectionCredential{}, errors.New("the provider issued a token that expires before the tool's request timeout; retry or shorten the tool timeout")
 		}
-		// The refresh may have lost to a re-consent, or the Connection may
-		// have changed mode or generation while the exchange was in flight.
-		// Re-read it and reapply every check before pairing the material
-		// with a mode and generation.
 		if connection, err = s.loadLiveConnection(ctx, req); err != nil {
 			return outboundaccess.ConnectionCredential{}, err
 		}
@@ -167,10 +132,6 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 			return outboundaccess.ConnectionCredential{}, err
 		}
 	} else if connection, err = s.loadLiveConnection(ctx, req); err != nil {
-		// A disconnect that began after the first read tombstones custody
-		// but keeps the row for revocation, and the custody read does not
-		// consult tombstones: the Connection is read again (its deletion
-		// timestamp is set before the finalizer runs) before any release.
 		return outboundaccess.ConnectionCredential{}, err
 	}
 	return outboundaccess.ConnectionCredential{
@@ -182,13 +143,6 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 	}, nil
 }
 
-// RequireLiveConnection implements outboundaccess.ConnectionLivenessChecker:
-// the frozen-binding check ResolveConnectionCredential applies before it
-// releases a credential, and the grant custody holds. Custody, not the
-// Connection's status, is authoritative: a re-consent commits there first,
-// so a status that still shows the frozen grant does not prove the
-// material a credential was derived from is still the person's current
-// grant. It reads the grant only, never the material, and never refreshes.
 func (s *Source) RequireLiveConnection(ctx context.Context, req outboundaccess.ConnectionCredentialRequest) error {
 	if s == nil || s.Client == nil || s.Credentials == nil {
 		return errors.New("connection credential source is not configured")
@@ -215,14 +169,9 @@ func (s *Source) RequireLiveConnection(ctx context.Context, req outboundaccess.C
 	if err != nil {
 		return err
 	}
-	// The exchanged credential carried the frozen grant: resolution refuses
-	// any other before it releases material (frozenGrantHolds).
 	if grant.Sequence != req.Frozen.GrantSequence {
 		return &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionRelinked}
 	}
-	// The provider can change during the exchange too, before the
-	// Connection's status shows it: it must still be accepted, match the
-	// consent, and declare the Tool, as when the credential was resolved.
 	provider := &corev1alpha1.ConnectorProvider{}
 	if err := s.reader().Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
 		return errors.New("connector provider is unavailable")
@@ -233,15 +182,10 @@ func (s *Source) RequireLiveConnection(ctx context.Context, req outboundaccess.C
 	if !connectors.ConsentMatchesProvider(connection, provider) {
 		return errors.New("connector provider changed since consent; the person must consent again")
 	}
-	// The consent fence leaves scopes out, so a provider that now requires
-	// more than the person granted is caught here, from the grant recorded at
-	// consent.
 	mode := connection.Spec.Mode
 	if mode == "" {
 		mode = corev1alpha1.ConnectionModeReadOnly
 	}
-	// A refresh keeps the grant but can narrow its scopes before the status
-	// shows it, so custody's scopes must cover the mode too.
 	required := connectors.ScopesForMode(provider, mode)
 	if !connectors.ScopesCover(connection.Status.GrantedScopes, required) || !connectors.ScopesCover(grant.Scopes, required) {
 		return errors.New("the provider now requires scopes the person did not grant; the person must consent again")
@@ -249,27 +193,18 @@ func (s *Source) RequireLiveConnection(ctx context.Context, req outboundaccess.C
 	if _, err := outboundaccess.DeclaredConnectorTool(provider, req.Tool); err != nil {
 		return err
 	}
-	// The person can disconnect or change the link while custody answers,
-	// and custody may report the grant it held before: the Connection must
-	// still be the frozen, Ready one once custody has answered.
 	if _, err := s.loadLiveConnection(ctx, req); err != nil {
 		return err
 	}
 	return nil
 }
 
-// loadLiveConnection re-reads the requester's Connection and checks that it
-// is exactly the one frozen at dispatch and still Ready for its current
-// generation.
 func (s *Source) loadLiveConnection(ctx context.Context, req outboundaccess.ConnectionCredentialRequest) (*corev1alpha1.Connection, error) {
 	name := req.Frozen.Name
 	if name == "" {
 		name = connectors.ConnectionName(req.Provider, req.Issuer, req.Subject)
 	}
 	connection := &corev1alpha1.Connection{}
-	// Authorization reads bypass the informer cache: a generation change
-	// after dispatch must be seen even before the watch catches up, or the
-	// frozen-binding check could pass against stale readiness.
 	if err := s.reader().Get(ctx, types.NamespacedName{Namespace: req.Namespace, Name: name}, connection); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionNotLinked}
@@ -302,15 +237,10 @@ func (s *Source) needsRefresh(credential store.ConnectorCredential) bool {
 	return s.expiresWithin(credential, s.skew())
 }
 
-// expiresWithin reports a credential that will not outlive horizon.
 func (s *Source) expiresWithin(credential store.ConnectorCredential, horizon time.Duration) bool {
 	return !credential.ExpiresAt.IsZero() && !credential.ExpiresAt.After(s.now().Add(horizon))
 }
 
-// refreshHorizon is how long a released token must stay valid: the refresh
-// skew, or the executing Tool's curated request timeout when that is longer,
-// so a provider that rechecks the bearer during a long call never sees it
-// expire mid-request.
 func (s *Source) refreshHorizon(tool outboundaccess.ToolBinding) time.Duration {
 	horizon := s.skew()
 	if timeout := outboundaccess.NormalizedConnectorTimeout(tool.Timeout); timeout > horizon {
@@ -319,16 +249,8 @@ func (s *Source) refreshHorizon(tool outboundaccess.ToolBinding) time.Duration {
 	return horizon
 }
 
-// refreshSingleFlight refreshes once per Connection grant at a time.
-// Concurrent callers share the result, and a waiter that arrives after
-// another flight finished re-reads custody instead of refreshing again. Only
-// the grant the callers read is refreshed: custody another consent committed
-// meanwhile is returned untouched, since a failed refresh of it (an
-// invalid_grant) would shred a credential no caller of this flight bound.
 func (s *Source) refreshSingleFlight(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, grant int64, horizon time.Duration) (store.ConnectorCredential, error) {
 	results := s.flights.DoChan(fmt.Sprintf("%s/%d", connection.UID, grant), func() (any, error) {
-		// Detach from the caller so a canceled waiter cannot abort a refresh
-		// other callers depend on; bound it independently.
 		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
 		current, err := s.Credentials.GetConnectorCredential(flightCtx, ref)
@@ -343,8 +265,6 @@ func (s *Source) refreshSingleFlight(ctx context.Context, connection *corev1alph
 	if s.flightEntered != nil {
 		s.flightEntered()
 	}
-	// The shared flight keeps running for the callers that still need it,
-	// but each caller returns as soon as its own context is done.
 	var flight singleflight.Result
 	select {
 	case flight = <-results:
@@ -365,8 +285,6 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	logger := log.FromContext(ctx).WithValues("connection", connection.Name, "provider", connection.Spec.ProviderRef.Name)
 	if strings.TrimSpace(current.RefreshToken) == "" {
 		if !s.needsRefresh(current) {
-			// Still valid for shorter requests: only this call's horizon is
-			// not covered, so the link is left Ready.
 			return store.ConnectorCredential{}, errors.New("connection credential cannot be refreshed and expires before the tool's request timeout; shorten the tool timeout or reconnect")
 		}
 		s.markNotReady(ctx, connection, ref, current.Version, corev1alpha1.ConnectionReasonExpired, corev1alpha1.ConnectionStateExpired,
@@ -388,14 +306,8 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	if err != nil {
 		var oauthErr *connectors.OAuthError
 		if errors.As(err, &oauthErr) && oauthErr.IsInvalidGrant() {
-			// The provider no longer honors this refresh token. Shred the
-			// stale material (without a disconnect tombstone, so the person
-			// can consent again) unless a newer consent already replaced it,
-			// in which case the newer material is simply returned.
 			shredErr := s.Credentials.ShredConnectorCredential(ctx, string(connection.UID), current.Version)
 			if errors.Is(shredErr, store.ErrConflict) {
-				// A consent won the race; its material is released only if it
-				// is not itself about to expire, as any resolution would judge.
 				winner, err := s.Credentials.GetConnectorCredential(ctx, ref)
 				if err != nil {
 					return store.ConnectorCredential{}, err
@@ -416,14 +328,12 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 		return store.ConnectorCredential{}, errors.New("connection credential refresh failed")
 	}
 	refreshed := store.ConnectorCredential{
-		AccessToken:     token.AccessToken,
-		RefreshToken:    token.RefreshToken,
-		TokenType:       token.TokenType,
-		ExpiresAt:       token.ExpiresAt,
-		Scopes:          token.Scopes,
-		AuthorityDigest: current.AuthorityDigest,
-		// A refresh carries the grant and the revocation identity forward;
-		// only a consent starts a new grant.
+		AccessToken:      token.AccessToken,
+		RefreshToken:     token.RefreshToken,
+		TokenType:        token.TokenType,
+		ExpiresAt:        token.ExpiresAt,
+		Scopes:           token.Scopes,
+		AuthorityDigest:  current.AuthorityDigest,
 		GrantSequence:    current.GrantSequence,
 		RevocationDigest: current.RevocationDigest,
 	}
@@ -433,39 +343,20 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 	if refreshed.TokenType == "" {
 		refreshed.TokenType = current.TokenType
 	}
-	// Only an omitted scope field inherits the previous grant; an explicitly
-	// empty one is a grant of nothing and fails the mode check below.
 	if !token.ScopePresent {
 		refreshed.Scopes = current.Scopes
 	}
-	// A provider may narrow the scopes on refresh. The narrowed grant is
-	// recorded so the controller re-judges ScopesGranted, and nothing is
-	// released for a mode the new token no longer covers.
 	mode := connection.Spec.Mode
 	if mode == "" {
 		mode = corev1alpha1.ConnectionModeReadOnly
 	}
-	// The rotated material is sealed first, whatever the verdict below: the
-	// provider may have invalidated the previous refresh token, and only
-	// what custody holds can later be revoked at disconnect or re-consent.
-	// Fenced on the version read at flight start: a consent that completed
-	// meanwhile wins, and its material is returned instead.
 	switch err := s.Credentials.ReplaceConnectorCredential(ctx, ref, refreshed, current.Version); {
 	case errors.Is(err, store.ErrConflict):
 		return s.refreshLostToConsent(ctx, cfg, provider, ref, refreshed, horizon, logger)
 	case errors.Is(err, store.ErrConnectorCustodyTombstoned), errors.Is(err, store.ErrNotFound):
-		// Disconnect fenced custody while the provider was rotating the
-		// material. The rotated pair derives from this Connection's own
-		// committed grant, so its ownership is proven and it is revoked
-		// rather than left live outside the disconnect's revocation set.
 		s.revokeUnstorable(ctx, cfg, provider, refreshed, logger)
-		// The Tool request was never sent, so callers are told to reconnect,
-		// as for any other disconnected Connection.
 		return store.ConnectorCredential{}, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionNoCredential}
 	case err != nil:
-		// The provider already issued this pair and may have invalidated the
-		// previous refresh token, so it is kept in sealed retirement custody,
-		// where disconnect revokes it, rather than dropped.
 		switch retireErr := s.retireRefreshed(ctx, ref, refreshed); {
 		case errors.Is(retireErr, store.ErrConnectorCustodyTombstoned):
 			s.revokeUnstorable(ctx, cfg, provider, refreshed, logger)
@@ -474,10 +365,6 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 		}
 		return store.ConnectorCredential{}, fmt.Errorf("store refreshed connection credential: %w", err)
 	}
-	// The row as stored (its version comes from the store's sequence) is
-	// what the status records. A row that already differs was replaced by a
-	// newer refresh or consent, whose own status write must not be undone
-	// with this call's older material.
 	stored, err := s.Credentials.GetConnectorCredential(ctx, ref)
 	if err != nil {
 		return store.ConnectorCredential{}, fmt.Errorf("re-read refreshed connection credential: %w", err)
@@ -491,19 +378,12 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 		return store.ConnectorCredential{}, errors.New("refreshed connection credential no longer covers the connection mode; the person must consent again")
 	}
 	s.recordRefresh(ctx, connection, ref, refreshed)
-	// A token the provider issued already inside the refresh skew would
-	// expire mid-call; it is not released, and the next call refreshes again.
 	if s.expiresWithin(refreshed, horizon) {
 		return store.ConnectorCredential{}, errors.New("the provider issued a token that expires within the refresh window or before the tool's request timeout; retry or shorten the tool timeout")
 	}
 	return refreshed, nil
 }
 
-// retireRefreshed keeps a refreshed pair that could not become custody in
-// sealed retirement custody, so disconnect can still revoke it. A transient
-// store failure is retried a few times, and the call's own cancellation
-// does not abandon material the provider already issued; the attempts are
-// bounded on their own, so a blocked store cannot hold the refresh flight.
 func (s *Source) retireRefreshed(ctx context.Context, ref store.ConnectorCredentialRef, refreshed store.ConnectorCredential) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshRetireTimeout)
 	defer cancel()
@@ -523,9 +403,6 @@ func (s *Source) retireRefreshed(ctx context.Context, ref store.ConnectorCredent
 	return err
 }
 
-// refreshRetireAttempts bounds the retries of retiring refreshed material,
-// and refreshRetireTimeout all of them together; refreshRetireBackoff is the
-// first wait, doubled each time.
 const refreshRetireAttempts = 3
 
 var (
@@ -533,17 +410,12 @@ var (
 	refreshRetireBackoff = 100 * time.Millisecond
 )
 
-// revokeUnstorable revokes, best effort, a refreshed credential that custody
-// refused because the Connection was disconnected meanwhile.
 func (s *Source) revokeUnstorable(ctx context.Context, cfg connectors.OAuthProviderConfig, provider *corev1alpha1.ConnectorProvider, credential store.ConnectorCredential, logger logr.Logger) {
 	revoker, ok := s.OAuth.(Revoker)
 	if !ok {
 		logger.Info("refreshed credential could not be stored after disconnect and the OAuth client cannot revoke it")
 		return
 	}
-	// The tokens go only to the revocation authority sealed with the
-	// material they derive from; a revocation endpoint moved since consent
-	// is never handed them, the same rule disconnect applies.
 	if credential.RevocationDigest == "" || credential.RevocationDigest != connectors.ProviderRevocationDigest(provider) {
 		logger.Info("refreshed credential could not be stored and the provider's revocation authority changed since consent; the tokens are left to expire")
 		return
@@ -561,11 +433,6 @@ func (s *Source) revokeUnstorable(ctx context.Context, cfg connectors.OAuthProvi
 	}
 }
 
-// validateProvider loads the Connection's provider uncached and checks that
-// the held credential may be used against it: the provider is accepted, the
-// credential was issued by this OAuth client (issuer digest), the person's
-// consent covers the provider's current authority (client plus tool
-// destinations), and the granted scopes cover the mode.
 func (s *Source) validateProvider(ctx context.Context, connection *corev1alpha1.Connection, credential store.ConnectorCredential, tool *outboundaccess.ToolBinding) (*corev1alpha1.ConnectorProvider, error) {
 	provider := &corev1alpha1.ConnectorProvider{}
 	if err := s.reader().Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
@@ -577,17 +444,11 @@ func (s *Source) validateProvider(ctx context.Context, connection *corev1alpha1.
 	return provider, nil
 }
 
-// checkProvider judges held material against a provider already read: every
-// error it returns is a provider that does not authorize the material, never
-// a failed read.
 func checkProvider(connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider,
 	credential store.ConnectorCredential, tool *outboundaccess.ToolBinding) error {
 	if !connectors.ProviderAccepted(provider) {
 		return errors.New("connector provider is not accepted")
 	}
-	// The token was issued by the OAuth client sealed with it (the issuer
-	// digest: client identity and endpoints, not tool destinations); a
-	// replaced provider or rotated client must never receive or use it.
 	if credential.AuthorityDigest == "" || credential.AuthorityDigest != connectors.ProviderIssuerDigest(provider) {
 		return &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionClientChanged}
 	}
@@ -601,9 +462,6 @@ func checkProvider(connection *corev1alpha1.Connection, provider *corev1alpha1.C
 	if !connectors.ScopesCover(credential.Scopes, connectors.ScopesForMode(provider, mode)) {
 		return errors.New("connection credential does not cover the connection mode; the person must consent again")
 	}
-	// The executing Tool is judged against this same provider state, so a
-	// credential returned after a re-consent on a retargeted provider can
-	// never be paired with a destination that provider no longer declares.
 	if tool != nil {
 		if _, err := outboundaccess.DeclaredConnectorTool(provider, *tool); err != nil {
 			return err
@@ -619,7 +477,6 @@ func (s *Source) providerConfig(ctx context.Context, provider *corev1alpha1.Conn
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: secretRef.Name}, secret); err != nil {
 		return connectors.OAuthProviderConfig{}, errors.New("connector provider client secret is unavailable")
 	}
-	// The secret is opaque bytes; only emptiness is judged, never trimmed.
 	value := string(secret.Data[secretRef.Key])
 	if strings.TrimSpace(value) == "" {
 		return connectors.OAuthProviderConfig{}, errors.New("connector provider client secret is empty")
@@ -627,11 +484,6 @@ func (s *Source) providerConfig(ctx context.Context, provider *corev1alpha1.Conn
 	return connectors.ProviderOAuthConfig(provider, value), nil
 }
 
-// recordNarrowedScopes stores the scopes a refresh actually returned and
-// withdraws ScopesGranted for the current mode. The controller recomputes the
-// condition from the same field on its next pass. Like markNotReady, a
-// conflict with an unrelated writer is retried while custody still holds
-// the narrowed material, or status would keep advertising the wider grant.
 func (s *Source) recordNarrowedScopes(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, narrowed store.ConnectorCredential, mode string) {
 	logger := log.FromContext(ctx).WithValues("connection", connection.Name)
 	const maxAttempts = 4
@@ -663,17 +515,9 @@ func (s *Source) recordNarrowedScopes(ctx context.Context, connection *corev1alp
 	}
 }
 
-// recordRefresh updates non-secret status after a successful refresh. A
-// failed status write is logged; the refreshed material is already safe in
-// custody and the call may proceed.
 func (s *Source) recordRefresh(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) {
 	logger := log.FromContext(ctx).WithValues("connection", connection.Name)
 	const maxAttempts = 4
-	// Fenced on the resourceVersion read at flight start: a consent that
-	// completed meanwhile has already rewritten status, and this stale
-	// refresh must not overwrite its scopes or expiry. Any other concurrent
-	// writer is retried while custody still holds this refreshed material,
-	// or scopes and expiry would stay stale indefinitely.
 	for attempt := 1; ; attempt++ {
 		now := metav1.NewTime(s.now().UTC())
 		patch := client.MergeFromWithOptions(connection.DeepCopy(), client.MergeFromWithOptimisticLock{})
@@ -699,14 +543,6 @@ func (s *Source) recordRefresh(ctx context.Context, connection *corev1alpha1.Con
 	}
 }
 
-// markNotReady records a terminal link failure. The Ready reason is the
-// durable record the controller projects state from. The patch is fenced on
-// the resourceVersion read at flight start: a consent that completed after
-// the custody shred has already rewritten status, and this stale verdict
-// must not overwrite it. A conflict caused by any other writer (a periodic
-// reconciler pass, say) is retried against the re-read Connection as long as
-// custody still holds nothing newer than the material this verdict judged;
-// otherwise a Ready link with no usable credential could persist.
 func (s *Source) markNotReady(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, judgedVersion int64, reason, state, message string) {
 	logger := log.FromContext(ctx).WithValues("connection", connection.Name, "reason", reason)
 	const maxAttempts = 4
@@ -737,12 +573,6 @@ func (s *Source) markNotReady(ctx context.Context, connection *corev1alpha1.Conn
 	}
 }
 
-// verdictStillCurrent re-reads the Connection for another markNotReady
-// attempt and reports whether the judged material is still what custody
-// holds: nothing (shredded and not re-committed) or the same version.
-// Versions never repeat for a Connection, even across a shred and
-// re-consent, so any other version means a consent or refresh won and its
-// status stands.
 func (s *Source) verdictStillCurrent(ctx context.Context, connection *corev1alpha1.Connection, ref store.ConnectorCredentialRef, judgedVersion int64) bool {
 	fresh := &corev1alpha1.Connection{}
 	if err := s.reader().Get(ctx, client.ObjectKeyFromObject(connection), fresh); err != nil {
@@ -770,8 +600,6 @@ func oauthReason(err error) string {
 	return "transport"
 }
 
-// frozenGrantHolds refuses custody that a consent other than the frozen one
-// produced.
 func frozenGrantHolds(req outboundaccess.ConnectionCredentialRequest, credential store.ConnectorCredential) error {
 	if req.Frozen.GrantSequence <= 0 || credential.GrantSequence != req.Frozen.GrantSequence {
 		return &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionRelinked}
@@ -779,28 +607,14 @@ func frozenGrantHolds(req outboundaccess.ConnectionCredentialRequest, credential
 	return nil
 }
 
-// refreshLostToConsent handles a refresh whose store write lost to a consent
-// that committed meanwhile. The winner's material is released only if it
-// is not itself about to expire; otherwise this call fails and the next one
-// refreshes the winner as any resolution would. The pair this refresh
-// obtained cannot be stored and derives from this Connection's own
-// committed grant, so it is revoked rather than left live outside custody;
-// only material the winner does not hold is revoked, because a provider that
-// kept the refresh token across both exchanges shares it with the winning
-// row, and revoking it would kill the winner's grant.
 func (s *Source) refreshLostToConsent(ctx context.Context, cfg connectors.OAuthProviderConfig, provider *corev1alpha1.ConnectorProvider, ref store.ConnectorCredentialRef, refreshed store.ConnectorCredential, horizon time.Duration, logger logr.Logger) (store.ConnectorCredential, error) {
 	winner, err := s.Credentials.GetConnectorCredential(ctx, ref)
 	if err != nil {
 		return store.ConnectorCredential{}, err
 	}
-	// The pair this refresh obtained is kept in sealed retirement custody
-	// and revoked at disconnect, never revoked now: some providers revoke
-	// every token of a grant together, which would kill the winning
-	// consent that just committed.
 	if winner.AccessToken != refreshed.AccessToken || winner.RefreshToken != refreshed.RefreshToken {
 		switch err := s.retireRefreshed(ctx, ref, refreshed); {
 		case errors.Is(err, store.ErrConnectorCustodyTombstoned):
-			// The Connection is being disconnected: the whole grant goes.
 			s.revokeUnstorable(ctx, cfg, provider, refreshed, logger)
 		case err != nil:
 			logger.Info("refreshed credential that lost to a consent could not be retired; it is left to expire")
@@ -812,13 +626,6 @@ func (s *Source) refreshLostToConsent(ctx context.Context, cfg connectors.OAuthP
 	return winner, nil
 }
 
-// ResolveGitHubPersonCredential returns a person's current github.com token
-// from their link to provider, for an operation the person runs for
-// themselves rather than a Task, such as reading their repositories in their
-// own workspace. It binds the Connection as it is now: only a Ready link
-// owned by the person, whose provider is accepted, issues github.com tokens
-// and is unchanged since consent, serves it. The token stays valid for at
-// least horizon.
 func (s *Source) ResolveGitHubPersonCredential(ctx context.Context, namespace, provider, issuer, subject string, horizon time.Duration) (outboundaccess.ConnectionCredential, error) {
 	if s == nil || s.Client == nil || s.Credentials == nil {
 		return outboundaccess.ConnectionCredential{}, errors.New("connection credential source is not configured")
@@ -859,9 +666,6 @@ func (s *Source) ResolveGitHubPersonCredential(ctx context.Context, namespace, p
 		return outboundaccess.ConnectionCredential{}, err
 	}
 	validate := func(connection *corev1alpha1.Connection, credential store.ConnectorCredential) error {
-		// A Connection deleted and recreated under the same name can reach the
-		// same grant sequence; the credential belongs only to the one it was
-		// read for.
 		if string(connection.UID) != ref.ConnectionUID {
 			return errors.New("connection was replaced; try again")
 		}
@@ -888,8 +692,6 @@ func (s *Source) ResolveGitHubPersonCredential(ctx context.Context, namespace, p
 			return outboundaccess.ConnectionCredential{}, errors.New("the provider issued a token that expires too soon")
 		}
 	}
-	// A disconnect or re-consent may have landed meanwhile; judge the
-	// Connection as it is now before releasing anything.
 	if connection, err = load(); err != nil {
 		return outboundaccess.ConnectionCredential{}, err
 	}
@@ -902,5 +704,4 @@ func (s *Source) ResolveGitHubPersonCredential(ctx context.Context, namespace, p
 	}, nil
 }
 
-// ErrNoPersonConnection reports that the person has no link to the provider.
 var ErrNoPersonConnection = errors.New("the person has no connection to this provider")

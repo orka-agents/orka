@@ -14,21 +14,10 @@ import (
 
 const ceilingToolBash = "Bash"
 
-// validateAgentRuntimeCeiling rejects a Task whose resolved tool policy or
-// iteration budget exceeds the Agent's runtime ceiling. The resolved request is
-// the Task override when present and the Agent default otherwise, so Agent
-// defaults that exceed the ceiling fail as well. A nil task checks only the
-// defaults the Agent sets explicitly, because Tasks may still supply their own
-// policy within the ceiling. Orka-injected coordination tools are not counted.
 func validateAgentRuntimeCeiling(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
 	return validateAgentRuntimeCeilingWithRegisteredPolicy(task, agent, nil)
 }
 
-// validateAgentRuntimeCeilingWithRegisteredPolicy is validateAgentRuntimeCeiling
-// for a runtimeRef Agent whose registered AgentRuntime MCP policy is known. A
-// Task allowlist that exactly matches the registration is judged by the tools
-// that policy actually exposes after its own deny list and Bash gate; any other
-// allowlist, which dispatch rejects anyway, is judged as requested.
 func validateAgentRuntimeCeilingWithRegisteredPolicy(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
@@ -47,8 +36,6 @@ func validateAgentRuntimeCeilingWithRegisteredPolicy(
 	}
 
 	if ceiling.MaxTurns != nil && !runtimeRef && checkTurns {
-		// Registered external runtimes fix the iteration budget in their profile
-		// and reject maxTurns overrides, so the ceiling cannot be exceeded there.
 		if turns := effectiveACPMaxTurns(task, agent); turns > *ceiling.MaxTurns {
 			return fmt.Errorf("agent %q ceiling allows at most %d turns, but the task resolves to %d; set maxTurns or the Agent defaultMaxTurns within the ceiling",
 				agent.Name, *ceiling.MaxTurns, turns)
@@ -59,8 +46,6 @@ func validateAgentRuntimeCeilingWithRegisteredPolicy(
 		return nil
 	}
 	tools, bash := resolvedCeilingToolRequest(task, agent, runtimeRef, registered)
-	// Registered external runtimes fix the Bash gate in their profile, so only
-	// the tool allowlist applies to them.
 	if ceiling.AllowBash != nil && !*ceiling.AllowBash && bash && !runtimeRef {
 		if runtime.Type == corev1alpha1.AgentRuntimeCodex {
 			return fmt.Errorf("agent %q ceiling forbids Bash, but the codex runtime runs shell commands in every session, including read-only ones; use another runtime or allow Bash in the ceiling", agent.Name)
@@ -88,8 +73,6 @@ func validateAgentRuntimeCeilingWithRegisteredPolicy(
 	return nil
 }
 
-// validateAgentRuntimeCeilingForRegistration judges a runtimeRef Task against
-// the MCP policy of the given AgentRuntime read.
 func validateAgentRuntimeCeilingForRegistration(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
@@ -102,11 +85,6 @@ func validateAgentRuntimeCeilingForRegistration(
 	return validateAgentRuntimeCeilingWithRegisteredPolicy(task, agent, policy)
 }
 
-// resolvedCeilingToolRequest returns the tools the Task can execute after the
-// runtime's own normalization, deny list, and Bash gate, and whether that
-// policy grants Bash. It starts from the same allowlist dispatch uses and
-// then drops only the injected coordination tools. A nil tool list means the
-// unrestricted native set.
 func resolvedCeilingToolRequest(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
@@ -115,9 +93,6 @@ func resolvedCeilingToolRequest(
 ) ([]string, bool) {
 	requested := requestedACPAllowedTools(task, agent)
 	if runtimeRef {
-		// External runtimes accept only an exact registered allowlist and
-		// reject allowBash and disallowedTools overrides, then expose what the
-		// registered policy allows, as buildAgentRuntimeMCPConfigurationWithRegistry does.
 		tools := sortedUnique(requested)
 		if tools != nil && registered != nil && slices.Equal(effectiveACPAllowedTools(task, agent), registered.AllowedTools) {
 			policy := harnessv2.MCPToolPolicy{
@@ -130,8 +105,6 @@ func resolvedCeilingToolRequest(
 		return tools, slices.ContainsFunc(tools, isCeilingBashTool)
 	}
 	if len(requested) > 0 && !slices.ContainsFunc(requested, func(tool string) bool { return strings.TrimSpace(tool) != "" }) {
-		// A nonempty all-blank allowlist is the legacy unrestricted sentinel;
-		// judge it as the widest grant so it can never slip past a ceiling.
 		requested = nil
 	} else {
 		requested = effectiveACPAllowedTools(task, agent)
@@ -139,8 +112,6 @@ func resolvedCeilingToolRequest(
 	asked := requestedACPAllowedTools(task, agent)
 	tools, bash := resolvedCeilingRuntimeTools(task, agent, requested)
 	if tools != nil && injectsACPCoordinationTools(task, agent) {
-		// Only the coordination tools Orka added are exempt; one the Task asked
-		// for itself still has to fit the ceiling.
 		tools = slices.DeleteFunc(tools, func(tool string) bool {
 			return slices.Contains(acpInjectedCoordinationTools, tool) &&
 				!slices.ContainsFunc(asked, func(name string) bool { return strings.EqualFold(strings.TrimSpace(name), tool) })
@@ -155,8 +126,6 @@ func resolvedCeilingRuntimeTools(task *corev1alpha1.Task, agent *corev1alpha1.Ag
 		disallowed = sortedUnique(task.Spec.AgentRuntime.DisallowedTools)
 	}
 	allowBash := effectiveACPAllowBash(task, agent)
-	// Without a Task, judge the Agent defaults at their widest: write intent
-	// lifts the read-only narrowing some runtimes apply.
 	intent := corev1alpha1.WorkspaceIntentWrite
 	if task != nil {
 		intent = effectiveACPWorkspaceIntent(task)
@@ -167,37 +136,21 @@ func resolvedCeilingRuntimeTools(task *corev1alpha1.Task, agent *corev1alpha1.Ag
 		tools := acp.OpenCodeEffectiveAllowedTools(allowed, disallowed, allowBash)
 		return tools, allowBash && slices.ContainsFunc(tools, isCeilingBashTool)
 	}
-	// Every Codex session that dispatches can run shell commands: the
-	// unrestricted policy grants the shell, and the only narrower policy Codex
-	// accepts (read intent with Glob, Grep, and Read) still runs read commands
-	// through it. allowBash: false cannot remove that.
 	codexShell := agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCodex
 	if allowed == nil {
 		return nil, allowBash || codexShell
 	}
-	// Judge exactly what dispatch grants: descriptors keep every allowed name
-	// that MCPToolPolicy.Allows accepts, and its deny list matches names
-	// exactly, so a differently cased deny entry does not narrow the request.
 	policy := harnessv2.MCPToolPolicy{AllowedToolNames: allowed, DisallowedToolNames: disallowed, AllowBash: allowBash}
 	tools := sortedUnique(slices.DeleteFunc(slices.Clone(allowed), func(tool string) bool { return !policy.Allows(tool) }))
 	return tools, codexShell || slices.ContainsFunc(tools, isCeilingBashTool)
 }
 
-// ceilingAllowsTool reports whether a requested tool is within the ceiling.
-// Tool names match without regard to case, but scopes must match exactly
-// because they carry command or path text. A bare ceiling entry also covers
-// scoped requests of the same tool; a scoped entry covers only its own scope.
-// An entry for a forwarding Tool covers its derived write tool, which a
-// registered external runtime lists by name; the Tool decides whether it has
-// writes at all.
 func ceilingAllowsTool(ceiling []string, tool string) bool {
 	tool = strings.TrimSpace(tool)
 	if tool == "" {
 		return true
 	}
 	if parent, ok := strings.CutSuffix(tool, harnessv2.MCPForwardWriteSuffix); ok {
-		// Only a Tool name has a write tool: one suffix, on a valid
-		// Kubernetes name, which carries no scope or second suffix.
 		if len(validation.IsDNS1123Subdomain(parent)) > 0 {
 			return false
 		}
@@ -213,7 +166,6 @@ func ceilingAllowsTool(ceiling []string, tool string) bool {
 	})
 }
 
-// splitCeilingTool separates a tool name from its parenthesized scope.
 func splitCeilingTool(tool string) (base, scope string, scoped bool) {
 	tool = strings.TrimSpace(tool)
 	if before, after, ok := strings.Cut(tool, "("); ok {

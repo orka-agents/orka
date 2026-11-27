@@ -138,15 +138,10 @@ func requireSameObject(fd int, expected *unix.Stat_t, kind uint32) error {
 	return nil
 }
 
-// dupCloseOnExec duplicates fd with close-on-exec set atomically. unix.Dup
-// clears the flag, so an adapter another session starts in the meantime would
-// inherit a handle into a private skill folder that outlives our close.
 func dupCloseOnExec(fd int) (int, error) {
 	return unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
 }
 
-// openDirectoryStream returns a separate handle on dirFd for reading entries,
-// so closing it leaves dirFd open.
 func openDirectoryStream(dirFd int) (*os.File, error) {
 	dup, err := dupCloseOnExec(dirFd)
 	if err != nil {
@@ -179,11 +174,6 @@ func readDirectoryNames(dirFd int, remaining int) ([]string, error) {
 	}
 }
 
-// WriteTo creates destination, which must not exist yet, under an existing
-// parent folder and writes the skill into it with fixed modes: folders 0755,
-// files 0644, and 0755 for files that were executable in the image. Ownership
-// is left to the caller, which assigns the whole session tree to the session
-// identity.
 func (t *Tree) WriteTo(destination string) error {
 	if !path.IsAbs(destination) || path.Clean(destination) != destination {
 		return failf(ReasonWriteFailed, "skill %s destination %q must be a clean absolute path", t.Name, destination)
@@ -229,8 +219,6 @@ func (t *Tree) WriteTo(destination string) error {
 	return nil
 }
 
-// withParent opens the parent folder of a relative path component by
-// component with O_NOFOLLOW and calls fn with it and the final name.
 func withParent(rootFd int, relative string, fn func(fd int, name string) error) error {
 	components := strings.Split(relative, "/")
 	fd, err := dupCloseOnExec(rootFd)

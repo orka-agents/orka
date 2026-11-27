@@ -13,9 +13,6 @@ import (
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
-// uniqueConflict reports a unique or primary-key violation as
-// store.ErrConflict. It keeps SQLite's message and error in the chain, so
-// callers that inspect either keep working. Other errors pass through.
 func uniqueConflict(err error) error {
 	if err == nil {
 		return nil

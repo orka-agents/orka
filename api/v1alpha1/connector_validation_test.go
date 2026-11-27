@@ -45,8 +45,6 @@ func loadRootValidator(t *testing.T, crdFile string) schemavalidation.SchemaVali
 	return rootValidator
 }
 
-// requireSpecAtRoot proves the root schema refuses to drop spec, which is the
-// only way a transition rule scoped to spec could be bypassed.
 func requireSpecAtRoot(t *testing.T, crdFile string, spec map[string]any) {
 	t.Helper()
 	rootValidator := loadRootValidator(t, crdFile)
@@ -148,12 +146,9 @@ func TestConnectorProviderSpecRules(t *testing.T) {
 			{timeout: "1m30s"}, {timeout: "500µs"}, {timeout: "1m0.5s"}, {timeout: "10m0.000000001s", wantError: true},
 			{timeout: "1h0m0s", wantError: true}, {timeout: "1m30", wantError: true}, {timeout: "30sm", wantError: true},
 			{timeout: "11m", wantError: true}, {timeout: "1h", wantError: true}, {timeout: "0s", wantError: true},
-			// time.ParseDuration overflows on these even though they look well-formed.
 			{timeout: "9223372036854775808ns", wantError: true}, {timeout: "9223372037s", wantError: true},
 			{timeout: "999999h999999h999999h", wantError: true},
 		}
-		// The forms a typed client sends: metav1.Duration serializes through
-		// time.Duration.String, so 10m arrives as "10m0s" and 0.5ms as "500µs".
 		durations := []time.Duration{10 * time.Minute, 150 * time.Second, 90 * time.Second, 30 * time.Second, 1500 * time.Millisecond, 500 * time.Microsecond, time.Nanosecond}
 		typed := make([]timeoutCase, 0, len(durations))
 		for _, d := range durations {
@@ -177,7 +172,6 @@ func TestConnectorProviderSpecRules(t *testing.T) {
 			schemaErrs := schemavalidation.ValidateCustomResource(nil, map[string]any{"spec": spec}, rootValidator)
 			var celErrs []error
 			if len(schemaErrs) == 0 {
-				// CEL runs only on schema-valid objects, as in the API server.
 				errs, _ := validator.Validate(t.Context(), nil, structural, spec, nil, celconfig.RuntimeCELCostBudget)
 				for _, err := range errs {
 					celErrs = append(celErrs, err)

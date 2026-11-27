@@ -15,11 +15,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-// runtimePoolTestAdoptUnenrolledBoot reproduces a cold start that loses the
-// race with scale-down: desiredReplicas reaches zero before the marked Pod is
-// Ready, so the serving path never enrolls the boot. Scale-down then adopts
-// the Ready Pod as the active instance and requests its drain. The returned
-// fixture's supervisor reports that drain as quiescent.
 func runtimePoolTestAdoptUnenrolledBoot(t *testing.T) *nativePoolBootFixture {
 	t.Helper()
 	f := newNativePoolBootFixture(t, false)
@@ -70,7 +65,6 @@ func runtimePoolTestStopUnenrolledBoot(t *testing.T, f *nativePoolBootFixture) {
 	if got := ptr.Deref(deployment.Spec.Replicas, -1); got != 0 {
 		t.Fatalf("quiescent unenrolled boot left Deployment replicas at %d, want 0", got)
 	}
-	// Without a retention barrier the stopped Pod terminates immediately.
 	if err := f.r.Delete(t.Context(), &f.pod); err != nil {
 		t.Fatal(err)
 	}
@@ -79,9 +73,6 @@ func runtimePoolTestStopUnenrolledBoot(t *testing.T, f *nativePoolBootFixture) {
 	}
 }
 
-// A marked boot with neither a witness nor a retention barrier never admitted
-// work. Its exact authenticated quiescent drain must complete scale-to-zero
-// instead of failing on the missing witness on every reconcile.
 func TestRuntimePoolBootUnenrolledScaleDownCompletesWithoutWitness(t *testing.T) {
 	f := runtimePoolTestAdoptUnenrolledBoot(t)
 	runtimePoolReconcile(t, f.r, f.pool)
@@ -102,9 +93,6 @@ func TestRuntimePoolBootUnenrolledScaleDownCompletesWithoutWitness(t *testing.T)
 	runtimePoolTestAssertNoBootEvidence(t, f)
 }
 
-// A new leader renders a new per-epoch template, so the adopted boot drains
-// through the rollout path. That path must also complete, moving the pool to
-// the new epoch so the next planned upgrade drain can settle.
 func TestRuntimePoolBootUnenrolledBootRetiresAfterControllerTakeover(t *testing.T) {
 	f := runtimePoolTestAdoptUnenrolledBoot(t)
 	f.r.ControllerEpoch++
@@ -142,10 +130,6 @@ func TestRuntimePoolBootUnenrolledBootRetiresAfterControllerTakeover(t *testing.
 	}
 }
 
-// A controller restart while a pool cold-starts renders a new per-epoch
-// template before the Pod ever serves, even though desiredReplicas stays 1.
-// The rollout path then adopts the Ready, never-enrolled boot and drains it;
-// that drain must complete so the new template can start.
 func TestRuntimePoolBootUnenrolledColdStartDrainsAcrossControllerRestart(t *testing.T) {
 	f := newNativePoolBootFixture(t, false)
 	previous := f.r.ControllerEpoch
@@ -183,10 +167,6 @@ func TestRuntimePoolBootUnenrolledColdStartDrainsAcrossControllerRestart(t *test
 	runtimePoolTestAssertNoBootEvidence(t, f)
 }
 
-// The never-enrolled path needs both the witness and the retention barrier to
-// be absent. Either half of the barrier, or a reserved but uncommitted witness,
-// shows enrollment reached retention, so the drain keeps failing closed and
-// writes no cleanup receipt.
 func TestRuntimePoolBootUnenrolledDrainRequiresAbsentEnrollmentEvidence(t *testing.T) {
 	patchPod := func(t *testing.T, f *nativePoolBootFixture, mutate func(*corev1.Pod)) {
 		t.Helper()
@@ -250,9 +230,6 @@ func TestRuntimePoolBootUnenrolledDrainRequiresAbsentEnrollmentEvidence(t *testi
 	}
 }
 
-// An enrolled boot keeps its retention barrier until retirement is proven, so
-// a lost witness must keep its drain failing closed: no receipt, no retirement
-// record and no release of the retained Pod.
 func TestRuntimePoolBootEnrolledDrainStillRequiresWitness(t *testing.T) {
 	f := newNativePoolBootFixture(t, false)
 	f.serve(t)

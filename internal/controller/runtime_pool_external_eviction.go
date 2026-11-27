@@ -29,40 +29,24 @@ import (
 )
 
 const (
-	// externalRuntimeEvictionAnnotation records the observed eviction of the
-	// exact current instance. It is bound to the workspace, sequence and
-	// instance identity, and a mismatching record authorizes nothing.
-	externalRuntimeEvictionAnnotation = "orka.ai/external-runtime-eviction"
-	// externalRuntimeRetirementRequestedAnnotation requests exact retirement and
-	// replacement of the current external instance.
+	externalRuntimeEvictionAnnotation            = "orka.ai/external-runtime-eviction"
 	externalRuntimeRetirementRequestedAnnotation = "orka.ai/external-runtime-retirement-requested"
 
 	externalEvictionSourceWorker     = "WorkerTermination"
 	externalEvictionSourceSupervisor = "SupervisorSignal"
 
-	// podConditionDisruptionTarget is set by Kubernetes before a disruptive
-	// termination that may not delete the Pod first, such as graceful node
-	// shutdown.
 	podConditionDisruptionTarget corev1.PodConditionType = "DisruptionTarget"
 )
 
-// externalRuntimeEviction is the durable eviction record for one exact
-// external runtime instance.
 type externalRuntimeEviction struct {
 	WorkspaceUID types.UID                          `json:"workspaceUID"`
 	Sequence     int64                              `json:"sequence"`
 	Identity     workspacev1alpha1.InstanceIdentity `json:"identity"`
 	Source       string                             `json:"source"`
 	SignaledAt   time.Time                          `json:"signaledAt"`
-	// Deadline is the end of the eviction window. Suspension is never
-	// authorized at or after it.
-	Deadline    time.Time `json:"deadline"`
-	Suspendable bool      `json:"suspendable"`
-	// Outcome acknowledges the settled reason Core persisted for this exact
-	// instance once it stopped. It is written only after that status write
-	// is confirmed, so a WorkerEviction condition with the same reason left by
-	// an earlier instance is never mistaken for this instance's outcome.
-	Outcome string `json:"outcome,omitempty"`
+	Deadline     time.Time                          `json:"deadline"`
+	Suspendable  bool                               `json:"suspendable"`
+	Outcome      string                             `json:"outcome,omitempty"`
 }
 
 func (e *externalRuntimeEviction) matches(w *workspacev1alpha1.ExecutionWorkspace) bool {
@@ -86,9 +70,6 @@ func externalRuntimeEvictionRecord(pool *corev1alpha1.RuntimePool) (*externalRun
 	return &record, nil
 }
 
-// currentExternalRuntimeEviction returns the eviction record only when it binds
-// the workspace's exact current instance. A malformed record fails closed: it
-// is treated as an eviction whose window has already ended.
 func currentExternalRuntimeEviction(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (*externalRuntimeEviction, bool) {
 	record, err := externalRuntimeEvictionRecord(pool)
 	if err != nil {
@@ -100,8 +81,6 @@ func currentExternalRuntimeEviction(pool *corev1alpha1.RuntimePool, w *workspace
 	return record, false
 }
 
-// externalWorkerEvictionError reports that the exact attested native worker
-// began graceful termination. It is a stale identity for admission.
 type externalWorkerEvictionError struct {
 	signaledAt time.Time
 	deadline   time.Time
@@ -113,16 +92,6 @@ func (e *externalWorkerEvictionError) Error() string {
 
 func (e *externalWorkerEvictionError) Unwrap() error { return workspaceprovider.ErrStaleIdentity }
 
-// externalWorkerEvictionSignal derives the eviction window from the worker
-// Pod. The worker forwards SIGTERM to its Actors when the kubelet signals it,
-// which is the Pod's deletion time less its grace period. The window ends at
-// the worker's shutdown budget or the Pod's own grace, whichever is first.
-// A DisruptionTarget condition announces the termination earlier still. When
-// the Pod carries both, the window starts at the earlier signal and ends at
-// the earlier deadline: a deletion that follows a disruption never reopens or
-// extends the window the disruption started.
-// Every signal time is clamped to Core's clock, as the supervisor signal is:
-// a node or API server clock ahead of Core never extends the window.
 func externalWorkerEvictionSignal(worker *corev1.Pod, now time.Time) (time.Time, time.Time, bool) {
 	if worker == nil {
 		return time.Time{}, time.Time{}, false
@@ -168,9 +137,6 @@ func externalWorkerEvictionSignal(worker *corev1.Pod, now time.Time) (time.Time,
 	return signaledAt, deadline, evicting
 }
 
-// externalWorkspaceSuspendable reports whether an eviction of the workspace's
-// current instance may drain for a data-only suspension. Operator access
-// forfeits retention (ADR 0044), so a tainted workspace never announces one.
 func externalWorkspaceSuspendable(w *workspacev1alpha1.ExecutionWorkspace, tainted bool) bool {
 	return w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 		w.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed &&
@@ -178,32 +144,14 @@ func externalWorkspaceSuspendable(w *workspacev1alpha1.ExecutionWorkspace, taint
 		slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
 }
 
-// externalRetirementAction is the provider action Core will authorize for the
-// exact current instance once its drain settles. Drain requests carry it so a
-// supervisor whose worker is terminated afterward knows whether its data must
-// remain suspendable.
 func externalRetirementAction(w *workspacev1alpha1.ExecutionWorkspace, deleting, tainted bool) workspacev1alpha1.WorkloadRetirementAction {
-	// Quarantine is terminal and never reusable, so it never earns the data-preserving
-	// Suspend authorization that a Suspend-capable class otherwise receives. Providers
-	// act on quarantine only through a Stop (or Delete) authorization.
 	quarantined := w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
-	// A failed instance has no new data to capture; its last verified
-	// checkpoint stays with the provider for explicit recovery.
 	failed := w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed
-	// Operator access forfeits retention (ADR 0044): a tainted workspace is
-	// never captured into a data checkpoint, so it never earns a new Suspend
-	// authorization either. Task settlement and retention delete it; until
-	// then, scale-down retires its instance with Stop.
 	tainted = tainted || operatoraccess.Tainted(w.Annotations)
 	switch {
 	case deleting:
 		return workspacev1alpha1.WorkloadRetirementDelete
 	case tainted && !quarantined && !failed && externalSuspendRetirementAuthorized(w):
-		// A Suspend authorized for this exact instance before the taint
-		// landed may already be capturing. Rewriting it to Stop mid-capture
-		// would abort a provider operation in an unspecified state, and it
-		// would not remove data already captured; the workspace's Delete
-		// disposition is what removes it. Keep the authorization stable.
 		return workspacev1alpha1.WorkloadRetirementSuspend
 	case !quarantined && !failed && !tainted && (w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended || slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)):
 		return workspacev1alpha1.WorkloadRetirementSuspend
@@ -212,8 +160,6 @@ func externalRetirementAction(w *workspacev1alpha1.ExecutionWorkspace, deleting,
 	}
 }
 
-// externalSuspendRetirementAuthorized reports a Suspend retirement already
-// authorized for the exact current instance.
 func externalSuspendRetirementAuthorized(w *workspacev1alpha1.ExecutionWorkspace) bool {
 	retirement, workload, allocation := w.Spec.Retirement, w.Spec.Workload, w.Status.Allocation
 	return retirement != nil && workload != nil && allocation != nil &&
@@ -228,11 +174,6 @@ func externalRetirementDrainReason(action workspacev1alpha1.WorkloadRetirementAc
 	return harnessv2.DrainReasonWorkspaceRetirement
 }
 
-// supervisorWorkerEvictionSignal returns when an authenticated supervisor
-// status reports its host worker's termination signal. The eviction timestamp
-// is reported independently of the drain reason, because the signal can
-// arrive during a suspension or capacity drain that keeps its own reason; a
-// worker_eviction drain without it still counts from its request time.
 func (r *RuntimePoolReconciler) supervisorWorkerEvictionSignal(status harnessv2.StatusResponse) (time.Time, bool) {
 	if !status.Drain.Requested {
 		return time.Time{}, false
@@ -246,14 +187,11 @@ func (r *RuntimePoolReconciler) supervisorWorkerEvictionSignal(status harnessv2.
 	}
 	signaledAt = signaledAt.UTC()
 	if now := r.now().UTC(); signaledAt.IsZero() || signaledAt.After(now) {
-		// A supervisor clock ahead of Core never extends the window.
 		signaledAt = now
 	}
 	return signaledAt, true
 }
 
-// observeExternalSupervisorEviction handles a supervisor that self-reported
-// its worker's termination signal through an authenticated status probe.
 func (r *RuntimePoolReconciler) observeExternalSupervisorEviction(ctx context.Context, pool *corev1alpha1.RuntimePool, status harnessv2.StatusResponse) (ctrl.Result, bool, error) {
 	if !runtimePoolHasExternalWorkspace(pool) {
 		return ctrl.Result{}, false, nil
@@ -270,12 +208,6 @@ func (r *RuntimePoolReconciler) observeExternalSupervisorEviction(ctx context.Co
 	return result, true, err
 }
 
-// beginExternalRuntimeEviction records the eviction of the exact current
-// instance and, for a data-only suspendable workspace, requests its exact
-// retirement. Retirement then reuses the authenticated drain: admission stays
-// closed, prompts already accepted settle, and only a quiescent runtime earns a
-// Suspend authorization before the deadline. A non-suspendable workspace keeps
-// the existing failure semantics for a lost instance.
 func (r *RuntimePoolReconciler) beginExternalRuntimeEviction(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -300,11 +232,6 @@ func (r *RuntimePoolReconciler) beginExternalRuntimeEviction(
 
 var errExternalEvictionUnbound = errors.New("runtime worker eviction observed without an exact instance identity or with an invalid record")
 
-// recordExternalRuntimeEviction persists an eviction signal for the exact
-// current instance, merging it with any earlier record: the earliest signal
-// and the shortest window win, so a later observation never extends the time
-// left to suspend. It is also used while a retirement drain is already in
-// progress, where requestRetirement is false.
 func (r *RuntimePoolReconciler) recordExternalRuntimeEviction(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -363,12 +290,6 @@ func (r *RuntimePoolReconciler) recordExternalRuntimeEviction(
 	return &record, nil
 }
 
-// observeExternalRetiringWorkerEviction keeps collecting eviction signals
-// while a retirement drain runs: termination can begin during a drain that
-// started for another reason, and the Pod can reveal a shorter window than a
-// supervisor signal recorded earlier. The action is the retirement the drain
-// will authorize; it decides whether the eviction is reported as draining for
-// suspension.
 func (r *RuntimePoolReconciler) observeExternalRetiringWorkerEviction(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace, status *harnessv2.StatusResponse, action workspacev1alpha1.WorkloadRetirementAction) error {
 	a := w.Status.Allocation
 	if a == nil || a.Startup == nil {
@@ -400,12 +321,6 @@ func (r *RuntimePoolReconciler) observeExternalRetiringWorkerEviction(ctx contex
 	return nil
 }
 
-// markExternalRetiringEviction publishes an eviction observed during a
-// retirement drain. A Suspend retirement drains for suspension, so its
-// settlement can later report EvictionSuspended; any other retirement cannot
-// preserve the instance's data. A condition already reporting this eviction,
-// including an expired window, is preserved; one left by an earlier instance
-// is replaced.
 func (r *RuntimePoolReconciler) markExternalRetiringEviction(ctx context.Context, pool *corev1alpha1.RuntimePool, record *externalRuntimeEviction, action workspacev1alpha1.WorkloadRetirementAction) error {
 	if record == nil {
 		return nil
@@ -425,8 +340,6 @@ func (r *RuntimePoolReconciler) markExternalRetiringEviction(ctx context.Context
 	return r.Status().Patch(ctx, pool, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
-// externalEvictionProgress closes admission and reports the eviction
-// condition without changing the bound instance.
 func (r *RuntimePoolReconciler) externalEvictionProgress(ctx context.Context, pool *corev1alpha1.RuntimePool, lifecycle corev1alpha1.RuntimePoolLifecycle, reason, message string) (ctrl.Result, error) {
 	status := r.baseRuntimePoolStatus(pool, pool.Status.CurrentReplicas)
 	status.ActiveInstance = pool.Status.ActiveInstance
@@ -436,9 +349,6 @@ func (r *RuntimePoolReconciler) externalEvictionProgress(ctx context.Context, po
 	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 }
 
-// externalEvictionDeadlineExceeded refuses a Suspend authorization at or after
-// the eviction deadline. The worker has killed (or is about to kill) the
-// instance, so a late snapshot could not be trusted to hold settled work.
 func (r *RuntimePoolReconciler) externalEvictionDeadlineExceeded(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) bool {
 	record, malformed := currentExternalRuntimeEviction(pool, w)
 	if malformed {
@@ -447,13 +357,6 @@ func (r *RuntimePoolReconciler) externalEvictionDeadlineExceeded(pool *corev1alp
 	return record != nil && !r.now().Before(record.Deadline)
 }
 
-// externalSuspendNotAfter bounds a Suspend authorization by the exact
-// instance's recorded eviction deadline. Core cannot withdraw the
-// authorization once written, so the provider enforces the deadline: it never
-// starts a suspension after notAfter and stops the instance instead. A bound
-// already written is kept, or moved earlier by a shorter window, but never
-// removed or extended. Any other action carries no bound, which also clears it
-// when deletion supersedes the Suspend.
 func externalSuspendNotAfter(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace, action workspacev1alpha1.WorkloadRetirementAction) *metav1.Time {
 	if action != workspacev1alpha1.WorkloadRetirementSuspend {
 		return nil
@@ -464,8 +367,6 @@ func externalSuspendNotAfter(pool *corev1alpha1.RuntimePool, w *workspacev1alpha
 		notAfter = existing.NotAfter.DeepCopy()
 	}
 	if record, malformed := currentExternalRuntimeEviction(pool, w); !malformed && record != nil {
-		// The API stores whole seconds, truncating, so the stored bound never
-		// extends the window, and the stored value then wins over the record.
 		deadline := metav1.NewTime(record.Deadline)
 		if notAfter == nil || deadline.Before(notAfter) {
 			notAfter = &deadline
@@ -474,25 +375,12 @@ func externalSuspendNotAfter(pool *corev1alpha1.RuntimePool, w *workspacev1alpha
 	return notAfter
 }
 
-// externalProviderSuspendDeadlineExceeded reports that the Suspend
-// authorization's notAfter, less the provider's clock-skew margin, passed
-// before the provider started the suspension, so it stopped the instance
-// without preserving its data.
 func externalProviderSuspendDeadlineExceeded(w *workspacev1alpha1.ExecutionWorkspace) bool {
 	condition := meta.FindStatusCondition(w.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceDataPlaneReady))
 	return condition != nil && condition.ObservedGeneration == w.Generation &&
 		condition.Reason == string(workspacev1alpha1.ReasonSuspendDeadlineExceeded)
 }
 
-// externalEvictionSettlementPending reports whether an eviction still needs
-// its outcome recorded before the markers that hold the pool in retirement are
-// removed. That is the case while the persisted condition reports an eviction
-// draining. It is also the case while the persisted record binds the exact
-// instance w and has not acknowledged its outcome, for example because the
-// draining report was lost to a status conflict: the condition is then absent
-// or still shows an earlier instance's outcome, possibly with the same reason,
-// and only the record's acknowledgement tells them apart. A record for any
-// other instance never makes this one pending.
 func externalEvictionSettlementPending(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) bool {
 	condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction)
 	if condition != nil && condition.Status == metav1.ConditionTrue && condition.Reason == corev1alpha1.RuntimePoolReasonEvictionDraining {
@@ -506,9 +394,6 @@ func externalEvictionSettlementPending(pool *corev1alpha1.RuntimePool, w *worksp
 	return record.Outcome != reason
 }
 
-// externalEvictionAwaitingOutcome returns the pool's persisted eviction record
-// when it binds the exact instance w and announced a data-only suspension, so
-// that how it ended must be reported.
 func externalEvictionAwaitingOutcome(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) *externalRuntimeEviction {
 	if w == nil {
 		return nil
@@ -520,9 +405,6 @@ func externalEvictionAwaitingOutcome(pool *corev1alpha1.RuntimePool, w *workspac
 	return record
 }
 
-// acknowledgeExternalEvictionOutcome binds the outcome just persisted in
-// status to the exact instance's eviction record. Callers invoke it only after
-// that status write is confirmed.
 func (r *RuntimePoolReconciler) acknowledgeExternalEvictionOutcome(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) error {
 	record := externalEvictionAwaitingOutcome(pool, w)
 	if record == nil {
@@ -542,15 +424,12 @@ func (r *RuntimePoolReconciler) acknowledgeExternalEvictionOutcome(ctx context.C
 	return r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 
-// externalEvictionOutcome is how an eviction ended once its exact instance
-// stopped: suspended with verified retained data, or lost.
 func externalEvictionOutcome(w *workspacev1alpha1.ExecutionWorkspace) (string, string) {
 	a := (*workspacev1alpha1.AllocationObservation)(nil)
 	if w != nil {
 		a = w.Status.Allocation
 	}
 	if w != nil && externalProviderSuspendDeadlineExceeded(w) {
-		// The provider's report wins over any retained data it also shows.
 		return corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded,
 			"the suspension authorization expired before the provider started suspending the runtime, so it stopped without its data; its last checkpoint is retained and uncertain work is never replayed"
 	}
@@ -561,11 +440,6 @@ func externalEvictionOutcome(w *workspacev1alpha1.ExecutionWorkspace) (string, s
 		"the evicted runtime stopped without a data-only suspension; its last checkpoint is retained and uncertain work is never replayed"
 }
 
-// externalEvictionSettledCondition records how an eviction ended once its
-// exact instance stopped. Until the instance's record acknowledges an outcome,
-// any condition other than a draining report is not this instance's outcome,
-// even with the same reason, so the outcome is recorded as a new transition
-// that carries the current time.
 func (r *RuntimePoolReconciler) externalEvictionSettledCondition(pool *corev1alpha1.RuntimePool, status *corev1alpha1.RuntimePoolStatus, w *workspacev1alpha1.ExecutionWorkspace) {
 	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction)
 	reason, message := externalEvictionOutcome(w)

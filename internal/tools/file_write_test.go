@@ -89,7 +89,6 @@ func TestFileWriteTool_Execute_Write(t *testing.T) {
 		t.Errorf("mode = %q, want %q", writeResult.Mode, "write")
 	}
 
-	// Verify file content
 	content, err := os.ReadFile(filepath.Join(tmpDir, "test.txt"))
 	if err != nil {
 		t.Fatalf("failed to read file: %v", err)
@@ -107,7 +106,6 @@ func TestFileWriteTool_Execute_Append(t *testing.T) {
 		allowedPaths: []string{tmpDir},
 	}
 
-	// Write initial content
 	filePath := filepath.Join(tmpDir, "append.txt")
 	if err := os.WriteFile(filePath, []byte("line1\n"), 0644); err != nil {
 		t.Fatalf("failed to write initial file: %v", err)

@@ -29,10 +29,8 @@ type fakeConnectionSource struct {
 	credential ConnectionCredential
 	err        error
 	calls      int
-	// liveErr is what the post-exchange Connection re-check reports.
 	liveErr    error
 	liveChecks []ConnectionCredentialRequest
-	// duringLive runs inside the post-exchange Connection re-check.
 	duringLive func()
 }
 
@@ -258,8 +256,6 @@ func TestKubernetesResolverConnectionModePreconditions(t *testing.T) {
 		req := base
 		req.FrozenConnections = map[string]FrozenConnection{}
 		for name, frozen := range base.FrozenConnections {
-			// The snapshot pinned another policy object (or generation): the
-			// policy's credential output may differ from what was dispatched.
 			frozen.PolicyUID, frozen.PolicyGeneration = "another-policy-uid", 7
 			req.FrozenConnections[name] = frozen
 		}
@@ -370,7 +366,6 @@ func TestKubernetesResolverConnectionModeBindsDeclaredTool(t *testing.T) {
 			}
 		})
 	}
-	// A readWrite link may use the declared write tool with the default method.
 	source.credential.Mode = corev1alpha1.ConnectionModeReadWrite
 	req := f.base
 	req.Tool = ToolBinding{Name: "gh_comment", URL: "https://api.github.com/comments", Class: corev1alpha1.AgentRuntimeBrokeredToolClassWrite}
@@ -385,7 +380,6 @@ func TestDeclaredConnectorToolRequiresDeclaredHeaders(t *testing.T) {
 		HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/search/issues", Method: "GET", Headers: map[string]string{"Accept": "application/vnd.github+json"}},
 	}}}}
 	binding := ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead}
-	// The declared header set must match exactly; a canonical spelling is fine.
 	binding.Headers = map[string]string{"accept": "application/vnd.github+json"}
 	if _, err := DeclaredConnectorTool(provider, binding); err != nil {
 		t.Fatalf("declared headers must be accepted: %v", err)
@@ -411,13 +405,11 @@ func TestDeclaredConnectorToolRequiresDeclaredSchema(t *testing.T) {
 		HTTP:       &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/search/issues", Method: "GET"},
 	}}}}
 	binding := ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead}
-	// The same schema, however formatted, is accepted.
 	binding.Parameters = &apiextensionsv1.JSON{Raw: []byte(`{
 		"additionalProperties": false, "properties": {"q": {"type": "string"}}, "required": ["q"], "type": "object"}`)}
 	if _, err := DeclaredConnectorTool(provider, binding); err != nil {
 		t.Fatalf("equivalent schema must be accepted: %v", err)
 	}
-	// A weaker or absent Tool schema cannot replace the curated one.
 	for name, parameters := range map[string]*apiextensionsv1.JSON{
 		"absent": nil,
 		"weaker": {Raw: []byte(`{"type":"object"}`)},
@@ -436,8 +428,6 @@ func TestDeclaredConnectorToolEmptyDeclaredHeaderStillRequiresPresence(t *testin
 		HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/search/issues", Method: "GET", Headers: map[string]string{"Accept": ""}},
 	}}}}
 	binding := ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead}
-	// A declared header with an empty value is still a declared header: an
-	// unrelated header of the same count cannot stand in for it.
 	binding.Headers = map[string]string{"X-HTTP-Method-Override": "DELETE"}
 	if _, err := DeclaredConnectorTool(provider, binding); err == nil {
 		t.Fatal("an undeclared header must not replace a declared empty one")
@@ -448,8 +438,6 @@ func TestDeclaredConnectorToolEmptyDeclaredHeaderStillRequiresPresence(t *testin
 	}
 }
 
-// A Tool may not keep a credential-bearing request open longer than the
-// provider's curated timeout; both sides default to 30s.
 func TestDeclaredConnectorToolComparesTimeouts(t *testing.T) {
 	provider := &corev1alpha1.ConnectorProvider{ObjectMeta: metav1.ObjectMeta{Name: "github"}, Spec: corev1alpha1.ConnectorProviderSpec{
 		Tools: []corev1alpha1.ConnectorTool{{
@@ -480,8 +468,6 @@ func TestDeclaredConnectorToolComparesTimeouts(t *testing.T) {
 	if _, err := DeclaredConnectorTool(provider, defaulted); err == nil {
 		t.Fatal("a longer Tool timeout must be refused")
 	}
-	// An explicit 0s or negative timeout would run without a deadline; it
-	// is refused rather than read as the default.
 	for _, explicit := range []time.Duration{0, -time.Second} {
 		defaulted.Timeout, defaulted.TimeoutSet = explicit, true
 		if _, err := DeclaredConnectorTool(provider, defaulted); err == nil || !strings.Contains(err.Error(), "positive") {
@@ -507,25 +493,20 @@ func TestDeclaredConnectorToolBuiltinBindings(t *testing.T) {
 	if _, err := DeclaredConnectorTool(provider, write); err != nil {
 		t.Fatalf("write built-in: %v", err)
 	}
-	// A provider that does not issue github.com credentials never serves a
-	// built-in, even when its declaration slipped past validation.
 	enterprise := provider.DeepCopy()
 	enterprise.Spec.OAuth.TokenURL = "https://github.example.com/login/oauth/access_token"
 	if _, err := DeclaredConnectorTool(enterprise, read); err == nil || !strings.Contains(err.Error(), "does not issue credentials for") {
 		t.Fatalf("enterprise err = %v", err)
 	}
 	for name, binding := range map[string]ToolBinding{
-		// The class is fixed by the catalog, not by the caller.
 		"class":      {Name: "create_pull_request", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
 		"http":       {Name: "gh_search", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
 		"unknown":    {Name: "get_issue", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
 		"not linked": {Name: "web_search", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
 		"url":        {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true, URL: "https://evil.example.test", Timeout: connectors.BuiltinToolTimeout, TimeoutSet: true},
-		// The binding must carry exactly the catalog bound: no timeout, or a caller's own, is refused.
 		"no timeout": {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true},
 		"timeout":    {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, Builtin: true, TimeoutSet: true, Timeout: 30 * time.Minute},
-		// A custom Tool never matches a built-in declaration.
-		"custom": {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, URL: "https://api.github.com/pulls", Method: "GET"},
+		"custom":     {Name: "list_pull_requests", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead, URL: "https://api.github.com/pulls", Method: "GET"},
 	} {
 		if _, err := DeclaredConnectorTool(provider, binding); err == nil {
 			t.Fatalf("%s: want refusal", name)
@@ -557,9 +538,6 @@ func TestResolveConnectionRefusesBuiltinBindingsAndForeignProviders(t *testing.T
 	}
 }
 
-// TestKubernetesResolverConnectionModeJudgesArgumentsFirst covers a call
-// whose arguments the curated schema rejects: it is refused before the
-// credential source runs, so it can never refresh or shred custody.
 func TestKubernetesResolverConnectionModeJudgesArgumentsFirst(t *testing.T) {
 	f := newConnectionModeFixture(t)
 	source := &fakeConnectionSource{credential: ConnectionCredential{AccessToken: "gho", Mode: corev1alpha1.ConnectionModeReadOnly}}
@@ -579,10 +557,6 @@ func TestKubernetesResolverConnectionModeJudgesArgumentsFirst(t *testing.T) {
 	}
 }
 
-// TestKubernetesResolverConnectionModeRefusesUnboundDestinationsFirst covers
-// Tools whose requests could not reach the exact curated destination: an
-// MCP-backed Tool and a templated URL are refused before the credential
-// source runs.
 func TestKubernetesResolverConnectionModeRefusesUnboundDestinationsFirst(t *testing.T) {
 	f := newConnectionModeFixture(t)
 	source := &fakeConnectionSource{credential: ConnectionCredential{AccessToken: "gho", Mode: corev1alpha1.ConnectionModeReadOnly}}
@@ -628,9 +602,6 @@ func TestDeclaredConnectorToolMatchesForwarding(t *testing.T) {
 	}
 }
 
-// TestDeclaredConnectorToolMatchesForwardedWritesItGrants covers a forwarding
-// Tool's write: it matches only a declaration that grants writes, and is
-// then judged as a write, so it needs a readWrite link.
 func TestDeclaredConnectorToolMatchesForwardedWritesItGrants(t *testing.T) {
 	provider := &corev1alpha1.ConnectorProvider{Spec: corev1alpha1.ConnectorProviderSpec{Tools: []corev1alpha1.ConnectorTool{{
 		Name: "azure_arm", Source: corev1alpha1.ConnectorToolSourceHTTP, Class: corev1alpha1.ConnectorToolClassRead,

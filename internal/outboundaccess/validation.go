@@ -39,8 +39,6 @@ const (
 	ReasonResolutionFailed  = "ResolutionFailed"
 )
 
-// Issue is a status-safe validation failure. Message must never contain
-// credentials or a credential-bearing URL.
 type Issue struct {
 	Reason  string
 	Message string
@@ -53,8 +51,6 @@ func (i *Issue) Error() string {
 	return i.Message
 }
 
-// ValidateSpec validates structural and security invariants without reading
-// referenced objects.
 func ValidateSpec(policy *corev1alpha1.OutboundAccessPolicy) *Issue {
 	if policy == nil {
 		return invalid("policy is required")
@@ -80,7 +76,6 @@ func ValidateSpec(policy *corev1alpha1.OutboundAccessPolicy) *Issue {
 	return validateGatewaySpec(gateway)
 }
 
-// AgentIdentityMode returns the policy's mode with its default applied.
 func AgentIdentityMode(identity *corev1alpha1.AgentIdentityOutboundAccess) string {
 	if identity == nil || strings.TrimSpace(identity.Mode) == "" {
 		return corev1alpha1.OutboundAgentIdentityModeSelf
@@ -88,9 +83,6 @@ func AgentIdentityMode(identity *corev1alpha1.AgentIdentityOutboundAccess) strin
 	return strings.TrimSpace(identity.Mode)
 }
 
-// ConnectionProviderName returns the ConnectorProvider whose Connections a
-// policy draws on: a connection-mode policy, or an agentIdentity policy in
-// Delegated mode, which exchanges the requester's token for the Agent's.
 func ConnectionProviderName(policy *corev1alpha1.OutboundAccessPolicy) (string, bool) {
 	switch {
 	case policy == nil:
@@ -140,12 +132,9 @@ func validateAgentIdentitySpec(identity *corev1alpha1.AgentIdentityOutboundAcces
 	if strings.HasSuffix(resource, "/.default") {
 		return invalid("agentIdentity entra.resource names the resource; Orka appends /.default")
 	}
-	// Orka appends /.default, so a query or fragment would leave a scope
-	// Entra refuses on every call.
 	if strings.ContainsAny(resource, "?#") {
 		return invalid("agentIdentity entra.resource must not contain a query or fragment")
 	}
-	// Entra refuses a scope without an authority, such as https://:123.
 	if parsed, err := url.Parse(resource); err != nil || parsed.Hostname() == "" || parsed.User != nil {
 		return invalid("agentIdentity entra.resource must name a host or application ID")
 	}
@@ -174,8 +163,6 @@ func validateCredentialOutput(output *corev1alpha1.OutboundCredentialOutput) *Is
 	if output != nil && output.Prefix != nil && strings.ContainsAny(*output.Prefix, "\r\n") {
 		return invalid("output prefix must not contain carriage returns or newlines")
 	}
-	// The prefix is joined with the credential into one header value, so it
-	// must itself be a valid field value: no other control bytes or DEL.
 	if output != nil && output.Prefix != nil && !validHeaderValueBytes(*output.Prefix) {
 		return invalid("output prefix must be a valid HTTP header value without control bytes")
 	}
@@ -404,8 +391,6 @@ func validateSecretSelector(ref corev1alpha1.NamespacedSecretKeySelector) *Issue
 	return nil
 }
 
-// ResolveReferences verifies same-namespace Secrets/ServiceAccounts, Services,
-// port existence, TLS CA keys, and exact cross-namespace trust.
 func ResolveReferences(ctx context.Context, reader client.Reader, policy *corev1alpha1.OutboundAccessPolicy, trust TrustConfig) (*Issue, error) {
 	if reader == nil {
 		return nil, errors.New("outbound access reference reader is required")
@@ -417,8 +402,6 @@ func ResolveReferences(ctx context.Context, reader client.Reader, policy *corev1
 		return resolveConnectorProvider(ctx, reader, policy.Namespace, connection.ProviderRef.Name)
 	}
 	if policy.Spec.AgentIdentity != nil {
-		// The identity comes from the Task binding at call time. Only a
-		// delegated policy references a cluster object: its provider.
 		if provider, ok := ConnectionProviderName(policy); ok {
 			return resolveConnectorProvider(ctx, reader, policy.Namespace, provider)
 		}
@@ -480,12 +463,6 @@ func resolveTokenSource(
 			}
 			return nil, fmt.Errorf("resolve outbound ServiceAccount reference: %w", err)
 		}
-		// A ServiceAccount source lets the AI worker request that account's
-		// token. Orka's own accounts (the controller, workers, proxies,
-		// publisher) must never be one: the worker would gain their authority.
-		// That includes the AI worker's own account: a TokenRequest can bind
-		// the token to any Pod that runs as the account, and the internal API
-		// identifies a Task's worker by the Pod its token is bound to.
 		platform := serviceAccount.Labels[labels.LabelPlatformIdentity] == labels.PlatformIdentityValue ||
 			trust.platformServiceAccount(namespace, serviceAccount.Name)
 		if platform {
@@ -551,8 +528,6 @@ func resolveTLS(ctx context.Context, reader client.Reader, namespace string, con
 	return nil, nil
 }
 
-// resolveConnectorProvider verifies the same-namespace ConnectorProvider
-// exists and is Accepted with resolved references for its current generation.
 func resolveConnectorProvider(ctx context.Context, reader client.Reader, namespace, name string) (*Issue, error) {
 	provider := &corev1alpha1.ConnectorProvider{}
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, provider); err != nil {
@@ -611,26 +586,15 @@ func ValidateCredentialHeader(name string) error {
 	case "host", "content-length", "transfer-encoding", "connection", "trailer", "upgrade", "proxy-connection":
 		return fmt.Errorf("output header %q is managed by net/http", name)
 	case "traceparent", "tracestate", "baggage":
-		// Trace propagation writes these on the outbound request; a
-		// credential bound to one would be overwritten or would leak
-		// into telemetry context.
 		return fmt.Errorf("output header %q is reserved for trace propagation", name)
 	case "content-type":
-		// Every Tool request carries its own Content-Type before outbound
-		// access applies, so a credential bound to it would collide on
-		// every call: such a policy could be accepted but never used.
 		return fmt.Errorf("output header %q is set by the request body", name)
 	case "idempotency-key":
-		// Brokered consequential calls carry their approval operation key
-		// here before outbound access applies; a credential bound to it
-		// would collide on every write.
 		return fmt.Errorf("output header %q carries the approval operation key", name)
 	}
 	return nil
 }
 
-// validHeaderValueBytes reports whether value is a valid HTTP field value:
-// visible ASCII, spaces, tabs, and obs-text, with no other control byte.
 func validHeaderValueBytes(value string) bool {
 	for i := 0; i < len(value); i++ {
 		if c := value[i]; (c < ' ' && c != '\t') || c == 0x7f {

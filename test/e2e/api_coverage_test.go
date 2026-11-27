@@ -55,7 +55,6 @@ var _ = Describe("API Coverage", Ordered, func() {
 	AfterAll(func() {
 		stopPortForward(cancelPF, portForwardCmd)
 
-		// Clean up all resources with e2e-api-cov- prefix
 		for _, res := range []struct{ kind, name string }{
 			{"task", "e2e-api-cov-session-task"},
 			{"task", "e2e-api-cov-container-task"},
@@ -67,7 +66,6 @@ var _ = Describe("API Coverage", Ordered, func() {
 				"-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 		}
-		// Clean up the chat session
 		cmd := exec.Command("kubectl", "delete", "session", sessionName,
 			"-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
@@ -80,7 +78,6 @@ var _ = Describe("API Coverage", Ordered, func() {
 		dumpDebugInfo("e2e-api-cov-session-task", "e2e-api-cov-container-task")
 	})
 
-	// Test 1: GET /api/v1/sessions/:id (session transcript)
 	It("should retrieve session transcript via GET /api/v1/sessions/:id", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
 
@@ -152,7 +149,6 @@ var _ = Describe("API Coverage", Ordered, func() {
 		}, 30*time.Second, time.Second).Should(Succeed())
 	})
 
-	// Test 2: PUT /api/v1/agents/:name (update agent)
 	It("should update an agent via PUT /api/v1/agents/:name", func() {
 		By("creating an agent via kubectl")
 		agentManifest := fmt.Sprintf(`{
@@ -233,7 +229,6 @@ var _ = Describe("API Coverage", Ordered, func() {
 		}, 30*time.Second, time.Second).Should(Succeed())
 	})
 
-	// Test 3: GET /api/v1/tools/:name (single tool)
 	It("should retrieve a single tool via GET /api/v1/tools/:name", func() {
 		By("fetching the web_search tool")
 		req, err := http.NewRequest("GET", apiBaseURL+"/api/v1/tools/web_search", nil)
@@ -255,7 +250,6 @@ var _ = Describe("API Coverage", Ordered, func() {
 		Expect(bodyStr).To(ContainSubstring("builtin"), "Builtin tool response should identify builtin tools")
 	})
 
-	// Test 4: GET /api/v1/auth/validate
 	It("should validate auth tokens via GET /api/v1/auth/validate", func() {
 		By("calling with a valid token")
 		req, err := http.NewRequest("GET", apiBaseURL+"/api/v1/auth/validate", nil)
@@ -288,7 +282,6 @@ var _ = Describe("API Coverage", Ordered, func() {
 		Expect(resp.StatusCode).To(Equal(http.StatusUnauthorized), "Empty token should return 401")
 	})
 
-	// Test 5: GET /api/v1/secrets
 	It("should list secrets without exposing values via GET /api/v1/secrets", func() {
 		By("fetching secrets list")
 		req, err := http.NewRequest("GET", apiBaseURL+"/api/v1/secrets", nil)
@@ -307,7 +300,6 @@ var _ = Describe("API Coverage", Ordered, func() {
 		bodyStr := string(body)
 		Expect(bodyStr).NotTo(BeEmpty(), "Secrets response should not be empty")
 
-		// Parse as paginated response map to verify structure
 		var response map[string]interface{}
 		err = json.Unmarshal(body, &response)
 		Expect(err).NotTo(HaveOccurred(), "Response should be valid JSON")
@@ -315,7 +307,6 @@ var _ = Describe("API Coverage", Ordered, func() {
 		items, ok := response["items"].([]interface{})
 		Expect(ok).To(BeTrue(), "Response should have an items array")
 
-		// Verify no secret values are exposed
 		for _, item := range items {
 			secret, ok := item.(map[string]interface{})
 			Expect(ok).To(BeTrue(), "Each item should be a JSON object")
@@ -324,7 +315,6 @@ var _ = Describe("API Coverage", Ordered, func() {
 		}
 	})
 
-	// Test 6: DELETE /api/v1/chat/:sessionId
 	It("should delete a chat session via DELETE /api/v1/chat/:sessionId", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
 
@@ -333,7 +323,6 @@ var _ = Describe("API Coverage", Ordered, func() {
 			model = "gpt-4o-mini"
 		}
 
-		// Ensure provider exists (may already exist from test 1)
 		createProviderCRD(providerName, "openai", "e2e-openai-secret", "api-key", e2eOpenAIBaseURL, model)
 
 		chatSessionID := "e2e-api-cov-chat-session"
@@ -352,7 +341,6 @@ var _ = Describe("API Coverage", Ordered, func() {
 		resp, err := client.Do(req)
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()
-		// Drain the response body (may be SSE stream)
 		chatResponse, _ := io.ReadAll(resp.Body)
 		if e2eMockOpenAI {
 			By("verifying the scripted chat answer streamed back")
@@ -375,7 +363,6 @@ var _ = Describe("API Coverage", Ordered, func() {
 		}, 30*time.Second, time.Second).Should(Succeed())
 	})
 
-	// Test 7: GET /api/v1/tasks/:id/plan (404 for non-autonomous)
 	It("should return 404 for plan on non-autonomous task", func() {
 		const containerTaskName = "e2e-api-cov-container-task"
 

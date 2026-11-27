@@ -263,8 +263,6 @@ func TestSessionCleanupAuthorityRejectsUnfrozenProjectionEpoch(t *testing.T) {
 			changedProjection, changedTurn := *projection, *turn
 			changedProjection.Payload = body
 			if !test.keepDigest {
-				// Re-pin malformed fixtures to exercise authority validation, not
-				// merely the separate immutable-payload integrity check.
 				changedProjection.PayloadDigest = store.CanonicalBytesDigest(body)
 				changedTurn.ProjectionDigest = changedProjection.PayloadDigest
 			}

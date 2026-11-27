@@ -569,8 +569,6 @@ func TestLoadScannerPolicyRequiresPolicyConfigMapOptInLabel(t *testing.T) {
 	}
 }
 
-// looksLikeSecretNegatives are placeholders, bare keywords, and code that
-// reads credentials from configuration; none is a secret.
 var looksLikeSecretNegatives = []string{
 	"env OPENAI_API_KEY=dummy ANTHROPIC_API_KEY=dummy vekil",
 	"curl -H 'Authorization: Bearer $VEKIL_TOKEN' http://host.docker.internal:1337/v1/models",
@@ -612,8 +610,6 @@ var looksLikeSecretNegatives = []string{
 	"credential: placeholder",
 }
 
-// looksLikeSecretPositives are credential-shaped values in every form the
-// heuristic recognises.
 var looksLikeSecretPositives = []string{
 	"Authorization: Bearer " + strings.Repeat("q", 24) + "-opaque",
 	"api_key=" + strings.Repeat("0123456789abcdef", 2),
@@ -689,8 +685,6 @@ var looksLikeSecretPositives = []string{
 	"secret_key: |\n  " + strings.Repeat("0a1b2c3d", 5),
 	"AWS_SECRET_ACCESS_KEY:\n  " + strings.Repeat("0a1b2c3d", 5),
 	"credential: correct-horse-battery-staple-value",
-	// Dotted values in credential-keyed config scalars are attacker-
-	// controllable literal shapes; only '=' code assignments are exempt.
 	"password: config.production.password",
 	"token: config.Providers.Default.AccessToken",
 	"password: readPasswordFromKeychain(ctx)",

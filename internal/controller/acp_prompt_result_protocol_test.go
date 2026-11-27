@@ -10,9 +10,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// lostResponseReceiptStore commits a prompt result receipt and then reports
-// its outcome unknown, as the storage client does when it cannot settle the
-// write, the first lose times.
 type lostResponseReceiptStore struct {
 	*sqlite.Store
 	lose  int
@@ -31,10 +28,6 @@ func (s *lostResponseReceiptStore) SavePromptResultReceipt(ctx context.Context, 
 	return nil
 }
 
-// P5: a lost receipt response leaves the attempt Running, so the dispatcher
-// never moves it to Settling without knowing its receipt is stored. The step
-// is idempotent by its attempt ID: settling the same result again finds the
-// stored receipt and moves the attempt once, and another result is refused.
 func TestSettlingAfterLostResultReceiptResponseIsIdempotent(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)

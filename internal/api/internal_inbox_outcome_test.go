@@ -20,10 +20,6 @@ import (
 
 const consumingInboxPath = "/internal/v1/messages/default/my-task?parentTask=coordinator&markRead=true"
 
-// inboxOutcomeApp serves the inbox route with the server's error handler over
-// a storage client whose ConsumeMessages calls the returned injector controls.
-// Each request runs under timeout, so a write the client keeps retrying ends
-// the way a worker's request deadline ends it.
 func inboxOutcomeApp(t *testing.T, timeout time.Duration) (*fiber.App, *storagefault.Injector) {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
@@ -71,16 +67,9 @@ func requireInboxContents(t *testing.T, body string, want ...string) {
 	require.Equal(t, append([]string{}, want...), got)
 }
 
-// A consuming inbox read whose ConsumeMessages committed but whose result the
-// storage client could not read answers 409 without a retry hint: a new HTTP
-// request carries a new operation ID, so it cannot replay the consumed batch
-// and would return the inbox without it.
 func TestInternalConsumingInboxAnswersUnknownOutcomeWithoutRetryHint(t *testing.T) {
 	app, injector := inboxOutcomeApp(t, 10*time.Second)
 	consume := storagefault.Match{Methods: []string{"ConsumeMessages"}}
-	// The first attempt commits and loses its response; every later attempt,
-	// including the client's replay after it resolves the operation as
-	// committed, is refused, so the result cannot be read.
 	refused := injector.Inject(storagefault.Fault{
 		Match: consume, Action: storagefault.Fail(fmt.Errorf("%w: refused by the test", store.ErrConflict)),
 	})
@@ -93,16 +82,12 @@ func TestInternalConsumingInboxAnswersUnknownOutcomeWithoutRetryHint(t *testing.
 	require.Equal(t, 1, lost.Hits())
 	require.Positive(t, refused.Hits())
 
-	// The batch was consumed, so a retry would have lost it.
 	refused.Remove()
 	resp, body = getInbox(t, app)
 	require.Equal(t, http.StatusOK, resp.StatusCode, body)
 	requireInboxContents(t, body)
 }
 
-// A consuming inbox read whose ConsumeMessages never reached the provider
-// answers 503 with a retry hint once the request's deadline ends the client's
-// retries: nothing was consumed, so a new request returns the same batch.
 func TestInternalConsumingInboxAnswersUnavailableWithRetryHint(t *testing.T) {
 	app, injector := inboxOutcomeApp(t, time.Second)
 	unavailable := injector.Inject(storagefault.Fault{

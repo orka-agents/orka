@@ -16,8 +16,6 @@ import (
 	"github.com/orka-agents/orka/internal/providerproxy/testdata/codexroutes"
 )
 
-// These hosts never resolve via DNS. Only the test transport's dial address
-// is replaced; the real request URL, path, Host and headers reach the server.
 const (
 	qualifiedRouteID = "04a11d52ead447b3e59aad569e2ad08e"
 	qualifiedFront   = "http://codex-429-" + qualifiedRouteID + ".orka-system.svc:8080/v1"
@@ -52,8 +50,6 @@ func dialTestUpstream(t *testing.T, proxy *providerProxy, front, target string) 
 	t.Cleanup(tr.CloseIdleConnections)
 }
 
-// Only fixtures explicitly standing in for a qualified auth proxy use these
-// helpers. Counting happens at the real loopback server, not in this transport.
 func qualifyScriptedProxy(c *ProviderProxyConfig) {
 	id := sha256.Sum256([]byte("orka-codex-429-v1\nhttp://gateway-a1b2c3.test.svc:1337\n" + c.Model + "\n"))
 	c.UpstreamBaseURL = fmt.Sprintf("http://codex-429-%x.orka-system.svc:8080/v1", id[:16])
@@ -85,15 +81,12 @@ func (w scriptedQualificationWriter) WriteHeader(status int) {
 func (w scriptedQualificationWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func (w scriptedQualificationWriter) Flush()                      { w.ResponseWriter.(http.Flusher).Flush() }
 
-// An unknown gateway can synthesize 429 after accepting inference. A retry
-// would hide that fact by completing on the second physical send.
 func TestCodexUnqualified429IsNotRetried(t *testing.T) {
 	testCodexRoutePost(t, ProviderProxyConfig{UpstreamBaseURL: "http://default-gateway.example.test:8080/v1", Model: qualifiedModel, ProviderKind: "codex", UpstreamBearerToken: testUpstreamToken}, "/responses", "foreign", 1)
 }
 
 func testCodexRoutePost(t *testing.T, cfg ProviderProxyConfig, routePath, proof string, wantPosts int) {
 	t.Helper()
-	// Input, tools and child claims cannot grant operator authority.
 	body := `{"model":"` + cfg.Model + `","stream":true,"input":"one turn","metadata":{"retry_qualified":"true","task_retry":"3"},"tools":[{"type":"function","name":"read"}]}`
 	testCodexWirePost(t, cfg, routePath, proof, wantPosts, body, nil)
 }
@@ -184,7 +177,7 @@ func TestCodexQualificationDirectStreamShape(t *testing.T) {
 			if tc.Qualified {
 				want = 2
 			} else if tc.InvalidJSON {
-				want = 0 // existing immutable profile rejects malformed JSON before dispatch
+				want = 0
 			}
 			h := make(http.Header)
 			if tc.Header != "" {

@@ -50,45 +50,26 @@ const (
 )
 
 type connectorTestHarness struct {
-	t   *testing.T
-	app *fiber.App
-	// handlers lets a test replace the uncached reader to model informer lag.
-	handlers *Handlers
-	client   client.Client
-	store    *storageclient.Client
-	identity *UserInfo
-	oauth    *httptest.Server
-	tokens   int
-	// skipFinalizer strips the custody finalizer from new Connections, as if
-	// they were created outside the API, to prove consent refuses them.
-	skipFinalizer bool
-	// statusFailure, when set and true, makes Connection status updates fail
-	// to model a transient API server error during completion.
-	statusFailure *atomic.Bool
-	// grantScope overrides the scope the token fixture reports; revoked
-	// records every token the fixture was asked to revoke.
-	grantScope string
-	revoked    []string
-	// omitScope leaves the scope field out of the token response entirely,
-	// which RFC 6749 reads as "as requested"; grantScope " " is an explicit
-	// empty grant instead.
-	omitScope bool
-	// omitRefreshToken issues an access token only; expiresIn overrides the
-	// fixture lifetime.
-	omitRefreshToken bool
-	expiresIn        int
-	// now is the handlers' clock.
-	now time.Time
-	// createConflict makes the next Connection create report AlreadyExists
-	// after the object was created, as a concurrent request would.
-	createConflict *atomic.Bool
-	// statusConflictOnce makes the next Connection status update fail with a
-	// conflict after applying a concurrent mode change to the stored object.
-	statusConflictOnce *atomic.Bool
-	statusConflictMode string
-	// tokenSuffix makes each exchange issue distinct token values.
-	tokenSuffix string
-	// contextTokenAuthorization, when set, enables scope enforcement.
+	t                         *testing.T
+	app                       *fiber.App
+	handlers                  *Handlers
+	client                    client.Client
+	store                     *storageclient.Client
+	identity                  *UserInfo
+	oauth                     *httptest.Server
+	tokens                    int
+	skipFinalizer             bool
+	statusFailure             *atomic.Bool
+	grantScope                string
+	revoked                   []string
+	omitScope                 bool
+	omitRefreshToken          bool
+	expiresIn                 int
+	now                       time.Time
+	createConflict            *atomic.Bool
+	statusConflictOnce        *atomic.Bool
+	statusConflictMode        string
+	tokenSuffix               string
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
@@ -124,8 +105,6 @@ func newConnectorTestHarness(t *testing.T, objects ...runtime.Object) *connector
 	return buildConnectorTestHarness(t, ContextTokenAuthorizationConfig{}, objects...)
 }
 
-// newConnectorTestHarnessWithContextTokens enforces context-token scopes with
-// the default connector scope names.
 func newConnectorTestHarnessWithContextTokens(t *testing.T, objects ...runtime.Object) *connectorTestHarness {
 	t.Helper()
 	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
@@ -135,11 +114,7 @@ func newConnectorTestHarnessWithContextTokens(t *testing.T, objects ...runtime.O
 	return buildConnectorTestHarness(t, authz, objects...)
 }
 
-// refreshFixture answers a refresh_token grant. GitHub sign-in uses the
-// refresh token it is given once: each fixture person's refresh token yields
-// their own new tokens.
 func refreshFixture(w http.ResponseWriter, refreshToken string) {
-	// An expiry with no refresh token beside it, which GitHub never issues.
 	if refreshToken == "ghr_alice_final" {
 		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "ghu_alice_refreshed", "token_type": "bearer", "expires_in": 28800})
 		return
@@ -172,8 +147,6 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 					return errors.New("transient status failure")
 				}
 				if connection, ok := obj.(*corev1alpha1.Connection); ok && harness.statusConflictOnce != nil && harness.statusConflictOnce.Swap(false) {
-					// A PUT moved the mode between the completion fence and
-					// this status write.
 					stored := &corev1alpha1.Connection{}
 					if err := c.Get(ctx, client.ObjectKeyFromObject(connection), stored); err != nil {
 						return err
@@ -191,7 +164,6 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 					obj.SetUID(types.UID("uid-" + obj.GetName()))
 				}
 				if _, isConnection := obj.(*corev1alpha1.Connection); isConnection && harness.skipFinalizer {
-					// Model a Connection created outside the API, before the controller protects it.
 					obj.SetFinalizers(nil)
 				}
 				if err := c.Create(ctx, obj, opts...); err != nil {
@@ -308,8 +280,6 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 	return h
 }
 
-// completionFromLocation extracts the one-time completion token from the
-// callback redirect's URL fragment.
 func completionFromLocation(t *testing.T, location string) string {
 	t.Helper()
 	parsed, err := url.Parse(location)
@@ -323,8 +293,6 @@ func completionFromLocation(t *testing.T, location string) string {
 	return values.Get("completion")
 }
 
-// consentAndCallback runs the browser half of a link and returns the redirect
-// location.
 func (h *connectorTestHarness) consentAndCallback(created ConnectionAuthorizeResponse) string {
 	h.t.Helper()
 	query := stateFromAuthorizeURL(h.t, created.AuthorizeURL)
@@ -418,8 +386,6 @@ func TestConnectionConsentFlow(t *testing.T) {
 		t.Fatalf("stored connection = %+v", stored)
 	}
 
-	// The browser half: the callback parks the tokens and hands back a
-	// completion token in the fragment; nothing is committed yet.
 	location := h.callback(url.Values{"code": {"good-code"}, "state": {query.Get("state")}})
 	if !strings.HasPrefix(location, connectorCallbackBase+"/settings/connectors?") || !strings.Contains(location, "status=pending") || !strings.Contains(location, "connection="+created.Connection.Name) || !strings.Contains(location, "namespace="+created.Connection.Namespace) {
 		t.Fatalf("location = %q", location)
@@ -444,29 +410,23 @@ func TestConnectionConsentFlow(t *testing.T) {
 		t.Fatalf("pending connection = %d %s", resp.StatusCode, raw)
 	}
 
-	// The owner commits with the one-time token.
 	resp, raw = h.complete(created.Connection.Name, completion)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("complete = %d %s", resp.StatusCode, raw)
 	}
 	assertConnectionLinked(t, h, created.Connection.Name)
 
-	// The completion token is single-use.
 	resp, _ = h.complete(created.Connection.Name, completion)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("replayed completion = %d, want 409", resp.StatusCode)
 	}
 
-	// The state is single-use.
 	location = h.callback(url.Values{"code": {"good-code"}, "state": {query.Get("state")}})
 	if !strings.Contains(location, "reason=consent_expired") {
 		t.Fatalf("replayed state location = %q", location)
 	}
 }
 
-// assertConnectionLinked checks the API view, the Ready condition, and the
-// sealed custody row after a successful callback, and that no token material
-// escaped into the response.
 func assertConnectionLinked(t *testing.T, h *connectorTestHarness, name string) {
 	t.Helper()
 	resp, raw := h.do(http.MethodGet, "/api/v1/connections/"+name, nil)
@@ -508,7 +468,6 @@ func TestConnectionOwnershipModeAndDisconnect(t *testing.T) {
 	var resp *http.Response
 	var raw []byte
 
-	// Listing shows the connection; another person sees nothing.
 	resp, raw = h.do(http.MethodGet, "/api/v1/connections", nil)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), created.Connection.Name) {
 		t.Fatalf("list = %d %s", resp.StatusCode, raw)
@@ -538,7 +497,6 @@ func TestConnectionOwnershipModeAndDisconnect(t *testing.T) {
 		}
 	}
 
-	// Widening to readWrite starts a new consent with the write scope.
 	h.identity = &UserInfo{AuthType: AuthTypeOIDC, Username: "alice", Subject: "alice", Issuer: connectorTestIssuer, Namespace: connectorTestNamespace}
 	resp, raw = h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{"mode": "readWrite"})
 	if resp.StatusCode != http.StatusOK {
@@ -551,21 +509,18 @@ func TestConnectionOwnershipModeAndDisconnect(t *testing.T) {
 	if updated.Connection.Mode != corev1alpha1.ConnectionModeReadWrite || updated.AuthorizeURL == "" {
 		t.Fatalf("updated = %+v", updated)
 	}
-	// The stale read-only conditions must not advertise a usable readWrite link.
 	if updated.Connection.Ready || updated.Connection.State != corev1alpha1.ConnectionStatePending {
 		t.Fatalf("widened response must be pending until consent completes: %+v", updated.Connection)
 	}
 	if scope := stateFromAuthorizeURL(t, updated.AuthorizeURL).Get("scope"); scope != "read:user repo" {
 		t.Fatalf("readWrite scope = %q", scope)
 	}
-	// Narrowing needs no consent.
 	resp, raw = h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{"mode": "readOnly"})
 	_ = json.Unmarshal(raw, &updated)
 	if resp.StatusCode != http.StatusOK || updated.AuthorizeURL != "" || updated.Connection.Mode != corev1alpha1.ConnectionModeReadOnly {
 		t.Fatalf("narrow = %d %+v", resp.StatusCode, updated)
 	}
 
-	// Re-authorize and disconnect.
 	resp, raw = h.do(http.MethodPost, "/api/v1/connections/"+created.Connection.Name+"/authorize", nil)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "authorizeURL") {
 		t.Fatalf("authorize = %d %s", resp.StatusCode, raw)
@@ -574,7 +529,6 @@ func TestConnectionOwnershipModeAndDisconnect(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete = %d", resp.StatusCode)
 	}
-	// The custody finalizer holds the object until the controller finishes.
 	stored := &corev1alpha1.Connection{}
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
 		t.Fatal(err)
@@ -606,7 +560,6 @@ func TestConnectionCallbackRejections(t *testing.T) {
 		t.Fatalf("missing state location = %q", location)
 	}
 
-	// Provider denial consumes the consent.
 	location = h.callback(url.Values{"error": {"access_denied"}, "state": {state}})
 	if !strings.Contains(location, "reason=access_denied") || !strings.Contains(location, "connection="+created.Connection.Name) {
 		t.Fatalf("denied location = %q", location)
@@ -616,7 +569,6 @@ func TestConnectionCallbackRejections(t *testing.T) {
 		t.Fatalf("consumed state location = %q", location)
 	}
 
-	// A bad code fails the exchange and stores nothing.
 	created = h.create("readOnly")
 	state = stateFromAuthorizeURL(t, created.AuthorizeURL).Get("state")
 	location = h.callback(url.Values{"code": {"bad-code"}, "state": {state}})
@@ -633,7 +585,6 @@ func TestConnectionCallbackRejections(t *testing.T) {
 		}
 	}
 
-	// A consent whose Connection was replaced (different UID) is rejected.
 	created = h.create("readOnly")
 	state = stateFromAuthorizeURL(t, created.AuthorizeURL).Get("state")
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
@@ -683,7 +634,6 @@ func TestConnectionHandlersRefuseNonHumanIdentities(t *testing.T) {
 	if resp, _ := h.do(http.MethodGet, "/api/v1/connections", nil); resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("anonymous status = %d", resp.StatusCode)
 	}
-	// Context-token identities are people too.
 	h.identity = &UserInfo{AuthType: AuthTypeContextToken, Username: "carol", Subject: "carol", Issuer: connectorTestIssuer, Namespace: connectorTestNamespace}
 	if resp, raw := h.do(http.MethodPost, "/api/v1/connections", map[string]string{"provider": "github"}); resp.StatusCode != http.StatusCreated {
 		t.Fatalf("context token status = %d body = %s", resp.StatusCode, raw)
@@ -722,7 +672,6 @@ func TestConnectionCreateValidation(t *testing.T) {
 		})
 	}
 
-	// An unaccepted provider cannot be linked.
 	pending := acceptedTestProvider()
 	pending.Name = "gmail"
 	pending.Status.Conditions = nil
@@ -733,7 +682,6 @@ func TestConnectionCreateValidation(t *testing.T) {
 		t.Fatalf("unaccepted provider status = %d", resp.StatusCode)
 	}
 
-	// Creating twice reuses the same Connection.
 	first := h.create("readOnly")
 	second := h.create("readWrite")
 	if first.Connection.Name != second.Connection.Name || second.Connection.Mode != corev1alpha1.ConnectionModeReadWrite {
@@ -747,7 +695,6 @@ func TestConnectionCreateValidation(t *testing.T) {
 		t.Fatalf("connections = %d, want 1", len(list.Items))
 	}
 
-	// The catalog lists providers with readiness and tool classes.
 	resp, raw := h.do(http.MethodGet, "/api/v1/connectors", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("connectors = %d %s", resp.StatusCode, raw)
@@ -830,11 +777,6 @@ func TestValidateConnectorConfig(t *testing.T) {
 	_ = store.ErrNotFound
 }
 
-// TestConnectionCompletionRequiresOwnerAndToken covers the forwarded-link
-// attack: an attacker starts a link and sends the authorize URL to a victim,
-// who approves with their own provider account. The victim's browser then
-// holds the completion token but is not the owner, and the attacker owns the
-// Connection but never sees the token. Neither can finish the link.
 func TestConnectionCompletionRequiresOwnerAndToken(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	attacker := &UserInfo{AuthType: AuthTypeOIDC, Username: "mallory", Subject: "mallory", Issuer: connectorTestIssuer, Namespace: connectorTestNamespace}
@@ -842,17 +784,14 @@ func TestConnectionCompletionRequiresOwnerAndToken(t *testing.T) {
 
 	h.identity = attacker
 	created := h.create("")
-	// The victim's browser completes consent (the callback has no Orka identity).
 	h.identity = nil
 	location := h.consentAndCallback(created)
 	completion := completionFromLocation(t, location)
 
-	// The victim, holding the token, is not the owner: the Connection is invisible.
 	h.identity = victim
 	if resp, _ := h.complete(created.Connection.Name, completion); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("victim completion = %d, want 404", resp.StatusCode)
 	}
-	// The attacker owns the Connection but has no token.
 	h.identity = attacker
 	for name, token := range map[string]string{"missing": "", "forged": "forged.Zm9yZ2Vk", "guessed nonce": "nonce.YWJj"} {
 		resp, _ := h.complete(created.Connection.Name, token)
@@ -874,7 +813,6 @@ func TestConnectionCompletionRequiresOwnerAndToken(t *testing.T) {
 	if _, err := h.store.GetConnectorCredential(context.Background(), ref); err == nil {
 		t.Fatal("victim credentials must never reach custody")
 	}
-	// Even with the token, the attacker cannot commit into a *different* Connection they own.
 	other := acceptedTestProvider()
 	other.Name = "gmail"
 	if err := h.client.Create(context.Background(), other); err != nil {
@@ -889,8 +827,6 @@ func TestConnectionCompletionRequiresOwnerAndToken(t *testing.T) {
 	if resp, _ := h.complete(second.Connection.Name, completion); resp.StatusCode != http.StatusConflict {
 		t.Fatalf("cross-connection completion = %d, want 409", resp.StatusCode)
 	}
-	// The token was consumed by that attempt, so the legitimate owner path is
-	// also closed now; a fresh consent is required.
 	if resp, _ := h.complete(created.Connection.Name, completion); resp.StatusCode != http.StatusConflict {
 		t.Fatalf("consumed completion = %d, want 409", resp.StatusCode)
 	}
@@ -899,7 +835,6 @@ func TestConnectionCompletionRequiresOwnerAndToken(t *testing.T) {
 func TestConnectionCompletionRequiresFinalizerAndRefusesTombstones(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 
-	// A Connection without the finalizer cannot even start consent.
 	h.skipFinalizer = true
 	resp, raw := h.do(http.MethodPost, "/api/v1/connections", map[string]string{"provider": "github"})
 	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "not yet protected") {
@@ -907,8 +842,6 @@ func TestConnectionCompletionRequiresFinalizerAndRefusesTombstones(t *testing.T)
 	}
 	h.skipFinalizer = false
 
-	// A Connection that loses the finalizer after consent started is refused
-	// at the callback, before any code exchange, and at completion.
 	h.identity = &UserInfo{AuthType: AuthTypeOIDC, Username: "carol", Subject: "carol", Issuer: connectorTestIssuer, Namespace: connectorTestNamespace}
 	created := h.create("")
 	unprotected := &corev1alpha1.Connection{}
@@ -930,9 +863,6 @@ func TestConnectionCompletionRequiresFinalizerAndRefusesTombstones(t *testing.T)
 		t.Fatalf("completion without finalizer = %d %s, want 409", resp.StatusCode, raw)
 	}
 
-	// Simulate a disconnect that raced the completion: custody was deleted and
-	// the UID tombstoned before the owner committed. A different person gets a
-	// fresh, finalizer-protected Connection.
 	h.identity = &UserInfo{AuthType: AuthTypeOIDC, Username: "bob", Subject: "bob", Issuer: connectorTestIssuer, Namespace: connectorTestNamespace}
 	created = h.create("")
 	location = h.consentAndCallback(created)
@@ -961,7 +891,6 @@ func TestConnectionCompletionRequiresFinalizerAndRefusesTombstones(t *testing.T)
 		t.Fatal("a refused completion must not mark the connection Ready")
 	}
 
-	// A callback arriving after the disconnect cannot even park tokens.
 	resp, raw = h.do(http.MethodPost, "/api/v1/connections/"+created.Connection.Name+"/authorize", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("re-authorize = %d %s", resp.StatusCode, raw)
@@ -980,8 +909,6 @@ func TestConnectionCompletionRejectsStaleModeAndIsRetryable(t *testing.T) {
 	location := h.consentAndCallback(created)
 	completion := completionFromLocation(t, location)
 
-	// Widen the mode after consent started: the parked read-only token must
-	// not mark the readWrite generation Ready.
 	resp, raw := h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{"mode": "readWrite"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("widen = %d %s", resp.StatusCode, raw)
@@ -990,7 +917,6 @@ func TestConnectionCompletionRejectsStaleModeAndIsRetryable(t *testing.T) {
 	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "mode changed") {
 		t.Fatalf("stale-mode completion = %d %s, want 409", resp.StatusCode, raw)
 	}
-	// The discarded tokens are left to expire, never revoked.
 	if len(h.revoked) != 0 {
 		t.Fatalf("a discarded completion must not revoke tokens nobody committed, revoked = %v", h.revoked)
 	}
@@ -1001,12 +927,10 @@ func TestConnectionCompletionRejectsStaleModeAndIsRetryable(t *testing.T) {
 	if stored.Status.State == corev1alpha1.ConnectionStateReady {
 		t.Fatal("a stale-mode completion must not link")
 	}
-	// The stale completion was discarded, not left for later.
 	if resp, _ := h.complete(created.Connection.Name, completion); resp.StatusCode != http.StatusConflict {
 		t.Fatalf("discarded completion = %d, want 409", resp.StatusCode)
 	}
 
-	// A completion whose status update fails transiently stays retryable.
 	var fail atomic.Bool
 	h.statusFailure = &fail
 	h.grantScope = "read:user repo"
@@ -1049,8 +973,6 @@ func TestCompletionLocksSerializePerKey(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("the waiter must proceed once the key is released")
 	}
-	// Entries are dropped once the last holder releases them, so account
-	// churn does not grow the map for the lifetime of the process.
 	if size := locks.size(); size != 0 {
 		t.Fatalf("lock map size = %d after release, want 0", size)
 	}
@@ -1073,8 +995,6 @@ func TestConnectionUpdateRequiresModeAndRetriesConsent(t *testing.T) {
 		t.Fatal("an update without a mode must change nothing")
 	}
 
-	// Widening returns an authorize URL, and so does retrying it while the
-	// write scopes are still not granted.
 	for attempt := range 2 {
 		resp, raw = h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{"mode": "readWrite"})
 		if resp.StatusCode != http.StatusOK {
@@ -1091,7 +1011,6 @@ func TestConnectionUpdateRequiresModeAndRetriesConsent(t *testing.T) {
 func TestConnectionCallbackRefusesPartialScopeGrants(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	created := h.create("readWrite")
-	// The person declines the write permission at the provider.
 	h.grantScope = "read:user"
 	location := h.consentAndCallback(created)
 	if !strings.Contains(location, "reason=scopes_denied") || strings.Contains(location, "completion=") {
@@ -1101,7 +1020,6 @@ func TestConnectionCallbackRefusesPartialScopeGrants(t *testing.T) {
 		t.Fatalf("a refused partial grant must not revoke tokens nobody committed, revoked = %v", h.revoked)
 	}
 
-	// An explicitly empty scope is a grant of nothing, not "as requested".
 	h.grantScope = " "
 	created = h.create("readWrite")
 	location = h.consentAndCallback(created)
@@ -1109,7 +1027,6 @@ func TestConnectionCallbackRefusesPartialScopeGrants(t *testing.T) {
 		t.Fatalf("explicit empty grant location = %q", location)
 	}
 
-	// A provider that omits the scope field granted what was requested.
 	h.grantScope = ""
 	h.omitScope = true
 	h.revoked = nil
@@ -1138,7 +1055,6 @@ func TestConnectionCallbackRevokesWhenDisconnectedMidExchange(t *testing.T) {
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
 		t.Fatal(err)
 	}
-	// Disconnect finalizes while the code exchange is in flight.
 	if err := h.store.DeleteConnectorCredential(context.Background(), string(stored.UID)); err != nil {
 		t.Fatal(err)
 	}
@@ -1185,8 +1101,6 @@ func TestConnectionRoutesEnforceContextTokenScopes(t *testing.T) {
 func TestConnectionCallbackRefusesChangedProvider(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	created := h.create("readOnly")
-	// The provider's OAuth client is rotated while the person is at the
-	// provider: the code must not be exchanged with the new client.
 	provider := &corev1alpha1.ConnectorProvider{}
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
 		t.Fatal(err)
@@ -1221,7 +1135,6 @@ func TestConnectionCompletionRefusesChangedProvider(t *testing.T) {
 	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "provider changed") {
 		t.Fatalf("completion after provider change = %d %s, want 409", resp.StatusCode, raw)
 	}
-	// The parked tokens belong to the old client: discarded, not sent to the new one.
 	if len(h.revoked) != 0 {
 		t.Fatalf("tokens must not be revoked against a different authority, revoked = %v", h.revoked)
 	}
@@ -1244,8 +1157,6 @@ func TestConnectionAuthorizeRefusesDeletingConnection(t *testing.T) {
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: created.Connection.Name}, stored); err != nil {
 		t.Fatal(err)
 	}
-	// The custody finalizer holds the object in Terminating until the
-	// controller finalizes it; no new consent may start meanwhile.
 	if err := h.client.Delete(context.Background(), stored); err != nil {
 		t.Fatal(err)
 	}
@@ -1274,15 +1185,11 @@ func TestConnectionLinkRecordsConsentAuthority(t *testing.T) {
 	if !connectors.ConsentMatchesProvider(stored, provider) || !connectors.ConnectionLinked(stored) {
 		t.Fatalf("a committed consent must record the provider authority and be linked: %+v", stored.Status)
 	}
-	// The sealed credential carries the issuing client's digest (what refresh
-	// and revocation authenticate), independent of status.
 	ref, _ := connectors.CredentialRef(stored)
 	credential, err := h.store.GetConnectorCredential(context.Background(), ref)
 	if err != nil || credential.AuthorityDigest != connectors.ProviderIssuerDigest(provider) {
 		t.Fatalf("stored credential authority = %q err = %v", credential.AuthorityDigest, err)
 	}
-	// A rotated client makes the next mode change ask for consent again even
-	// though the granted scopes already cover the mode.
 	provider.Spec.OAuth.ClientID = "rotated-client"
 	if err := h.client.Update(context.Background(), provider); err != nil {
 		t.Fatal(err)
@@ -1293,9 +1200,6 @@ func TestConnectionLinkRecordsConsentAuthority(t *testing.T) {
 	}
 }
 
-// TestConnectionStaleModeDiscardKeepsCommittedCredential covers a completion
-// whose credential entered custody but whose status write failed: a later
-// mode change discards the parked row without revoking the committed tokens.
 func TestConnectionStaleModeDiscardKeepsCommittedCredential(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	var fail atomic.Bool
@@ -1308,15 +1212,10 @@ func TestConnectionStaleModeDiscardKeepsCommittedCredential(t *testing.T) {
 		t.Fatalf("failed status update = %d %s, want 500", resp.StatusCode, raw)
 	}
 	fail.Store(false)
-	// The credential is committed; the completion row is still parked.
 	if resp, raw := h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{"mode": "readWrite"}); resp.StatusCode != http.StatusOK {
 		t.Fatalf("widen = %d %s", resp.StatusCode, raw)
 	}
 	h.revoked = nil
-	// Custody already holds this grant, so the retry records the link from
-	// it against the current (wider) mode, which the granted scopes do not
-	// cover: the link is Pending until the person consents again, and
-	// nothing is discarded or revoked.
 	if resp, raw := h.complete(created.Connection.Name, completion); resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `"state":"Pending"`) {
 		t.Fatalf("committed completion after a mode change = %d %s, want 200 and Pending", resp.StatusCode, raw)
 	}
@@ -1333,16 +1232,11 @@ func TestConnectionStaleModeDiscardKeepsCommittedCredential(t *testing.T) {
 	}
 }
 
-// TestConnectionPartialGrantKeepsReissuedCommittedToken covers a provider that
-// re-issues the committed long-lived access token during a widening consent
-// the person then declines: the refusal must not revoke the live token.
 func TestConnectionPartialGrantKeepsReissuedCommittedToken(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	created := h.create("readOnly")
 	h.link(created)
 	h.revoked = nil
-	// The fixture always issues gho_secret_access / ghr_secret_refresh: the
-	// widening exchange re-issues exactly the committed material.
 	if resp, raw := h.do(http.MethodPut, "/api/v1/connections/"+created.Connection.Name, map[string]string{"mode": "readWrite"}); resp.StatusCode != http.StatusOK {
 		t.Fatalf("widen = %d %s", resp.StatusCode, raw)
 	}
@@ -1361,10 +1255,6 @@ func TestConnectionPartialGrantKeepsReissuedCommittedToken(t *testing.T) {
 	}
 }
 
-// TestConnectionCompletionRetryDoesNotOverwriteNewerCommit covers a
-// completion that wrote custody but failed its status write, retried after a
-// newer completion committed different tokens: the retry must not write the
-// superseded tokens over the newer commit.
 func TestConnectionCompletionRetryDoesNotOverwriteNewerCommit(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	var fail atomic.Bool
@@ -1377,7 +1267,6 @@ func TestConnectionCompletionRetryDoesNotOverwriteNewerCommit(t *testing.T) {
 		t.Fatalf("first attempt = %d %s, want 500", resp.StatusCode, raw)
 	}
 	fail.Store(false)
-	// A second consent commits newer material while A is still retryable.
 	var reauthorized ConnectionAuthorizeResponse
 	if resp, raw := h.do(http.MethodPost, "/api/v1/connections/"+created.Connection.Name+"/authorize", nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("authorize = %d %s", resp.StatusCode, raw)
@@ -1389,7 +1278,6 @@ func TestConnectionCompletionRetryDoesNotOverwriteNewerCommit(t *testing.T) {
 	if resp, raw := h.complete(created.Connection.Name, completionB); resp.StatusCode != http.StatusOK {
 		t.Fatalf("newer completion = %d %s", resp.StatusCode, raw)
 	}
-	// Retrying A resumes nothing: custody now holds B.
 	if resp, raw := h.complete(created.Connection.Name, completionA); resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "newer completion") {
 		t.Fatalf("stale retry = %d %s, want 409", resp.StatusCode, raw)
 	}
@@ -1402,15 +1290,12 @@ func TestConnectionCompletionRetryDoesNotOverwriteNewerCommit(t *testing.T) {
 	if err != nil || credential.AccessToken != "gho_secret_access-b" || credential.RefreshToken != "ghr_secret_refresh-b" {
 		t.Fatalf("custody = %+v err = %v, want the newer commit", credential, err)
 	}
-	// Each commit is a new grant, and the status mirrors custody's number:
-	// A took grant 1 (its status write failed), B took grant 2.
 	if credential.GrantSequence != 2 || stored.Status.GrantSequence != 2 {
 		t.Fatalf("grant after the newer commit: custody %d status %d, want 2 and 2", credential.GrantSequence, stored.Status.GrantSequence)
 	}
 	if resp, _ := h.complete(created.Connection.Name, completionA); resp.StatusCode != http.StatusConflict {
 		t.Fatal("the stale completion must be discarded")
 	}
-	// A retry whose material is still current resumes the status update.
 	h.tokenSuffix = "-c"
 	if resp, raw := h.do(http.MethodPost, "/api/v1/connections/"+created.Connection.Name+"/authorize", nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("authorize = %d %s", resp.StatusCode, raw)
@@ -1437,8 +1322,6 @@ func TestConnectionCompletionRetryDoesNotOverwriteNewerCommit(t *testing.T) {
 	}
 }
 
-// TestConnectionReauthorizationRetiresPreviousCredential covers linking twice:
-// the first credential is retained sealed so disconnect can revoke it.
 func TestConnectionReauthorizationRetiresPreviousCredential(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	created := h.create("readOnly")
@@ -1466,10 +1349,6 @@ func TestConnectionReauthorizationRetiresPreviousCredential(t *testing.T) {
 	}
 }
 
-// TestConnectionOmittedScopeBindsToConsentRequest covers a provider whose
-// configured scopes grow between consent start and callback while the token
-// response omits scope: the grant is what the consent asked for, so the
-// link stays Pending until the person consents again.
 func TestConnectionOmittedScopeBindsToConsentRequest(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	created := h.create("readOnly")
@@ -1497,8 +1376,6 @@ func TestConnectionOmittedScopeBindsToConsentRequest(t *testing.T) {
 	}
 }
 
-// TestConnectionCreateRestoresOwnershipLabels covers a deterministic
-// Connection that exists without its list labels: reuse restores them.
 func TestConnectionCreateRestoresOwnershipLabels(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	name := connectors.ConnectionName("github", connectorTestIssuer, "alice")
@@ -1524,8 +1401,6 @@ func TestConnectionCreateRestoresOwnershipLabels(t *testing.T) {
 	}
 }
 
-// TestConnectionNarrowingReportsReady covers narrowing a widened Connection
-// back to a mode the existing grant covers: the response is usable at once.
 func TestConnectionNarrowingReportsReady(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	created := h.create("readOnly")
@@ -1546,9 +1421,6 @@ func TestConnectionNarrowingReportsReady(t *testing.T) {
 	}
 }
 
-// TestConnectionCompletionRefusesRetargetedToolAfterCallback covers a tool
-// destination changed between callback and completion: the OAuth client is
-// unchanged, but the consented authority is not, so nothing is recorded.
 func TestConnectionCompletionRefusesRetargetedToolAfterCallback(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	created := h.create("readOnly")
@@ -1557,8 +1429,6 @@ func TestConnectionCompletionRefusesRetargetedToolAfterCallback(t *testing.T) {
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
 		t.Fatal(err)
 	}
-	// A new credential-receiving destination changes the consented authority
-	// while the OAuth client (issuer digest) stays the same.
 	provider.Spec.Tools = append(provider.Spec.Tools, corev1alpha1.ConnectorTool{
 		Name: "gh_search", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP, Description: "search",
 		HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://api.github.com/search/issues"},
@@ -1578,9 +1448,6 @@ func TestConnectionCompletionRefusesRetargetedToolAfterCallback(t *testing.T) {
 	}
 }
 
-// TestConnectionCreateWideningReusedLinkReportsPending covers POST reusing a
-// Ready readOnly Connection with readWrite requested: consent for the wider
-// mode is outstanding, so the view is Pending, not the stale Ready state.
 func TestConnectionCreateWideningReusedLinkReportsPending(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	created := h.create("readOnly")
@@ -1596,7 +1463,6 @@ func TestConnectionCreateWideningReusedLinkReportsPending(t *testing.T) {
 	if widened.AuthorizeURL == "" || widened.Connection.Ready || widened.Connection.State != corev1alpha1.ConnectionStatePending {
 		t.Fatalf("widening create must report pending: %+v", widened)
 	}
-	// Re-authorizing the same mode keeps the current view.
 	resp, raw = h.do(http.MethodPost, "/api/v1/connections", map[string]string{"provider": "github", "mode": "readOnly"})
 	if resp.StatusCode != http.StatusCreated || !strings.Contains(string(raw), `"ready":true`) {
 		t.Fatalf("same-mode create = %d %s, want the current ready view", resp.StatusCode, raw)
@@ -1607,9 +1473,6 @@ func TestConnectionCreateReusesConcurrentlyCreatedConnection(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	h.createConflict = &atomic.Bool{}
 	h.createConflict.Store(true)
-	// The create races another request for the same identity and provider:
-	// the object exists by the time this create is answered, and this
-	// request reuses it under the ordinary ownership checks.
 	created := h.create("readOnly")
 	if created.AuthorizeURL == "" || created.Connection.Name != connectors.ConnectionName("github", connectorTestIssuer, "alice") {
 		t.Fatalf("created = %+v", created)
@@ -1621,7 +1484,6 @@ func TestConnectionCreateReusesConcurrentlyCreatedConnection(t *testing.T) {
 	if stored.Labels[ConnectionSubjectDigestLabel] == "" {
 		t.Fatalf("reused connection labels = %v", stored.Labels)
 	}
-	// Another identity's object is still refused.
 	h.identity.Subject = "mallory"
 	h.createConflict.Store(true)
 	if resp, raw := h.do(http.MethodPost, "/api/v1/connections", map[string]string{"provider": "github", "mode": "readOnly"}); resp.StatusCode != http.StatusCreated {
@@ -1637,8 +1499,6 @@ func TestConnectionCompleteRefusesExpiredTokenWithoutRefresh(t *testing.T) {
 	created := h.create("readOnly")
 	location := h.consentAndCallback(created)
 	completion := completionFromLocation(t, location)
-	// The browser held the completion past the token's lifetime: a link
-	// that could never authenticate is not committed as Ready.
 	h.now = h.now.Add(2 * time.Minute)
 	resp, raw := h.complete(created.Connection.Name, completion)
 	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "expired before completion") {
@@ -1655,7 +1515,6 @@ func TestConnectionCompleteRefusesExpiredTokenWithoutRefresh(t *testing.T) {
 	if _, err := h.store.GetConnectorCredential(context.Background(), ref); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("custody err = %v, want nothing committed", err)
 	}
-	// The completion is gone; a retry cannot commit it later.
 	if resp, _ := h.complete(created.Connection.Name, completion); resp.StatusCode == http.StatusOK {
 		t.Fatal("a discarded completion must not commit on retry")
 	}
@@ -1666,10 +1525,6 @@ func TestConnectionCompleteRejudgesLinkAfterConcurrentModeChange(t *testing.T) {
 	h.grantScope = "read:user"
 	created := h.create("readOnly")
 	location := h.consentAndCallback(created)
-	// Between the completion fence and the status write a PUT widened the
-	// mode. Custody now holds the read-only grant, so the link is judged
-	// against the new mode from the committed material rather than left
-	// describing a grant custody no longer holds.
 	h.statusConflictOnce = &atomic.Bool{}
 	h.statusConflictOnce.Store(true)
 	h.statusConflictMode = corev1alpha1.ConnectionModeReadWrite
@@ -1695,9 +1550,6 @@ func TestConnectionCompleteRejudgesLinkAfterConcurrentModeChange(t *testing.T) {
 
 func TestConnectionCreateRefusesObjectBoundToAnotherProvider(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
-	// An object created outside the API under this identity's deterministic
-	// name, but bound to a different provider, is not reused: the provider
-	// reference is immutable and a consent for it could never link.
 	name := connectors.ConnectionName("github", connectorTestIssuer, "alice")
 	foreign := &corev1alpha1.Connection{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: connectorTestNamespace, Finalizers: []string{controller.ConnectionCustodyFinalizer}},
@@ -1740,9 +1592,6 @@ func TestConnectionCreateNarrowingReusedLinkStaysReady(t *testing.T) {
 	h.grantScope = "read:user repo"
 	created := h.create("readWrite")
 	h.link(created)
-	// Reusing the Ready readWrite link with readOnly narrows it: the grant
-	// already covers the narrower mode, so the response stays Ready even
-	// though the spec write bumped the generation the conditions observe.
 	resp, raw := h.do(http.MethodPost, "/api/v1/connections", map[string]string{"provider": "github", "mode": "readOnly"})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("narrowing create = %d %s", resp.StatusCode, raw)
@@ -1756,10 +1605,6 @@ func TestConnectionCreateNarrowingReusedLinkStaysReady(t *testing.T) {
 	}
 }
 
-// TestConnectionCommittedRetryKeepsProviderConsentFence covers custody
-// committed and the status write lost, then a provider tool retargeted
-// before the retry: the committed material is not recorded as consented for
-// a destination the person never saw, and nothing is revoked.
 func TestConnectionCommittedRetryKeepsProviderConsentFence(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	var fail atomic.Bool
@@ -1798,11 +1643,6 @@ func TestConnectionCommittedRetryKeepsProviderConsentFence(t *testing.T) {
 	}
 }
 
-// TestConnectionRevocationIdentityBoundAtConsentStart covers a revocation
-// endpoint moved while the person is at the provider: the consent still
-// completes (the OAuth client and tool destinations are unchanged), but the
-// tokens are sealed with the revocation identity consent started under, so
-// disconnect never hands them to the endpoint that appeared meanwhile.
 func TestConnectionRevocationIdentityBoundAtConsentStart(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	created := h.create("readOnly")
@@ -1831,10 +1671,6 @@ func TestConnectionRevocationIdentityBoundAtConsentStart(t *testing.T) {
 	}
 }
 
-// TestConnectionViewsRevalidateAgainstCurrentProvider covers the window in
-// which a provider has changed but the Connection's own conditions still
-// say Ready: the API views apply the checks credential resolution applies,
-// so the dashboard and CLI never advertise a link it would refuse.
 func TestConnectionViewsRevalidateAgainstCurrentProvider(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	created := h.create("readOnly")
@@ -1871,7 +1707,6 @@ func TestConnectionViewsRevalidateAgainstCurrentProvider(t *testing.T) {
 		}
 	}
 
-	// A new OAuth client: the recorded consent no longer matches.
 	updateProvider(func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.ClientID = "rotated-client" })
 	for _, view := range func() []ConnectionResponse { g, l := views(); return []ConnectionResponse{g, l} }() {
 		if view.Ready || view.State != corev1alpha1.ConnectionStateReady || !strings.Contains(view.Message, "changed since you consented") {
@@ -1879,7 +1714,6 @@ func TestConnectionViewsRevalidateAgainstCurrentProvider(t *testing.T) {
 		}
 	}
 
-	// The same client, but a read scope the grant lacks.
 	updateProvider(func(p *corev1alpha1.ConnectorProvider) {
 		p.Spec.OAuth.ClientID = "client-id"
 		p.Spec.OAuth.Scopes.Read = append(p.Spec.OAuth.Scopes.Read, "read:org")
@@ -1890,8 +1724,6 @@ func TestConnectionViewsRevalidateAgainstCurrentProvider(t *testing.T) {
 		}
 	}
 
-	// The original configuration, but no longer accepted (its references
-	// broke or its generation moved on): resolution refuses the link.
 	updateProvider(func(p *corev1alpha1.ConnectorProvider) { p.Spec.OAuth.Scopes.Read = []string{"read:user"} })
 	unaccepted := &corev1alpha1.ConnectorProvider{}
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, unaccepted); err != nil {
@@ -1907,7 +1739,6 @@ func TestConnectionViewsRevalidateAgainstCurrentProvider(t *testing.T) {
 		}
 	}
 
-	// The provider is deleted: the link keeps its tokens but is unusable.
 	provider := &corev1alpha1.ConnectorProvider{}
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: "github"}, provider); err != nil {
 		t.Fatal(err)
@@ -1922,9 +1753,6 @@ func TestConnectionViewsRevalidateAgainstCurrentProvider(t *testing.T) {
 	}
 }
 
-// TestConnectionCallbackRefusesModeChangeBeforeExchange covers a mode change
-// while the person is at the provider: the callback refuses before any code
-// exchange, so no token is issued that completion would only discard.
 func TestConnectionCallbackRefusesModeChangeBeforeExchange(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	created := h.create("readWrite")
@@ -1946,9 +1774,6 @@ func TestConnectionCallbackRefusesModeChangeBeforeExchange(t *testing.T) {
 	}
 }
 
-// TestConnectionListIncludesUnlabeledOwnedConnections covers a Connection
-// created through Kubernetes without the owner index label: ownership comes
-// from spec.subject, so its owner still sees it.
 func TestConnectionListIncludesUnlabeledOwnedConnections(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	created := h.create("readOnly")
@@ -1967,9 +1792,6 @@ func TestConnectionListIncludesUnlabeledOwnedConnections(t *testing.T) {
 	}
 }
 
-// TestConnectionViewsReadProvidersUncached covers informer lag after a
-// provider change: the views judge the provider as the API server holds it,
-// as credential resolution does, not as the cache last saw it.
 func TestConnectionViewsReadProvidersUncached(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	created := h.create("readOnly")
@@ -1987,9 +1809,6 @@ func TestConnectionViewsReadProvidersUncached(t *testing.T) {
 	}
 }
 
-// TestConnectionViewsMarkDuplicateLinksUnready covers a person holding two
-// links to one provider: resolution refuses both as ambiguous, so neither
-// view advertises a usable link.
 func TestConnectionViewsMarkDuplicateLinksUnready(t *testing.T) {
 	h := newConnectorTestHarness(t, acceptedTestProvider())
 	created := h.create("readOnly")
@@ -2030,8 +1849,6 @@ func TestConnectionViewsMarkDuplicateLinksUnready(t *testing.T) {
 	}
 }
 
-// A link whose person declined an agent host gets none, so relinking it
-// neither discloses one nor has clients wait for one.
 func TestConnectionPromisesAHostOnlyToALinkThatGetsOne(t *testing.T) {
 	provider := acceptedTestProvider()
 	provider.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
@@ -2053,7 +1870,6 @@ func TestConnectionPromisesAHostOnlyToALinkThatGetsOne(t *testing.T) {
 	}
 }
 
-// Clients disclose an agent host before consent from the provider view.
 func TestConnectorProviderResponseSaysWhenItServesAgentHosts(t *testing.T) {
 	provider := &corev1alpha1.ConnectorProvider{ObjectMeta: metav1.ObjectMeta{Name: "github"}}
 	if connectorProviderResponse(provider).AgentHost {

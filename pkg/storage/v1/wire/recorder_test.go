@@ -11,22 +11,15 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire"
 )
 
-// recordingProvider records every call to a method with a wire RPC and
-// answers with preset results, errors or panics. zz_generated.recorder_test.go
-// implements the methods; families without RPCs stay unimplemented.
 type recordingProvider struct {
 	storagev1.StateProvider
 
 	mu      sync.Mutex
 	calls   []recordedCall
 	results map[string][]any
-	// written holds, per method, the records the provider writes into its
-	// write-back arguments, in argument order.
 	written map[string][]any
 	errs    map[string]error
 	panics  map[string]any
-	// block holds a method's call until the channel closes; entered then
-	// receives the method's name when a call arrives.
 	block   map[string]chan struct{}
 	entered chan string
 }
@@ -40,20 +33,14 @@ type recordedCall struct {
 	hasFence    bool
 }
 
-// testDataset is the dataset a recording provider describes unless a test
-// sets another Describe result.
 const testDataset = "dataset-test"
 
-// boundConfig binds a client to the recording provider's dataset.
 var boundConfig = wire.ClientConfig{Dataset: testDataset}
 
-// serveBoth serves provider as both the state.v1 and the artifacts.v1
-// provider.
 func serveBoth(provider *recordingProvider) wire.ServerConfig {
 	return wire.ServerConfig{State: provider, Artifacts: provider}
 }
 
-// describeDefault is the recording provider's description.
 func describeDefault() storagev1.ProviderInfo {
 	return storagev1.ProviderInfo{
 		ContractVersion: storagev1.ContractVersion,
@@ -102,9 +89,6 @@ func (p *recordingProvider) called(ctx context.Context, method string, args ...a
 	return results, err
 }
 
-// waitEntered waits until a call to method reaches the provider, skipping
-// calls to other methods, such as the Describe a server sends to learn its
-// dataset.
 func (p *recordingProvider) waitEntered(t *testing.T, method string) {
 	t.Helper()
 	timeout := time.After(10 * time.Second)
@@ -144,15 +128,12 @@ func (p *recordingProvider) callsTo(method string) []recordedCall {
 	return calls
 }
 
-// writtenFor returns the records a method writes back.
 func (p *recordingProvider) writtenFor(method string) []any {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.written[method]
 }
 
-// writeBackInto writes the record at index of written into target, as a
-// provider writes into a record argument.
 func writeBackInto[T any](written []any, index int, target *T) {
 	if target == nil || index >= len(written) {
 		return
@@ -162,8 +143,6 @@ func writeBackInto[T any](written []any, index int, target *T) {
 	}
 }
 
-// snapshot copies the record a pointer argument points to, so a later write
-// into the argument does not change what was recorded.
 func snapshot(arg any) any {
 	value := reflect.ValueOf(arg)
 	if !value.IsValid() || value.Kind() != reflect.Pointer || value.IsNil() {

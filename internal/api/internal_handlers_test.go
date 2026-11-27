@@ -102,9 +102,6 @@ func setupTestInternalHandlers() (*InternalHandlers, *fiber.App, *storageclient.
 	})
 	app := fiber.New()
 
-	// Select the fixture identity addressed by each existing handler test. This
-	// keeps the original behavior tests intact while exercising the real
-	// Pod -> Job -> Task UID authorization path.
 	app.Use(func(c fiber.Ctx) error {
 		taskName := ""
 		parts := strings.Split(strings.Trim(c.Path(), "/"), "/")
@@ -168,7 +165,6 @@ func TestSubmitPlan(t *testing.T) {
 		body := map[string]any{"summary": "test"}
 		bodyBytes, _ := json.Marshal(body)
 
-		// Use a route that provides namespace but omits taskName
 		app2 := fiber.New()
 		app2.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, &UserInfo{
@@ -191,7 +187,6 @@ func TestGetPlan(t *testing.T) {
 	h, app, ss := setupTestInternalHandlers()
 	app.Get("/internal/v1/plans/:namespace/:taskName", h.GetPlan)
 
-	// Pre-save a plan
 	err := ss.SavePlan(context.Background(), "default", "my-task", &store.PlanState{
 		TaskName:     "my-task",
 		Namespace:    "default",
@@ -292,7 +287,6 @@ func TestGetMessages(t *testing.T) {
 	h, app, ss := setupTestInternalHandlers()
 	app.Get("/internal/v1/messages/:namespace/:taskName", h.GetMessages)
 
-	// Pre-send a message
 	err := ss.SendMessage(context.Background(), &store.Message{
 		Namespace:  "default",
 		FromTask:   "worker-a",
@@ -312,8 +306,6 @@ func TestGetMessages(t *testing.T) {
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&messages))
 		require.Len(t, messages, 1)
 		require.Equal(t, "hello from a", messages[0]["content"])
-		// createdAt keeps the wire format it had as a string: RFC 3339 in UTC
-		// with the stored fractional seconds.
 		require.Regexp(t, `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$`, messages[0]["createdAt"])
 	})
 
@@ -365,7 +357,6 @@ func TestGetMessages(t *testing.T) {
 	})
 
 	t.Run("markRead defaults to true", func(t *testing.T) {
-		// Send a fresh message for this sub-test
 		err := ss.SendMessage(context.Background(), &store.Message{
 			Namespace: "default", FromTask: "sender", ToTask: "reader",
 			ParentTask: "coord", Content: "read me",
@@ -381,7 +372,6 @@ func TestGetMessages(t *testing.T) {
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&msgs))
 		require.Len(t, msgs, 1)
 
-		// Second call should return empty because markRead defaulted to true
 		req2 := httptest.NewRequest(http.MethodGet, "/internal/v1/messages/default/reader?parentTask=coord", nil)
 		resp2, err := app.Test(req2)
 		require.NoError(t, err)
@@ -820,7 +810,6 @@ func TestGetSessionTranscript(t *testing.T) {
 	h, app, ss := setupTestInternalHandlers()
 	app.Get("/internal/v1/sessions/:namespace/:name/transcript", h.GetSessionTranscript)
 
-	// Create a session and append messages
 	err := ss.CreateSession(context.Background(), &store.SessionRecord{
 		Namespace:   "default",
 		Name:        "my-session",
@@ -1068,7 +1057,6 @@ func TestVerifyCallerNamespace(t *testing.T) {
 
 	t.Run("no auth returns unauthorized", func(t *testing.T) {
 		app := fiber.New()
-		// No UserInfo middleware — simulates unauthenticated request
 		app.Post("/internal/v1/results/:namespace/:taskName", h.SubmitResult)
 
 		req := httptest.NewRequest(http.MethodPost, "/internal/v1/results/default/my-task",
@@ -1092,9 +1080,6 @@ func TestVerifyCallerNamespace(t *testing.T) {
 			bytes.NewReader([]byte(`{"output":"done"}`)))
 		req.Header.Set("Content-Type", "application/json")
 
-		// Fail closed: internal endpoints are namespace-scoped, and a caller
-		// without a verifiable namespace identity must not pass for arbitrary
-		// namespaces.
 		resp, err := app.Test(req)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -1213,7 +1198,6 @@ func TestSendMessageAdditional(t *testing.T) {
 			c.Locals(UserInfoContextKey, &UserInfo{Username: "system:serviceaccount:default:worker"})
 			return c.Next()
 		})
-		// Route without :namespace param to simulate empty namespace
 		app.Post("/internal/v1/messages/", h.SendMessage)
 
 		body, _ := json.Marshal(map[string]string{
@@ -1445,8 +1429,6 @@ func TestGetSessionTranscriptAppliesTaskCutoff(t *testing.T) {
 	}
 }
 
-// recallFixture serves the internal memory list route to callers that are
-// the verified worker of an active Task, or to any other identity given.
 func recallFixture(t *testing.T, memoryStore func(*storageclient.Client) store.MemoryStore, caller *UserInfo) (*fiber.App, *storageclient.Client) {
 	t.Helper()
 	scheme := internalCallerAuthScheme(t)
@@ -1548,8 +1530,6 @@ func TestInternalListMemoriesCountsRecallsOnlyFromTaskWorkers(t *testing.T) {
 	}, 200*time.Millisecond, 10*time.Millisecond, "a caller that is no Task's worker cannot mark a listing as a recall")
 }
 
-// slowRecallStore keeps a recall count from finishing until release is
-// closed, like a storage write that keeps retrying.
 type slowRecallStore struct {
 	store.MemoryStore
 	release <-chan struct{}
@@ -1613,7 +1593,6 @@ func TestInternalRoutesRefuseToReviewOrApplyConsolidationProposals(t *testing.T)
 	}
 	require.Equal(t, http.StatusForbidden, post("/internal/v1/memory-proposals/default/"+pending.ID+"/review", `{"status":"accepted"}`))
 	require.Equal(t, http.StatusForbidden, post("/internal/v1/memory-proposals/default/"+accepted.ID+"/apply", `{}`))
-	// However a client pads the ID, the request is refused and changes nothing.
 	for _, path := range []string{"/internal/v1/memory-proposals/default/%20" + accepted.ID + "%20/apply",
 		"/internal/v1/memory-proposals/default/%20" + pending.ID + "/review"} {
 		status := post(path, `{"status":"accepted"}`)

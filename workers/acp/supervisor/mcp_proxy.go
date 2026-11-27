@@ -68,9 +68,7 @@ type mcpProxySession struct {
 	leaseVersion  uint64
 	closed        bool
 	calls         chan struct{}
-	// forwarders serve command-line clients for this session's forwarding
-	// Tools; they close with the session.
-	forwarders []*azureGateway
+	forwarders    []*azureGateway
 }
 
 type mcpJSONRPCRequest struct {
@@ -95,9 +93,7 @@ type mcpJSONRPCError struct {
 type mcpToolsCallParams struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
-	// MCP clients send progress tokens and extensions in _meta. The enclosing
-	// request limit bounds it, and it never contributes broker authority.
-	Meta json.RawMessage `json:"_meta,omitempty"`
+	Meta      json.RawMessage `json:"_meta,omitempty"`
 }
 
 func newMCPProxy(broker MCPBroker) (*mcpProxy, error) {
@@ -182,7 +178,6 @@ func (s *mcpProxySession) activate(ctx context.Context, auth harnessv2.PromptMCP
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Admission can wait behind capability locks after the handler samples time.
 	if lockedNow := time.Now(); now.Before(lockedNow) {
 		now = lockedNow
 	}
@@ -199,8 +194,6 @@ func (s *mcpProxySession) activate(ctx context.Context, auth harnessv2.PromptMCP
 	s.authorization = &cloned
 	s.lease = lease
 	s.state = harnessv2.RuntimeSessionStateIdle
-	// Keep only the admitted prompt's trace identity. The gate retains its own
-	// lifetime and never carries request values or baggage into broker calls.
 	parent := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
 	s.gateContext, s.gateCancel = context.WithCancelCause(parent)
 	s.revokedGate = nil
@@ -208,9 +201,6 @@ func (s *mcpProxySession) activate(ctx context.Context, auth harnessv2.PromptMCP
 	return nil
 }
 
-// testlessRequestDigest supplies a structurally valid placeholder to reuse the
-// exact PromptMCPAuthorization identity validator without authorizing an HTTP
-// mutation. Broker calls always carry their own canonical request digest.
 func testlessRequestDigest() harnessv2.RequestDigest {
 	return harnessv2.RequestDigest("sha256:" + strings.Repeat("0", 64))
 }
@@ -228,14 +218,12 @@ func (s *mcpProxySession) markRunning(promptID harnessv2.PromptID, now time.Time
 	s.state = harnessv2.RuntimeSessionStatePromptRunning
 	forwarders := append([]*azureGateway(nil), s.forwarders...)
 	s.mu.Unlock()
-	// The prompt can now make broker calls, so az can be signed in.
 	for _, forwarder := range forwarders {
 		forwarder.signInAtPromptStart()
 	}
 	return nil
 }
 
-// promptRunning reports whether prompt is the session's running prompt.
 func (s *mcpProxySession) promptRunning(prompt harnessv2.PromptID) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -243,10 +231,6 @@ func (s *mcpProxySession) promptRunning(prompt harnessv2.PromptID) bool {
 		s.state == harnessv2.RuntimeSessionStatePromptRunning
 }
 
-// approvalRequired reports whether the session's approval policy requires
-// approval for a tool. It reads the session's frozen configuration, which
-// every prompt's policy must match and which, unlike a prompt's
-// authorization, stays set between prompts.
 func (s *mcpProxySession) approvalRequired(toolName string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -264,8 +248,6 @@ func (s *mcpProxySession) renew(auth harnessv2.PromptMCPAuthorization, lease har
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Commit and schedule expiry against the clock observed under the lock.
-	// A backward clock step must not rewind a later caller timestamp.
 	if lockedNow := time.Now().UTC(); now.Before(lockedNow) {
 		now = lockedNow
 	}
@@ -310,8 +292,6 @@ func (s *mcpProxySession) expire(promptID harnessv2.PromptID, version uint64) {
 	if s.closed || s.authorization == nil || s.authorization.PromptID != promptID || s.leaseVersion != version {
 		return
 	}
-	// Relative timers can fire before an absolute wire deadline following a
-	// backward wall-clock step. Recheck both bounds and rearm the earlier one.
 	now := time.Now()
 	if now.Before(s.authorization.ExpiresAt) && now.Before(s.lease.ExpiresAt) {
 		s.resetLeaseTimerLocked(now)
@@ -506,9 +486,6 @@ func (s *mcpProxySession) handleToolCall(w http.ResponseWriter, r *http.Request,
 		writeMCPRPCError(w, rpc.ID, -32602, "MCP tool call requires a bounded request ID")
 		return
 	}
-	// Reject this tool request with its own JSON-RPC ID. A transport-level
-	// rejection can close a client's shared MCP stream and strand other calls.
-	// The global HTTP guard still bounds request parsing and control messages.
 	response, err := s.callBrokeredTool(r.Context(), callID, params.Name, params.Arguments, false, nil)
 	if err != nil {
 		switch {
@@ -544,12 +521,6 @@ var (
 	errMCPBrokerInvalidResponse = errors.New("MCP broker returned an invalid response")
 )
 
-// callBrokeredTool sends one call to the broker under the session's current
-// prompt authority. forward selects which tools the caller may name: the MCP
-// endpoint calls only model-facing tools, and a client forwarder calls only
-// its forwarding Tool. A non-nil admit sees the prompt the call would run
-// under and can refuse it with an error, which is returned unchanged before
-// anything is sent.
 func (s *mcpProxySession) callBrokeredTool(
 	requestCtx context.Context, callID, toolName string, arguments json.RawMessage, forward bool,
 	admit func(harnessv2.PromptID) error,
@@ -586,8 +557,6 @@ func (s *mcpProxySession) callBrokeredTool(
 		Protocol: harnessv2.ProtocolVersion, SessionState: harnessv2.RuntimeSessionStatePromptRunning,
 		Metadata: metadata, Lease: lease, Authorization: authorization, Call: call,
 	}
-	// Provider requests cannot choose the parent of a controller-side tool call.
-	// An empty trusted parent also clears any ambient request span.
 	ctx := trace.ContextWithSpanContext(requestCtx, trace.SpanContextFromContext(gate))
 	var cancel context.CancelFunc
 	if authorization.ApprovalPolicy.Requires(toolName) {
@@ -602,9 +571,6 @@ func (s *mcpProxySession) callBrokeredTool(
 	}()
 	response, err := s.proxy.broker.Call(ctx, request)
 	if err != nil {
-		// Only a locally cancelled call waits for courtesy cancellation. A
-		// broker failure or a definitive response must keep its own meaning,
-		// even if gate revocation races its delivery.
 		if errors.Is(err, context.Canceled) {
 			waitForPromptGateCancellation(requestCtx, gate)
 		}
@@ -624,7 +590,6 @@ func (s *mcpProxySession) listTools(_ time.Time) []map[string]any {
 	}
 	result := make([]map[string]any, 0, len(s.configuration.ToolPolicy.Tools))
 	for _, descriptor := range s.configuration.ToolPolicy.Tools {
-		// A forwarding Tool serves a command-line client, never the model.
 		if !descriptor.Source.Brokered() || descriptor.Forward != nil {
 			continue
 		}

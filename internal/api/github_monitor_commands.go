@@ -127,7 +127,6 @@ func repositoryMonitorAcceptsLabelCommand(monitor *corev1alpha1.RepositoryMonito
 		if target.Draft && !monitor.Spec.Targets.PullRequests.IncludeDrafts {
 			return false
 		}
-		// Reject before the label is consumed; the controller re-checks.
 		if include := monitor.Spec.Targets.PullRequests.IncludeLabels; len(include) > 0 &&
 			repositoryMonitorWebhookMatchingLabel(slices.Concat(include, monitor.Spec.Repair.IncludeLabels, monitor.Spec.Repair.CIOnlyLabels), target.Labels) == "" {
 			return false
@@ -504,9 +503,6 @@ func repositoryMonitorPermissionAllowedForIntent(monitor *corev1alpha1.Repositor
 	if !repositoryMonitorReadOnlyCommandIntent(intent) {
 		return repositoryMonitorPermissionAllowed(monitor, permission)
 	}
-	// AllowedRepositoryPermissions is intentionally a write-command allowlist
-	// (the CRD only permits write, maintain, and admin). Read-only commands use
-	// the lower triage-or-better threshold instead of that write-only policy.
 	permission = strings.ToLower(strings.TrimSpace(permission))
 	return repositoryMonitorPermissionInList(permission, []string{githubPermissionTriage, githubPermissionWrite, githubPermissionMaintain, githubPermissionAdmin})
 }
@@ -598,9 +594,6 @@ func githubIssueSnapshotDigest(monitor *corev1alpha1.RepositoryMonitor, target g
 		labels = append(labels, trimmed)
 	}
 	slicesSortStringsFold(labels)
-	// Hash exactly the issue content supplied to agent workflows. GitHub's
-	// updated_at also changes when one-shot command labels are consumed/re-added,
-	// so including it would defeat active-action coalescing for identical input.
 	payload := struct {
 		Number int      `json:"number"`
 		Title  string   `json:"title"`
@@ -776,9 +769,6 @@ func (h *Handlers) markRepositoryMonitorCommandWorkActionRetryPending(ctx contex
 	if desiredAction == "" {
 		return nil
 	}
-	// The store checks the status and writes in one step: a finished action is
-	// final, and reopening it, even one the controller completes concurrently,
-	// would run its work again.
 	_, err := h.repositoryMonitorStore.MarkWorkActionRetryPending(ctx, store.MarkWorkActionRetryPendingRequest{
 		Namespace: monitor.Namespace, ID: store.RepositoryMonitorWorkActionID(command.ID, desiredAction), RunID: runID,
 		BlockedReason: store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed, Error: cause.Error(),

@@ -9,9 +9,6 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 )
 
-// grantsClassOperatorAccess reports whether rules let their subject pass the
-// operator-access admission check on ExecutionWorkspaceClasses, including
-// through a wildcard.
 func grantsClassOperatorAccess(rules []rbacv1.PolicyRule) bool {
 	matches := func(values []string, want string) bool {
 		return slices.Contains(values, want) || slices.Contains(values, rbacv1.ResourceAll)
@@ -37,11 +34,6 @@ func rolesGrantingClassOperatorAccess(t *testing.T, manifest string) []string {
 	return roles
 }
 
-// Opting a class into orka task exec and orka task cp requires the
-// operator-access verb, and the feature's promise is that nobody holds it
-// until a cluster administrator grants it deliberately. A bundled role that
-// carries the verb, most easily through a '*' on the class resource, would
-// hand it to everyone already bound to that role.
 func TestNoBundledRoleGrantsClassOperatorAccess(t *testing.T) {
 	installer, err := os.ReadFile(filepath.Join("..", "..", "..", "manifest_staging", "deploy", "orka.yaml"))
 	if err != nil {

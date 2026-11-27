@@ -56,15 +56,10 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
     </Button>
   )
 
-  // A 403 replaces cached data (the token lost access); any other failure
-  // keeps what already loaded and only blocks a page that never loaded.
   if (isForbiddenError(error) || (error && !isNotFoundError(error) && !monitor)) {
     return <AccessErrorView title="Could not load repository monitor" resource={`repository monitor ${monitorName}`} error={error} action={backToMonitors} />
   }
 
-  // A 404 wins over cached data: a monitor deleted after it loaded keeps its
-  // last `data`. The detail queries live in RepositoryMonitorDetailContent, so
-  // a missing monitor sends none of them.
   if (isNotFoundError(error) || !monitor) {
     return (
       <NotFoundView
@@ -404,7 +399,6 @@ function RepositoryMonitorDetailContent({ monitorName, monitor }: { monitorName:
               <CardTitle>Recent Runs</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {/* A failed load must not read as "No runs"; a later failed poll keeps what loaded. */}
               {runs.error && (isForbiddenError(runs.error) || !runs.data) ? (
                 <ListAccessError error={runs.error} resource="monitor runs" />
               ) : runs.isLoading ? (

@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// catalogInterfaces are the interfaces whose methods the catalog lists.
 var catalogInterfaces = map[string]reflect.Type{
 	"StateProvider":           reflect.TypeFor[storagev1.StateProvider](),
 	"ArtifactProvider":        reflect.TypeFor[storagev1.ArtifactProvider](),
@@ -27,13 +26,10 @@ var catalogInterfaces = map[string]reflect.Type{
 	"MigrationMarkerStore":    reflect.TypeFor[storagev1.MigrationMarkerStore](),
 }
 
-// readPrefixes are the name prefixes of methods that change nothing.
 var readPrefixes = []string{"Get", "List", "Has", "Count", "Load", "Read", "Search", "Check", "Is", "Describe", "HealthCheck", "Export"}
 
-// writesNamedLikeReads are writes whose names start with a read prefix.
 var writesNamedLikeReads = []string{"IsLocked"}
 
-// readsNamedLikeWrites are reads whose names start with no read prefix.
 var readsNamedLikeWrites = []string{"PreviewScanTaskIngestion", "ResolveMemoryProposalApplication", "ResolveTaskDataFence"}
 
 func providerMethod(t *testing.T, name string) reflect.Type {
@@ -127,7 +123,6 @@ func TestMethodCatalogKinds(t *testing.T) {
 	require.False(t, ok)
 }
 
-// classified lists every method whose call class is not CallInteractive.
 var classified = map[string]storagev1.CallClass{
 	"AdvanceControllerEpoch":    storagev1.CallControl,
 	"Describe":                  storagev1.CallControl,
@@ -136,21 +131,15 @@ var classified = map[string]storagev1.CallClass{
 	"ResolveOperation":          storagev1.CallControl,
 	"SyncControllerEpochMirror": storagev1.CallControl,
 
-	// The dataset binding establishes and checks identity before a fence
-	// exists, so it never waits behind ordinary work.
 	"BindDataset":                 storagev1.CallControl,
 	"CompleteDatasetBootstrap":    storagev1.CallControl,
 	"DetachDatasetBinding":        storagev1.CallControl,
 	"GetDatasetBinding":           storagev1.CallControl,
 	"UpdateBindingKeyFingerprint": storagev1.CallControl,
 
-	// The write watermark records and checks what a dataset acknowledged, so
-	// lost writes are detected even while ordinary work saturates the store.
 	"AdvanceWriteWatermark": storagev1.CallControl,
 	"GetWriteWatermark":     storagev1.CallControl,
 
-	// A migration copies a dataset while writes are stopped. Export batches
-	// can carry whole results and artifacts.
 	"AbortImport":          storagev1.CallBackground,
 	"BeginImport":          storagev1.CallBackground,
 	"ClearMigrationMarker": storagev1.CallBackground,
@@ -169,11 +158,8 @@ var classified = map[string]storagev1.CallClass{
 	"MaintainGatewayRecords":              storagev1.CallBackground,
 	"PruneOperationReceipts":              storagev1.CallBackground,
 	"PruneUsage":                          storagev1.CallBackground,
-	// A memory consolidation run lists the Sessions that changed in its window.
-	"ListMemoryConsolidationSessions": storagev1.CallBackground,
+	"ListMemoryConsolidationSessions":     storagev1.CallBackground,
 
-	// Snapshot retention scans references and deletes snapshots that no
-	// longer have any.
 	"CountAgentExecutionSnapshotReferences":    storagev1.CallBackground,
 	"DeleteAgentExecutionSnapshot":             storagev1.CallBackground,
 	"ListAgentExecutionSnapshotMetadataBefore": storagev1.CallBackground,
@@ -185,8 +171,6 @@ var classified = map[string]storagev1.CallClass{
 	"SavePromptResultReceipt": storagev1.CallBulk,
 	"SaveResult":              storagev1.CallBulk,
 
-	// Sealed snapshot bodies and native session records can each reach
-	// several megabytes.
 	"CommitSealedSessionTurnFinalization": storagev1.CallBulk,
 	"CreateSealedAgentExecutionSnapshot":  storagev1.CallBulk,
 	"GetSealedAgentExecutionSnapshot":     storagev1.CallBulk,
@@ -263,9 +247,6 @@ func TestMethodsReturnsACopy(t *testing.T) {
 	require.True(t, ok)
 }
 
-// TestWriteRequestsDigestEveryField fills every argument of every write with
-// non-zero values and checks that the request digest covers each top-level
-// field, including fields hidden from JSON.
 func TestWriteRequestsDigestEveryField(t *testing.T) {
 	contextType := reflect.TypeFor[context.Context]()
 	for name, info := range storagev1.Methods() {
@@ -310,8 +291,6 @@ func TestWriteRequestsDigestEveryField(t *testing.T) {
 	}
 }
 
-// filledValue returns a value of type typ with every field set to a non-zero
-// value.
 func filledValue(t *testing.T, typ reflect.Type, depth int) reflect.Value {
 	t.Helper()
 	require.Lessf(t, depth, 12, "%s nests too deeply to fill", typ)

@@ -29,7 +29,6 @@ func main() {
 
 func run(args []string) error {
 	flags := flag.NewFlagSet("aimockcapture", flag.ContinueOnError)
-	// Flag parsing can otherwise echo untrusted values, including upstream userinfo.
 	flags.SetOutput(io.Discard)
 	listen := flags.String("listen", ":4010", "listen address")
 	upstream := flags.String("upstream", "http://127.0.0.1:4011", "aimock upstream URL")

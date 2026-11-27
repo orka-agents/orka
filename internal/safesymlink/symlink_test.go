@@ -99,8 +99,6 @@ func TestValidateGraphBoundsChainDepth(t *testing.T) {
 		t.Fatalf("chain within the depth bound rejected: %v", err)
 	}
 
-	// Chains deeper than the kernel's resolution bound can never resolve at
-	// use time and would otherwise cost O(links x depth) validation work.
 	paths, links = buildChain(maxSymlinkChainDepth + 1)
 	err := ValidateGraph(paths, links, 4096, 4096)
 	if err == nil || !strings.Contains(err.Error(), "maximum resolution depth") {

@@ -26,10 +26,6 @@ const (
 	runCmdName      = "run"
 )
 
-// ---------------------------------------------------------------------------
-// renderMarkdown
-// ---------------------------------------------------------------------------
-
 func TestRenderMarkdownBasic(t *testing.T) {
 	out := renderMarkdown("# Hello\n\nWorld")
 	if out == "" {
@@ -42,7 +38,6 @@ func TestRenderMarkdownBasic(t *testing.T) {
 
 func TestRenderMarkdownEmpty(t *testing.T) { //nolint:unparam
 	out := renderMarkdown("")
-	// Empty input should still produce some output (or empty)
 	_ = out
 }
 
@@ -60,10 +55,6 @@ func TestRenderMarkdownCodeBlock(t *testing.T) {
 		t.Error("renderMarkdown returned empty for code block")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// handleToolCallEvent
-// ---------------------------------------------------------------------------
 
 func TestHandleToolCallEvent_DelegateTask(t *testing.T) {
 	args, _ := json.Marshal(map[string]any{"agentRef": "code-reviewer"})
@@ -122,7 +113,6 @@ func TestHandleToolCallEvent_CheckTaskProgress(t *testing.T) { //nolint:unparam
 
 	w.Close() //nolint:errcheck
 	os.Stderr = old
-	// Should not panic — suppressed
 }
 
 func TestHandleToolCallEvent_FetchTaskOutput(t *testing.T) {
@@ -158,7 +148,6 @@ func TestHandleToolCallEvent_FetchTaskOutputDefault(t *testing.T) {
 
 	var buf bytes.Buffer
 	buf.ReadFrom(r) //nolint:errcheck
-	// At default verbosity, fetch_task_output should not print
 	if strings.Contains(buf.String(), "Fetching result") {
 		t.Errorf("should not show fetching result at default verbosity")
 	}
@@ -197,7 +186,6 @@ func TestHandleToolCallEvent_DefaultToolVV(t *testing.T) {
 
 	var buf bytes.Buffer
 	buf.ReadFrom(r) //nolint:errcheck
-	// At VV, default tool name printing is suppressed (verbosity < VerbosityVV is false)
 	if strings.Contains(buf.String(), "⚙") {
 		t.Errorf("should not show ⚙ at VV verbosity for default tool")
 	}
@@ -221,15 +209,10 @@ func TestHandleToolCallEvent_DelegateVV(t *testing.T) {
 
 	var buf bytes.Buffer
 	buf.ReadFrom(r) //nolint:errcheck
-	// At VV, delegation message is suppressed (verbosity < VerbosityVV is false)
 	if strings.Contains(buf.String(), "Delegating") {
 		t.Errorf("should not show delegation at VV verbosity")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// handleToolResultEvent
-// ---------------------------------------------------------------------------
 
 func TestHandleToolResultEvent_CheckTaskProgress(t *testing.T) {
 	result, _ := json.Marshal(map[string]any{
@@ -305,7 +288,6 @@ func TestHandleToolResultEvent_CheckTaskProgressVV(t *testing.T) {
 
 	var buf bytes.Buffer
 	buf.ReadFrom(r) //nolint:errcheck
-	// VV suppresses the ↻ output
 	if strings.Contains(buf.String(), "↻") {
 		t.Error("should not show ↻ at VV verbosity")
 	}
@@ -382,15 +364,10 @@ func TestHandleToolResultEvent_DefaultToolDefault(t *testing.T) {
 
 	var buf bytes.Buffer
 	buf.ReadFrom(r) //nolint:errcheck
-	// Default verbosity should not show ✓ for non-special tools
 	if strings.Contains(buf.String(), "✓") {
 		t.Error("should not show at default verbosity")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// finishStream
-// ---------------------------------------------------------------------------
 
 func TestFinishStream_TTYWithContent(t *testing.T) {
 	var buf strings.Builder
@@ -429,10 +406,6 @@ func TestFinishStream_NonTTYNoContent(t *testing.T) {
 		t.Errorf("finishStream returned %d, want 0", code)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// streamChat — with httptest mock SSE server
-// ---------------------------------------------------------------------------
 
 func sseServer(events []string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -599,7 +572,6 @@ func TestStreamChat_TTYWithContent(t *testing.T) {
 	c := client.NewWithNamespace(srv.URL, "", "default")
 	req := client.ChatRequest{Message: "hello", SessionID: "s1"}
 
-	// stdoutTTY=true triggers renderMarkdown path in finishStream
 	code := streamChat(context.Background(), c, req, VerbosityDefault, false, true)
 	if code != 0 {
 		t.Errorf("streamChat returned %d, want 0", code)
@@ -607,7 +579,6 @@ func TestStreamChat_TTYWithContent(t *testing.T) {
 }
 
 func TestStreamChat_EmptyStream(t *testing.T) {
-	// Server sends nothing — stream ends immediately
 	srv := sseServer([]string{})
 	defer srv.Close()
 
@@ -631,10 +602,6 @@ func TestStreamChat_MissingDoneFails(t *testing.T) {
 		t.Errorf("streamChat returned %d, want 1 for a stream without done", code)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// newRunCmd
-// ---------------------------------------------------------------------------
 
 func TestNewRunCmd_Structure(t *testing.T) {
 	cmd := newRunCmd()
@@ -672,9 +639,6 @@ func TestNewRunCmd_AgentWithProvider(t *testing.T) {
 	root := newRootCmd()
 	root.SetArgs([]string{runCmdName, runAgentFlag, "runtime-agent", "--provider", runTestProvider, runServerFlag, srv.URL, runSessionFlag, "test-sess", "hello"})
 
-	// Runtime Agents carry no providerRef, so the chat coordinator's Provider
-	// must remain selectable alongside --agent; the server rejects genuine
-	// conflicts with an Agent-bound providerRef.
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
 	}
@@ -682,10 +646,6 @@ func TestNewRunCmd_AgentWithProvider(t *testing.T) {
 		t.Fatalf("expected agent and provider forwarded together, got agent=%q provider=%q", got.Agent, got.Provider)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// trailingAnsiPad regex
-// ---------------------------------------------------------------------------
 
 func TestTrailingAnsiPad(t *testing.T) {
 	input := "hello\x1b[0m   \t  "
@@ -697,10 +657,6 @@ func TestTrailingAnsiPad(t *testing.T) {
 		t.Errorf("expected prefix 'hello', got %q", got)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// newRunCmd integration — full chat flow through cobra
-// ---------------------------------------------------------------------------
 
 func TestNewRunCmd_OneShotViaCobra(t *testing.T) {
 	tmp := t.TempDir()
@@ -725,7 +681,6 @@ func TestNewRunCmd_OneShotViaCobra(t *testing.T) {
 	root := newRootCmd()
 	root.SetArgs([]string{"run", "--server", srv.URL, "--session", "test-sess", "hello world"})
 
-	// runOneShot calls os.Exit on non-zero, but 0 is fine
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
 	}
@@ -825,7 +780,6 @@ func TestNewRunCmd_ProviderOnly(t *testing.T) { //nolint:dupl
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case chatConfigPath:
-			// No provider or model set
 			json.NewEncoder(w).Encode(client.ChatConfigResponse{Enabled: true}) //nolint:errcheck
 		case chatAPIPath:
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -892,10 +846,6 @@ func TestNewRunCmd_NoProviderNoModel(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// runREPL — test by overriding os.Stdin
-// ---------------------------------------------------------------------------
-
 func TestRunREPL_QuitCommand(t *testing.T) {
 	doneData, _ := json.Marshal(client.SSEEventData{})
 
@@ -907,7 +857,6 @@ func TestRunREPL_QuitCommand(t *testing.T) {
 
 	c := client.NewWithNamespace(srv.URL, "", "default")
 
-	// Feed REPL commands via a pipe
 	r, w, _ := os.Pipe()
 	oldStdin := os.Stdin
 	os.Stdin = r
@@ -1108,7 +1057,6 @@ func TestRunREPL_EOF(t *testing.T) {
 	os.Stdin = r
 	defer func() { os.Stdin = oldStdin }()
 
-	// Close immediately — EOF
 	w.Close() //nolint:errcheck
 
 	err := runREPL(c, "s1", "", "", "", VerbosityDefault, false, false)

@@ -22,8 +22,6 @@ import (
 	"github.com/orka-agents/orka/workers/common"
 )
 
-// Gather the registered collector, including its actual label names. These tests
-// are serial because the production collector is process-global.
 func approvalDecisionSamples(t *testing.T) map[string]*dto.Histogram {
 	t.Helper()
 	families, err := ctrlmetrics.Registry.Gather()
@@ -55,9 +53,6 @@ func (f approvalMetricTransport) RoundTrip(req *http.Request) (*http.Response, e
 
 func requestWorkerMetricApproval(t *testing.T, f *v2ApprovalAPIFixture) approvals.Approval {
 	t.Helper()
-	// Exercise request_approval, the worker HTTP recorder, authenticated worker
-	// ownership checks and real SQLite ingestion. Only the small emitter adapter
-	// and HTTP transport are fixtures; Kubernetes is the existing fake client.
 	app := setupOwnedInternalExecutionEventApp(t, f.store, f.task.Name, "worker-pod", "worker-pod-uid")
 	tokenPath := filepath.Join(t.TempDir(), "worker-token")
 	require.NoError(t, os.WriteFile(tokenPath, []byte("synthetic-worker-token"), 0600))
@@ -108,7 +103,7 @@ func TestApprovalDecisionMetricsHumanPaths(t *testing.T) {
 				require.Equal(t, http.StatusOK, response.status, "%s", response.body)
 				if path == "acp" {
 					call.result(t)
-					f.start(t).result(t) // receipt replay must not count again
+					f.start(t).result(t)
 				}
 				response = f.decide("reviewer-b", pending.ID, decision)
 				require.NoError(t, response.err)

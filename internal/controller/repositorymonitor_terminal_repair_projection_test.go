@@ -54,8 +54,6 @@ func TestRepositoryMonitorInventoryPreservesPreTaskRepairFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Terminalization first fails the action. Command processing follows on the
-	// next reconciliation, and an inventory can run between those transitions.
 	if queued, err := r.enqueueAcceptedRepositoryMonitorCommands(ctx, monitor); err != nil || queued {
 		t.Fatalf("exhausted command recovery: queued=%v err=%v", queued, err)
 	}
@@ -158,8 +156,6 @@ func TestRepositoryMonitorTerminalRepairProjectionUsesCurrentHeadEvidence(t *tes
 			if err := db.CreateWorkAction(ctx, action); err != nil {
 				t.Fatal(err)
 			}
-			// Give the command a later timestamp than its authoritative evidence
-			// to prove that duplicate command projection cannot replace success.
 			if tc.jobPhase != "" {
 				if err := db.CreateRepairJob(ctx, &store.RepairJob{ID: "repair-" + repositoryMonitorShortHash(command.ID), MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, PRNumber: command.Number, HeadSHA: command.HeadSHA, Phase: tc.jobPhase, CreatedAt: command.CreatedAt.Add(-time.Minute)}); err != nil {
 					t.Fatal(err)

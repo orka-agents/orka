@@ -5,21 +5,14 @@ import { listArtifactsResponseSchema } from '@/schemas/artifact'
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 
-// Relative path for the shared api client (prepends API_BASE_URL itself).
 const taskArtifactsPath = (taskId: string) =>
   `/tasks/${encodeURIComponent(taskId)}/artifacts`
 
-// Absolute, namespace-safe download URL for a single artifact. Filename and
-// namespace are URL-encoded so unusual names can't break routing.
 export function taskArtifactDownloadUrl(taskId: string, filename: string, namespace: string) {
   const ns = namespace ? `?namespace=${encodeURIComponent(namespace)}` : ''
   return `${API_BASE_URL}/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(filename)}${ns}`
 }
 
-// Download an artifact through the authenticated fetch path. A bare <a download>
-// cannot carry the bearer token (auth is header-only, no cookie), so the API
-// returns 401; this fetches the blob with the Authorization header and saves it
-// via a transient object URL. Throws on non-OK so callers can surface an error.
 export async function downloadTaskArtifact(taskId: string, filename: string, namespace: string) {
   const token = useAuthStore.getState().token
   const res = await fetch(taskArtifactDownloadUrl(taskId, filename, namespace), {
@@ -37,9 +30,6 @@ export async function downloadTaskArtifact(taskId: string, filename: string, nam
   URL.revokeObjectURL(url)
 }
 
-// List artifact metadata for a task. Backend returns { artifacts: [] }, and 501
-// when the artifact store is disabled — treat that as a stable "unsupported"
-// empty rather than retrying forever.
 export function useTaskArtifacts(
   taskId: string,
   enabled = true,
@@ -54,8 +44,6 @@ export function useTaskArtifacts(
       return listArtifactsResponseSchema.parse(raw)
     },
     enabled: enabled && !!taskId,
-    // 501 means the feature is off and 404 means the task is gone; neither
-    // changes on retry, so only transient failures are retried.
     retry: (failureCount, error) =>
       !(error instanceof ApiError && (error.status === 501 || error.status === 404)) && failureCount < 3,
     refetchInterval: (query) => {

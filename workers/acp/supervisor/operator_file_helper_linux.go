@@ -19,22 +19,6 @@ import (
 	"github.com/orka-agents/orka/internal/operatoraccess"
 )
 
-// RunOperatorFileHelper implements the hidden file-copy subcommand. It runs
-// as the RuntimeSession child identity (launched through the ACP exec
-// helper), never as the supervisor, so ordinary file permissions, read-only
-// workspace protection, and ownership of created files match the agent's own.
-//
-// Confinement does not depend on walking path components: the session owns
-// the directories it would walk and can rename them concurrently. The
-// workspace root is opened without following symbolic links and must be the
-// exact directory the supervisor recorded before the session child started.
-// Every other path is resolved by the kernel in one openat2 call beneath that
-// root (RESOLVE_BENEATH, no symbolic links, magic links, or mount crossings),
-// which fails a resolution whose result is not beneath the root, including
-// one raced by a rename. Without openat2 the helper refuses.
-//
-// Protocol: one JSON status line on stdout, followed for reads by exactly
-// status.size bytes of file content.
 func RunOperatorFileHelper(args []string, stdin io.Reader, stdout io.Writer) int {
 	status := runOperatorFileHelper(args, stdin, stdout)
 	if status != nil {
@@ -44,9 +28,6 @@ func RunOperatorFileHelper(args []string, stdin io.Reader, stdout io.Writer) int
 	return 0
 }
 
-// operatorFileHelperResolvedHook runs after the helper resolves the target's
-// parent directory and before it opens or creates the final entry. Tests use
-// it to move directories at the worst moment.
 var operatorFileHelperResolvedHook func()
 
 func operatorFileHelperResolved() {
@@ -55,14 +36,8 @@ func operatorFileHelperResolved() {
 	}
 }
 
-// operatorFileHelperCommitHook runs after an upload's temporary entry was
-// verified and before it is renamed into place. Tests use it to substitute
-// the entry inside that window.
 var operatorFileHelperCommitHook func()
 
-// operatorEntryIsFile reports whether name in dirFD, not followed, is the
-// open file fd. The session can replace a named entry at any time, so a
-// name only proves which inode it held at the instant it is checked.
 func operatorEntryIsFile(dirFD int, name string, fd int) bool {
 	var entry, file unix.Stat_t
 	return unix.Fstatat(dirFD, name, &entry, unix.AT_SYMLINK_NOFOLLOW) == nil &&
@@ -129,8 +104,6 @@ func mapOperatorOpenError(err error) *operatorFileStatus {
 	}
 }
 
-// operatorWorkspaceIdentity is the device and inode of the workspace
-// directory, recorded by the supervisor before the session child started.
 type operatorWorkspaceIdentity struct{ dev, ino uint64 }
 
 func (i operatorWorkspaceIdentity) String() string {
@@ -150,13 +123,6 @@ func parseOperatorWorkspaceIdentity(raw string) (operatorWorkspaceIdentity, bool
 	return operatorWorkspaceIdentity{dev: dev, ino: ino}, true
 }
 
-// openOperatorWorkspaceRoot opens the workspace root without following a
-// symbolic link and proves it is the recorded directory. The child owns its
-// session root, so it could rename the workspace aside and put its private
-// home, or any directory it can read, in its place. The comparison is sound
-// only because the supervisor holds the recorded directory open for the
-// session's lifetime (acp.RecordWorkspaceIdentity): otherwise the child could
-// delete the workspace and be given its inode number for a new directory.
 func openOperatorWorkspaceRoot(root string, identity operatorWorkspaceIdentity) (int, *operatorFileStatus) {
 	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -175,17 +141,10 @@ func openOperatorWorkspaceRoot(root string, identity operatorWorkspaceIdentity) 
 }
 
 const (
-	operatorResolveBeneath = unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV
-	// operatorResolveAttempts bounds retries of a resolution the kernel
-	// abandoned because a rename or mount raced it.
+	operatorResolveBeneath  = unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV
 	operatorResolveAttempts = 8
 )
 
-// openOperatorBeneath resolves rel beneath rootFD in one kernel call. The
-// kernel refuses any component that is a symbolic link, a magic link, or a
-// mount crossing, and fails the resolution if its result is not beneath the
-// root when it completes, which is what a concurrent rename of an
-// intermediate directory out of the workspace produces.
 func openOperatorBeneath(rootFD int, rel string, flags int, mode uint32) (int, error) {
 	how := unix.OpenHow{Flags: uint64(flags | unix.O_CLOEXEC | unix.O_NOFOLLOW), Mode: uint64(mode), Resolve: operatorResolveBeneath}
 	for range operatorResolveAttempts {
@@ -200,8 +159,6 @@ func openOperatorBeneath(rootFD int, rel string, flags int, mode uint32) (int, e
 
 func sameOperatorInode(a, b *unix.Stat_t) bool { return a.Dev == b.Dev && a.Ino == b.Ino }
 
-// verifyOperatorParent proves that the parent directory held by dirFD is
-// still what rel's parent resolves to beneath the root.
 func verifyOperatorParent(rootFD int, parent string, dirFD int) error {
 	current, err := openOperatorBeneath(rootFD, parent, unix.O_PATH|unix.O_DIRECTORY, 0)
 	if err != nil {
@@ -241,8 +198,6 @@ func readOperatorFile(rootFD int, rel string, bound int64, stdout io.Writer) *op
 	}
 	writeOperatorFileStatus(stdout, operatorFileStatus{OK: true, Size: stat.Size})
 	if _, err := io.CopyN(stdout, file, stat.Size); err != nil {
-		// The status line is already sent; the supervisor detects the short
-		// copy and aborts the response.
 		os.Exit(1)
 	}
 	return nil
@@ -285,9 +240,6 @@ func writeOperatorFile(rootFD int, rel string, size int64, stdin io.Reader, stdo
 			_ = unix.Unlinkat(dirFD, temporary, 0)
 		}
 	}()
-	// The helper inherits the supervisor's restrictive umask, which would
-	// narrow the creation mode. Apply the intended mode explicitly so a
-	// replaced file keeps its permissions and a new file gets 0644.
 	if err := unix.Fchmod(fd, perm); err != nil {
 		return mapOperatorOpenError(err)
 	}
@@ -304,14 +256,9 @@ func writeOperatorFile(rootFD int, rel string, size int64, stdin io.Reader, stdo
 	if err := file.Sync(); err != nil {
 		return operatorFileFailure(operatorFileCodeIO, "sync failed")
 	}
-	// The session can move the parent directory out of the workspace while
-	// the upload streams. Commit only into the directory the path still
-	// resolves to beneath the root.
 	if err := verifyOperatorParent(rootFD, parent, dirFD); err != nil {
 		return mapOperatorOpenError(err)
 	}
-	// The session can also replace the temporary entry with another file or
-	// a symlink while stdin streams. Commit only the inode written here.
 	if !operatorEntryIsFile(dirFD, temporary, fd) {
 		return operatorFileFailure(operatorFileCodeIO, "the upload's temporary file was replaced")
 	}
@@ -322,17 +269,9 @@ func writeOperatorFile(rootFD int, rel string, size int64, stdin io.Reader, stdo
 		return mapOperatorOpenError(err)
 	}
 	committed = true
-	// A substitution racing the instant between the check and the rename
-	// installs someone else's entry: report the copy as failed. That entry
-	// is the session's own, so it is left in place.
 	if !operatorEntryIsFile(dirFD, name, fd) {
 		return operatorFileFailure(operatorFileCodeIO, "the upload's temporary file was replaced")
 	}
-	// A move racing the instant between the check and the rename is caught
-	// here. The copy is then reported as failed; a newly created entry is
-	// withdrawn. Copy in requires the class exec level, which already lets
-	// the operator write anywhere the session child can, so this window
-	// cannot exceed the operator's authority.
 	if err := verifyOperatorParent(rootFD, parent, dirFD); err != nil {
 		if existing.Ino == 0 {
 			var placed unix.Stat_t

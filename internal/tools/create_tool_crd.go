@@ -16,7 +16,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// CreateToolCRDTool creates a Tool CRD with an HTTP endpoint.
 type CreateToolCRDTool struct{}
 
 func (t *CreateToolCRDTool) Name() string { return createToolCRDToolName }

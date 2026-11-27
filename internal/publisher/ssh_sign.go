@@ -24,8 +24,6 @@ const (
 	sshSigWrapWidth   = 70
 )
 
-// ValidateCommitIdentity validates a Git commit author/committer name and email.
-// Empty values are allowed and resolve to the package defaults.
 func ValidateCommitIdentity(name, email string) (string, string, error) {
 	resolvedName := strings.TrimSpace(name)
 	if resolvedName == "" {
@@ -57,9 +55,6 @@ func validateCommitIdentityPart(field, value string) error {
 	return nil
 }
 
-// ParseSSHSigningKey parses an unencrypted OpenSSH private key and returns its
-// ssh.Signer plus its canonical SHA256 fingerprint. Passphrase-protected keys
-// are rejected fail-closed.
 func ParseSSHSigningKey(privateKeyPEM []byte) (ssh.Signer, string, error) {
 	if len(bytes.TrimSpace(privateKeyPEM)) == 0 {
 		return nil, "", invalid("commit signing key", "private key must not be empty")
@@ -74,10 +69,6 @@ func ParseSSHSigningKey(privateKeyPEM []byte) (ssh.Signer, string, error) {
 	if signer == nil || signer.PublicKey() == nil {
 		return nil, "", invalid("commit signing key", "signing key has no public key")
 	}
-	// Only deterministic SSH signing key types (Ed25519 and RSA PKCS#1 v1.5) are
-	// permitted so independent publishers produce identical commit OIDs and
-	// bundle digests for the same prepare request. Randomized ECDSA signatures
-	// would break deterministic preparation and recovery verification.
 	switch signer.PublicKey().Type() {
 	case ssh.KeyAlgoED25519, ssh.KeyAlgoRSA:
 	default:
@@ -86,16 +77,11 @@ func ParseSSHSigningKey(privateKeyPEM []byte) (ssh.Signer, string, error) {
 	return signer, ssh.FingerprintSHA256(signer.PublicKey()), nil
 }
 
-// SSHSigningKeyFingerprint returns the canonical SHA256 fingerprint of an
-// unencrypted OpenSSH private key.
 func SSHSigningKeyFingerprint(privateKeyPEM []byte) (string, error) {
 	_, fingerprint, err := ParseSSHSigningKey(privateKeyPEM)
 	return fingerprint, err
 }
 
-// SignGitCommitPayload signs an unsigned Git commit object payload using
-// OpenSSH's SSHSIG v1 format (namespace "git", hash "sha512") and returns the
-// ASCII-armored signature block without a trailing newline.
 func SignGitCommitPayload(signer ssh.Signer, unsignedPayload []byte) (string, error) {
 	if signer == nil || signer.PublicKey() == nil {
 		return "", invalid("commit signing key", "signer is required")
@@ -116,8 +102,6 @@ func SignGitCommitPayload(signer ssh.Signer, unsignedPayload []byte) (string, er
 	return armorSSHSig(blob), nil
 }
 
-// VerifyGitCommitSignature verifies an ASCII-armored SSHSIG signature produced
-// for an unsigned Git commit payload against the given public key.
 func VerifyGitCommitSignature(publicKey ssh.PublicKey, unsignedPayload []byte, armoredSig string) error {
 	if publicKey == nil {
 		return invalid("commit signing key", "public key is required")
@@ -149,13 +133,6 @@ func sshSigAlgorithmForKey(keyType string) string {
 	}
 }
 
-// sshSigSignedData constructs the OpenSSH PROTOCOL.sshsig signed data blob:
-//
-//	byte[6]   "SSHSIG"
-//	string    namespace ("git")
-//	string    reserved ("")
-//	string    hash_algorithm ("sha512")
-//	string    H(message)
 func sshSigSignedData(message []byte) []byte {
 	hash := sha512.Sum512(message)
 	var buf bytes.Buffer
@@ -167,15 +144,6 @@ func sshSigSignedData(message []byte) []byte {
 	return buf.Bytes()
 }
 
-// encodeSSHSigBlob encodes the OpenSSH PROTOCOL.sshsig signature blob:
-//
-//	byte[6]   "SSHSIG"
-//	uint32    SIG_VERSION (1)
-//	string    publickey
-//	string    namespace ("git")
-//	string    reserved ("")
-//	string    hash_algorithm ("sha512")
-//	string    signature
 func encodeSSHSigBlob(pubKey ssh.PublicKey, sig *ssh.Signature) []byte {
 	var buf bytes.Buffer
 	buf.WriteString(sshSigMagicPrefix)
@@ -272,8 +240,6 @@ func dearmorSSHSig(armored string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(joined)
 }
 
-// buildUnsignedCommitObject formats the canonical Git commit object payload
-// without a gpgsig header.
 func buildUnsignedCommitObject(treeOID, parentOID, authorName, authorEmail, date, message string) []byte {
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "tree %s\n", treeOID)
@@ -285,8 +251,6 @@ func buildUnsignedCommitObject(treeOID, parentOID, authorName, authorEmail, date
 	return buf.Bytes()
 }
 
-// buildSignedCommitObject injects a gpgsig header into the Git commit object
-// payload, indenting continuation lines by one space per Git's commit format.
 func buildSignedCommitObject(treeOID, parentOID, authorName, authorEmail, date, armoredSig, message string) []byte {
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "tree %s\n", treeOID)

@@ -260,9 +260,6 @@ func TestResponsesProductionDeadlineDuringTerminalWrite(t *testing.T) {
 	issuer := newTestOIDCProvider(t)
 	server := NewServer(h.client, nil, ServerConfig{WatchNamespace: "default", Chat: h.config, OIDC: issuer.config()})
 	server.openaiHandler.config.MaxDuration = 10 * time.Millisecond
-	// Race instrumentation makes this large response exceed the normal socket
-	// grace period. Isolate the handler deadline; socket deadlines have their
-	// own real-TCP backpressure and keep-alive tests.
 	server.app.Server().HeaderReceived = func(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 		config := server.requestConfig(header)
 		config.WriteTimeout = 15 * time.Second
@@ -331,8 +328,6 @@ func TestResponsesProductionFragmentedFunctionIdentity(t *testing.T) {
 	}
 }
 
-// Only the provider interface is substituted. One large terminal chunk crosses
-// the deadline inside the actual TCP writer, without relying on select luck.
 type responsesDeadlineProvider struct {
 	*oaiMockProvider
 	observed chan context.Context

@@ -58,8 +58,6 @@ func newToolScheme() *runtime.Scheme {
 	return s
 }
 
-// ---------- validateTool ----------
-
 func TestValidateTool(t *testing.T) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "auth-secret", Namespace: "default"},
@@ -1334,7 +1332,6 @@ func TestToolReconcilerMCPSubstrateActorWaitsForLegacyTaskCleanup(t *testing.T) 
 		t.Fatalf("lease = %#v, want legacy Task ownership preserved", gotLease)
 	}
 
-	// Once the legacy owner confirms deletion, the Tool may claim a fresh actor.
 	if err := r.Get(ctx, types.NamespacedName{Name: legacyTask.Name, Namespace: legacyTask.Namespace}, legacyTask); err != nil {
 		t.Fatalf("Get legacy Task: %v", err)
 	}
@@ -2379,8 +2376,6 @@ func approvedMCPActorTemplateForTest() *unstructured.Unstructured {
 	return template
 }
 
-// ---------- healthCheck ----------
-
 func TestHealthCheck(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -2457,8 +2452,6 @@ func TestHealthCheck_Unreachable(t *testing.T) {
 	}
 }
 
-// ---------- getHTTPClient ----------
-
 func TestGetHTTPClient(t *testing.T) {
 	t.Run("returns injected client", func(t *testing.T) {
 		custom := &http.Client{}
@@ -2482,8 +2475,6 @@ func TestGetHTTPClient(t *testing.T) {
 		}
 	})
 }
-
-// ---------- updateStatus ----------
 
 func TestToolUpdateStatus(t *testing.T) {
 	tests := []struct {
@@ -2610,14 +2601,10 @@ type recordingToolWorkspaceExecutor struct {
 	deletedActorIDs                []string
 	deleteReqs                     []workspace.DeleteRequest
 	deleteErrs                     []error
-	// describeTemplates is the template Describe reports for each Actor ID.
-	describeTemplates map[string]workspace.TemplateRef
-	// describeDeleted lists Actor IDs Describe reports as already deleted.
-	describeDeleted []string
-	describePhase   workspace.Phase
-	// claimedTemplateUIDs is the template UID each Actor was claimed with,
-	// which Describe reports unless describeTemplates names another.
-	claimedTemplateUIDs map[string]string
+	describeTemplates              map[string]workspace.TemplateRef
+	describeDeleted                []string
+	describePhase                  workspace.Phase
+	claimedTemplateUIDs            map[string]string
 }
 
 func (e *recordingToolWorkspaceExecutor) Claim(ctx context.Context, req workspace.ClaimRequest) (*workspace.ClaimResult, error) {

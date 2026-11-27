@@ -18,12 +18,7 @@ import (
 )
 
 const (
-	execHelperProtocolVersion = "orka-acp-exec-v1"
-	// operatorExecHelperProtocolVersion launches an operator command with one
-	// supplementary tag group. The tag is unforgeable (dropping or changing
-	// supplementary groups needs CAP_SETGID) and inherited by every
-	// descendant, so the supervisor can find and kill the whole operation even
-	// after processes leave the process group, session, or process tree.
+	execHelperProtocolVersion         = "orka-acp-exec-v1"
 	operatorExecHelperProtocolVersion = "orka-acp-operator-exec-v1"
 )
 
@@ -49,9 +44,6 @@ func newChildCommand(cfg ProcessConfig) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
-// RunExecHelper validates the trusted launch envelope, applies hard resource
-// limits to the current process, and only then replaces it with the adapter.
-// It is exported solely for cmd/orka-acp-exec-helper.
 func RunExecHelper(args, environment []string) error {
 	invocation, err := parseExecHelperInvocation(args)
 	if err != nil {
@@ -241,7 +233,6 @@ func inspectProcessesForUIDAt(procRoot string, uid, selfPID int) ([]procProcess,
 		}
 		data, err := os.ReadFile(filepath.Join(procRoot, entry.Name(), "status"))
 		if errors.Is(err, fs.ErrNotExist) {
-			// A numeric /proc entry may disappear between ReadDir and ReadFile.
 			continue
 		}
 		if err != nil {
@@ -317,9 +308,6 @@ func reapExitedProcessesForUIDExcept(uid, excludedPID int) {
 	if !supported {
 		return
 	}
-	// Operator leaders are reaped only by their owners; see operatorLeaders.
-	// The lock is held for the whole pass so a command cannot start, exit,
-	// and be reaped here before it is registered.
 	operatorLeaders.mu.Lock()
 	defer operatorLeaders.mu.Unlock()
 	for _, process := range processes {

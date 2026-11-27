@@ -44,7 +44,6 @@ const (
 
 var gatewayMetadataKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
 
-// GatewayClassReconciler validates administrator-owned adapter profiles.
 type GatewayClassReconciler struct {
 	client.Client
 	Scheme *k8sruntime.Scheme
@@ -54,7 +53,6 @@ type GatewayClassReconciler struct {
 // +kubebuilder:rbac:groups=gateway.orka.ai,resources=gatewayclasses/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=gateway.orka.ai,resources=gatewayclasses/finalizers,verbs=update
 
-// Reconcile validates one GatewayClass.
 func (r *GatewayClassReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	object := &gatewayv1alpha1.GatewayClass{}
 	if err := r.Get(ctx, req.NamespacedName, object); err != nil {
@@ -80,7 +78,6 @@ func (r *GatewayClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager registers the GatewayClass controller.
 func (r *GatewayClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1alpha1.GatewayClass{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
@@ -88,7 +85,6 @@ func (r *GatewayClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// GatewayReconciler resolves adapter references and probes orka.gateway.v1.
 type GatewayReconciler struct {
 	client.Client
 	Scheme                *k8sruntime.Scheme
@@ -103,7 +99,6 @@ type GatewayReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 
-// Reconcile validates references, Secret boundaries, health, and capabilities.
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	object := &gatewayv1alpha1.Gateway{}
 	if err := r.Get(ctx, req.NamespacedName, object); err != nil {
@@ -205,7 +200,6 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{RequeueAfter: gatewayRequeueInterval}, nil
 }
 
-// SetupWithManager registers Gateway watches, including Secret and Service rotation.
 func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1alpha1.Gateway{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
@@ -246,8 +240,6 @@ func (r *GatewayReconciler) gatewaysForClass(ctx context.Context, object client.
 	})
 }
 
-// gatewaysMatching lists Gateways in namespace ("" for all namespaces) and
-// enqueues those accepted by matches.
 func (r *GatewayReconciler) gatewaysMatching(ctx context.Context, namespace string, matches func(*gatewayv1alpha1.Gateway) bool) []reconcile.Request {
 	list := &gatewayv1alpha1.GatewayList{}
 	if err := r.List(ctx, list, client.InNamespace(namespace)); err != nil {
@@ -263,7 +255,6 @@ func (r *GatewayReconciler) gatewaysMatching(ctx context.Context, namespace stri
 	return requests
 }
 
-// GatewayBindingReconciler validates semantic routing and target references.
 type GatewayBindingReconciler struct {
 	client.Client
 	Scheme *k8sruntime.Scheme
@@ -276,7 +267,6 @@ type GatewayBindingReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes,verbs=get;list;watch
 
-// Reconcile validates one semantic GatewayBinding.
 func (r *GatewayBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	object := &gatewayv1alpha1.GatewayBinding{}
 	if err := r.Get(ctx, req.NamespacedName, object); err != nil {
@@ -351,7 +341,6 @@ func (r *GatewayBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager registers binding watches.
 func (r *GatewayBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1alpha1.GatewayBinding{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
@@ -474,8 +463,6 @@ func (r *GatewayBindingReconciler) findAmbiguousGatewayBinding(
 		if !gatewayBindingsOverlap(current, other) {
 			continue
 		}
-		// Overlap requires the same GatewayRef, so the current Gateway's observed
-		// capabilities are also the peer binding's capabilities.
 		programmable, err := r.gatewayBindingCanBeProgrammed(ctx, other, capabilities)
 		if err != nil {
 			return "", err

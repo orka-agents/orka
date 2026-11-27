@@ -141,9 +141,6 @@ func TestInternalSubmitExecutionEventTaskOwnership(t *testing.T) {
 }
 
 func TestInternalSubmitExecutionEventAttributesChatSessionTasks(t *testing.T) {
-	// A chat-created Task has no sessionRef; its orka.ai/chat-session label
-	// attributes its events to that chat Session so the chat's timeline is
-	// not empty. The label counts only for an existing chat Session.
 	ctx := context.Background()
 	sqliteStore := newInternalExecutionEventStore(t)
 	for _, session := range []*store.SessionRecord{
@@ -197,7 +194,6 @@ func TestInternalSubmitExecutionEventAttributesChatSessionTasks(t *testing.T) {
 		})
 	}
 
-	// The chat Session's timeline now lists the chat-created Task's event.
 	sessionHandlers := NewHandlers(HandlersConfig{SessionStore: sqliteStore, ExecutionEventStore: sqliteStore})
 	app := fiber.New()
 	app.Get("/sessions/:id/events", sessionHandlers.ListSessionEvents)
@@ -218,8 +214,6 @@ func TestInternalSubmitExecutionEventAttributesChatSessionTasks(t *testing.T) {
 }
 
 func TestExecutionEventSessionNameWithoutSessionStore(t *testing.T) {
-	// Without a store a sessionRef is taken as given, but a chat label cannot
-	// be shown to name a chat Session and attributes nothing.
 	labeled := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labels.LabelChatSession: "chat-1"}}}
 	if got, err := executionEventSessionName(context.Background(), nil, "default", labeled); err != nil || got != "" {
 		t.Fatalf("chat-labeled session = %q, %v; want none", got, err)
@@ -409,8 +403,6 @@ func TestInternalSubmitExecutionEventRequiresCurrentTaskWorker(t *testing.T) {
 	}
 }
 
-// newInternalExecutionEventStore returns the storage client over an
-// in-memory SQLite store, as production wires the API.
 func newInternalExecutionEventStore(t *testing.T) *storageclient.Client {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
@@ -600,11 +592,6 @@ func doJSONRequest(t *testing.T, app *fiber.App, target string, body any) *http.
 	}
 	req := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(data))
 	req.Header.Set("Content-Type", "application/json")
-	// Fiber's app.Test defaults to a 1s deadline. This is an in-process JSON POST
-	// that returns immediately under normal conditions, but a loaded CI runner can
-	// starve the server goroutine past 1s and surface a spurious "i/o timeout".
-	// Use a generous explicit deadline so the helper measures handler behavior, not
-	// scheduler latency.
 	resp, err := app.Test(req, fiber.TestConfig{Timeout: 30 * time.Second, FailOnTimeout: true})
 	if err != nil {
 		t.Fatalf("app.Test: %v", err)

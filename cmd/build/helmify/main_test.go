@@ -167,9 +167,6 @@ func TestStaticChartDashboardFlag(t *testing.T) {
 	if strings.Count(rendered, "- --dashboard-enabled=true\n") != 1 {
 		t.Fatalf("enabling the dashboard must render exactly one --dashboard-enabled=true:\n%s", rendered)
 	}
-	// helm upgrade --reuse-values keeps a release's older values, which
-	// have no controller.dashboard map. Rendering evaluates NOTES.txt as
-	// well, so this covers both templates that read it.
 	rendered = requireHelmRender(t, "--show-only", "templates/deployment.yaml", "--set", "controller.dashboard=null")
 	if strings.Contains(rendered, "--dashboard-enabled") {
 		t.Fatalf("a release without controller.dashboard must leave the dashboard off:\n%s", rendered)
@@ -186,9 +183,6 @@ func TestStaticChartConnectorsFlags(t *testing.T) {
 	if err == nil || !strings.Contains(output, "callbackBaseUrl is required") {
 		t.Fatalf("enabling connectors without a callback base URL must fail: %v\n%s", err, output)
 	}
-	// Linked-account tokens live only in the controller store; the controller
-	// already refuses an ephemeral store outright, so the combination cannot
-	// render.
 	output, err = helmTemplateStaticChart(t, "--show-only", "templates/deployment.yaml",
 		"--set", "controller.connectors.enabled=true",
 		"--set", "controller.connectors.callbackBaseUrl=https://orka.example.test",
@@ -342,8 +336,6 @@ func TestStaticChartGrantsConnectorProvidersLeastPrivilege(t *testing.T) {
 	if end := strings.Index(controllerRole, "\n---"); end >= 0 {
 		controllerRole = controllerRole[:end]
 	}
-	// The controller reads providers and manages their finalizer; it never
-	// creates or deletes one.
 	const want = "resources: [\"connectorproviders\"]\n    verbs: [\"get\", \"list\", \"watch\", \"update\", \"patch\"]"
 	if !strings.Contains(controllerRole, want) || strings.Count(controllerRole, `"connectorproviders"`) != 1 {
 		t.Fatalf("controller tenant Role must grant connectorproviders only %q:\n%s", want, controllerRole)
@@ -608,8 +600,6 @@ func TestStaticChartUsesServicePortForInClusterControllerURLs(t *testing.T) {
 		}
 	}
 
-	// Native workspace runtimes resolve only fully qualified Service names,
-	// under the configured cluster domain.
 	custom := requireHelmRender(t, "--set", "service.port=18080", "--set-string", "clusterDomain=corp.example")
 	if !strings.Contains(custom, "--controller-url=http://test-orka.orka-test.svc.corp.example:18080") {
 		t.Fatalf("controller URL does not use clusterDomain:\n%s", custom)
@@ -773,8 +763,6 @@ func TestStaticChartGeneratesAgentExecutionSnapshotSecret(t *testing.T) {
 			t.Fatalf("generated snapshot Secret is missing %q:\n%s", marker, secret)
 		}
 	}
-	// The chart must never render key material: Helm keeps rendered
-	// manifests in release history. The controller mints the key at runtime.
 	if strings.Contains(secret, "\ndata:") || strings.Contains(secret, "\nstringData:") {
 		t.Fatalf("generated snapshot Secret must be rendered empty:\n%s", secret)
 	}
@@ -810,7 +798,6 @@ func TestStaticChartGeneratesAgentExecutionSnapshotSecret(t *testing.T) {
 	}
 }
 
-// renderedVolume returns the named volume block of a rendered Deployment.
 func renderedVolume(t *testing.T, deployment, name string) string {
 	t.Helper()
 	start := strings.Index(deployment, "\n        - name: "+name+"\n")
@@ -843,8 +830,6 @@ func TestStaticChartEnforcesNamespaceModeWithAdmissionPolicy(t *testing.T) {
 	requireRenderedDocument(t, rendered,
 		"kind: ValidatingAdmissionPolicyBinding\n", "\n  name: test-orka-namespace-mode\n")
 
-	// The claim is no longer a controller-served webhook: the controller must
-	// be able to claim its namespace before its own webhook server is up.
 	webhook := requireRenderedDocument(t, rendered,
 		"kind: ValidatingWebhookConfiguration\n", "\n  name: test-orka-controller\n")
 	for _, marker := range []string{"namespace-mode.", "/validate-v1-namespace-execution-mode"} {
@@ -864,8 +849,6 @@ func TestStaticChartEnforcesNamespaceModeWithAdmissionPolicy(t *testing.T) {
 	}
 }
 
-// requireHelmRenderWithUpstreamService renders the static chart with the
-// provider proxy's upstream Service lookup forced to return service.
 func requireHelmRenderWithUpstreamService(t *testing.T, service string, args ...string) (string, error) {
 	t.Helper()
 	helm, err := exec.LookPath("helm")
@@ -931,7 +914,6 @@ func TestStaticChartDerivesProviderProxyEgressFromUpstreamService(t *testing.T) 
 		t.Fatalf("derived egress does not select the Service's Pods on its target port: %#v", gateway)
 	}
 
-	// A UDP entry sharing the port number must not win over the TCP one.
 	output, err = requireHelmRenderWithUpstreamService(t,
 		`dict "spec" (dict "selector" (dict "app" "gw") "ports" (list `+
 			`(dict "port" 1337 "protocol" "TCP" "targetPort" 8443) `+
@@ -944,8 +926,6 @@ func TestStaticChartDerivesProviderProxyEgressFromUpstreamService(t *testing.T) 
 		t.Fatalf("derivation must take the TCP target port, not the UDP one: %v\n%s", err, output)
 	}
 
-	// Without a target port the Service port is the Pod port; a cluster.local
-	// suffix and the scheme's default port are accepted too.
 	output, err = requireHelmRenderWithUpstreamService(t,
 		`dict "spec" (dict "selector" (dict "app" "gw") "ports" (list (dict "port" 80)))`,
 		"--set-json", "providerProxy.egress=[]",
@@ -1056,8 +1036,6 @@ func TestStaticChartGeneratesWebhookTLSSecret(t *testing.T) {
 		}
 	}
 
-	// Update on a webhook configuration is whole-object, so a policy bounds
-	// the controller to caBundle changes on its own configuration.
 	guard := requireRenderedDocument(t, rendered,
 		"kind: ValidatingAdmissionPolicy\n", "\n  name: test-orka-webhook-configuration\n")
 	for _, marker := range []string{
@@ -1139,8 +1117,6 @@ func TestStaticChartUsesOnlyHarnessV2(t *testing.T) {
 	}
 }
 
-// helm upgrade --reuse-values carries an older chart's defaults, including its
-// harnessV1 block, so leftover values must still render only harness-v2.
 func TestStaticChartIgnoresLeftoverHarnessV1Values(t *testing.T) {
 	rendered := requireHelmRender(t,
 		"--set-string", "harnessV1.image.repository=ghcr.io/orka-agents/orka/agent-harness-wrapper",
@@ -1208,7 +1184,6 @@ func TestStaticChartRejectsControllerWatchScopeChangesOnUpgrade(t *testing.T) {
 			},
 		},
 		{
-			// Earlier releases rendered the short Service name.
 			name: "static harness v2 controller with a short controller URL",
 			existingControllerArgs: []string{
 				"--controller-mode=harness-v2",
@@ -1227,7 +1202,6 @@ func TestStaticChartRejectsControllerWatchScopeChangesOnUpgrade(t *testing.T) {
 			},
 		},
 		{
-			// The cluster domain may itself contain the namespace suffix.
 			name: "static harness v2 controller with a cluster domain repeating the namespace suffix",
 			existingControllerArgs: []string{
 				"--controller-mode=harness-v2",
@@ -1503,7 +1477,6 @@ func TestStaticChartProviderProxyURLValidation(t *testing.T) {
 		{url: "http://gateway.example.test/%25invalid"},
 	} {
 		t.Run(test.url, func(t *testing.T) {
-			// A values file preserves backslashes that Helm's --set parser would consume.
 			values, err := yaml.Marshal(map[string]any{
 				"providerProxy": map[string]string{"upstreamBaseURL": test.url},
 			})

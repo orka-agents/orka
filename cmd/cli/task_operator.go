@@ -21,7 +21,6 @@ import (
 const operatorTaintNotice = "Note: operator exec and copies into a workspace taint the Task's session: " +
 	"it will never be published, reused, checkpointed, or continued.\n"
 
-// operatorExitError carries the remote command's exit status to main.
 type operatorExitError struct {
 	code    int
 	message string
@@ -29,7 +28,6 @@ type operatorExitError struct {
 
 func (e *operatorExitError) Error() string { return e.message }
 
-// ExitCode returns the process exit code for the CLI.
 func (e *operatorExitError) ExitCode() int { return e.code }
 
 func newTaskExecCmd() *cobra.Command {
@@ -87,11 +85,6 @@ checkpointed for forks, or continued. Every exec is audited.`,
 			if !quiet {
 				fmt.Fprint(os.Stderr, operatorTaintNotice)
 			}
-			// Without a terminal the first Ctrl-C is forwarded to the remote
-			// command, so it must not also end a port-forward this command
-			// started: the stream would drop under a command that handles
-			// SIGINT and carries on. Abandoning the stream ends it instead.
-			// With a terminal Ctrl-C is a byte on the stream, never a signal.
 			c, closeTunnel := newClientWithTunnel(cmd, "", !tty)
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
@@ -108,8 +101,6 @@ checkpointed for forks, or continued. Every exec is audited.`,
 				stopResize := watchTerminalResize(ctx, controls)
 				defer stopResize()
 			} else {
-				// Without a terminal, Ctrl-C is forwarded to the remote process
-				// group as SIGINT; a second Ctrl-C abandons the stream locally.
 				interrupts := make(chan os.Signal, 2)
 				signal.Notify(interrupts, os.Interrupt)
 				defer signal.Stop(interrupts)
@@ -132,9 +123,6 @@ checkpointed for forks, or continued. Every exec is audited.`,
 			return operatorStatusError(status)
 		},
 	}
-	// The global --token flag owns the -t shorthand. Re-declaring "token"
-	// locally (without a shorthand) shadows it for this command only, so -t
-	// can mean --tty as operators expect from kubectl exec -it.
 	cmd.Flags().String("token", "", tokenFlagUsage)
 	cmd.Flags().BoolVarP(&stdin, "stdin", "i", false, "Pass stdin to the command")
 	cmd.Flags().BoolVarP(&tty, "tty", "t", false, "Allocate a terminal for the command (implies -i)")
@@ -144,8 +132,6 @@ checkpointed for forks, or continued. Every exec is audited.`,
 	return cmd
 }
 
-// forwardOperatorInterrupts forwards the first interrupt to the remote process
-// group as SIGINT and abandons the stream on the second.
 func forwardOperatorInterrupts(ctx context.Context, interrupts <-chan os.Signal, controls chan<- operatoraccess.Control, abandon func()) {
 	forwarded := false
 	for {
@@ -166,10 +152,6 @@ func forwardOperatorInterrupts(ctx context.Context, interrupts <-chan os.Signal,
 	}
 }
 
-// operatorExecFailure maps an exec that produced no remote status to an exit
-// code. Statuses below 124 belong to the remote command, so a refusal before
-// the stream opens, a lost stream, or output that could not be written locally
-// must not exit 1: that would read as the command having run and returned 1.
 func operatorExecFailure(err error) error {
 	if errors.Is(err, context.Canceled) {
 		return &operatorExitError{code: 130, message: "interrupted"}
@@ -177,9 +159,6 @@ func operatorExecFailure(err error) error {
 	return &operatorExitError{code: 126, message: err.Error()}
 }
 
-// operatorExecTimeoutSeconds converts --timeout to the whole seconds the API
-// accepts. A sub-second remainder rounds up: truncating it would turn a short
-// timeout into zero, which the server reads as "use the 15 minute default".
 func operatorExecTimeoutSeconds(timeout time.Duration) (int64, error) {
 	if timeout <= 0 {
 		return 0, fmt.Errorf("--timeout must be positive")
@@ -228,8 +207,6 @@ func operatorStatusError(status operatoraccess.Status) error {
 	}
 }
 
-// operatorCopyTarget splits "<task>:<path>". Only a valid Task name before
-// the first colon counts, so local paths such as ./a:b stay local.
 func operatorCopyTarget(arg string) (string, string, bool) {
 	name, path, ok := strings.Cut(arg, ":")
 	if !ok || name == "" || len(validation.IsDNS1123Subdomain(name)) != 0 {
@@ -305,8 +282,6 @@ func copyOutOfWorkspace(ctx context.Context, cmd *cobra.Command, copyFrom copyFr
 	if info, err := os.Stat(local); err == nil && info.IsDir() {
 		local = filepath.Join(local, filepath.Base(filepath.FromSlash(path)))
 	}
-	// Write to a temporary sibling and rename only after a complete copy, so
-	// a refused or truncated transfer never clobbers the local file.
 	temporary, err := os.CreateTemp(filepath.Dir(local), "."+filepath.Base(local)+".orka-cp-*")
 	if err != nil {
 		return fmt.Errorf("create local file: %w", err)
@@ -320,9 +295,6 @@ func copyOutOfWorkspace(ctx context.Context, cmd *cobra.Command, copyFrom copyFr
 	if closeErr != nil {
 		return fmt.Errorf("write local file: %w", closeErr)
 	}
-	// The rename replaces the destination with the temporary file, whose mode
-	// is 0600. A file that already exists keeps its permissions, so an
-	// executable stays executable; a new file keeps the restrictive default.
 	if existing, err := os.Stat(local); err == nil && existing.Mode().IsRegular() {
 		if err := os.Chmod(temporary.Name(), existing.Mode().Perm()); err != nil {
 			return fmt.Errorf("write local file: %w", err)

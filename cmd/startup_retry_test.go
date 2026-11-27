@@ -40,8 +40,6 @@ import (
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 )
 
-// newTestManager builds a manager the way the controller does: per-object
-// cache settings make construction resolve those types through discovery.
 func newTestManager(t *testing.T, config *rest.Config) (ctrl.Manager, error) {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -66,7 +64,6 @@ func writeJSON(w http.ResponseWriter, status int, body string) {
 	_, _ = io.WriteString(w, body)
 }
 
-// discoveryHandler serves just enough discovery for Deployments and Services.
 func discoveryHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api", func(w http.ResponseWriter, _ *http.Request) {
@@ -89,7 +86,6 @@ func discoveryHandler() http.Handler {
 	return mux
 }
 
-// statusHandler answers every request with one API status error.
 func statusHandler(code int, reason string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, code, fmt.Sprintf(`{"kind":"Status","apiVersion":"v1","status":"Failure",`+
@@ -97,7 +93,6 @@ func statusHandler(code int, reason string) http.Handler {
 	})
 }
 
-// closedAddress returns a loopback address that refuses connections.
 func closedAddress(t *testing.T) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -117,9 +112,6 @@ func failingDial(err error) func(context.Context, string, string) (net.Conn, err
 	}
 }
 
-// TestIsTransientConnectErrorClassifiesManagerFailures classifies
-// the errors ctrl.NewManager actually returns, through controller-runtime's
-// discovery and error wrapping, for each way the API server can fail.
 func TestIsTransientConnectErrorClassifiesManagerFailures(t *testing.T) {
 	api := httptest.NewServer(discoveryHandler())
 	t.Cleanup(api.Close)
@@ -216,7 +208,6 @@ func TestIsTransientConnectErrorClassifiesManagerFailures(t *testing.T) {
 }
 
 func TestIsTransientConnectErrorClassifiesWrappedErrors(t *testing.T) {
-	// discovery wraps transport failures the way the restmapper reports them.
 	wrap := func(err error) error {
 		return fmt.Errorf("failed to determine if *v1.Service is namespaced: %w",
 			fmt.Errorf("failed to get restmapping: %w", fmt.Errorf("failed to get server groups: %w", err)))
@@ -230,8 +221,6 @@ func TestIsTransientConnectErrorClassifiesWrappedErrors(t *testing.T) {
 		{name: "nil", err: nil},
 		{name: "configuration", err: errors.New("must specify Config")},
 		{
-			// client-go already retries a reset GET several times before
-			// returning it, so this case is not exercised through NewManager.
 			name: "connection reset",
 			err: wrap(&url.Error{Op: "Get", URL: "https://10.96.0.1:443/api", Err: &net.OpError{
 				Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET),
@@ -255,8 +244,6 @@ func TestRetryStartupStepCreatesManagerOnceAPIServerIsReachable(t *testing.T) {
 	t.Cleanup(api.Close)
 	unrouted := closedAddress(t)
 
-	// The first two attempts dial an address that refuses connections, standing
-	// in for an API server that cannot be reached yet; later attempts reach it.
 	const unreachableAttempts = 2
 	var attempts atomic.Int32
 	config := &rest.Config{Host: api.URL, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -351,7 +338,6 @@ func TestRetryStartupStepStopsAtTheDeadline(t *testing.T) {
 		t.Fatalf("gave up after %s, want about the 100ms deadline", elapsed)
 	}
 
-	// The zero value, used where startup should not wait, allows one attempt.
 	calls = 0
 	if _, err := retryStartupStep(context.Background(), startupRetry{}, "Kubernetes API server", isTransientConnectError,
 		func() (ctrl.Manager, error) {
@@ -362,8 +348,6 @@ func TestRetryStartupStepStopsAtTheDeadline(t *testing.T) {
 	}
 }
 
-// A wake-up delayed past the deadline, here by a slow log write, must not
-// start another attempt that could block for a full dial timeout.
 func TestRetryStartupStepRechecksTheDeadlineAfterWaiting(t *testing.T) {
 	refused := &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
 	slowLog := funcr.New(func(_, _ string) { time.Sleep(100 * time.Millisecond) }, funcr.Options{})
@@ -410,7 +394,6 @@ func testStartupRetry(log logr.Logger, within, initialDelay, maxDelay time.Durat
 	return startupRetry{log: log, deadline: time.Now().Add(within), initialDelay: initialDelay, maxDelay: maxDelay}
 }
 
-// setPublisherEnv points workspacePublisherClientFromEnv at baseURL.
 func setPublisherEnv(t *testing.T, baseURL string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -433,8 +416,6 @@ func TestWorkspacePublisherClientFromEnvWaitsForPublisher(t *testing.T) {
 	address := closedAddress(t)
 	setPublisherEnv(t, "http://"+address)
 
-	// The Publisher starts listening once the first attempt has been refused
-	// and the retry logged, as a Publisher Pod restarting with the node does.
 	var publisher *httptest.Server
 	t.Cleanup(func() {
 		if publisher != nil {
@@ -498,8 +479,6 @@ func TestWorkspacePublisherClientFromEnvDoesNotRetryPublisherResponses(t *testin
 	}
 }
 
-// Toolbox flags are validated before startup waits for the API server; only
-// the image-volume version check reads it, once it is reachable.
 func TestACPToolboxPolicyValidatesFlagsWithoutAnAPIServer(t *testing.T) {
 	if _, err := resolveACPToolboxPolicy(true, "", "", "", "bogus"); err == nil {
 		t.Fatal("an invalid mount method was accepted")
@@ -511,7 +490,6 @@ func TestACPToolboxPolicyValidatesFlagsWithoutAnAPIServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A nil config would panic if the copy method contacted the API server.
 	if got := checkACPToolboxImageVolumeSupport(nil, copyPolicy); got.UnavailableReason != "" {
 		t.Fatalf("copy toolboxes marked unavailable: %s", got.UnavailableReason)
 	}

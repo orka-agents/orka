@@ -32,7 +32,6 @@ var (
 	executionEventRelativeURLRe         = regexp.MustCompile("(?i)(^|[[:space:]<({\\[=:'\"`,;])(?:/[^/[:space:]<>\"'`][^[:space:]<>\"'`]*|\\?[^[:space:]<>\"'`]+)")
 )
 
-// SanitizedExecutionEventPayload contains redacted and size-bounded public payload fields.
 type SanitizedExecutionEventPayload struct {
 	Summary     string
 	Content     json.RawMessage
@@ -40,7 +39,6 @@ type SanitizedExecutionEventPayload struct {
 	Truncation  *ExecutionEventTruncation
 }
 
-// RedactExecutionEventText redacts credential-shaped text using the shared Orka redaction rules.
 func RedactExecutionEventText(value string) string {
 	redacted := redact.SensitiveText(value)
 	redacted = executionEventAuthorizationHeaderRe.ReplaceAllString(redacted, `${1}`+ExecutionEventRedactedValue)
@@ -67,9 +65,6 @@ func stripPrefixedExecutionEventURLQuery(candidate string) string {
 
 func stripExecutionEventURLQuery(candidate string) string {
 	trimmed := strings.TrimRight(candidate, ".,;:!?)]}")
-	// A redaction placeholder ends with ']': when the candidate already
-	// carries one (redact.SensitiveText runs first), its closing bracket is
-	// part of the placeholder, not trailing punctuation.
 	if idx := strings.LastIndex(candidate, ExecutionEventRedactedValue); idx >= 0 && len(trimmed) < idx+len(ExecutionEventRedactedValue) {
 		trimmed = candidate[:idx+len(ExecutionEventRedactedValue)]
 	}
@@ -89,13 +84,11 @@ func stripExecutionEventURLQuery(candidate string) string {
 	return parsed.String() + suffix
 }
 
-// RedactAndTruncateExecutionEventText redacts value and bounds it to maxChars runes.
 func RedactAndTruncateExecutionEventText(value string, maxChars int) (string, bool, int) {
 	redacted := RedactExecutionEventText(value)
 	return truncateRunes(redacted, maxChars)
 }
 
-// SanitizeExecutionEventPayload redacts and truncates event payload fields for API/worker boundaries.
 func SanitizeExecutionEventPayload(summary string, content json.RawMessage, contentText string) (SanitizedExecutionEventPayload, error) {
 	var metadata ExecutionEventTruncation
 
@@ -133,8 +126,6 @@ func SanitizeExecutionEventPayload(summary string, content json.RawMessage, cont
 	}, nil
 }
 
-// SanitizeExecutionEventJSON redacts sensitive JSON keys and string values while preserving valid JSON.
-// Oversized JSON is replaced by a small preview object and marked in truncation metadata.
 func SanitizeExecutionEventJSON(content json.RawMessage) (json.RawMessage, *ExecutionEventTruncation, error) {
 	trimmed := bytes.TrimSpace(content)
 	if len(trimmed) == 0 {
@@ -185,7 +176,6 @@ func truncateExecutionEventJSON(content []byte, includeSanitizedLength bool) (js
 	return json.RawMessage(truncated), metadata, nil
 }
 
-// IsSensitiveExecutionEventKey reports whether a JSON key should have its value replaced.
 func IsSensitiveExecutionEventKey(key string) bool {
 	normalized := normalizeExecutionEventKey(key)
 	if isExecutionEventTokenUsageKey(normalized) {
@@ -244,8 +234,6 @@ func sanitizeExecutionEventJSONValue(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(typed))
-		// Keys are sorted so that redacted keys, which may collide, are
-		// told apart the same way every time.
 		keys := make([]string, 0, len(typed))
 		for key := range typed {
 			keys = append(keys, key)
@@ -278,11 +266,6 @@ func sanitizeExecutionEventJSONValue(value any) any {
 	}
 }
 
-// sanitizeExecutionEventJSONKey redacts a key the way string values are
-// redacted: keys are as caller-controlled as values, so a credential sent as
-// a key must not survive in the event either. A key that collides with one
-// already kept, as a literal key can with an earlier key's redacted form, is
-// numbered, so no field is dropped.
 func sanitizeExecutionEventJSONKey(key string, kept map[string]any) string {
 	redacted := RedactExecutionEventText(key)
 	candidate := redacted

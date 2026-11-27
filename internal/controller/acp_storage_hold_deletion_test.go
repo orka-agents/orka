@@ -12,9 +12,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// heldDeletingTask holds the fixture's settling Task for its lost receipt,
-// then marks the Task for deletion behind a finalizer, as a user deleting a
-// held Task would. It returns the Task, the receipt and the hold.
 func heldDeletingTask(t *testing.T, fixture *recoveryFixture) (*corev1alpha1.Task, *store.PromptResultReceipt, taskStorageRecordHold) {
 	t.Helper()
 	task, receipt, digest := settlingTaskWithReceipt(t, fixture)
@@ -46,9 +43,6 @@ func heldDeletingTask(t *testing.T, fixture *recoveryFixture) (*corev1alpha1.Tas
 	return task, receipt, hold
 }
 
-// requireDeletingTaskCleanupProceeds checks that recovery handed the released
-// deleting Task to the current epoch, whose terminal recovery owns any pending
-// runtime cleanup, and that the cleanup the Task finalizer waits on completes.
 func requireDeletingTaskCleanupProceeds(t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task) {
 	t.Helper()
 	released := &corev1alpha1.Task{}
@@ -62,8 +56,6 @@ func requireDeletingTaskCleanupProceeds(t *testing.T, fixture *recoveryFixture, 
 		t.Fatalf("released deleting Task phase = %s, want terminal", released.Status.Phase)
 	}
 	if !taskScopedRuntimeSessionCleanupComplete(released) {
-		// The dispatcher's current-epoch sweep runs this for a deleting Task
-		// whose attempt is terminal and whose runtime cleanup is pending.
 		if err := fixture.dispatcher.recoverStaleTask(fixture.ctx, released, fixture.fence); err != nil {
 			t.Fatalf("current-epoch terminal recovery: %v", err)
 		}
@@ -77,8 +69,6 @@ func requireDeletingTaskCleanupProceeds(t *testing.T, fixture *recoveryFixture, 
 	}
 }
 
-// Acknowledging the hold of a Task already marked for deletion still records
-// its outcome as unknown, so the finalizer's terminal attempt is reached.
 func TestACPDispatcherReleasesAcknowledgedHoldOfADeletingTask(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -103,8 +93,6 @@ func TestACPDispatcherReleasesAcknowledgedHoldOfADeletingTask(t *testing.T) {
 	requireDeletingTaskCleanupProceeds(t, fixture, task)
 }
 
-// A receipt restored after the held Task was marked for deletion releases the
-// hold and settles the attempt from it, without running the prompt again.
 func TestACPDispatcherReleasesRestoredHoldOfADeletingTask(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -125,11 +113,8 @@ func TestACPDispatcherReleasesRestoredHoldOfADeletingTask(t *testing.T) {
 	requireDeletingTaskCleanupProceeds(t, fixture, task)
 }
 
-// errInjectedProjection fails one terminal projection enqueue, as a lost
-// response or a store that is briefly unavailable would.
 var errInjectedProjection = errors.New("injected terminal projection failure")
 
-// failingProjectionStore fails the next failures terminal projection enqueues.
 type failingProjectionStore struct {
 	store.DurableControlStore
 	failures int
@@ -145,9 +130,6 @@ func (s *failingProjectionStore) EnqueueOutboxProjection(
 	return s.DurableControlStore.EnqueueOutboxProjection(ctx, projection, fence)
 }
 
-// recoverAfterAFailedPass runs a recovery pass over failing, whose injected
-// failure stops it after the held attempt left Settling, then the passes that
-// follow, and checks that they finish the deleting Task.
 func recoverAfterAFailedPass(
 	t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task, failing store.DurableControlStore, injected error,
 ) {
@@ -178,8 +160,6 @@ func recoverAfterAFailedPass(
 	requireDeletingTaskCleanupProceeds(t, fixture, task)
 }
 
-// An acknowledged deleting Task whose pass failed after its outcome was
-// recorded as unknown is still finished by the next pass.
 func TestACPDispatcherFinishesAcknowledgedDeletingTaskAfterAFailedPass(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -191,8 +171,6 @@ func TestACPDispatcherFinishesAcknowledgedDeletingTaskAfterAFailedPass(t *testin
 	requireAttemptState(t, fixture, store.PromptExecutionOutcomeUnknown)
 }
 
-// A restored deleting Task whose pass failed after its attempt succeeded, at
-// the delivery transition that follows, is still finished by the next pass.
 func TestACPDispatcherFinishesRestoredDeletingTaskAfterAFailedPass(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -206,13 +184,8 @@ func TestACPDispatcherFinishesRestoredDeletingTaskAfterAFailedPass(t *testing.T)
 	requireAttemptState(t, fixture, store.PromptExecutionSucceeded)
 }
 
-// errInjectedOutcomeUnknown fails the transition that records an attempt's
-// outcome as unknown.
 var errInjectedOutcomeUnknown = errors.New("injected outcome-unknown transition failure")
 
-// An acknowledged deleting Task whose pass journaled its terminal event but
-// failed before the attempt recorded the unknown outcome is finished from the
-// journal by the next pass, which also hands the Task to the current epoch.
 func TestACPDispatcherHandsOffADeletingTaskFromAJournaledRecoveryTerminal(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)

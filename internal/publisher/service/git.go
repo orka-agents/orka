@@ -419,8 +419,6 @@ func (r *gitRunner) observeDefaultRef(ctx context.Context, box *gitSandbox, repo
 		return "", "", apiError(ErrSCMTransport, "source_ref_absent", "repository default source ref is absent", 409, false, nil)
 	}
 	if resolvedRef == "" {
-		// Some transports advertise only the HEAD object. Freezing the exact OID
-		// is still safe and avoids guessing a branch name.
 		return oid, oid, nil
 	}
 	return resolvedRef, oid, nil

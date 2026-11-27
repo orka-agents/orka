@@ -362,7 +362,6 @@ func TestSubmitResultContext_PreservesPublishedStdoutMarkerAfterCancellation(t *
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// Exceed the pipe buffer so cancellation lands during marker publication.
 	result := []byte(strings.Repeat("x", 1<<20))
 	done := make(chan error, 1)
 	go func() {
@@ -470,12 +469,10 @@ func TestSubmitResult_BearerToken(t *testing.T) {
 
 	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
 
-	// When no SA token file exists, no auth header is sent
 	err := SubmitResultContext(context.Background(), []byte("no token"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Without the SA token file mounted, Authorization should be empty
 	if gotAuth != "" {
 		t.Logf("Authorization header present (SA token file may exist): %s", gotAuth)
 	}
@@ -523,7 +520,6 @@ func TestFormatStructuredResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FormatStructuredResult: %v", err)
 	}
-	// Should set version to 1
 	var parsed StructuredResult
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -602,7 +598,6 @@ func TestParseStructuredResult_InvalidJSON(t *testing.T) {
 }
 
 func TestParseStructuredResult_MissingVersion(t *testing.T) {
-	// JSON without version field should be treated as plain text
 	sr := ParseStructuredResult(`{"summary":"test"}`)
 	if sr.Summary != `{"summary":"test"}` {
 		t.Errorf("expected raw JSON as summary when version=0, got %q", sr.Summary)
@@ -674,8 +669,6 @@ func TestSubmitResult_AllRetriesFail(t *testing.T) {
 
 	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
 	defer func() {
-		// The backoff schedule must outlast a routine controller restart:
-		// exponential up to the 60s cap, ~4 minutes in total.
 		var total time.Duration
 		for _, d := range slept {
 			if d > maxBackoff {

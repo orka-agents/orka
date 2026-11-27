@@ -49,8 +49,6 @@ func TestSubstrateActorPoolPinsTemplateWhileEmptyAcrossRestart(t *testing.T) {
 	require.Equal(t, corev1alpha1.SubstrateActorPoolPhaseReady, pool.Status.Phase)
 	require.Zero(t, executor.convergeTarget)
 
-	// Reconstruct the controller after the native template is replaced under
-	// the same name. No actors remain from which to infer the old identity.
 	restarted := *r
 	restarted.SubstrateTemplateValidator = func(_ context.Context, request *ExecutionWorkspaceRequest) error {
 		request.TemplateUID = "replacement-native-template-uid"
@@ -71,7 +69,6 @@ func TestSubstrateActorPoolPinsTemplateWhileEmptyAcrossRestart(t *testing.T) {
 		require.False(t, executor.convergeCalled)
 		require.False(t, executor.pruneCalled)
 	}
-	// Rejecting a replacement must not prevent cleanup of the old pool.
 	require.NoError(t, r.Delete(t.Context(), pool))
 	_, err := r.Reconcile(t.Context(), req)
 	require.NoError(t, err)

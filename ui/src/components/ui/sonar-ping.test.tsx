@@ -8,7 +8,6 @@ describe('SonarPing', () => {
     const root = container.firstElementChild as HTMLElement
     expect(root).toBeInTheDocument()
     expect(root).toHaveAttribute('aria-hidden', 'true')
-    // Concentric rings + center dot => multiple spans.
     expect(root.querySelectorAll('span').length).toBeGreaterThanOrEqual(3)
   })
 

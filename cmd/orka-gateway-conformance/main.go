@@ -96,8 +96,6 @@ func loadDeliveryFixture(path string) (*conformance.DeliveryFixture, error) {
 	return fixture, nil
 }
 
-// encoding/json accepts repeated keys and matches these ASCII field names
-// case-insensitively. Reject aliases before a later value can replace an identity.
 func uniqueFixtureKeys(body []byte) bool {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	opening, err := decoder.Token()
@@ -128,8 +126,6 @@ func uniqueFixtureKeys(body []byte) bool {
 	return err == nil && closing == json.Delim('}')
 }
 
-// encoding/json repairs invalid UTF-8 and unpaired UTF-16 surrogates.
-// Reject both before decoding can change a routing identity.
 func validFixtureUnicode(body []byte) bool {
 	if !utf8.Valid(body) {
 		return false

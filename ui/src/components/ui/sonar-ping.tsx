@@ -1,11 +1,5 @@
 import { cn } from '@/lib/utils'
 
-/**
- * Decorative "sonar" idle illustration — concentric rings pinging outward from
- * a center dot, evoking listening for activity. Used in idle/empty states (e.g.
- * the Live view when nothing is running). Purely ornamental (aria-hidden);
- * motion is gated behind motion-safe.
- */
 export function SonarPing({ className }: { className?: string }) {
   return (
     <div

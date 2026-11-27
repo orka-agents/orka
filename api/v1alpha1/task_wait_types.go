@@ -13,14 +13,9 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 type TaskWaitKind string
 
 const (
-	// TaskWaitKindApproval waits for a human decision on a parked sign-off
-	// approval that the turn requested. It never authorizes a gated tool call.
 	TaskWaitKindApproval TaskWaitKind = "Approval"
-	// TaskWaitKindTasks waits until every referenced child Task, following
-	// its own continuation chain, reaches a terminal phase.
-	TaskWaitKindTasks TaskWaitKind = "Tasks"
-	// TaskWaitKindTimer waits until a fixed time, for rate-limit backoff.
-	TaskWaitKindTimer TaskWaitKind = "Timer"
+	TaskWaitKindTasks    TaskWaitKind = "Tasks"
+	TaskWaitKindTimer    TaskWaitKind = "Timer"
 )
 
 // TaskWaitState is the durable lifecycle of a parked turn.
@@ -28,27 +23,15 @@ const (
 type TaskWaitState string
 
 const (
-	// TaskWaitStateRequested records a wait the running turn asked for. It
-	// takes effect only after that exact attempt settles Succeeded.
 	TaskWaitStateRequested TaskWaitState = "Requested"
-	// TaskWaitStateWaiting means the turn ended at an idle boundary, its
-	// runtime capacity was released, and the awaited event has not arrived.
-	TaskWaitStateWaiting TaskWaitState = "Waiting"
-	// TaskWaitStateResuming durably reserves the continuation Task name
-	// before it is created, so creation is exactly-once across restarts.
-	TaskWaitStateResuming TaskWaitState = "Resuming"
-	// TaskWaitStateResumed means the continuation Task exists.
-	TaskWaitStateResumed TaskWaitState = "Resumed"
-	// TaskWaitStateExpired means the wait deadline passed first.
-	TaskWaitStateExpired TaskWaitState = "Expired"
-	// TaskWaitStateCancelled means cancellation was requested while waiting.
+	TaskWaitStateWaiting   TaskWaitState = "Waiting"
+	TaskWaitStateResuming  TaskWaitState = "Resuming"
+	TaskWaitStateResumed   TaskWaitState = "Resumed"
+	TaskWaitStateExpired   TaskWaitState = "Expired"
 	TaskWaitStateCancelled TaskWaitState = "Cancelled"
-	// TaskWaitStateAbandoned means the requesting turn did not end in a
-	// proven success, so the wait was never armed and nothing resumes.
 	TaskWaitStateAbandoned TaskWaitState = "Abandoned"
 )
 
-// IsTerminal reports whether no further wait transition can occur.
 func (s TaskWaitState) IsTerminal() bool {
 	switch s {
 	case TaskWaitStateResumed, TaskWaitStateExpired, TaskWaitStateCancelled, TaskWaitStateAbandoned:
@@ -59,27 +42,14 @@ func (s TaskWaitState) IsTerminal() bool {
 }
 
 const (
-	// TaskConditionWaiting is True while a parked turn waits for an external
-	// event with its runtime capacity released.
-	TaskConditionWaiting = "Waiting"
-	// TaskConditionWaitingForCapacity is True while admission is blocked only
-	// because runtime or provider capacity is exhausted. It is retryable and
-	// bounded by the Task deadline.
+	TaskConditionWaiting            = "Waiting"
 	TaskConditionWaitingForCapacity = "WaitingForCapacity"
 
-	// TaskWaitingForCapacityReasonRuntimeCapacityUnavailable reports runtime
-	// admission blocked by capacity: a full RuntimePool, a RuntimePool that is
-	// not admitting new sessions, or a runtime rate limit on prompt admission.
-	// The condition message carries the specific cause when it is known.
-	TaskWaitingForCapacityReasonRuntimeCapacityUnavailable = "RuntimeCapacityUnavailable"
-	// TaskWaitingForCapacityReasonWorkspaceCapacityUnavailable reports an
-	// execution-workspace pool or provider with no admission capacity.
+	TaskWaitingForCapacityReasonRuntimeCapacityUnavailable   = "RuntimeCapacityUnavailable"
 	TaskWaitingForCapacityReasonWorkspaceCapacityUnavailable = "WorkspaceCapacityUnavailable"
-	// TaskWaitingForCapacityReasonCapacityAvailable clears the condition.
-	TaskWaitingForCapacityReasonCapacityAvailable = "CapacityAvailable"
+	TaskWaitingForCapacityReasonCapacityAvailable            = "CapacityAvailable"
 )
 
-// MaxTaskWaitReferences bounds the references a single wait may carry.
 const MaxTaskWaitReferences = 16
 
 // TaskWaitStatus records a data-only park of an agent turn. The parked Task's

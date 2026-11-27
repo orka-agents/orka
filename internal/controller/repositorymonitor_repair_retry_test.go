@@ -14,11 +14,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// A retried findings repair handoff adopts the repair Task's stored prompt,
-// even when prompt inputs moved since: the first handoff clears the item's
-// skip reason after writing it into the prompt, and the item's verdict can
-// move before the retry. A stored prompt for another head or intent is not
-// adopted, so a stale Task still fails recovery validation.
 func TestRepositoryMonitorFixRepairRetryKeepsStoredPrompt(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -103,8 +98,6 @@ func TestRepositoryMonitorFixRepairRetryKeepsStoredPrompt(t *testing.T) {
 		})
 	}
 
-	// Only the stored input data is reused: a Task whose instructions were
-	// edited after creation, even with an untouched input, is not adopted.
 	t.Run("edited instructions", func(t *testing.T) {
 		if err := cl.Get(ctx, key, &task); err != nil {
 			t.Fatal(err)

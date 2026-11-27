@@ -467,8 +467,6 @@ func TestValidateProviderSpec(t *testing.T) {
 			if issue.Reason != ReasonInvalidProvider {
 				t.Fatalf("reason = %q, want %q", issue.Reason, ReasonInvalidProvider)
 			}
-			// The message becomes public provider status: it never repeats
-			// a credential-bearing value from the spec.
 			if strings.Contains(strings.ToLower(issue.Message), "s3cr3t") || strings.Contains(issue.Message, "access_token") {
 				t.Fatalf("issue echoed a credential-bearing value: %s", issue.Message)
 			}
@@ -707,15 +705,12 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 	if !ConsentMatchesProvider(connection, scopesOnly) {
 		t.Fatal("a scope-only change is judged by ScopesGranted, not the authority digest")
 	}
-	// The parameter encoding is deterministic regardless of map order.
 	withParams := provider.DeepCopy()
 	withParams.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"audience": "api", "prompt": "consent"}
 	again := withParams.DeepCopy()
 	if ProviderAuthorityDigest(withParams) != ProviderAuthorityDigest(again) || ProviderAuthorityDigest(withParams) == digest {
 		t.Fatal("authorize parameters must change the digest deterministically")
 	}
-	// The encoding is injective: values that embed delimiters cannot collide
-	// with a different parameter set.
 	collide := provider.DeepCopy()
 	collide.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"a": "x\x00param:b\x00v"}
 	split := provider.DeepCopy()
@@ -723,7 +718,6 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 	if ProviderAuthorityDigest(collide) == ProviderAuthorityDigest(split) {
 		t.Fatal("delimiter-bearing values must not collide with a different parameter set")
 	}
-	// The issuer digest ignores tool destinations but follows the client.
 	retargeted := provider.DeepCopy()
 	retargeted.Spec.Tools[2].HTTP.URL = "https://api.github.com/elsewhere"
 	if ProviderIssuerDigest(retargeted) != ProviderIssuerDigest(provider) || ProviderAuthorityDigest(retargeted) == ProviderAuthorityDigest(provider) {
@@ -734,9 +728,6 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 	if ProviderIssuerDigest(rotated) == ProviderIssuerDigest(provider) || ProviderIssuerDigest(nil) != "" {
 		t.Fatal("a rotated client must move the issuer digest")
 	}
-	// Authorize-only parameters shape consent, not the issued token's
-	// authority: they move the consent fence but neither block a refresh nor
-	// skip revocation.
 	prompted := provider.DeepCopy()
 	if prompted.Spec.OAuth.AdditionalAuthorizeParameters == nil {
 		prompted.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{}
@@ -755,24 +746,17 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 	if ProviderIssuerDigest(moved) == ProviderIssuerDigest(provider) {
 		t.Fatal("the token URL must move the issuer digest")
 	}
-	// The effective PKCE setting is part of what the browser's consent was
-	// started with; flipping it mid-flow must fail the callback's fence.
 	noPKCE := provider.DeepCopy()
 	off := false
 	noPKCE.Spec.OAuth.PKCE = &off
 	if ProviderAuthorityDigest(noPKCE) == ProviderAuthorityDigest(provider) || ProviderIssuerDigest(noPKCE) != ProviderIssuerDigest(provider) {
 		t.Fatal("the PKCE setting must move the authority digest but not the issuer digest")
 	}
-	// A broadened parameter schema on a declared tool moves the consent
-	// fence: the constraint the person consented under is gone.
 	widened := provider.DeepCopy()
 	widened.Spec.Tools[2].Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object"}`)}
 	if ProviderAuthorityDigest(widened) == ProviderAuthorityDigest(provider) || ProviderIssuerDigest(widened) != ProviderIssuerDigest(provider) {
 		t.Fatal("a tool's parameter schema must move the authority digest but not the issuer digest")
 	}
-	// A built-in declaration is a use of the token the person consented to:
-	// adding one, or changing its class, moves the authority digest but not
-	// the issuer digest.
 	builtinAdded := provider.DeepCopy()
 	builtinAdded.Spec.Tools = append(builtinAdded.Spec.Tools, corev1alpha1.ConnectorTool{Name: "list_issues", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceBuiltin})
 	if ProviderAuthorityDigest(builtinAdded) == digest || ProviderIssuerDigest(builtinAdded) != ProviderIssuerDigest(provider) {
@@ -786,8 +770,6 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 }
 
 func TestValidScopeTokenRefusesCommas(t *testing.T) {
-	// Comma-delimited scope lists (GitHub) are split on the comma, so a
-	// configured scope must never contain one.
 	for scope, want := range map[string]bool{"repo": true, "read:user": true, "repo,gist": false, "": false, "a b": false, "ünï": false} {
 		if got := validScopeToken(scope); got != want {
 			t.Fatalf("validScopeToken(%q) = %t, want %t", scope, got, want)
@@ -795,7 +777,6 @@ func TestValidScopeTokenRefusesCommas(t *testing.T) {
 	}
 }
 
-// A provider that serves agent hosts resolves only with a Relay template.
 func TestResolveProviderReferencesNeedsARelayAgentHostTemplate(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
@@ -831,7 +812,6 @@ func TestResolveProviderReferencesNeedsARelayAgentHostTemplate(t *testing.T) {
 		"a Standalone template": {objects: []runtime.Object{secret, template(func(spec *corev1alpha1.AgentHostTemplateSpec) {
 			spec.Access = corev1alpha1.AgentHostAccessStandalone
 		})}, want: ReasonReferenceInvalid},
-		// A template the AgentHost reconciler would refuse.
 		"an invalid template": {objects: []runtime.Object{secret, template(func(spec *corev1alpha1.AgentHostTemplateSpec) {
 			spec.RuntimeClassName = new("Bad_Name")
 		})}, want: ReasonReferenceInvalid},

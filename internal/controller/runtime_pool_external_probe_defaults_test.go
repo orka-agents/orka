@@ -16,8 +16,6 @@ func TestExternalRuntimePoolAttestsDefaultedProbeProtocol(t *testing.T) {
 	frozen := workspace.Spec.Workload.DeepCopy()
 	container := &pod.Spec.Containers[0]
 	for _, probe := range []*corev1.Probe{container.LivenessProbe, container.ReadinessProbe, container.StartupProbe} {
-		// Kubernetes writes HTTP1 when H2CContainerProbe is enabled. Core's
-		// published template omits Protocol but already means HTTP/1.1.
 		probe.HTTPGet.Protocol = new(corev1.HTTPProtocolHTTP1)
 	}
 	if err := f.r.Update(t.Context(), &pod); err != nil {

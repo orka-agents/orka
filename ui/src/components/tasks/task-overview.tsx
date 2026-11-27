@@ -17,25 +17,15 @@ interface TaskOverviewProps {
   trace?: TaskTrace
   approvals?: Approval[]
   artifacts?: ArtifactMetadata[]
-  /** 'error' when execution events failed to load, 'unsupported' when the server has them off. */
   eventsStatus?: 'error' | 'unsupported'
-  /** Owned by the parent that controls polling, so pause truly pauses. */
   following?: boolean
   onToggleFollow?: () => void
-  /** False when execution-event storage is unavailable. */
   forkSupported?: boolean
-  /** Response-level latest seq (0 for an empty stream); pins fork afterSeq. */
   latestSeq?: number
   pendingApprovals?: number
   onReviewApprovals?: () => void
 }
 
-/**
- * Where the task is and whether it needs anyone: what it is doing now, its
- * progress and delivery, derived checks, and its child tasks. The parent
- * fetches everything, so this is pure presentation; follow/pause is the
- * parent's so toggling it gates the parent's polling.
- */
 export function TaskOverview({
   task,
   events = [],
@@ -51,8 +41,6 @@ export function TaskOverview({
   onReviewApprovals,
 }: TaskOverviewProps) {
   const latestEvent = events[events.length - 1]
-  // Prefer the response-level seq (0 for an empty stream) so fork afterSeq is
-  // pinned even before any event arrives; fall back to the last event's seq.
   const pinnedSeq = latestSeq ?? latestEvent?.seq
   const hasChildren = (task.status?.childTasks?.length ?? 0) > 0
   return (
@@ -67,7 +55,6 @@ export function TaskOverview({
           {onReviewApprovals && <Button size="sm" variant="outline" onClick={onReviewApprovals}>Review</Button>}
         </div>
       )}
-      {/* The spotlight and token counts come from execution events. */}
       {eventsStatus === 'error' && (
         <p className="text-sm text-destructive" role="alert">Unable to load execution events; activity and token counts may be out of date.</p>
       )}

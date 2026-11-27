@@ -15,24 +15,10 @@ import (
 var _ storagev1.OperationReceiptStore = (*Store)(nil)
 
 const (
-	// receiptRetention is how long SQLite keeps an operation receipt or an
-	// aborted record after recording it: the contract's minimum plus
-	// receiptClockStepAllowance.
-	receiptRetention = storagev1.MinReceiptRetention + receiptClockStepAllowance
-	// receiptClockStepAllowance bounds cumulative host clock regression
-	// between pruning and every later resolution, including repeated steps,
-	// process restarts and host failovers. It is not a per-step allowance.
-	// SQLite uses the host's wall clock and assumes this bound holds; beyond
-	// it, ResolveOperation could report an already-pruned commit as aborted.
+	receiptRetention          = storagev1.MinReceiptRetention + receiptClockStepAllowance
 	receiptClockStepAllowance = 15 * time.Minute
-	// maxReceiptResultBytes is the largest result SQLite keeps with a
-	// receipt: SQLite's own value limit. SQLite keeps every result whole, so
-	// a replay never reads records the write changed again, except where a
-	// write keeps only identities and reads its records again on replay
-	// (writeOperationRereading).
-	maxReceiptResultBytes = 1_000_000_000
-	// receiptPruneBatch bounds one pruning statement of the maintenance loop.
-	receiptPruneBatch = 1000
+	maxReceiptResultBytes     = 1_000_000_000
+	receiptPruneBatch         = 1000
 )
 
 const (
@@ -40,8 +26,6 @@ const (
 	operationAborted   = string(storagev1.OperationAborted)
 )
 
-// operationReceiptSchemaStatements defines the operation receipt table. Its
-// layout is frozen in migrations/168-to-169.sql.
 func operationReceiptSchemaStatements() []string {
 	return []string{
 		`CREATE TABLE IF NOT EXISTS operation_receipts (
@@ -65,49 +49,19 @@ func operationReceiptSchemaStatements() []string {
 	}
 }
 
-// RequireWriteEnvelopes makes the store refuse every contract write that
-// carries no write envelope, with ErrValidation, as the contract requires of
-// a provider. Production calls it once the store is open; package tests
-// leave it off so they can write without an envelope. Administrative
-// methods, such as AdvanceControllerEpoch and the dataset binding writes, do
-// not run as write operations and are not affected.
 func (s *Store) RequireWriteEnvelopes() {
 	s.requireWriteEnvelopes.Store(true)
 }
 
-// writeOperationKey marks a context inside a write operation's body, so a
-// store method the body calls runs as part of that operation.
 type writeOperationKey struct{}
 
-// noResult is the result of a write that returns only an error.
 type noResult struct{}
 
-// resultPair is the result of a write that returns two values.
 type resultPair[A, B any] struct {
 	First  A
 	Second B
 }
 
-// writeOperation runs body as one call of the contract write method.
-//
-// Without a write envelope in ctx, a store that requires envelopes, as
-// production does, refuses the write with ErrValidation, and any other store
-// runs body unchanged, as package tests do. With one, writeOperation runs the
-// contract's commit-time checks in the transaction that commits the write, in
-// this order: the dataset, the operation receipt, the operation's age and the
-// clock, the dataset state and the controller epoch fence. Body then runs in
-// the same transaction, which every store method it reaches joins, and its
-// result is recorded with the operation receipt before the transaction
-// commits. A replay of a committed operation returns the recorded result
-// without running body, once a Task data fence ctx carries passes its check.
-// A refusal, or an error from body, commits nothing and records no receipt.
-//
-// explicitFence is the ControllerEpochFence a method takes as a parameter, or
-// nil. With an envelope it must equal the envelope's fence.
-//
-// Inside an enclosing task-data transaction, the operation runs under a
-// savepoint of that transaction, so a failed operation leaves nothing behind
-// even if the caller goes on; the enclosing transaction commits it.
 func writeOperation[R any](
 	ctx context.Context,
 	s *Store,
@@ -118,11 +72,6 @@ func writeOperation[R any](
 	return writeOperationScoped(ctx, s, method, explicitFence, body, nil, nil)
 }
 
-// writeOperationRereading is writeOperation for a write whose receipt keeps
-// only the identifiers of the records it changed. On a replay, reread builds
-// the result again from those records, in the replay's transaction and after
-// its Task data fence check, so a replay sees the records as they are now and
-// never outside the fence.
 func writeOperationRereading[R any](
 	ctx context.Context,
 	s *Store,
@@ -133,11 +82,6 @@ func writeOperationRereading[R any](
 	return writeOperationScoped(ctx, s, method, nil, body, nil, reread)
 }
 
-// writeCustodyOperation is writeOperation for a connector custody write whose
-// result carries sealed custody material. Its receipt is kept under the
-// custody scope connectionUID names for the result, so removing that
-// Connection's custody clears the copy the receipt holds; see
-// clearCustodyReceipts.
 func writeCustodyOperation[R any](
 	ctx context.Context,
 	s *Store,
@@ -148,9 +92,6 @@ func writeCustodyOperation[R any](
 	return writeOperationScoped(ctx, s, method, nil, body, connectionUID, nil)
 }
 
-// writeOperationScoped is writeOperation with an optional custody scope for
-// the receipt, derived from the result, and an optional reread of a replayed
-// result (see writeOperationRereading).
 func writeOperationScoped[R any](
 	ctx context.Context,
 	s *Store,
@@ -189,9 +130,6 @@ func writeOperationScoped[R any](
 			return err
 		}
 		if replay {
-			// Body checks the Task data fence for a new operation. A replay
-			// checks it here, so the outcome of an operation that a later
-			// cleanup or Job revocation invalidated is never returned.
 			if fence, ok := store.TaskDataFenceFrom(ctx); ok {
 				if err := s.checkTaskDataFence(ctx, fence); err != nil {
 					return err
@@ -234,8 +172,6 @@ func writeOperationScoped[R any](
 	return result, nil
 }
 
-// writeOperationErr is writeOperation for a method that returns only an
-// error and takes no explicit fence.
 func writeOperationErr(
 	ctx context.Context,
 	s *Store,
@@ -248,10 +184,6 @@ func writeOperationErr(
 	return err
 }
 
-// writeOperationInto is writeOperation for a method that also writes into the
-// record its caller passed, such as an assigned ID or a filled time: the
-// record as the write left it is kept with the result, and a replay writes it
-// back. A nil record is left to body to refuse.
 func writeOperationInto[T, R any](
 	ctx context.Context,
 	s *Store,
@@ -274,9 +206,6 @@ func writeOperationInto[T, R any](
 	return result.First, nil
 }
 
-// requireOwnTransaction refuses an administrative method called inside
-// another transaction. Its outcome is durable when it returns, which an
-// enclosing transaction that may still roll back cannot promise.
 func (s *Store) requireOwnTransaction(ctx context.Context, method string) error {
 	if s.taskDataTx(ctx) != nil || ctx.Value(writeOperationKey{}) != nil {
 		return store.ValidationErrorf("%s must not run inside another transaction", method)
@@ -284,8 +213,6 @@ func (s *Store) requireOwnTransaction(ctx context.Context, method string) error 
 	return nil
 }
 
-// requireEnvelopeFence checks that a method's explicit fence equals the
-// envelope's fence.
 func requireEnvelopeFence(explicit, envelope storagev1.ControllerEpochFence) error {
 	normalized, err := storagev1.NormalizeEpochFence(explicit)
 	if err != nil {
@@ -298,12 +225,6 @@ func requireEnvelopeFence(explicit, envelope storagev1.ControllerEpochFence) err
 	return nil
 }
 
-// inWriteTransaction runs run in the write transaction ctx carries, under a
-// savepoint, or in a new transaction that it commits. A new transaction
-// reserves SQLite's writer before run reads anything, so an operation's
-// receipt check and its commit see the same state even across connections.
-// A new transaction records, under method, how long it waited for the
-// connection and how long it then held it.
 func (s *Store) inWriteTransaction(ctx context.Context, method string, run func(context.Context, *sql.Tx) error) error {
 	if tx := s.taskDataTx(ctx); tx != nil {
 		if _, err := tx.ExecContext(ctx, `SAVEPOINT orka_write_operation`); err != nil {
@@ -329,8 +250,6 @@ func (s *Store) inWriteTransaction(ctx context.Context, method string, run func(
 		_ = tx.Rollback()
 		writeHoldSeconds.WithLabelValues(method).Observe(time.Since(began).Seconds())
 	}()
-	// BeginTx is deferred in SQLite. A write statement reserves the writer even
-	// when its predicate matches no rows.
 	if _, err := tx.ExecContext(ctx, `UPDATE operation_receipts SET method = method WHERE 0`); err != nil {
 		return err
 	}
@@ -341,9 +260,6 @@ func (s *Store) inWriteTransaction(ctx context.Context, method string, run func(
 	return tx.Commit()
 }
 
-// checkWrite runs the commit-time checks before a write's own
-// preconditions. It returns the stored result and true for a replay of a
-// committed operation.
 func (s *Store) checkWrite(
 	ctx context.Context, tx *sql.Tx, method string, envelope storagev1.WriteEnvelope,
 ) ([]byte, bool, error) {
@@ -391,7 +307,6 @@ func (s *Store) checkWrite(
 	return nil, false, nil
 }
 
-// requireDataset checks that datasetID names this store's dataset.
 func requireDataset(q datasetReader, datasetID string) error {
 	record, err := readDataset(q)
 	if err != nil {
@@ -403,7 +318,6 @@ func requireDataset(q datasetReader, datasetID string) error {
 	return nil
 }
 
-// now is the provider clock.
 func (s *Store) now() time.Time {
 	if s.clock != nil {
 		return s.clock().UTC()
@@ -411,8 +325,6 @@ func (s *Store) now() time.Time {
 	return time.Now().UTC()
 }
 
-// requireCompatibleDataset refuses every operation on a dataset the store
-// cannot serve, before any other check.
 func (s *Store) requireCompatibleDataset() error {
 	if s.datasetState() == storagev1.DatasetIncompatible {
 		return fmt.Errorf("%w: SQLite cannot serve this dataset", storagev1.ErrIncompatible)
@@ -420,8 +332,6 @@ func (s *Store) requireCompatibleDataset() error {
 	return nil
 }
 
-// datasetState is whether the dataset accepts writes. An open SQLite store
-// always does: it migrates its schema while opening, under the process lock.
 func (s *Store) datasetState() storagev1.DatasetState {
 	if s.writeState != nil {
 		return s.writeState()
@@ -430,19 +340,16 @@ func (s *Store) datasetState() storagev1.DatasetState {
 }
 
 type operationReceipt struct {
-	operationID string
-	method      string
-	digest      string
-	state       string
-	fence       storagev1.ControllerEpochFence
-	issuedAt    time.Time
-	recordedAt  time.Time
-	result      []byte
-	// custodyScope is the Connection UID whose custody the result carries,
-	// or empty.
+	operationID  string
+	method       string
+	digest       string
+	state        string
+	fence        storagev1.ControllerEpochFence
+	issuedAt     time.Time
+	recordedAt   time.Time
+	result       []byte
 	custodyScope string
-	// cleared reports that the result was removed with that custody.
-	cleared bool
+	cleared      bool
 }
 
 func (r operationReceipt) matches(method, digest string) error {
@@ -502,8 +409,6 @@ func insertOperationReceipt(ctx context.Context, tx *sql.Tx, receipt operationRe
 	return nil
 }
 
-// encodeReceiptResult encodes a write's result for its receipt with the
-// receipt codec, so a replay returns a value equal to the original.
 func encodeReceiptResult[R any](method string, result R) ([]byte, error) {
 	if _, ok := any(result).(noResult); ok {
 		return nil, nil
@@ -529,7 +434,6 @@ func decodeReceiptResult[R any](method string, data []byte) (R, error) {
 	return value, nil
 }
 
-// ResolveOperation implements storagev1.OperationReceiptStore.
 func (s *Store) ResolveOperation(ctx context.Context, request storagev1.ResolveOperationRequest) (storagev1.OperationOutcome, error) {
 	if err := request.Validate(); err != nil {
 		return storagev1.OperationOutcome{}, err
@@ -564,9 +468,6 @@ func (s *Store) ResolveOperation(ctx context.Context, request storagev1.ResolveO
 			return fmt.Errorf("%w: operation %q was issued more than %s ahead of the store clock",
 				storagev1.ErrClockSkew, request.OperationID, storagev1.MaxClockSkew)
 		}
-		// A receipt the operation left is kept at least MinReceiptRetention
-		// after it was recorded, and was recorded no earlier than IssuedAt
-		// minus MaxClockSkew. Past that bound a missing receipt proves nothing.
 		if now.Sub(request.IssuedAt) > storagev1.MinReceiptRetention-storagev1.MaxClockSkew {
 			return fmt.Errorf("%w: operation %q is too old to establish whether it committed",
 				storagev1.ErrOperationExpired, request.OperationID)
@@ -591,13 +492,10 @@ func (s *Store) ResolveOperation(ctx context.Context, request storagev1.ResolveO
 	return outcome, nil
 }
 
-// pruneOperationReceiptsSQL deletes up to a limit of the oldest receipts
-// recorded before a cutoff.
 const pruneOperationReceiptsSQL = `DELETE FROM operation_receipts WHERE rowid IN (
    SELECT rowid FROM operation_receipts WHERE recorded_at_ns < ? ORDER BY recorded_at_ns LIMIT ?
  )`
 
-// PruneOperationReceipts implements storagev1.OperationReceiptStore.
 func (s *Store) PruneOperationReceipts(ctx context.Context, limit int) (int, error) {
 	if limit < 1 {
 		return 0, store.ValidationErrorf("operation receipt prune limit must be at least 1")
@@ -605,9 +503,6 @@ func (s *Store) PruneOperationReceipts(ctx context.Context, limit int) (int, err
 	cutoff := s.now().Add(-receiptRetention).UnixNano()
 	executor := s.taskDataExecutor(ctx)
 	if s.taskDataTx(ctx) == nil {
-		// Pruning runs outside a write transaction, and a batch can hold the
-		// single connection long enough to matter, so it records its wait and
-		// hold as a write transaction does.
 		const method = "PruneOperationReceipts"
 		started := time.Now()
 		conn, err := s.db.Conn(ctx)
@@ -633,8 +528,6 @@ func (s *Store) PruneOperationReceipts(ctx context.Context, limit int) (int, err
 	return int(removed), nil
 }
 
-// pruneExpiredOperationReceipts removes every receipt past its retention in
-// bounded batches.
 func (s *Store) pruneExpiredOperationReceipts(ctx context.Context) error {
 	for {
 		removed, err := s.PruneOperationReceipts(ctx, receiptPruneBatch)
@@ -644,22 +537,14 @@ func (s *Store) pruneExpiredOperationReceipts(ctx context.Context) error {
 	}
 }
 
-// writeTx is the transaction a write method runs in. Inside a write
-// operation or a task-data transaction it is a savepoint of that transaction:
-// Commit releases the savepoint and Rollback undoes the method's writes, so
-// the method behaves as it does on its own, and the owner commits the result
-// together with its operation receipt.
 type writeTx struct {
 	*sql.Tx
 	savepoint string
 	done      bool
 }
 
-// writeSavepoints names the savepoints of joined write transactions, so
-// nested ones never share a name.
 var writeSavepoints atomic.Uint64
 
-// Commit commits a transaction writeTx began, or releases its savepoint.
 func (t *writeTx) Commit() error {
 	if t.savepoint == "" {
 		return t.Tx.Commit()
@@ -672,8 +557,6 @@ func (t *writeTx) Commit() error {
 	return err
 }
 
-// Rollback rolls back a transaction writeTx began, or undoes the writes made
-// since its savepoint. After Commit it does nothing.
 func (t *writeTx) Rollback() error {
 	if t.savepoint == "" {
 		return t.Tx.Rollback()
@@ -687,9 +570,6 @@ func (t *writeTx) Rollback() error {
 	return errors.Join(rollbackErr, releaseErr)
 }
 
-// securityWriteStore returns the store a security write runs on. Security
-// queries use the store's security transaction, so inside a write operation
-// they run on a store whose security transaction is the operation's.
 func (s *Store) securityWriteStore(ctx context.Context) *Store {
 	if s.securityTx != nil {
 		return s
@@ -700,9 +580,6 @@ func (s *Store) securityWriteStore(ctx context.Context) *Store {
 	return s
 }
 
-// beginTx begins a transaction for a write method, or joins the write
-// operation or task-data transaction ctx carries. SQLite has one connection,
-// so a write method never opens a second transaction while ctx carries one.
 func (s *Store) beginTx(ctx context.Context) (*writeTx, error) {
 	if tx := s.taskDataTx(ctx); tx != nil {
 		name := fmt.Sprintf("orka_write_%d", writeSavepoints.Add(1))
@@ -718,22 +595,11 @@ func (s *Store) beginTx(ctx context.Context) (*writeTx, error) {
 	return &writeTx{Tx: tx}, nil
 }
 
-// clearCustodyReceiptsSQL clears one custody scope's receipt results. It
-// repeats the partial index's own predicate, custody_scope <> ”, because
-// SQLite uses a partial index only for a query that states it.
 const clearCustodyReceiptsSQL = `UPDATE operation_receipts SET result = NULL, result_cleared = 1
  WHERE custody_scope = ? AND custody_scope <> '' AND result_cleared = 0`
 
-// clearCustodyReceipts removes the results that receipts hold for the custody
-// of a Connection when that custody is
-// deleted, shredded or tombstoned. The receipts stay, so a replay of such a
-// write never runs it again: it returns ErrConflict. secure_delete zeroes the
-// removed results in the database file; the custody method truncates the
-// write-ahead log after its commit. It runs on q, the custody method's
-// transaction, and reports whether it cleared any.
 func (s *Store) clearCustodyReceipts(ctx context.Context, q taskDataExecutor, connectionUID string) (bool, error) {
 	if connectionUID == "" {
-		// An empty scope marks a receipt outside custody.
 		return false, nil
 	}
 	result, err := q.ExecContext(ctx, clearCustodyReceiptsSQL, connectionUID)

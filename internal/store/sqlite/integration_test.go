@@ -19,7 +19,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupDiskStore creates a Store backed by a real on-disk SQLite file.
 func setupDiskStore(t *testing.T) *Store {
 	t.Helper()
 	dir := t.TempDir()
@@ -176,7 +175,6 @@ func TestIntegration_LargeResult(t *testing.T) {
 	s := setupDiskStore(t)
 	ctx := context.Background()
 
-	// 5MB result — well beyond the old 1MB ConfigMap limit
 	data := make([]byte, 5*1024*1024)
 	for i := range data {
 		data[i] = byte(i % 256)
@@ -206,7 +204,6 @@ func TestIntegration_LargeSessionTranscript(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// Append 500 messages in batches
 	const totalMessages = 500
 	const batchSize = 50
 	for batch := range totalMessages / batchSize {
@@ -228,7 +225,6 @@ func TestIntegration_LargeSessionTranscript(t *testing.T) {
 		}
 	}
 
-	// Verify count
 	sess, err := s.GetSession(ctx, "ns", "big-session")
 	if err != nil {
 		t.Fatalf("GetSession: %v", err)
@@ -237,7 +233,6 @@ func TestIntegration_LargeSessionTranscript(t *testing.T) {
 		t.Errorf("MessageCount = %d, want %d", sess.MessageCount, totalMessages)
 	}
 
-	// Verify all messages load
 	msgs, err := s.LoadTranscript(ctx, "ns", "big-session", 0)
 	if err != nil {
 		t.Fatalf("LoadTranscript: %v", err)
@@ -246,7 +241,6 @@ func TestIntegration_LargeSessionTranscript(t *testing.T) {
 		t.Errorf("got %d messages, want %d", len(msgs), totalMessages)
 	}
 
-	// Verify ordering
 	for i := 1; i < len(msgs); i++ {
 		if !msgs[i].Timestamp.After(msgs[i-1].Timestamp) && msgs[i].Timestamp != msgs[i-1].Timestamp {
 			t.Errorf("messages not ordered at index %d", i)
@@ -254,7 +248,6 @@ func TestIntegration_LargeSessionTranscript(t *testing.T) {
 		}
 	}
 
-	// Test pagination with limit
 	page, err := s.LoadTranscript(ctx, "ns", "big-session", 10)
 	if err != nil {
 		t.Fatalf("LoadTranscript with limit: %v", err)
@@ -275,7 +268,6 @@ func TestIntegration_ConcurrentReadWrite(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Truncate(time.Second)
 
-	// Create a session for concurrent message appends
 	if err := s.CreateSession(ctx, &store.SessionRecord{
 		Namespace: "ns", Name: "concurrent-sess", SessionType: "task", CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
@@ -286,7 +278,6 @@ func TestIntegration_ConcurrentReadWrite(t *testing.T) {
 	const readsPerWriter = 5
 	var wg sync.WaitGroup
 
-	// Concurrent writers for results
 	for i := range writers {
 		wg.Add(1)
 		go func(i int) {
@@ -300,7 +291,6 @@ func TestIntegration_ConcurrentReadWrite(t *testing.T) {
 		}(i)
 	}
 
-	// Concurrent writers for session messages
 	for i := range writers {
 		wg.Add(1)
 		go func(i int) {
@@ -314,23 +304,18 @@ func TestIntegration_ConcurrentReadWrite(t *testing.T) {
 		}(i)
 	}
 
-	// Concurrent readers
 	for i := range writers {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			// Read results (may or may not exist yet)
 			s.GetResult(ctx, "ns", fmt.Sprintf("task-%d-0", i)) //nolint:errcheck
-			// Read sessions
-			s.ListSessions(ctx, "ns") //nolint:errcheck
-			// Read transcript
-			s.LoadTranscript(ctx, "ns", "concurrent-sess", 0) //nolint:errcheck
+			s.ListSessions(ctx, "ns")                           //nolint:errcheck
+			s.LoadTranscript(ctx, "ns", "concurrent-sess", 0)   //nolint:errcheck
 		}(i)
 	}
 
 	wg.Wait()
 
-	// Verify all results were written
 	for i := range writers {
 		for j := range readsPerWriter {
 			key := fmt.Sprintf("task-%d-%d", i, j)
@@ -346,7 +331,6 @@ func TestIntegration_ConcurrentReadWrite(t *testing.T) {
 		}
 	}
 
-	// Verify all messages were appended
 	sess, err := s.GetSession(ctx, "ns", "concurrent-sess")
 	if err != nil {
 		t.Fatalf("GetSession: %v", err)
@@ -367,7 +351,6 @@ func TestIntegration_ConcurrentLocking(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// Race N goroutines to acquire the lock — exactly one should win
 	const racers = 20
 	var wg sync.WaitGroup
 	winners := make(chan int, racers)
@@ -405,19 +388,16 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 	sessionName := "my-session"
 	taskName := "my-task"
 
-	// 1. Create session
 	if err := s.CreateSession(ctx, &store.SessionRecord{
 		Namespace: ns, Name: sessionName, SessionType: "task", CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// 2. Acquire lock
 	if err := s.AcquireLock(ctx, ns, sessionName, taskName, "", time.Now().UTC()); err != nil {
 		t.Fatalf("AcquireLock: %v", err)
 	}
 
-	// 3. Verify locked for other tasks
 	locked, err := s.IsLocked(ctx, ns, sessionName, "other-task", "", time.Now().UTC())
 	if err != nil {
 		t.Fatalf("IsLocked: %v", err)
@@ -426,32 +406,27 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 		t.Error("expected session to be locked for other-task")
 	}
 
-	// 4. Append user message
 	if err := s.AppendMessages(ctx, ns, sessionName, []store.SessionMessage{
 		{Role: "user", Content: "Run my container task", Timestamp: now},
 	}); err != nil {
 		t.Fatalf("AppendMessages user: %v", err)
 	}
 
-	// 5. Save result
 	result := []byte(`{"status": "success", "output": "hello world"}`)
 	if err := s.SaveResult(ctx, ns, taskName, result); err != nil {
 		t.Fatalf("SaveResult: %v", err)
 	}
 
-	// 6. Append assistant response
 	if err := s.AppendMessages(ctx, ns, sessionName, []store.SessionMessage{
 		{Role: roleAssistant, Content: "Task completed successfully", Timestamp: now.Add(time.Second)},
 	}); err != nil {
 		t.Fatalf("AppendMessages assistant: %v", err)
 	}
 
-	// 7. Release lock
 	if err := s.ReleaseLock(ctx, ns, sessionName, taskName, ""); err != nil {
 		t.Fatalf("ReleaseLock: %v", err)
 	}
 
-	// 8. Verify final state
 	sess, err := s.GetSession(ctx, ns, sessionName)
 	if err != nil {
 		t.Fatalf("GetSession: %v", err)
@@ -469,7 +444,6 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 		t.Errorf("unexpected message roles: %s, %s", sess.Messages[0].Role, sess.Messages[1].Role)
 	}
 
-	// 9. Verify result
 	gotResult, err := s.GetResult(ctx, ns, taskName)
 	if err != nil {
 		t.Fatalf("GetResult: %v", err)
@@ -478,7 +452,6 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 		t.Errorf("result = %q, want %q", gotResult, result)
 	}
 
-	// 10. Cleanup: delete task result and session
 	if err := s.DeleteResult(ctx, ns, taskName); err != nil {
 		t.Fatalf("DeleteResult: %v", err)
 	}
@@ -486,7 +459,6 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 		t.Fatalf("DeleteSession: %v", err)
 	}
 
-	// Verify cleanup
 	_, err = s.GetResult(ctx, ns, taskName)
 	if err != store.ErrNotFound {
 		t.Errorf("result after delete: got %v, want ErrNotFound", err)
@@ -512,7 +484,6 @@ func TestIntegration_MultiNamespaceIsolation(t *testing.T) {
 	namespaces := []string{"team-a", "team-b", "team-c"}
 
 	for _, ns := range namespaces {
-		// Each namespace gets its own result and session
 		if err := s.SaveResult(ctx, ns, "shared-task", []byte("data-"+ns)); err != nil {
 			t.Fatalf("SaveResult %s: %v", ns, err)
 		}
@@ -528,7 +499,6 @@ func TestIntegration_MultiNamespaceIsolation(t *testing.T) {
 		}
 	}
 
-	// Verify isolation: each namespace sees only its own data
 	for _, ns := range namespaces {
 		got, err := s.GetResult(ctx, ns, "shared-task")
 		if err != nil {
@@ -555,7 +525,6 @@ func TestIntegration_MultiNamespaceIsolation(t *testing.T) {
 		}
 	}
 
-	// Delete one namespace's data — others unaffected
 	if err := s.DeleteSession(ctx, "team-a", "shared-session", time.Now().UTC()); err != nil {
 		t.Fatalf("DeleteSession team-a: %v", err)
 	}
@@ -563,7 +532,6 @@ func TestIntegration_MultiNamespaceIsolation(t *testing.T) {
 		t.Fatalf("DeleteResult team-a: %v", err)
 	}
 
-	// team-b and team-c still have their data
 	for _, ns := range []string{"team-b", "team-c"} {
 		if _, err := s.GetResult(ctx, ns, "shared-task"); err != nil {
 			t.Errorf("GetResult %s after team-a delete: %v", ns, err)
@@ -578,7 +546,6 @@ func TestIntegration_BinaryData(t *testing.T) {
 	s := setupDiskStore(t)
 	ctx := context.Background()
 
-	// Test various binary patterns
 	tests := []struct {
 		name string
 		data []byte
@@ -642,7 +609,6 @@ func TestIntegration_SessionTokenTracking(t *testing.T) {
 		t.Errorf("tokens = (%d, %d), want (100, 200)", sess.InputTokens, sess.OutputTokens)
 	}
 
-	// Verify listing includes token info
 	sessions, err := s.ListSessions(ctx, "ns")
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
@@ -666,19 +632,16 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 	s := NewStore(db, dbPath)
 	ctx := context.Background()
 
-	// Write data before shutdown
 	if err := s.SaveResult(ctx, "ns", "pre-shutdown", []byte("important")); err != nil {
 		t.Fatalf("SaveResult: %v", err)
 	}
 
-	// Simulate graceful shutdown via context cancellation
 	shutdownCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() {
 		done <- s.Start(shutdownCtx)
 	}()
 
-	// Let it run briefly
 	time.Sleep(100 * time.Millisecond)
 	cancel()
 
@@ -686,7 +649,6 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 		t.Fatalf("Start returned error: %v", err)
 	}
 
-	// Reopen and verify data survived
 	db2, err := NewDB(dbPath)
 	if err != nil {
 		t.Fatalf("NewDB reopen: %v", err)
@@ -789,17 +751,14 @@ func TestIntegration_DBSizeMetric(t *testing.T) {
 	s := NewStore(db, dbPath)
 	ctx := context.Background()
 
-	// Write some data to ensure the file has measurable size
 	for i := range 100 {
 		if err := s.SaveResult(ctx, "ns", fmt.Sprintf("task-%d", i), []byte(strings.Repeat("x", 1024))); err != nil {
 			t.Fatalf("SaveResult: %v", err)
 		}
 	}
 
-	// Trigger metric update
 	s.updateDBSizeMetric()
 
-	// Verify the file exists and has non-zero size
 	info, err := os.Stat(dbPath)
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
@@ -821,7 +780,6 @@ func TestIntegration_DuplicateSessionCreate(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// Second create should fail (primary key conflict)
 	err := s.CreateSession(ctx, session)
 	if err == nil {
 		t.Error("expected error on duplicate session create, got nil")
@@ -839,7 +797,6 @@ func TestIntegration_AppendMessagesEmptyList(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// Appending empty list should succeed and not change count
 	if err := s.AppendMessages(ctx, "ns", "empty-append", []store.SessionMessage{}); err != nil {
 		t.Fatalf("AppendMessages empty: %v", err)
 	}
@@ -868,12 +825,10 @@ func TestIntegration_ReleaseLockWrongTask(t *testing.T) {
 		t.Fatalf("AcquireLock: %v", err)
 	}
 
-	// Release with wrong task name — should be a no-op (lock stays)
 	if err := s.ReleaseLock(ctx, "ns", "wrong-release", "task-b", ""); err != nil {
 		t.Fatalf("ReleaseLock wrong task: %v", err)
 	}
 
-	// Lock should still be held by task-a
 	locked, err := s.IsLocked(ctx, "ns", "wrong-release", "task-b", "", time.Now().UTC())
 	if err != nil {
 		t.Fatalf("IsLocked: %v", err)

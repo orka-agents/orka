@@ -16,11 +16,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// TestRepositoryMonitorRepairAppliesImplementationPathLimits covers a repair
-// whose patch touches a repository control path, one outside the configured
-// allowlist, and one inside it. The runtime enforces the limits on the
-// workspace delta before publication; a rejection reaches the controller as
-// a WorkspaceValidationFailed delivery with nothing pushed.
 func TestRepositoryMonitorRepairAppliesImplementationPathLimits(t *testing.T) {
 	controlPathRejection := acpWorkspaceValidationFailureMessage(&harnessv2.ClientError{StatusCode: http.StatusConflict, Code: harnessv2.ErrorCodeSessionPoisoned, Message: harnessv2.WorkspaceDeltaRepositoryControlPathMessage})
 	disallowedPathRejection := acpWorkspaceValidationFailureMessage(&harnessv2.ClientError{StatusCode: http.StatusConflict, Code: harnessv2.ErrorCodeSessionPoisoned, Message: harnessv2.WorkspaceDeltaDisallowedPathMessage})

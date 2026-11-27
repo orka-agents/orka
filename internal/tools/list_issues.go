@@ -18,27 +18,19 @@ import (
 
 const listIssuesToolName = "list_issues"
 
-// ListIssuesTool lists open GitHub issues in a repository.
 type ListIssuesTool struct {
 	k8sClient  client.Client
-	apiBaseURL string // override for testing; empty uses https://api.github.com
+	apiBaseURL string
 }
 
-// ListIssuesArgs are the arguments for the list_issues tool.
 type ListIssuesArgs struct {
-	// TaskName is the name of a task whose workspace config provides the repo and git credentials.
-	TaskName string `json:"task_name"`
-	// RepoURL is a direct GitHub repo URL (falls back to ORKA_GIT_REPO env var).
-	RepoURL string `json:"repo_url"`
-	// UnassignedOnly filters to issues with no assignee. Default is true.
-	UnassignedOnly *bool `json:"unassigned_only"`
-	// PerPage is the number of results per page (default: 30, max: 100).
-	PerPage int `json:"per_page"`
-	// Page is the page number for pagination.
-	Page int `json:"page"`
+	TaskName       string `json:"task_name"`
+	RepoURL        string `json:"repo_url"`
+	UnassignedOnly *bool  `json:"unassigned_only"`
+	PerPage        int    `json:"per_page"`
+	Page           int    `json:"page"`
 }
 
-// IssueSummary represents a single GitHub issue in the result.
 type IssueSummary struct {
 	Number    int      `json:"number"`
 	Title     string   `json:"title"`
@@ -49,33 +41,28 @@ type IssueSummary struct {
 	HTMLURL   string   `json:"html_url"`
 }
 
-// ListIssuesResult is the result of listing issues.
 type ListIssuesResult struct {
 	Issues      []IssueSummary `json:"issues"`
-	Count       int            `json:"count"`         // number of issues on this page (after filtering)
-	HasNextPage bool           `json:"has_next_page"` // true if more pages may exist
+	Count       int            `json:"count"`
+	HasNextPage bool           `json:"has_next_page"`
 }
 
-// NewListIssuesTool creates a new list_issues tool.
 func NewListIssuesTool(k8sClient client.Client) *ListIssuesTool {
 	return &ListIssuesTool{
 		k8sClient: k8sClient,
 	}
 }
 
-// Name returns the tool name.
 func (t *ListIssuesTool) Name() string {
 	return listIssuesToolName
 }
 
-// Description returns the tool description.
 func (t *ListIssuesTool) Description() string {
 	return "List open GitHub issues in a repository. " +
 		"Use this to scan a repo for open issues to triage, prioritize, or assign to agents. " +
 		"By default only returns unassigned issues. Returns issue number, title, body, labels, and author."
 }
 
-// Parameters returns the JSON schema for tool parameters.
 func (t *ListIssuesTool) Parameters() json.RawMessage {
 	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: workspaceTaskDescription}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Direct GitHub repository URL (e.g. 'https://github.com/owner/repo'). Falls back to ORKA_GIT_REPO env var if not provided."}, "unassigned_only": map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "If true, only return issues with no assignee. Defaults to true."}, perPageField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Number of results per page", jsonSchemaDefaultField: 30, jsonSchemaMinimumField: 1, jsonSchemaMaximumField: 100}, pageField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Page number for pagination (default: 1)"}}}
 	data, _ := json.Marshal(schema)
@@ -84,20 +71,17 @@ func (t *ListIssuesTool) Parameters() json.RawMessage {
 
 const maxIssueBodyLength = 500
 
-// Execute lists open issues from a GitHub repository.
 func (t *ListIssuesTool) Execute(ctx context.Context, argsJSON json.RawMessage) (string, error) {
 	var args ListIssuesArgs
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
 		return "", fmt.Errorf("failed to parse arguments: %w", err)
 	}
 
-	// Resolve repo and token using the shared helper
 	owner, repo, token, baseURL, err := resolveReadRepoAndToken(ctx, t.k8sClient, t.Name(), args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
 		return "", err
 	}
 
-	// Apply defaults
 	perPage := args.PerPage
 	if perPage <= 0 {
 		perPage = 30
@@ -116,7 +100,6 @@ func (t *ListIssuesTool) Execute(ctx context.Context, argsJSON json.RawMessage) 
 		unassignedOnly = *args.UnassignedOnly
 	}
 
-	// Build GitHub API URL
 	url := fmt.Sprintf("%s/repos/%s/%s/issues?state=open&per_page=%d&page=%d", baseURL, owner, repo, perPage, page)
 	if unassignedOnly {
 		url += "&assignee=none"
@@ -146,7 +129,6 @@ func (t *ListIssuesTool) Execute(ctx context.Context, argsJSON json.RawMessage) 
 		return "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, boundedNote(string(respBody)))
 	}
 
-	// Parse the response — GitHub issues API returns PRs too, so we filter them out
 	var rawIssues []struct {
 		Number int    `json:"number"`
 		Title  string `json:"title"`
@@ -171,7 +153,6 @@ func (t *ListIssuesTool) Execute(ctx context.Context, argsJSON json.RawMessage) 
 
 	issues := make([]IssueSummary, 0, len(rawIssues))
 	for _, raw := range rawIssues {
-		// Filter out pull requests
 		if raw.PullRequest != nil {
 			continue
 		}

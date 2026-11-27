@@ -22,8 +22,6 @@ type usagePersistenceError struct{ cause error }
 func (e *usagePersistenceError) Error() string { return e.cause.Error() }
 func (e *usagePersistenceError) Unwrap() error { return e.cause }
 
-// IsUsagePersistenceError identifies accounting failures that must not trigger
-// another model call, even if a joined provider error normally permits retry.
 func IsUsagePersistenceError(err error) bool {
 	_, ok := errors.AsType[*usagePersistenceError](err)
 	return ok
@@ -37,9 +35,6 @@ type usageCall struct {
 	err         error
 }
 
-// UsageHTTPMiddleware accounts for retries and API fallbacks inside the SDK.
-// Each HTTP request can incur usage even when only the last one reports counts.
-// It never reads request bodies, response bodies, headers or credentials.
 func UsageHTTPMiddleware(req *http.Request, next func(*http.Request) (*http.Response, error)) (*http.Response, error) {
 	call, _ := req.Context().Value(usageHTTPAttemptKey{}).(*usageCall)
 	if call != nil {
@@ -96,8 +91,6 @@ func (c *usageCall) persistenceError() error {
 	return c.err
 }
 
-// RecordIntermediateUsage preserves a successful SDK probe whose response is
-// consumed inside a provider rather than returned to the calling worker.
 func RecordIntermediateUsage(ctx context.Context, response *CompletionResponse) error {
 	call, _ := ctx.Value(usageHTTPAttemptKey{}).(*usageCall)
 	if call == nil || response == nil {
@@ -124,7 +117,6 @@ func RecordIntermediateUsage(ctx context.Context, response *CompletionResponse) 
 	return nil
 }
 
-// ReportedTokenCount preserves missing cache breakdowns as nil.
 func ReportedTokenCount(value int64, reported bool) *int64 {
 	if !reported {
 		return nil
@@ -132,14 +124,10 @@ func ReportedTokenCount(value int64, reported bool) *int64 {
 	return &value
 }
 
-// WithUsageRecorder enables durable accounting independently of tracing. The
-// caller supplies verified ownership; no provider/user billing fields do so.
 func WithUsageRecorder(ctx context.Context, recorder UsageRecorder) context.Context {
 	return context.WithValue(ctx, usageRecorderKey{}, recorder)
 }
 
-// CopyUsageRecorder preserves accounting when a stream detaches from an HTTP
-// request. It copies only the counts recorder, not the request or credentials.
 func CopyUsageRecorder(dst, src context.Context) context.Context {
 	if record, ok := src.Value(usageRecorderKey{}).(UsageRecorder); ok {
 		return WithUsageRecorder(dst, record)
@@ -147,8 +135,6 @@ func CopyUsageRecorder(dst, src context.Context) context.Context {
 	return dst
 }
 
-// usageProvider is installed inside retry/fallback decorators, so every call,
-// including rejected and cancelled attempts, has its own durable identity.
 type usageProvider struct{ Provider }
 
 func (p *usageProvider) TelemetryProviderName() string { return ProviderTelemetryName(p.Provider) }
@@ -168,9 +154,6 @@ func (p *usageProvider) begin(ctx context.Context, req *CompletionRequest) (cont
 	return context.WithValue(ctx, usageHTTPAttemptKey{}, call), call, nil
 }
 
-// usageWriteTimeout bounds usage writes detached from the call's cancellation.
-// It outlasts the worker event recorder's connection retries, so a controller
-// restart during a model call does not fail the call.
 const usageWriteTimeout = 90 * time.Second
 
 func finishUsage(ctx context.Context, record UsageRecorder, observation store.UsageObservation) error {
@@ -191,7 +174,6 @@ func (p *usageProvider) Complete(ctx context.Context, req *CompletionRequest) (*
 	if call == nil {
 		return response, callErr
 	}
-	// SDK error conversion can discard the middleware error's type.
 	callErr = errors.Join(callErr, call.persistenceError())
 	observation := call.snapshot()
 	observation.ID = observation.CounterID + "/finish"
@@ -244,7 +226,6 @@ func (p *usageProvider) Stream(ctx context.Context, req *CompletionRequest) (<-c
 			}
 			observation.ID, observation.Status = observation.CounterID+"/finish", usageStatus(ctx, errors.New("stream ended without final usage"))
 			observation.ObservedAt, observation.Complete = time.Now().UTC(), false
-			// The durable start still exposes a measurement gap if this write fails.
 			_ = finishUsage(ctx, call.record, observation)
 		}()
 		for {

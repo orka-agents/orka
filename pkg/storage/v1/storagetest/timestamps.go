@@ -8,13 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// timestampNanos has a non-zero sub-microsecond part, so a provider that
-// stores microseconds or milliseconds changes it, and a non-UTC offset, so a
-// provider that keeps the caller's zone instead of returning UTC fails.
 var timestampNanos = time.Date(2026, time.March, 4, 5, 6, 7, 123456789, time.FixedZone("AEST", 10*60*60))
 
-// requireSameInstant checks that a stored time round-trips exactly, to the
-// nanosecond, and comes back in UTC.
 func requireSameInstant(t *testing.T, want, got time.Time, field string) {
 	t.Helper()
 	require.Truef(t, want.Equal(got), "%s = %s, want %s", field, got.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))

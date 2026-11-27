@@ -80,7 +80,6 @@ describe('TaskApprovalPanel', () => {
     server.use(
       http.get(`${API}/tasks/:id/approvals`, () => {
         listCalls += 1
-        // First load pending; after the decision, return approved.
         return HttpResponse.json(listResponse([approval({ status: listCalls > 1 ? 'approved' : 'pending' })]))
       }),
       http.post(`${API}/tasks/:id/approvals/:approvalID/decision`, async ({ request }) => {
@@ -96,7 +95,6 @@ describe('TaskApprovalPanel', () => {
     await user.click(screen.getByRole('button', { name: 'Approve' }))
     await waitFor(() => expect(capturedBody).toEqual({ decision: 'approve' }))
     expect(capturedPath).toBe('/api/v1/tasks/tk/approvals/ap-1/decision')
-    // After invalidation the card reloads as approved (no more action buttons).
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument())
     expect(screen.queryByText('fetch an external URL')).not.toBeInTheDocument()
   })
@@ -185,7 +183,6 @@ describe('TaskApprovalPanel', () => {
     server.use(
       http.get(`${API}/tasks/:id/approvals`, () => {
         getCalls += 1
-        // After the 409, the refetch returns the settled (declined) approval.
         return HttpResponse.json(listResponse([approval({ status: decided ? 'declined' : 'pending' })]))
       }),
       http.post(`${API}/tasks/:id/approvals/:approvalID/decision`, () => {
@@ -198,11 +195,8 @@ describe('TaskApprovalPanel', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument())
     const callsBefore = getCalls
     await user.click(screen.getByRole('button', { name: 'Approve' }))
-    // The 409 triggers a refetch (not waiting for the 5s poll), and the card
-    // updates to the settled state — no more action buttons.
     await waitFor(() => expect(getCalls).toBeGreaterThan(callsBefore))
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument())
-    // Once the card has settled, the stale conflict note goes away.
     expect(screen.queryByText(/approval is already declined/i)).not.toBeInTheDocument()
   })
 
@@ -210,7 +204,6 @@ describe('TaskApprovalPanel', () => {
     server.use(http.get(`${API}/tasks/:id/approvals`, () => HttpResponse.json(listResponse([approval()]))))
     render(<TaskApprovalPanel taskId="tk" />)
     const card = await screen.findByTestId('approval-card')
-    // Card supplies py-6; a pt-6 on its first CardContent doubled it.
     expect(card.querySelector('[data-slot="card-content"]')).not.toHaveClass('pt-6')
   })
 
@@ -240,8 +233,6 @@ describe('TaskApprovalPanel', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument())
     const approveBtn = screen.getByRole('button', { name: 'Approve' })
     await user.click(approveBtn)
-    // While the request is in flight, both buttons read as disabled but the
-    // pressed one keeps focus (a disabled element would drop it).
     await waitFor(() => expect(screen.getByRole('button', { name: 'Decline' })).toHaveAttribute('aria-disabled', 'true'))
     expect(approveBtn).toHaveAttribute('aria-disabled', 'true')
     expect(approveBtn).toHaveFocus()
@@ -302,8 +293,6 @@ describe('TaskApprovalPanel', () => {
     server.use(
       http.get(`${API}/tasks/:id/approvals`, () => HttpResponse.json(listResponse([approval()]))),
     )
-    // The task is terminal, so the backend would 409 any decision — the card must
-    // not offer Approve/Decline.
     render(<TaskApprovalPanel taskId="tk" taskPhase="Succeeded" />)
     await waitFor(() => expect(screen.getByTestId('approval-card')).toBeInTheDocument())
     expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
@@ -319,7 +308,6 @@ describe('TaskApprovalPanel', () => {
     )
     render(<TaskApprovalPanel taskId="tk" taskPhase="Succeeded" parkedApprovalId="parked-1" />)
     await waitFor(() => expect(screen.getAllByTestId('approval-card')).toHaveLength(2))
-    // Only the parked sign-off is actionable; the unrelated approval stays read-only.
     expect(screen.getAllByRole('button', { name: 'Approve' })).toHaveLength(1)
     expect(screen.getAllByRole('button', { name: 'Decline' })).toHaveLength(1)
     expect(screen.getAllByText(/can no longer be decided because the task has completed/i)).toHaveLength(1)
@@ -349,7 +337,6 @@ describe('TaskApprovalPanel', () => {
     } finally {
       vi.useRealTimers()
     }
-    // The turn has ended, so only the poll can bring the sign-off controls.
     expect(await screen.findByRole('button', { name: 'Approve' })).toBeInTheDocument()
     expect(requests).toBeGreaterThan(1)
   })

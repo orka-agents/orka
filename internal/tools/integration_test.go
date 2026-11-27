@@ -22,12 +22,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// Integration tests for coordination tools against real GitHub API.
-// Run with: GITHUB_TOKEN=<token> go test ./internal/tools/ -tags=integration -run TestIntegration -v
-//
-// These tests use https://github.com/sozercan/ayna and require a valid GitHub token.
-// A test PR must be created before running (see TestIntegration_ReviewPullRequest for PR number).
-
 const (
 	integrationRepo       = "https://github.com/sozercan/ayna"
 	integrationTaskName   = "integration-test-task"
@@ -43,7 +37,6 @@ func setupIntegrationClient(t *testing.T) (*fake.ClientBuilder, string) {
 		t.Skip("GITHUB_TOKEN not set, skipping integration test")
 	}
 
-	// Set namespace env var
 	os.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	return fake.NewClientBuilder(), token
@@ -89,7 +82,6 @@ func TestIntegration_ReviewPullRequest(t *testing.T) {
 
 	k8sClient := builder.WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := NewReviewPullRequestTool(k8sClient)
-	// Use real GitHub API (no apiBaseURL override)
 
 	args, _ := json.Marshal(ReviewPullRequestArgs{
 		TaskName: integrationTaskName,
@@ -113,7 +105,6 @@ func TestIntegration_ReviewPullRequest(t *testing.T) {
 	t.Logf("Files changed: %d", len(reviewResult.Files))
 	t.Logf("Diff length: %d bytes", len(reviewResult.Diff))
 
-	// Assertions
 	if reviewResult.PRTitle == "" {
 		t.Error("expected non-empty PR title")
 	}
@@ -130,7 +121,6 @@ func TestIntegration_ReviewPullRequest(t *testing.T) {
 		t.Error("expected non-empty diff")
 	}
 
-	// Verify file details
 	for _, f := range reviewResult.Files {
 		t.Logf("  File: %s (status=%s, +%d/-%d)", f.Filename, f.Status, f.Additions, f.Deletions)
 		if f.Filename == "" {
@@ -237,7 +227,6 @@ func TestIntegration_MergePullRequest_CICheck(t *testing.T) {
 	k8sClient := builder.WithScheme(scheme).WithObjects(task, secret).Build()
 	tool := NewMergePullRequestTool(k8sClient)
 
-	// First, test merge (should succeed since ayna has no CI checks)
 	args, _ := json.Marshal(MergePullRequestArgs{
 		TaskName:    integrationTaskName,
 		PRNumber:    integrationPRNumber,
@@ -259,7 +248,6 @@ func TestIntegration_MergePullRequest_CICheck(t *testing.T) {
 	t.Logf("Message: %s", mergeResult.Message)
 	t.Logf("Checks Passed: %v", mergeResult.ChecksPassed)
 
-	// The PR should have been merged (ayna has no CI checks required)
 	if mergeResult.Merged {
 		t.Logf("✅ PR merged successfully with SHA %s", mergeResult.SHA)
 		if mergeResult.SHA == "" {
@@ -267,6 +255,5 @@ func TestIntegration_MergePullRequest_CICheck(t *testing.T) {
 		}
 	} else {
 		t.Logf("⚠️ PR was not merged: %s", mergeResult.Message)
-		// This is OK if CI checks are pending — the tool correctly blocked merge
 	}
 }

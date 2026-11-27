@@ -47,9 +47,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// These tests use the registered API routes, including TokenReview and the
-// SubjectAccessReviews they request. Only Kubernetes and the external tool are
-// fixtures; approval decisions and effect receipts share the real SQLite store.
 type v2ApprovalAPIFixture struct {
 	server       *Server
 	kube         client.Client
@@ -112,8 +109,6 @@ func newV2ApprovalAPIFixture(t *testing.T, configure ...func(*harnessv2.MCPBroke
 	require.NoError(t, authenticationv1.AddToScheme(scheme))
 	identities := make(map[string]authenticationv1.UserInfo)
 	for _, role := range []string{"reader", "approval-only", "outsider", "reviewer-a", "reviewer-b"} {
-		// A unique fixture credential avoids sharing the middleware's token cache
-		// between tests. These values are never sent to a live API server.
 		f.tokens[role] = "fixture-" + store.CanonicalBytesDigest([]byte(path+role))
 		identities[f.tokens[role]] = v2ApprovalAPIUser(role)
 	}
@@ -437,7 +432,6 @@ func TestV2ApprovalAPIApproveExecutesOriginalCallOnce(t *testing.T) {
 	require.JSONEq(t, `{"workOrder":"fixture-order-1","created":true}`, string(result.Result))
 	require.EqualValues(t, 1, f.count.Load())
 
-	// The persisted receipt supplies redelivery after a new handler is created.
 	restarted := *f.broker
 	f.broker = &restarted
 	replay := f.start(t).result(t)
@@ -481,8 +475,6 @@ func TestV2ApprovalAPIPreservesPrivateRuntimeIdentity(t *testing.T) {
 	require.Equal(t, store.CanonicalBytesDigest([]byte(f.call.Metadata.Fence.SupervisorBootID)), pending.Binding.SupervisorBootIDDigest)
 	require.Equal(t, store.CanonicalBytesDigest([]byte(f.call.Metadata.OperationID)), pending.Binding.OperationIDDigest)
 
-	// Sanitization would make either replacement look like the original ID.
-	// Neither replacement may authorize this review, even under the same Task.
 	for _, replace := range []func(*corev1alpha1.TaskExecutionStatus){
 		func(execution *corev1alpha1.TaskExecutionStatus) {
 			execution.RuntimeInstanceID = "https://runtime.example/instance?slot=2"
@@ -528,7 +520,6 @@ func TestV2ApprovalAPIURLDecodedDecisionUsesOriginalApproval(t *testing.T) {
 	call := f.start(t)
 	pending := f.pending(t)
 	f.requireWaiting(t, call)
-	// The panel uses encodeURIComponent for the colon-delimited broker ID.
 	encodedID := strings.ReplaceAll(pending.ID, ":", "%3A")
 	require.NotEqual(t, pending.ID, encodedID)
 	response := f.decide("reviewer-a", encodedID, "approve")
@@ -538,7 +529,6 @@ func TestV2ApprovalAPIURLDecodedDecisionUsesOriginalApproval(t *testing.T) {
 	require.False(t, result.IsError)
 	require.EqualValues(t, 1, f.count.Load())
 
-	// Encoded and unencoded delivery refer to the same recorded decision.
 	response = f.decide("reviewer-b", pending.ID, "approve")
 	require.NoError(t, response.err)
 	require.Equal(t, http.StatusOK, response.status, "%s", response.body)
@@ -655,7 +645,6 @@ func TestV2ApprovalAPIConcurrentDecisionsHaveOneDurableWinner(t *testing.T) {
 			for index, decision := range decisions {
 				go func() { done <- f.decide([]string{"reviewer-a", "reviewer-b"}[index], pending.ID, decision) }()
 			}
-			// Both handlers observed Pending and reached the real store append.
 			for range decisions {
 				select {
 				case <-barrier.arrived:
@@ -766,8 +755,6 @@ func TestV2ApprovalAPIExpiresReviewAfterWaitingBrokerDisconnects(t *testing.T) {
 	pending := f.pending(t)
 	call.cancel()
 	require.Equal(t, http.StatusServiceUnavailable, call.response(t).Code)
-	// No broker is present to write an expiry event. The API must still enforce
-	// the original deadline instead of accepting a decision that revives it.
 	deadline := time.NewTimer(3 * time.Second)
 	defer deadline.Stop()
 	for {

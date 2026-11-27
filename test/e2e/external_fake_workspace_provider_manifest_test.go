@@ -22,10 +22,6 @@ const (
 	externalFakeWorkspaceProviderLeaderElectionLease = "orka-workspace-fake.workspace.orka.ai"
 )
 
-// Role fields name both the role and its corresponding binding. ProviderRole
-// is cluster-scoped; CoreRole names cluster config and namespaced profile
-// reader grants. LeaderRole and its binding are namespaced.
-// The pinned binary uses a fixed Lease name, independent of the fixture ID.
 type externalFakeWorkspaceProviderFixtureNames struct {
 	Provider            string
 	Class               string
@@ -39,15 +35,6 @@ type externalFakeWorkspaceProviderFixtureNames struct {
 	LeaderElectionLease string
 }
 
-// externalFakeWorkspaceProviderManifests bootstraps the separately built fake
-// provider from orka-workspace v0.1.0-alpha.7 (608d560d69f7). The caller
-// installs the shared and fake CRDs/admission policies and supplies an existing
-// namespace.
-// Core's ServiceAccount is in that namespace and already has its normal RBAC.
-//
-// The fake config/profile are identity-only objects. Core constructs the real
-// Codex PodTemplate; the provider materializes it without reading credentials.
-// There is no fixture runtime, bootstrap Secret, pool, checkpoint, or suspension.
 func externalFakeWorkspaceProviderManifests(
 	namespace, imageRef, fixtureID, coreServiceAccount string,
 ) ([]map[string]any, externalFakeWorkspaceProviderFixtureNames, error) {
@@ -73,7 +60,6 @@ func externalFakeWorkspaceProviderManifests(
 	if !pinned || digested.Digest().Algorithm() != "sha256" || len(digested.Digest().Encoded()) != sha256.Size*2 {
 		return nil, names, fmt.Errorf("external fake provider image must be a SHA-256 digest-pinned image reference")
 	}
-	// Match Core's tag-free image identity, including local registry references.
 	canonicalImage, err := distributionref.WithDigest(distributionref.TrimNamed(named), digested.Digest())
 	if err != nil {
 		return nil, names, fmt.Errorf("canonicalize external fake provider image: %w", err)
@@ -109,9 +95,6 @@ func externalFakeWorkspaceProviderManifests(
 
 	account := resource("v1", "ServiceAccount", names.ServiceAccount, true)
 	providerRole := resource("rbac.authorization.k8s.io/v1", "ClusterRole", names.ProviderRole, false)
-	// These are the pinned provider bundle's controller permissions. Pod access
-	// must include Core's runtime namespace, which need not be the Task namespace.
-	// In particular, this identity never gets Secrets, core admit, or configure.
 	providerRole["rules"] = []any{
 		map[string]any{"apiGroups": []any{"workspace.orka.ai"},
 			"resources": []any{
@@ -144,7 +127,6 @@ func externalFakeWorkspaceProviderManifests(
 		"verbs": []any{"get", "list", "watch", "create", "update", "patch"},
 	}}
 	coreRole := resource("rbac.authorization.k8s.io/v1", "ClusterRole", names.CoreRole, false)
-	// Core resolves these two named parameter objects with uncached Get calls.
 	coreRole["rules"] = []any{map[string]any{
 		"apiGroups":     []any{externalFakeWorkspaceProviderControllerName},
 		"resources":     []any{"fakeproviderconfigs"},

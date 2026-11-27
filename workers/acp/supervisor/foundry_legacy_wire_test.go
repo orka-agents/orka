@@ -11,8 +11,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// These top-level schemas match the approval-aware controller at 51d3360dd,
-// before Foundry recovery fields were added. Its decoder rejects unknown fields.
 type legacyFoundryCapabilities struct {
 	Protocol                          string                                    `json:"protocol"`
 	Transport                         string                                    `json:"transport"`

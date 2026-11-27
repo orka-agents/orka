@@ -506,7 +506,6 @@ var _ = Describe("Agent Controller", func() {
 		}
 
 		BeforeEach(func() {
-			// Create the agent
 			agent := &corev1alpha1.Agent{}
 			err := k8sClient.Get(ctx, typeNamespacedName, agent)
 			if err != nil && errors.IsNotFound(err) {
@@ -525,7 +524,6 @@ var _ = Describe("Agent Controller", func() {
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
 
-			// Create a running task referencing this agent
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "task-for-agent-count",
@@ -544,7 +542,6 @@ var _ = Describe("Agent Controller", func() {
 			existing := &corev1alpha1.Task{}
 			if err := k8sClient.Get(ctx, taskNN, existing); err != nil && errors.IsNotFound(err) {
 				Expect(k8sClient.Create(ctx, task)).To(Succeed())
-				// Set phase to Running
 				Expect(k8sClient.Get(ctx, taskNN, task)).To(Succeed())
 				task.Status.Phase = corev1alpha1.TaskPhaseRunning
 				Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
@@ -552,14 +549,12 @@ var _ = Describe("Agent Controller", func() {
 		})
 
 		AfterEach(func() {
-			// Cleanup task
 			task := &corev1alpha1.Task{}
 			taskNN := types.NamespacedName{Name: "task-for-agent-count", Namespace: "default"}
 			if err := k8sClient.Get(ctx, taskNN, task); err == nil {
 				Expect(k8sClient.Delete(ctx, task)).To(Succeed())
 			}
 
-			// Cleanup agent
 			resource := &corev1alpha1.Agent{}
 			if err := k8sClient.Get(ctx, typeNamespacedName, resource); err == nil {
 				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
@@ -621,18 +616,15 @@ var _ = Describe("Agent Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
 
-			// Set LastUsed to the past
 			Expect(k8sClient.Get(ctx, ttlNN, agent)).To(Succeed())
 			past := metav1.NewTime(time.Now().Add(-10 * time.Second))
 			agent.Status.LastUsed = &past
 			Expect(k8sClient.Status().Update(ctx, agent)).To(Succeed())
 
-			// Reconcile — should delete the agent
 			r := &AgentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: ttlNN})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Agent should be gone
 			err = k8sClient.Get(ctx, ttlNN, &corev1alpha1.Agent{})
 			Expect(errors.IsNotFound(err)).To(BeTrue())
 		})
@@ -658,7 +650,6 @@ var _ = Describe("Agent Controller", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: noTTLNN})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Agent should still exist
 			Expect(k8sClient.Get(ctx, noTTLNN, agent)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
 		})
@@ -682,7 +673,6 @@ var _ = Describe("Agent Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
 
-			// Set LastUsed to now (TTL not expired)
 			Expect(k8sClient.Get(ctx, futureNN, agent)).To(Succeed())
 			now := metav1.Now()
 			agent.Status.LastUsed = &now
@@ -693,7 +683,6 @@ var _ = Describe("Agent Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
-			// Agent should still exist
 			Expect(k8sClient.Get(ctx, futureNN, agent)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
 		})

@@ -347,7 +347,6 @@ func TestUploadArtifactsRejectsSymlinkArtifactRoot(t *testing.T) {
 
 func TestUploadArtifacts_ReturnsErrorWhenTotalSizeExceeded(t *testing.T) {
 	prepareArtifactsDir(t)
-	// Create multiple files each under MaxArtifactFileBytes but totalling over MaxArtifactTotalBytes
 	fileSize := int64(MaxArtifactFileBytes - 1)
 	numFiles := (MaxArtifactTotalBytes / fileSize) + 2
 	for i := range numFiles {

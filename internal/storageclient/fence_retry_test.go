@@ -12,9 +12,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// closingFences opens its fence for a write's first attempt and is closed
-// with err from then on, as the controller epoch manager's fence is once it
-// holds the installation for storage recovery.
 type closingFences struct {
 	datasetID string
 	fence     storagev1.ControllerEpochFence
@@ -29,10 +26,6 @@ func (f *closingFences) WriteFence(context.Context, string) (string, storagev1.C
 	return f.datasetID, f.fence, nil
 }
 
-// A fence that closes after a write's first attempt refuses the write's
-// retries: a write that committed nothing is refused as not ready, one whose
-// outcome is unknown is resolved instead of retried, and one that committed
-// still returns its result.
 func TestRetryAfterTheFenceClosedIsRefused(t *testing.T) {
 	hold := &store.StorageHoldError{Hold: store.StorageRecoveryHold{
 		ID: "hold-1", Reason: store.StorageRecoveryWatermarkRegressed, Message: "the dataset lost writes",
@@ -94,11 +87,6 @@ func TestRetryAfterTheFenceClosedIsRefused(t *testing.T) {
 	})
 }
 
-// stallingFences opens its fence for a write's first attempt and then waits
-// on every later call until its context ends, as a fence source does whose
-// own reads stall, without the fence ever closing. It closes stalled when
-// the first such wait starts, and returns endErr, or the context's error
-// wrapped when endErr is nil, once the context ends.
 type stallingFences struct {
 	datasetID string
 	fence     storagev1.ControllerEpochFence
@@ -121,12 +109,6 @@ func (f *stallingFences) WriteFence(ctx context.Context, _ string) (string, stor
 	return f.datasetID, f.fence, nil
 }
 
-// A retry whose fence wait outlives the call or its retry horizon ends the
-// retries as when they end between attempts: the write returns the last
-// attempt's error, with the call's own context error when the call ended,
-// or is resolved when an attempt's outcome was unknown. A fence that stays
-// closed for the whole fence wait while the call is live refuses the retry
-// as not ready.
 func TestRetryFenceWaitThatOutlivesTheCallKeepsTheLastError(t *testing.T) {
 	newFixture := func(t *testing.T, fenceWait, horizon time.Duration, first scriptedStep) (*lossyFixture, *stallingFences) {
 		f := newLossyFixture(t)

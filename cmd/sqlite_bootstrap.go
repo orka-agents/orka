@@ -8,12 +8,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// openControllerSQLiteStore is the production bootstrap seam: exclusivity,
-// schema/identity validation, key loading, authentication of retained sealed
-// records and durable bootstrap completion all precede controller consumers.
-// The storage client owns the snapshot key: it authenticates every retained
-// sealed record before bootstrap completes, and SQLite only ever stores
-// sealed bytes.
 func openControllerSQLiteStore(
 	path string, loadKey func(sqlite.DatasetInfo) ([]byte, error), options ...sqlite.OpenOption,
 ) (*sqlite.Store, *storageclient.Client, []byte, error) {
@@ -45,8 +39,6 @@ func openControllerSQLiteStore(
 	if err := s.CompleteDatasetBootstrap(context.Background(), info.ID); err != nil {
 		return nil, nil, nil, fmt.Errorf("complete SQLite dataset bootstrap: %w", err)
 	}
-	// Every contract write reaches the store through the storage client,
-	// which attaches a write envelope; a write without one is refused.
 	s.RequireWriteEnvelopes()
 	success = true
 	return s, client, key, nil

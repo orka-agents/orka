@@ -465,7 +465,6 @@ func TestDownstreamFailureIncomplete(t *testing.T) {
 				return fakeResponse(r, http.StatusOK, io.NopCloser(strings.NewReader(body))), nil
 			})
 			w := &failedWriter{httptest.NewRecorder()}
-			// ServerContextKey makes ReverseProxy abort rather than suppressing copy errors in direct tests.
 			ctx := context.WithValue(context.Background(), http.ServerContextKey, &http.Server{})
 			r := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}")).WithContext(ctx)
 			func() {
@@ -663,9 +662,6 @@ func TestNonUTF8BodyRejectedWithoutLossyCapture(t *testing.T) {
 	}
 }
 
-// A streaming client may stop reading once it has the final event, before the
-// upstream response ends. The response was fully relayed, so the capture is
-// complete.
 func TestClientCloseAfterFinalEventComplete(t *testing.T) {
 	const final = "event: response.completed\ndata: {}\n\n"
 	clientGone := make(chan struct{})
@@ -673,7 +669,6 @@ func TestClientCloseAfterFinalEventComplete(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, final)
 		w.(http.Flusher).Flush()
-		// End the response only after the proxy has seen the client hang up.
 		select {
 		case <-clientGone:
 		case <-time.After(3 * time.Second):
@@ -707,8 +702,6 @@ func TestClientCloseAfterFinalEventComplete(t *testing.T) {
 	}
 }
 
-// A client that hangs up before the response's last bytes did not receive
-// them, so the capture stays incomplete even when the upstream then ends.
 func TestClientCloseBeforeFinalEventIncomplete(t *testing.T) {
 	const first = "event: response.output_text.delta\ndata: {}\n\n"
 	clientGone := make(chan struct{})

@@ -78,9 +78,7 @@ type operatorFixture struct {
 	supervisorCalls  []string
 	taintedAtRequest bool
 	noCapability     bool
-	// stallDownload, when set, makes the supervisor send part of a download
-	// and then stall until it is closed.
-	stallDownload chan struct{}
+	stallDownload    chan struct{}
 }
 
 func operatorTestObjects(classAccess string) []client.Object {
@@ -430,8 +428,6 @@ func TestOperatorCopyInTaintsBeforeWriting(t *testing.T) {
 	require.Equal(t, []string{OperatorAuditStarted, OperatorAuditFinished}, f.audit.phases())
 }
 
-// A path within MaxPathBytes can still encode past the signed request header
-// bound; that refusal must come before the taint.
 func TestOperatorCopyInOversizedRequestIsRefusedBeforeTheTaint(t *testing.T) {
 	f := newOperatorFixture(t, true, "exec")
 	path := strings.Repeat("<", 3500)
@@ -468,7 +464,6 @@ func TestOperatorExecEndToEndThroughTheAPI(t *testing.T) {
 	go func() { _ = f.app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true}) }()
 	t.Cleanup(func() { _ = f.app.Shutdown() })
 
-	// Plain HTTP (no upgrade) is refused with a clear error.
 	response, err := http.Get("http://" + listener.Addr().String() + "/api/v1/tasks/t1/exec?namespace=team")
 	require.NoError(t, err)
 	_ = response.Body.Close()
@@ -487,7 +482,6 @@ func TestOperatorExecEndToEndThroughTheAPI(t *testing.T) {
 	require.Equal(t, "printenv SECRET=hunter2", stdout.String())
 	require.True(t, f.workspaceTainted(t))
 	require.True(t, f.taskTainted(t))
-	// The refused plain-HTTP attempt is audited as denied before the exec.
 	require.Eventually(t, func() bool { return len(f.audit.phases()) == 3 }, 5*time.Second, 10*time.Millisecond)
 	f.audit.mu.Lock()
 	defer f.audit.mu.Unlock()
@@ -570,7 +564,6 @@ func TestOperatorCopyInRequiresAnExactContentLength(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Close() //nolint:errcheck
 	require.NoError(t, conn.SetDeadline(time.Now().Add(10*time.Second)))
-	// A chunked upload declaring three bytes while sending eight.
 	_, err = io.WriteString(conn, "PUT /api/v1/tasks/t1/files?namespace=team&path=notes.txt&size=3 HTTP/1.1\r\n"+
 		"Host: orka\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n8\r\nabcdefgh\r\n0\r\n\r\n")
 	require.NoError(t, err)
@@ -655,8 +648,6 @@ func operatorTestTarget(t *testing.T, f *operatorFixture) *operatorTarget {
 	return target
 }
 
-// A target resolved before the exec request arrived must be refused if the
-// class opt-in is withdrawn or the workspace is handed to another Task first.
 func TestOperatorTargetRevalidationRefusesChangedAuthorization(t *testing.T) {
 	ctx := context.Background()
 	cases := map[string]struct {
@@ -699,9 +690,6 @@ func TestOperatorTargetRevalidationRefusesChangedAuthorization(t *testing.T) {
 	}
 }
 
-// The ownership check and the taint write share one optimistic-lock step, so
-// a handoff that lands first refuses the taint instead of tainting (and
-// writing into) the successor's workspace.
 func TestOperatorTaintRefusesAWorkspaceHandedToAnotherTask(t *testing.T) {
 	ctx := context.Background()
 	f := newOperatorFixture(t, true, "exec")
@@ -731,7 +719,6 @@ func TestOperatorExecRevalidatesAfterTheDelayedExecRequest(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.CloseNow() //nolint:errcheck
 
-	// The class opt-in is withdrawn after the upgrade but before argv arrives.
 	class := &workspacev1alpha1.ExecutionWorkspaceClass{}
 	require.NoError(t, f.client.Get(ctx, types.NamespacedName{Namespace: operatorTestNamespace, Name: "cls"}, class))
 	delete(class.Annotations, operatoraccess.ClassAccessAnnotation)
@@ -758,9 +745,6 @@ func TestOperatorExecRevalidatesAfterTheDelayedExecRequest(t *testing.T) {
 	require.Equal(t, []string{OperatorAuditDenied}, f.audit.phases())
 }
 
-// An argv within the argv bounds can still encode past the signed request
-// header bound (HTML-escaped '<' is six bytes). That refusal must come before
-// the taint, so the workspace keeps its publication and continuation.
 func TestOperatorExecOversizedRequestIsRefusedBeforeTheTaint(t *testing.T) {
 	f := newOperatorFixture(t, true, "exec")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -798,8 +782,6 @@ func TestOperatorExecOversizedRequestIsRefusedBeforeTheTaint(t *testing.T) {
 	require.Equal(t, []string{OperatorAuditDenied}, f.audit.phases())
 }
 
-// A handshake refused by the WebSocket library after the handler handed audit
-// ownership to the hijack callback is still audited.
 func TestOperatorExecRefusedHandshakeIsAudited(t *testing.T) {
 	f := newOperatorFixture(t, true, "exec")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -826,9 +808,6 @@ func TestOperatorExecRefusedHandshakeIsAudited(t *testing.T) {
 	require.False(t, f.workspaceTainted(t))
 }
 
-// A client that never sends its exec request is disconnected once the read
-// times out: the cancelled read must close the hijacked socket, not leave the
-// relay and its socket pinned until the client acts.
 func TestOperatorExecSilentClientIsDisconnected(t *testing.T) {
 	previous := operatorExecOptionsReadTimeout
 	operatorExecOptionsReadTimeout = 200 * time.Millisecond
@@ -855,9 +834,6 @@ func TestOperatorExecSilentClientIsDisconnected(t *testing.T) {
 		5*time.Second, 10*time.Millisecond)
 }
 
-// A supervisor that stalls mid-download cannot hold the transfer past its own
-// deadline: the caller sees a truncated body and the copy is audited as
-// incomplete.
 func TestOperatorCopyOutStalledSupervisorIsBounded(t *testing.T) {
 	previous := operatorFileTransferTimeout
 	operatorFileTransferTimeout = 300 * time.Millisecond
@@ -877,9 +853,6 @@ func TestOperatorCopyOutStalledSupervisorIsBounded(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "a stalled supervisor transfer was not bounded")
 }
 
-// Every audit sink, log line, and Task Event receives a sanitized record: a
-// credential-shaped command basename, copy path, caller-supplied Task name, or
-// relayed error outcome never reaches it verbatim.
 func TestOperatorAuditRecordsAreSanitized(t *testing.T) {
 	const token = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
 	f := newOperatorFixture(t, true, "exec")
@@ -895,7 +868,6 @@ func TestOperatorAuditRecordsAreSanitized(t *testing.T) {
 	require.NotContains(t, string(raw), token)
 	require.LessOrEqual(t, len([]rune(records[0].Outcome)), maxOperatorAuditOutcomeChars)
 
-	// Ordinary values pass through unchanged.
 	clean := sanitizeOperatorAuditRecord(OperatorAuditRecord{Task: "t1", Command: "git", Path: "src/notes#1.txt", Outcome: "exited"})
 	require.Equal(t, "t1", clean.Task)
 	require.Equal(t, "git", clean.Command)
@@ -903,8 +875,6 @@ func TestOperatorAuditRecordsAreSanitized(t *testing.T) {
 	require.Equal(t, "exited", clean.Outcome)
 }
 
-// A command whose argv[0] is itself a credential is never echoed back into the
-// audit trail through the supervisor's refusal message.
 func TestOperatorExecAuditNeverCarriesARawCredentialArgv0(t *testing.T) {
 	const token = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
 	f := newOperatorFixture(t, true, "exec")
@@ -924,8 +894,6 @@ func TestOperatorExecAuditNeverCarriesARawCredentialArgv0(t *testing.T) {
 	require.NotContains(t, string(raw), token)
 }
 
-// Fiber routes case-insensitively, so every spelling of the upload route must
-// get the upload's bounded body size and read timeout.
 func TestOperatorFileUploadRequestConfigIgnoresPathCase(t *testing.T) {
 	for _, path := range []string{"/api/v1/tasks/t1/files", "/API/V1/TASKS/t1/FILES", "/Api/v1/Tasks/t1/Files?path=a&size=1"} {
 		var header fasthttp.RequestHeader
@@ -944,8 +912,6 @@ func TestOperatorFileUploadRequestConfigIgnoresPathCase(t *testing.T) {
 	}
 }
 
-// A copy-out streams its body to the caller; every spelling of the download
-// route gets a write deadline so a client that stops reading cannot pin it.
 func TestOperatorFileDownloadRequestConfigBoundsTheWrite(t *testing.T) {
 	server := &Server{handlers: NewHandlers(HandlersConfig{})}
 	for _, path := range []string{"/api/v1/tasks/t1/files?path=a", "/API/V1/TASKS/t1/FILES"} {
@@ -966,9 +932,6 @@ func TestOperatorFileDownloadRequestConfigBoundsTheWrite(t *testing.T) {
 	}
 }
 
-// The broker backstop honours the taint wherever orka-api wrote it: on the
-// linked workspace incarnation or on another Task that shared it, not only on
-// the requesting Task. A marker on a different incarnation does not count.
 func TestPublicationCredentialRefusedForOperatorTaintedWorkspace(t *testing.T) {
 	const (
 		workspaceName = "ws"
@@ -1049,8 +1012,6 @@ func TestPublicationCredentialRefusedForOperatorTaintedWorkspace(t *testing.T) {
 	}
 }
 
-// When the taint cannot be read, the broker refuses rather than issuing forge
-// write credentials.
 func TestPublicationCredentialFailsClosedWhenTaintIsUnreadable(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))

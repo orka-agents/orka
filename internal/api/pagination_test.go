@@ -126,7 +126,6 @@ func TestParsePagination(t *testing.T) {
 }
 
 func TestParsePagination_Constants(t *testing.T) {
-	// Verify constants are set correctly
 	if DefaultLimit != 100 {
 		t.Errorf("DefaultLimit = %d, want 100", DefaultLimit)
 	}

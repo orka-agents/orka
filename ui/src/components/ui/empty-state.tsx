@@ -2,23 +2,13 @@ import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 interface EmptyStateProps {
-  /** Optional lucide icon shown above the headline. */
   icon?: LucideIcon
-  /** Primary message. */
   headline: string
-  /** Optional supporting hint below the headline. */
   hint?: string
-  /** Optional call-to-action (e.g. a button or link). */
   action?: React.ReactNode
   className?: string
 }
 
-/**
- * Standard empty-state placeholder — icon + headline + hint + optional CTA.
- *
- * Replaces bare muted strings ("No tasks yet", "No logs available yet", etc.)
- * so empty views read as intentional rather than missing.
- */
 export function EmptyState({
   icon: Icon,
   headline,

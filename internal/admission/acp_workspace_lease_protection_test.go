@@ -59,8 +59,6 @@ func TestACPWorkspaceLeaseProtectionReservesControllerLeases(t *testing.T) {
 		{name: "forged enforcement marker delete", operation: apiserveradmission.Delete, username: untrustedUsername, leaseName: "orka-agent-use-enforcement"},
 		{name: "controller enforcement marker create", operation: apiserveradmission.Create, username: trustedControllerUser, leaseName: "orka-agent-use-enforcement", allowed: true},
 		{name: "controller enforcement marker delete", operation: apiserveradmission.Delete, username: trustedControllerUser, leaseName: "orka-agent-use-enforcement", allowed: true},
-		// Task admission ledgers: a forged or removed grant could admit Tasks
-		// past a namespace or child limit.
 		{name: "forged namespace ledger create", operation: apiserveradmission.Create, username: untrustedUsername, leaseName: namespaceLedger},
 		{name: "forged namespace ledger generateName", operation: apiserveradmission.Create, username: untrustedUsername, generate: labels.TaskAdmissionNamespaceLedgerNamePrefix},
 		{name: "forged namespace ledger update", operation: apiserveradmission.Update, username: untrustedUsername, leaseName: namespaceLedger},

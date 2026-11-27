@@ -1,5 +1,3 @@
-// Package workerclient implements the native worker's task-bound gateway reply
-// transport. Brokered ACP executions use their authorized transaction instead.
 package workerclient
 
 import (
@@ -21,8 +19,6 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-// Config contains controller-owned identity and a projected Pod token path.
-// Raw environment tokens are deliberately not supported.
 type Config struct {
 	ControllerURL string
 	Namespace     string
@@ -31,8 +27,6 @@ type Config struct {
 	TokenFile     string
 }
 
-// ErrUnavailable classifies optional service or transport failures. During
-// bootstrap callers may omit the tool, never treat this error as an origin grant.
 var ErrUnavailable = errors.New("gateway reply service is unavailable")
 
 type controllerError struct{ status int }
@@ -64,13 +58,10 @@ func New(cfg Config) (*Client, error) {
 		return nil, invalid
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil // Never forward the projected credential through env proxies.
+	transport.Proxy = nil
 	return &Client{taskUID: cfg.TaskUID, endpoint: strings.TrimRight(u.String(), "/") + "/internal/v1/tasks/" + cfg.Namespace + "/" + cfg.TaskName + "/gateway-messages", tokenFile: cfg.TokenFile, http: &http.Client{Timeout: 10 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
-// AuthenticateOrigin binds the exact Task UID without asking for message
-// admission. A fast Pod may precede Job identity publication, so retry 503 only,
-// at most five attempts within ten seconds. No failed response proves identity.
 func (c *Client) AuthenticateOrigin(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -153,7 +144,6 @@ func (c *Client) request(ctx context.Context, method, endpoint string, body []by
 		return fmt.Errorf("%w; admission outcome may be unknown", ErrUnavailable)
 	}
 	defer response.Body.Close() //nolint:errcheck
-	// Never copy provider, authorization, or upstream body diagnostics to the tool.
 	if response.StatusCode != http.StatusOK && (method != http.MethodPost || response.StatusCode != http.StatusAccepted) {
 		cause := &controllerError{status: response.StatusCode}
 		data, readErr := io.ReadAll(io.LimitReader(response.Body, 4097))
@@ -186,8 +176,6 @@ func (c *Client) request(ctx context.Context, method, endpoint string, body []by
 	return nil
 }
 
-// A known code must agree with the controller's status; arbitrary bodies never
-// convert a transport/backend failure into a definitive non-admission result.
 func gatewayRejectionStatus(code string) int {
 	switch code {
 	case "interim_delivery_unsupported", "conflict":

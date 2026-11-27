@@ -76,8 +76,6 @@ func (o taskWorkspaceCreateOptions) build(cmd *cobra.Command, taskType string) (
 		}
 		return nil, nil
 	}
-	// Omit the implicit read workspace when no workspace fields were configured.
-	// Preserve explicit write intent so its required repository is validated.
 	if !otherWorkspaceFlagsUsed && (!intentFlagUsed || intent != string(corev1alpha1.WorkspaceIntentWrite)) {
 		return nil, nil
 	}
@@ -118,8 +116,6 @@ func (o taskWorkspaceCreateOptions) build(cmd *cobra.Command, taskType string) (
 	return workspace, nil
 }
 
-// workspaceFlagUsage reports whether the workspace-intent flag and any other
-// workspace flag were explicitly set on the command line.
 func workspaceFlagUsage(cmd *cobra.Command) (intentUsed, othersUsed bool) {
 	intentUsed = cmd.Flags().Changed("workspace-intent")
 	for _, name := range []string{
@@ -134,10 +130,6 @@ func workspaceFlagUsage(cmd *cobra.Command) (intentUsed, othersUsed bool) {
 	return intentUsed, othersUsed
 }
 
-// validateWorkspaceFlags runs the full preflight mirror over the workspace
-// flags: source-selector dependencies, canonical source refs, paired identity
-// flags, canonical repository identities, publication branches, and
-// credential key/name pairing.
 func (o taskWorkspaceCreateOptions) validateWorkspaceFlags() error {
 	if err := o.validateSourceSelectorDependencies(); err != nil {
 		return err
@@ -178,9 +170,6 @@ func (o taskWorkspaceCreateOptions) validateWorkspaceFlags() error {
 	return nil
 }
 
-// validateWorkspaceSubPathFlag mirrors the harness-v2 workspace relative-root
-// validation so an unsafe --sub-path fails at create time instead of failing
-// RuntimeSession creation.
 func validateWorkspaceSubPathFlag(subPath string) error {
 	root := strings.TrimSpace(subPath)
 	if root == "" || root == "." {
@@ -206,9 +195,6 @@ func validateWorkspaceSubPathFlag(subPath string) error {
 	return nil
 }
 
-// validateSourceSelectorDependencies mirrors the controller workspace
-// preflight rule that source selectors and read credentials require a
-// repository, so a doomed Task fails here instead of after creation.
 func (o taskWorkspaceCreateOptions) validateSourceSelectorDependencies() error {
 	if strings.TrimSpace(o.gitRepo) != "" {
 		return nil
@@ -231,10 +217,6 @@ func (o taskWorkspaceCreateOptions) validateSourceSelectorDependencies() error {
 	return nil
 }
 
-// validateSourceSelectors mirrors the controller's runtimeWorkspaceSourceRef
-// selector validation with the same canonical source-ref validator, so a Task
-// with a malformed branch or ref selector fails here instead of after
-// creation. Keep in exact behavior parity with the controller.
 func (o taskWorkspaceCreateOptions) validateSourceSelectors() error {
 	if ref := strings.TrimSpace(o.ref); ref != "" {
 		if _, err := publisherservice.CanonicalWorkspaceSourceRef(ref); err != nil {
@@ -253,11 +235,6 @@ func (o taskWorkspaceCreateOptions) validateSourceSelectors() error {
 	return nil
 }
 
-// validateRepositoryIdentities mirrors the controller's canonical repository
-// identity checks (workspaceRepository / workspacePublicationRepository): a
-// supplied repository identity must use the github provider and match the
-// canonical credential-free URL identity, with the publication identity
-// derived from --publication-git-repo or falling back to --git-repo.
 func (o taskWorkspaceCreateOptions) validateRepositoryIdentities() error {
 	if strings.TrimSpace(o.sourceRepositoryProvider) != "" || strings.TrimSpace(o.sourceRepositoryID) != "" {
 		if err := validateRepositoryIdentityAgainstURL("--source-repository", o.sourceRepositoryProvider, o.sourceRepositoryID, o.gitRepo); err != nil {
@@ -290,8 +267,6 @@ func validateRepositoryIdentityAgainstURL(flagPrefix, provider, id, canonicalURL
 	return nil
 }
 
-// validatePublicationBranches mirrors the controller's
-// canonicalWorkspaceBranchRef validation for publication branch flags.
 func (o taskWorkspaceCreateOptions) validatePublicationBranches() error {
 	for _, branch := range []struct {
 		flag  string
@@ -315,10 +290,6 @@ func (o taskWorkspaceCreateOptions) validatePublicationBranches() error {
 	return nil
 }
 
-// canonicalizeRepositoryURLs canonicalizes repository URL flags to the only
-// form the controller's workspace preflight accepts so a doomed Task fails
-// here instead of after creation: GitHub SSH roots are converted
-// automatically, everything else must be a credential-free HTTPS URL.
 func (o *taskWorkspaceCreateOptions) canonicalizeRepositoryURLs() error {
 	for _, field := range []struct {
 		flag  string
@@ -422,10 +393,6 @@ session generation, verified remote commit) for tracing a problem.`,
 	return cmd
 }
 
-// printTaskRuntimeStatusSummary prints the rows a person needs after
-// creating a Task: whether it finished, and where the change went. Delivery
-// rows appear only for write-intent workspaces (or once delivery status
-// exists), and a failed or unknown outcome shows its reason.
 func printTaskRuntimeStatusSummary(cmd *cobra.Command, status map[string]any, reason, waitingOn string, writeIntent bool) error {
 	execution := nestedMap(status, "execution")
 	delivery := nestedMap(status, "delivery")
@@ -459,12 +426,6 @@ func printTaskRuntimeStatusSummary(cmd *cobra.Command, status map[string]any, re
 	return w.Flush()
 }
 
-// taskFailureReason returns a one-line reason for a Task that failed, was
-// cancelled, or ended with an unknown outcome, and nothing otherwise. The
-// safe status projection carries the ACP execution and delivery details;
-// container and native AI Tasks record their failure in the Task's
-// top-level status message or workload execution outcome, which are read
-// from the full Task so the short view shows the controller's error.
 func taskFailureReason(status map[string]any, task map[string]any) string {
 	execution := nestedMap(status, "execution")
 	delivery := nestedMap(status, "delivery")
@@ -508,8 +469,6 @@ func safeTaskRuntimeStatus(task client.TaskDetail) map[string]any {
 	}
 	status := nestedMap(task, "status")
 	out["phase"] = status["phase"]
-	// A Task awaiting approval stays Running, so the action it waits on is
-	// reported in every output, not only the default summary.
 	if waitingOn := taskWaitingOn(task); waitingOn != "" {
 		out["waitingOn"] = waitingOn
 	}

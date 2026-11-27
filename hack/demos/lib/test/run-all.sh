@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Run all hack/demos/lib smoke tests. Pure bash, no test framework.
-#
-# Usage: bash hack/demos/lib/test/run-all.sh
 
 set -Eeuo pipefail
 

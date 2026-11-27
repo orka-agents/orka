@@ -13,7 +13,6 @@ import (
 	"go.opentelemetry.io/otel"
 )
 
-// MapCarrier adapts a string map to OTel's TextMapCarrier.
 type MapCarrier map[string]string
 
 func (c MapCarrier) Get(key string) string {

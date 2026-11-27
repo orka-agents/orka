@@ -47,8 +47,6 @@ func forwardingTestAuthorization(t *testing.T, fence harnessv2.Fence, now time.T
 	return forwardingTestAuthorizationWith(t, fence, now, forwarders, false)
 }
 
-// forwardingTestAuthorizationWith builds the authorization, and, with
-// writes, the first forwarding Tool's write tool.
 func forwardingTestAuthorizationWith(t *testing.T, fence harnessv2.Fence, now time.Time, forwarders int, writes bool) (harnessv2.PromptMCPAuthorization, harnessv2.PromptLease) {
 	t.Helper()
 	authorization, lease := buildTestMCPAuthorization(t, fence, now, "lookup", harnessv2.MCPToolEffectReadOnly, false)
@@ -102,7 +100,6 @@ func newAzureGatewayFixture(t *testing.T) *azureGatewayFixture {
 func newAzureGatewayFixtureWith(t *testing.T, writes bool) *azureGatewayFixture {
 	t.Helper()
 	fixture := newAzureGatewayFixtureSigningIn(t, writes, nil)
-	// The prompt start signed az in; the tests below start from there.
 	fixture.waitForSignIn(t)
 	fixture.mu.Lock()
 	fixture.calls = nil
@@ -110,9 +107,6 @@ func newAzureGatewayFixtureWith(t *testing.T, writes bool) *azureGatewayFixture 
 	return fixture
 }
 
-// newAzureGatewayFixtureSigningIn starts the prompt with respond already
-// answering, so the sign-in the prompt start begins is the test's to watch.
-// adjust, if given, changes the prompt's authorization before it starts.
 func newAzureGatewayFixtureSigningIn(
 	t *testing.T, writes bool, respond func(harnessv2.MCPBrokerCallRequest) json.RawMessage,
 	adjust ...func(*testing.T, *harnessv2.PromptMCPAuthorization),
@@ -188,7 +182,6 @@ func newAzureGatewayFixtureSigningIn(
 	return fixture
 }
 
-// waitForSignIn waits for the sign-in the prompt start began.
 func (f *azureGatewayFixture) waitForSignIn(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -480,9 +473,6 @@ func TestAzureGatewayRewritesLinksOnTheSameOriginWithOrWithoutTheDefaultPort(t *
 	}
 }
 
-// TestAzureGatewaySharesTheRuntimeWideCallLimit covers forwarding under load:
-// a forwarded call takes the same runtime-wide slot an MCP tool call does,
-// so a full runtime answers az with a retryable 429 and calls no broker.
 func TestAzureGatewaySharesTheRuntimeWideCallLimit(t *testing.T) {
 	fixture := newAzureGatewayFixture(t)
 	token := fixture.token(t)
@@ -508,9 +498,6 @@ func TestAzureGatewaySharesTheRuntimeWideCallLimit(t *testing.T) {
 	}
 }
 
-// TestAzureGatewayRefusesAChunkedBody covers a GET whose body has no declared
-// length: forwarding would drop the body, so the gateway refuses it before
-// calling the broker.
 func TestAzureGatewayRefusesAChunkedBody(t *testing.T) {
 	fixture := newAzureGatewayFixture(t)
 	token := fixture.token(t)
@@ -534,11 +521,6 @@ func TestAzureGatewayRefusesAChunkedBody(t *testing.T) {
 	}
 }
 
-// TestAzureGatewaySendsWritesToTheWriteTool covers a Tool that allows writes:
-// a PUT reaches the broker as a call to the write tool with its JSON body,
-// and the same write retried with the SDK's request ID keeps its call ID, so
-// it joins rather than writes twice. A different body, or a write without
-// the request ID, gets its own call.
 func TestAzureGatewaySendsWritesToTheWriteTool(t *testing.T) {
 	fixture := newAzureGatewayFixtureWith(t, true)
 	token := fixture.token(t)
@@ -582,8 +564,6 @@ func TestAzureGatewaySendsWritesToTheWriteTool(t *testing.T) {
 	if calls[2].Call.CallID == calls[0].Call.CallID || calls[3].Call.CallID == calls[0].Call.CallID {
 		t.Fatal("a write with another body, or without a request ID, must get its own call ID")
 	}
-	// A guarded write keeps its precondition, and another precondition is
-	// another write.
 	guarded := header("req-1")
 	guarded.Set("If-Match", `"etag-1"`)
 	if response, _ := fixture.send(t, http.MethodPut, path, guarded, body); response.StatusCode != http.StatusOK {
@@ -594,7 +574,6 @@ func TestAzureGatewaySendsWritesToTheWriteTool(t *testing.T) {
 	if err != nil || request.IfMatch != `"etag-1"` || calls[len(calls)-1].Call.CallID == calls[0].Call.CallID {
 		t.Fatalf("guarded write = %+v, %v; want its If-Match and its own call ID", request, err)
 	}
-	// A precondition sent in several headers keeps every value.
 	repeated := header("req-2")
 	repeated["If-None-Match"] = []string{`"etag-1"`, `"etag-2"`}
 	if response, _ := fixture.send(t, http.MethodPut, path, repeated, body); response.StatusCode != http.StatusOK {
@@ -604,7 +583,6 @@ func TestAzureGatewaySendsWritesToTheWriteTool(t *testing.T) {
 	if request, err = harnessv2.DecodeMCPForwardRequest(calls[len(calls)-1].Call.Arguments); err != nil || request.IfNoneMatch != `"etag-1", "etag-2"` {
 		t.Fatalf("repeated precondition = %q, %v; want both values", request.IfNoneMatch, err)
 	}
-	// Reads still go to the Tool itself.
 	if response, _ := fixture.do(t, http.MethodGet, "/subscriptions", http.Header{"Authorization": {"Bearer " + token}}); response.StatusCode != http.StatusOK {
 		t.Fatalf("GET status = %d", response.StatusCode)
 	}
@@ -613,8 +591,6 @@ func TestAzureGatewaySendsWritesToTheWriteTool(t *testing.T) {
 	}
 }
 
-// TestAzureGatewayRefusesBodiesItCannotForward covers a write body that is
-// not JSON or too large to fit the broker's argument limit.
 func TestAzureGatewayRefusesBodiesItCannotForward(t *testing.T) {
 	fixture := newAzureGatewayFixtureWith(t, true)
 	token := fixture.token(t)
@@ -633,8 +609,6 @@ func TestAzureGatewayRefusesBodiesItCannotForward(t *testing.T) {
 	}
 }
 
-// TestAzureForwardingToolPairsItsWriteTool covers a session whose policy
-// carries a forwarding Tool and its write tool: one gateway serves both.
 func TestAzureForwardingToolPairsItsWriteTool(t *testing.T) {
 	fence := harnessv2.Fence{RuntimeSessionUID: "session-uid", RuntimeSessionGeneration: 1}
 	authorization, _ := forwardingTestAuthorizationWith(t, fence, time.Now().UTC(), 1, true)
@@ -644,9 +618,6 @@ func TestAzureForwardingToolPairsItsWriteTool(t *testing.T) {
 	}
 }
 
-// TestAzureGatewayAnswersDecidedWritesWithFinalStatuses covers approval
-// outcomes: az must not retry a write a reviewer declined, or one that may
-// already have reached Azure, so neither is answered with a retryable 5xx.
 func TestAzureGatewayAnswersDecidedWritesWithFinalStatuses(t *testing.T) {
 	fixture := newAzureGatewayFixtureWith(t, true)
 	token := fixture.token(t)
@@ -669,7 +640,6 @@ func TestAzureGatewayAnswersDecidedWritesWithFinalStatuses(t *testing.T) {
 			t.Errorf("%s: status = %d: %s", code, response.StatusCode, body)
 		}
 	}
-	// A broker failure on a write is recorded as an unknown outcome.
 	fixture.mu.Lock()
 	fixture.fail = errors.New("broker unavailable")
 	fixture.mu.Unlock()
@@ -683,10 +653,6 @@ func TestAzureGatewayAnswersDecidedWritesWithFinalStatuses(t *testing.T) {
 	}
 }
 
-// TestAzureGatewayResendsThrottledWrites covers a write Azure throttled:
-// Azure did not process it, so the client's retry, with the same request
-// ID, is a new attempt instead of a replay of the 429, and retries after a
-// processed answer join again.
 func TestAzureGatewayResendsThrottledWrites(t *testing.T) {
 	fixture := newAzureGatewayFixtureWith(t, true)
 	token := fixture.token(t)
@@ -711,8 +677,6 @@ func TestAzureGatewayResendsThrottledWrites(t *testing.T) {
 	if len(calls) != 3 || calls[1].Call.CallID != calls[0].Call.CallID+"-a1" || calls[2].Call.CallID != calls[1].Call.CallID {
 		t.Fatalf("call IDs = %q, %q, %q; want a new attempt after the 429, then a join", calls[0].Call.CallID, calls[1].Call.CallID, calls[2].Call.CallID)
 	}
-	// Past the session's limit, a new throttled write gets an answer az
-	// does not retry, since its retry could only replay the 429.
 	fixture.mu.Lock()
 	fixture.respond = func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
 		return json.RawMessage(`{"status":429,"headers":{"Retry-After":"1"},"body":"{}"}`)
@@ -731,11 +695,6 @@ func TestAzureGatewayResendsThrottledWrites(t *testing.T) {
 	}
 }
 
-// TestAzureGatewayRefusesResendsFromAnEarlierPrompt covers an az process
-// that outlives its prompt and resends a write during a later one: the
-// broker scopes a call to its prompt, so the gateway refuses the resend with
-// a final answer instead of sending the write again. A new request in the
-// later prompt is sent as usual.
 func TestAzureGatewayRefusesResendsFromAnEarlierPrompt(t *testing.T) {
 	fixture := newAzureGatewayFixtureWith(t, true)
 	token := fixture.token(t)
@@ -767,10 +726,6 @@ func TestAzureGatewayRefusesResendsFromAnEarlierPrompt(t *testing.T) {
 	}
 }
 
-// TestAzureGatewayWritePromptMemoryIsBounded covers the memory of write
-// prompts: a write keeps its first prompt for the session's whole life, so
-// a resend in any later prompt is refused however late it comes, and a full
-// memory refuses new writes rather than forget one.
 func TestAzureGatewayWritePromptMemoryIsBounded(t *testing.T) {
 	g := &azureGateway{}
 	if err := g.admitWrite("w", "p1"); err != nil {
@@ -800,10 +755,6 @@ func TestAzureGatewayWritePromptMemoryIsBounded(t *testing.T) {
 	}
 }
 
-// TestAzureGatewayIgnoresStaleThrottles covers two requests that joined the
-// same attempt: the first 429 advances the write to its next attempt, and
-// the second, late 429 of that same attempt does not advance it again, so a
-// write that succeeded on the next attempt is never sent a third time.
 func TestAzureGatewayIgnoresStaleThrottles(t *testing.T) {
 	g := &azureGateway{}
 	base := azureJoinableWritePrefix + "abc"
@@ -825,10 +776,6 @@ func TestAzureGatewayIgnoresStaleThrottles(t *testing.T) {
 	}
 }
 
-// TestAzureGatewayThrottleMemoryKeepsTrackedWrites covers a session at its
-// throttled-write limit: writes it already tracks keep their attempts and
-// still advance, and a new throttled write it cannot track is refused, so
-// no write rejoins an attempt it has passed and none replays its 429.
 func TestAzureGatewayThrottleMemoryKeepsTrackedWrites(t *testing.T) {
 	g := &azureGateway{}
 	succeeded, throttled := azureJoinableWritePrefix+"succeeded", azureJoinableWritePrefix+"throttled"

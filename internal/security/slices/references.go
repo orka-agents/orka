@@ -23,11 +23,6 @@ const (
 	referenceLineBufferBytes = 64 << 10
 )
 
-// ReferenceFiles returns, per slice ID, the repository files a reviewer may
-// read from its workspace and cite beyond the slice's excerpts. Go slices get
-// the in-repository packages they import and that import them, and
-// TypeScript and JavaScript files get the files they import and that import
-// them; investigation and baseline slices get the whole repository index.
 func ReferenceFiles(root string, reviewSlices []store.ReviewSlice) (map[string][]security.ReviewContextReferenceFile, error) {
 	files, err := collectFiles(root)
 	if err != nil {
@@ -114,8 +109,6 @@ func (l *referenceList) addDir(graph *goImportGraph, dir, relation string) {
 	}
 }
 
-// repositoryReferenceFiles lists source code before configuration so a large
-// repository keeps its code within the reference bound.
 func repositoryReferenceFiles(files []repoFile, lines map[string]int) []security.ReviewContextReferenceFile {
 	ordered := make([]repoFile, 0, len(files))
 	for _, file := range files {
@@ -185,8 +178,6 @@ func countFileLines(fullPath string) int {
 	return count
 }
 
-// goImportGraph links repository directories through Go imports that resolve
-// to a module rooted in the checkout.
 type goImportGraph struct {
 	sources   map[string][]string
 	edges     map[string]map[string]struct{}
@@ -200,8 +191,6 @@ type goModule struct {
 	dir  string
 }
 
-// Only files with a line count, which are regular and within the reference
-// size bound, are parsed.
 func newGoImportGraph(root string, files []repoFile, lines map[string]int) *goImportGraph {
 	graph := &goImportGraph{
 		sources:   map[string][]string{},
@@ -220,7 +209,6 @@ func newGoImportGraph(root string, files []repoFile, lines map[string]int) *goIm
 			graph.goDirsSet[file.Dir] = struct{}{}
 		}
 	}
-	// Longest module path first, so nested modules win over their parents.
 	sort.Slice(graph.modules, func(i, j int) bool { return len(graph.modules[i].path) > len(graph.modules[j].path) })
 	if len(graph.modules) == 0 {
 		return graph

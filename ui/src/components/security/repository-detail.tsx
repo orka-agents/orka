@@ -35,15 +35,10 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
     </Button>
   )
 
-  // A 403 replaces cached data (the token lost access); any other failure
-  // keeps what already loaded and only blocks a page that never loaded.
   if (isForbiddenError(error) || (error && !isNotFoundError(error) && !repo)) {
     return <AccessErrorView title="Could not load repository" resource={`repository ${repositoryName}`} error={error} action={backToSecurity} />
   }
 
-  // A 404 wins over cached data: a repository deleted after it loaded keeps
-  // its last `data`. The detail queries live in RepositoryDetailContent, so a
-  // missing repository sends none of them.
   if (isNotFoundError(error) || !repo) {
     return (
       <NotFoundView
@@ -132,7 +127,6 @@ function RepositoryDetailContent({ repositoryName, repo }: { repositoryName: str
         <Card>
           <CardHeader><CardTitle className="text-base">Review Slices</CardTitle></CardHeader>
           <CardContent>
-            {/* A failed request is not zero; show a dash instead of a count. */}
             <div className="text-2xl font-bold">{reviewSlices.error && !reviewSlices.data ? '—' : reviewSlices.data?.items?.length ?? 0}</div>
             <div className="mt-1 text-xs text-muted-foreground">Deterministic repository review units</div>
           </CardContent>
@@ -193,7 +187,6 @@ function RepositoryDetailContent({ repositoryName, repo }: { repositoryName: str
           <CardTitle>All Findings</CardTitle>
         </CardHeader>
         <CardContent>
-          {/* A failed load must not read as "No findings"; a later failed poll keeps what loaded. */}
           {findings.error && (isForbiddenError(findings.error) || !findings.data) ? (
             <ListAccessError error={findings.error} resource="findings" />
           ) : findings.isLoading ? (

@@ -13,16 +13,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// structuredDefaultAllowlist names the commands that may keep a non-table
-// default for --output, with the reason. Everything else that shows an
-// object or list must print a readable view by default; scripts pass
-// -o json. Add to this list only with a reason a reviewer would accept.
 var structuredDefaultAllowlist = map[string]string{
-	// The repository monitor command family prints nested workflow
-	// documents (plans, readiness reports, command receipts, mutations)
-	// whose shape has no short readable projection yet. YAML keeps them
-	// scannable. Giving each of them a field list is follow-up work; new
-	// monitor commands should not be added here without one.
 	"orka monitor actions get":              "monitor workflow document (YAML)",
 	"orka monitor commands create":          "monitor workflow document (YAML)",
 	"orka monitor commands get":             "monitor workflow document (YAML)",
@@ -53,10 +44,6 @@ var structuredDefaultAllowlist = map[string]string{
 	"orka monitor work-actions get":         "monitor workflow document (YAML)",
 }
 
-// TestNoCommandDefaultsToStructuredOutput walks the whole command tree and
-// fails when a command's --output flag defaults to json or yaml without an
-// allowlisted reason, so the next new `get` command cannot quietly default
-// to JSON again.
 func TestNoCommandDefaultsToStructuredOutput(t *testing.T) {
 	var offenders []string
 	var walk func(cmd *cobra.Command, path string)
@@ -79,9 +66,6 @@ func TestNoCommandDefaultsToStructuredOutput(t *testing.T) {
 	}
 }
 
-// TestStructuredDefaultAllowlistIsCurrent fails when an allowlist entry no
-// longer names a command with a structured default, so the list cannot
-// rot.
 func TestStructuredDefaultAllowlistIsCurrent(t *testing.T) {
 	found := map[string]bool{}
 	var walk func(cmd *cobra.Command, path string)

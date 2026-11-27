@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# Validates the harness v2 CRDs against a live cluster: runtime registration,
-# unsupported protocol rejection, and immutable Task execution bindings. The CRDs
-# from config/crd/bases must already be applied and Established by their one
-# designated platform owner.
-#
-# Usage: KUBECTL="kubectl" scripts/static-mode-crd-validate.sh
 set -euo pipefail
 
 KUBECTL=${KUBECTL:-kubectl}
@@ -23,7 +17,6 @@ fail() {
   FAILURES=$((FAILURES + 1))
 }
 
-# expect_accept <description> — applies stdin, expecting success.
 expect_accept() {
   local description="$1"
   if k apply -f - >/dev/null 2>&1; then
@@ -33,8 +26,6 @@ expect_accept() {
   fi
 }
 
-# expect_reject <description> <message-fragment> — applies stdin, expecting a
-# rejection whose error mentions the fragment.
 expect_reject() {
   local description="$1" fragment="$2" output
   if output=$(k apply -f - 2>&1); then
@@ -48,7 +39,6 @@ expect_reject() {
   pass "${description}"
 }
 
-# expect_status_patch <accept|reject> <description> <kind/name> <merge-patch> [fragment]
 expect_status_patch() {
   local mode="$1" description="$2" target="$3" patch="$4" fragment="${5:-}" output
   if output=$(k -n "${NAMESPACE}" patch "${target}" --subresource=status --type=merge -p "${patch}" 2>&1); then

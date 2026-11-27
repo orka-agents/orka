@@ -22,8 +22,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// contractSentinels lists every Err variable the contract declares. The
-// coverage test keeps it complete.
 var contractSentinels = map[string]error{
 	"ErrNotFound":                     storagev1.ErrNotFound,
 	"ErrConflict":                     storagev1.ErrConflict,
@@ -56,8 +54,6 @@ var contractSentinels = map[string]error{
 	"ErrConnectorRetiredLimit":        storagev1.ErrConnectorRetiredLimit,
 }
 
-// alsoMatches lists the sentinels a decoded sentinel matches by the
-// contract's own wrapping.
 var alsoMatches = map[string][]string{
 	"ErrFenced":             {"ErrConflict"},
 	"ErrPreconditionFailed": {"ErrConflict"},
@@ -65,11 +61,7 @@ var alsoMatches = map[string][]string{
 	"ErrDatasetMigrated":    {"ErrNotReady"},
 }
 
-// A contract error the codec does not know would reach the client as a
-// provider error, turning a refused write into an unknown outcome.
 func TestEveryContractSentinelIsCovered(t *testing.T) {
-	// go test runs a package's tests in its source directory, even under
-	// -trimpath, so the contract's sources are in the parent directory.
 	names, err := filepath.Glob(filepath.Join("..", "*.go"))
 	require.NoError(t, err)
 	require.NotEmpty(t, names, "the contract's sources")
@@ -103,8 +95,6 @@ func TestEveryContractSentinelIsCovered(t *testing.T) {
 	require.Equal(t, declared, listed, "contractSentinels lists every contract sentinel")
 }
 
-// serverToClient encodes err as the server library does and decodes it as
-// the client does.
 func serverToClient(t *testing.T, m *method, err error) error {
 	t.Helper()
 	encoded, ok := contractStatus(err)
@@ -153,8 +143,6 @@ func TestTypedContractErrorsKeepTheirDetail(t *testing.T) {
 	require.Equal(t, "generation 5 moved", preconditionErr.Message)
 	require.ErrorIs(t, precondition, storagev1.ErrConflict)
 
-	// The provider's wrapping text stays on the server: the client finds the
-	// typed message an in-process caller finds.
 	for _, typed := range []error{
 		storagev1.ValidationErrorf("x"), storagev1.FencedErrorf("x"), storagev1.PreconditionFailedErrorf("x"),
 	} {
@@ -162,8 +150,6 @@ func TestTypedContractErrorsKeepTheirDetail(t *testing.T) {
 		require.Equal(t, "x", wrapped.Error())
 		require.ErrorIs(t, wrapped, typed)
 	}
-	// A provider that returns a pointer to the typed error is treated as one
-	// that returns the value.
 	for typed, sentinel := range map[error]error{
 		&storagev1.ValidationError{Message: "x"}:         storagev1.ErrValidation,
 		&storagev1.FencedError{Message: "x"}:             storagev1.ErrFenced,
@@ -242,8 +228,6 @@ func TestProviderErrorsAreUnknownOutcomesForWritesOnly(t *testing.T) {
 		"an unknown reason on a write is an unknown outcome")
 }
 
-// An older server would ignore a parameter newer than its revision, so the
-// client refuses a call that sets one instead of sending it without it.
 func TestNewerParametersAreNeverDroppedSilently(t *testing.T) {
 	older := &Client{serverRevision: 1}
 	for _, unset := range []any{"", 0, []string{}, map[string]string{}, (*storagev1.PlanState)(nil), nil} {
@@ -278,8 +262,6 @@ func TestServerRefusalsDecodeToContractErrors(t *testing.T) {
 	require.Equal(t, "detail lost", bindingErr.Reason)
 }
 
-// A status without the storage ErrorInfo came from the gRPC library or a
-// proxy, so send evidence decides it.
 func TestTransportFailuresAreClassifiedBySendEvidence(t *testing.T) {
 	failure := status.Error(codes.Unavailable, "connection reset")
 	notSent := &sendEvidence{}
@@ -330,11 +312,6 @@ func TestStatusesCarryTheStorageErrorInfo(t *testing.T) {
 	require.Nil(t, storageErrorInfo(foreign), "another domain's ErrorInfo is not authoritative")
 }
 
-// A write refused because its contract part migrated travels as
-// DATASET_MIGRATED and decodes to ErrDatasetMigrated, which matches
-// ErrNotReady and is a definite refusal. A client from before the reason
-// existed decodes it as an unknown reason, which for a write is an unknown
-// outcome, so it never reports the refused write as committed.
 func TestDatasetMigratedRefusesWritesDefinitely(t *testing.T) {
 	encoded, ok := contractStatus(fmt.Errorf("save: %w", storagev1.ErrDatasetMigrated))
 	require.True(t, ok)

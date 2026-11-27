@@ -10,12 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// exportSeedTenant is the namespace the export seeds write to.
 const exportSeedTenant = "tenant-export"
 
-// reportsExport reports whether provider reports the export capability, and
-// fails when it reports it without implementing the export and import
-// surface.
 func reportsExport(t *testing.T, provider storagev1.ProviderDescriber) bool {
 	t.Helper()
 	if !slices.Contains(describe(t, provider).Capabilities, storagev1.ExportCapability) {
@@ -27,22 +23,15 @@ func reportsExport(t *testing.T, provider storagev1.ProviderDescriber) bool {
 	return true
 }
 
-// exporter returns the export and import surface of a provider the suite may
-// have wrapped to attach envelopes. Export, import and the migration markers
-// carry no envelope, so they go to the provider the factory returned.
 func exporter(provider storagev1.ProviderDescriber) ExportProvider {
 	return harnessProvider(provider).(ExportProvider)
 }
 
-// suiteExport is a provider's export and import surface together with the
-// provider the suite writes through, so a seed's writes get envelopes.
 type suiteExport struct {
 	ExportProvider
 	writes storagev1.ProviderDescriber
 }
 
-// newSuiteExport returns a factory of providers from newProvider whose
-// export and import surface the export cases use.
 func newSuiteExport[P storagev1.ProviderDescriber](newProvider func(t *testing.T) P) ExportFactory {
 	return func(t *testing.T) ExportProvider {
 		provider := newProvider(t)
@@ -50,8 +39,6 @@ func newSuiteExport[P storagev1.ProviderDescriber](newProvider func(t *testing.T
 	}
 }
 
-// copyDataset exports source and imports it into target, returning the
-// imported dataset's description.
 func copyDataset(t *testing.T, source, target ExportProvider) storagev1.ProviderInfo {
 	t.Helper()
 	manifest, records := exportDataset(t, source)
@@ -66,27 +53,14 @@ func copyDataset(t *testing.T, source, target ExportProvider) storagev1.Provider
 	return info
 }
 
-// stateExportSeed is what seedStateExport wrote that an import must continue
-// from.
 type stateExportSeed struct {
-	// lastMessageID is the highest message ID issued, whose message was then
-	// deleted.
-	lastMessageID int64
-	// unreadMessageID is the one message left unread: of the others, one was
-	// consumed and one deleted.
-	unreadMessageID int64
-	// sessionCreatedAt is when the seeded Session was created.
+	lastMessageID    int64
+	unreadMessageID  int64
 	sessionCreatedAt time.Time
-	// lastSessionSeq is the session's latest event sequence, whose Task
-	// stream was then deleted.
-	lastSessionSeq int64
-	// lastTaskSeq is the latest sequence of the remaining Task stream.
-	lastTaskSeq int64
+	lastSessionSeq   int64
+	lastTaskSeq      int64
 }
 
-// seedStateExport writes records through state.v1, including sequences whose
-// highest values were deleted, so a copy must carry the sequence heads, not
-// only the records.
 func seedStateExport(t *testing.T, provider storagev1.StateProvider) stateExportSeed {
 	t.Helper()
 	ctx := t.Context()
@@ -127,8 +101,6 @@ func seedStateExport(t *testing.T, provider storagev1.StateProvider) stateExport
 		}
 	}
 	require.NoError(t, provider.UpsertFinding(ctx, workflowFinding("fp-export", "high")))
-	// The session's sequence head is read before the deletion, so an import
-	// that lowered it to the remaining events would reuse a sequence and fail.
 	_, seed.lastSessionSeq, err = provider.ListSessionExecutionEvents(ctx, storagev1.SessionExecutionEventFilter{
 		Namespace: exportSeedTenant, SessionName: eventsSession,
 	})
@@ -206,10 +178,6 @@ func runStateExportImport(t *testing.T, newProvider StateFactory) {
 	t.Run("an imported dataset keeps the admission order of scan runs", func(t *testing.T) {
 		source := newProvider(t)
 		ctx := t.Context()
-		// The IDs sort opposite to admission, so an import that ordered runs
-		// by key would reverse them. The older run is still active and the
-		// newer one finished, so only the admission order keeps the older
-		// run from updating as active.
 		require.NoError(t, source.CreateScanRun(ctx, workflowScanRun("run-z", "running")))
 		require.NoError(t, source.CreateScanRun(ctx, workflowScanRun("run-a", "succeeded")))
 		target := newProvider(t)
@@ -230,9 +198,6 @@ func runStateExportImport(t *testing.T, newProvider StateFactory) {
 	t.Run("an imported dataset keeps the issuance order of sign-in sessions", func(t *testing.T) {
 		source := newProvider(t)
 		ctx := t.Context()
-		// Every session has the same creation time and the IDs sort opposite
-		// to issuance, so only the issuance order says which one the next
-		// sign-in ends.
 		at := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
 		last := storagev1.MaxAuthSessionsPerSubject - 1
 		for i := range storagev1.MaxAuthSessionsPerSubject {
@@ -260,10 +225,6 @@ func runStateExportImport(t *testing.T, newProvider StateFactory) {
 		target := newProvider(t)
 		_, err := exporter(target).BeginImport(t.Context(), beginImportRequest(t, describe(t, source), manifest))
 		require.NoError(t, err)
-		// The write carries its own envelope, naming the import's dataset, so
-		// it reaches SaveResult rather than the suite's epoch setup. The
-		// dataset holds no controller epoch, so the dataset state check must
-		// come before the fence check for the write to return ErrNotReady.
 		data := []byte("written during the import")
 		ctx := storagev1.WithWriteEnvelope(t.Context(),
 			NewWriteEnvelope(t, describe(t, target).DatasetID, suiteFence, "SaveResult", exportSeedTenant, "task-b", data))

@@ -15,20 +15,10 @@ import (
 )
 
 const (
-	// AuthInjectBody is the HTTP tool auth injection mode that places the
-	// credential in the request body.
 	AuthInjectBody = "body"
-	// TargetURLField is the reserved target-argument field that carries the
-	// interpolated URL identity of a templated HTTP tool.
 	TargetURLField = "__orkaApprovalURL"
 )
 
-// TargetArguments returns the approval-bound view of a tool call's arguments:
-// the body auth key is removed, and parameters interpolated into a templated
-// URL are folded into the reserved TargetURLField together with the template.
-// The worker and the controller both digest this view, so an approval granted
-// for one call binds exactly the request the worker asks the controller to
-// execute.
 func TargetArguments(args json.RawMessage, customTool *corev1alpha1.Tool) (json.RawMessage, error) {
 	if len(strings.TrimSpace(string(args))) == 0 {
 		return args, nil
@@ -114,8 +104,6 @@ func decodeTargetArgumentValues(args json.RawMessage) (map[string]any, error) {
 	return params, nil
 }
 
-// AuthBodyKey returns the body field an HTTP tool injects its credential
-// into, or "" when the tool does not use body auth.
 func AuthBodyKey(customTool *corev1alpha1.Tool) string {
 	if customTool == nil || customTool.Spec.HTTP == nil || customTool.Spec.HTTP.AuthSecretRef == nil {
 		return ""
@@ -126,7 +114,6 @@ func AuthBodyKey(customTool *corev1alpha1.Tool) string {
 	return strings.TrimSpace(customTool.Spec.HTTP.AuthBodyKey)
 }
 
-// URLUsesPlaceholder reports whether the tool URL interpolates key.
 func URLUsesPlaceholder(customTool *corev1alpha1.Tool, key string) bool {
 	if customTool == nil || customTool.Spec.HTTP == nil {
 		return false
@@ -135,20 +122,11 @@ func URLUsesPlaceholder(customTool *corev1alpha1.Tool, key string) bool {
 	return key != "" && strings.Contains(customTool.Spec.HTTP.URL, "{{"+key+"}}")
 }
 
-// ConnectorTargetSpecDigest digests a connector-backed Tool's spec together
-// with the connection-mode policy that injects the credential (output header
-// and prefix) and the identity of the Connection frozen for that policy at
-// dispatch. An approval for such a tool therefore binds the person's link
-// and the injection configuration as they were when the approval was
-// requested: a Job re-created after the decision against a re-linked account
-// or a changed policy produces a different digest and needs a fresh approval.
 func ConnectorTargetSpecDigest(spec corev1alpha1.ToolSpec, policy corev1alpha1.OutboundAccessPolicySpec, connectionUID string, connectionGeneration, grantSequence int64) (string, error) {
 	type connectionIdentity struct {
-		UID        string `json:"uid"`
-		Generation int64  `json:"generation"`
-		// GrantSequence binds the approval to one consent: a re-link of
-		// the same Connection object needs a fresh decision.
-		GrantSequence int64 `json:"grantSequence"`
+		UID           string `json:"uid"`
+		Generation    int64  `json:"generation"`
+		GrantSequence int64  `json:"grantSequence"`
 	}
 	return TargetSpecDigest(struct {
 		Spec       corev1alpha1.ToolSpec                 `json:"spec"`

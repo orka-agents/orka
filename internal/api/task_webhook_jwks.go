@@ -15,12 +15,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// TaskWebhookJWKSPath publishes the public keys that verify Task webhook
-// deliveries. It is unauthenticated: the set holds only public keys.
 const TaskWebhookJWKSPath = "/.well-known/orka/task-webhook-jwks.json"
 
-// taskWebhookJWKS serves the current and previous Task webhook verification
-// keys. Without a configured key source it serves an empty set.
 func (s *Server) taskWebhookJWKS(c fiber.Ctx) error {
 	set := taskwebhook.JWKS{Keys: []taskwebhook.JWK{}}
 	if s.config.TaskWebhookKeys != nil {

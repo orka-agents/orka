@@ -12,8 +12,6 @@ import (
 	"time"
 )
 
-// startPromptAfterRecovery mirrors the supervisor: resume an adapter that
-// exited while idle, then submit the prompt under the same lease.
 func startPromptAfterRecovery(ctx context.Context, session *RuntimeSession, promptID, requestDigest string, prompt []ContentBlock, leaseDeadline time.Time) (PromptRun, error) {
 	if err := session.RecoverExitedAdapter(ctx, promptID, requestDigest, leaseDeadline); err != nil {
 		return PromptRun{}, err
@@ -87,9 +85,6 @@ func TestRuntimeSessionResumesAdapterInPlaceAfterIdleExit(t *testing.T) {
 	}
 }
 
-// Only RecoverExitedAdapter restarts an adapter. A caller that has already
-// opened the prompt's provider gates must never resume one inside StartPrompt,
-// where a model call made during session/resume would be admitted.
 func TestRuntimeSessionStartPromptDoesNotResumeExitedAdapter(t *testing.T) {
 	session, stateDir := newTestRuntimeSessionWithOptions(t, helperModeResume, nil, map[string]string{helperExitAfterPromptEnv: "1"})
 	result, _ := runHelperPrompt(t, session, "prompt-1")
@@ -113,8 +108,6 @@ func TestRuntimeSessionStartPromptDoesNotResumeExitedAdapter(t *testing.T) {
 	}
 }
 
-// A failed relaunch check must leave the exited adapter unreplaced and the
-// session lost, without sending session/resume.
 func TestRuntimeSessionRelaunchValidationBlocksIdleAdapterResume(t *testing.T) {
 	session, stateDir := newTestRuntimeSessionWithOptions(t, helperModeResume, nil, map[string]string{helperExitAfterPromptEnv: "1"})
 	rejected := errors.New("workspace rejected")
@@ -148,8 +141,6 @@ func TestRuntimeSessionRelaunchValidationBlocksIdleAdapterResume(t *testing.T) {
 	}
 }
 
-// An idle adapter restart must not bypass the cancellation fence introduced
-// before resume support: an old queued cancel still owns this provider session.
 func TestRuntimeSessionCancellationFencePreventsIdleAdapterResume(t *testing.T) {
 	for _, scenario := range []struct {
 		name     string
@@ -246,8 +237,6 @@ func TestRuntimeSessionRejectedResumeIsLostAndStopsReplacement(t *testing.T) {
 	if session.AdapterRestarts() != 0 {
 		t.Fatalf("adapter restarts = %d, want 0", session.AdapterRestarts())
 	}
-	// A later prompt must fail the same way rather than wedge on the
-	// in-flight marker.
 	if _, err := startPromptAfterRecovery(ctx, session, "prompt-3", "sha256:prompt-3", []ContentBlock{Text("again")}, defaultPromptLease(session)); !errors.As(err, &lost) {
 		t.Fatalf("second prompt after rejected resume = %v, want AdapterLostError", err)
 	}
@@ -279,8 +268,6 @@ func TestRuntimeSessionInterruptedResumeIsLostAndStopsReplacement(t *testing.T) 
 	}
 }
 
-// The resume marker is written before the helper waits on a release file, so
-// cancellation always races a known, blocked pre-admission restart, not a sleep.
 func TestRuntimeSessionCancelPromptDuringBlockedResume(t *testing.T) {
 	for _, expiredCancel := range []bool{false, true} {
 		name := "live cancellation context"
@@ -542,12 +529,8 @@ func TestRuntimeSessionDeleteSkipsCloseAfterFreeze(t *testing.T) {
 	}
 	session, stateDir := newTestRuntimeSessionWithOptions(t, helperModeClose, nil, nil)
 	freezeCtx, cancelFreeze := context.WithTimeout(context.Background(), time.Second)
-	// Freeze proof is Linux-only; the attempt alone may leave the tree
-	// stopped, so it must suppress the close either way.
 	_ = session.Freeze(freezeCtx)
 	cancelFreeze()
-	// Continue the tree behind the session's back so a close, if sent, is
-	// answered and recorded: only the frozen marker may suppress it.
 	if err := signalProcessGroup(session.Process().PID(), continueSignal()); err != nil {
 		t.Fatalf("continue adapter: %v", err)
 	}
@@ -606,8 +589,6 @@ func TestRuntimeSessionRejectsLeaseExpiredWhileResumeWaitsForAdmissionLock(t *te
 		started <- err
 	}()
 	awaitResumeStateFile(t, ctx, filepath.Join(stateDir, helperResumeBlockedFile))
-	// Let the adapter answer on time, but hold the admission mutex until
-	// after the lease. The reply reader does not need this session mutex.
 	func() {
 		session.mu.Lock()
 		defer session.mu.Unlock()

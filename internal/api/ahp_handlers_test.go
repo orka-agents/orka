@@ -107,15 +107,13 @@ func TestAHPTokenRoutesMintListAndRevoke(t *testing.T) {
 		"unknown field": `{"subject":"bob"}`,
 		"bad ttl":       `{"ttl":"forever"}`,
 		"ttl too long":  `{"ttl":"100000h"}`,
-		// A zero given is not an omitted lifetime.
-		"zero ttl":     `{"ttl":"0s"}`,
-		"negative ttl": `{"ttl":"-1h"}`,
+		"zero ttl":      `{"ttl":"0s"}`,
+		"negative ttl":  `{"ttl":"-1h"}`,
 	} {
 		status, raw := h.do(http.MethodPost, "/api/v1/ahp-tokens", body)
 		require.Equal(t, http.StatusBadRequest, status, "%s: %s", name, raw)
 	}
 
-	// Another person sees none of alice's tokens and cannot revoke them.
 	h.identity = &UserInfo{AuthType: AuthTypeOIDC, Username: "bob", Subject: "bob", Issuer: ahpTestIssuer}
 	status, raw = h.do(http.MethodGet, "/api/v1/ahp-tokens", "")
 	require.Equal(t, http.StatusOK, status)
@@ -133,8 +131,6 @@ func TestAHPTokenRoutesMintListAndRevoke(t *testing.T) {
 	require.NotNil(t, list.Items[0].RevokedAt)
 }
 
-// A token for a namespace other than the one a sign-in gets could never
-// connect, so it is not minted.
 func TestAHPTokenRoutesRefuseANamespaceConnectionsCannotUse(t *testing.T) {
 	h := newAHPTestHarness(t, ContextTokenAuthorizationConfig{})
 	handlers := NewHandlers(HandlersConfig{AHP: h.host, WatchNamespace: "team"})
@@ -223,8 +219,6 @@ func TestAHPTokenOwnerCheckFollowsTheCurrentSignInPolicy(t *testing.T) {
 		"an empty allowlist admits no one, as at sign-in")
 }
 
-// TestAHPEndpointServesThroughFiber drives /ahp with the official client
-// through the Fiber adaptor the API server uses, from minting to revocation.
 func TestAHPEndpointServesThroughFiber(t *testing.T) {
 	h := newAHPTestHarness(t, ContextTokenAuthorizationConfig{})
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -260,8 +254,6 @@ func TestAHPEndpointServesThroughFiber(t *testing.T) {
 	}
 }
 
-// A GitHub sign-in session cannot mint AHP tokens yet, and is told so rather
-// than refused as a delegated context token.
 func TestAHPTokensRefuseAGitHubSessionByName(t *testing.T) {
 	h := newAHPTestHarness(t, ContextTokenAuthorizationConfig{})
 	h.identity = &UserInfo{AuthType: AuthTypeGitHubSession, Username: "alice", Subject: "852750", Issuer: "https://github.com"}

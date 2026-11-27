@@ -8,8 +8,6 @@ package store
 
 import storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 
-// The Agent Host Protocol records and store are part of the public storage
-// contract; these aliases keep their internal names for Orka callers.
 type (
 	AHPToken         = storagev1.AHPToken
 	AHPClient        = storagev1.AHPClient

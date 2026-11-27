@@ -24,10 +24,6 @@ import (
 	"github.com/orka-agents/orka/internal/operatoraccess"
 )
 
-// The shared core admission policy makes the workspace taint permanent for
-// every identity, including one that holds the core "admit" verb (envtest's
-// system:masters client holds every verb), while other core writes and the
-// first taint write stay admitted.
 func TestWorkspaceCoreAdmissionPolicyMakesTheOperatorTaintPermanent(t *testing.T) {
 	ctx := context.Background()
 	environment := &envtest.Environment{
@@ -97,8 +93,6 @@ func TestWorkspaceCoreAdmissionPolicyMakesTheOperatorTaintPermanent(t *testing.T
 	}
 	clearTaint := func(w *workspacev1alpha1.ExecutionWorkspace) { delete(w.Annotations, operatoraccess.TaintAnnotation) }
 
-	// Policy activation is asynchronous; probe with dry runs so an update
-	// admitted before activation never clears the fixture's marker.
 	deadline := time.Now().Add(time.Minute)
 	for {
 		err := update("tainted", clearTaint, client.DryRunAll)

@@ -17,7 +17,6 @@ const (
 	SubstrateActorPoolPhaseReady   SubstrateActorPoolPhase = "Ready"
 	SubstrateActorPoolPhaseFailed  SubstrateActorPoolPhase = "Failed"
 
-	// MaxSubstrateActorPoolTargetActors bounds per-pool actor reconciliation work.
 	MaxSubstrateActorPoolTargetActors int32 = 1000
 )
 

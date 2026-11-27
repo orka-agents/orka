@@ -135,7 +135,6 @@ func TestBrokeredTranscriptSearchRejectsGatewayCaller(t *testing.T) {
 		ReceivedAt: now, NextAttemptAt: now, ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
 	}})
 	require.NoError(t, err)
-	// The caller's ordinary SessionRef cannot override durable gateway ownership.
 	ctx := brokeredTranscriptSearchContext(t, task, NewTaskTranscriptSearcher(kube, data, data, client.ObjectKeyFromObject(task), string(task.UID), true, allowBrokeredTaskData))
 	for _, args := range []string{`{"query":"needle"}`, `{"query":"needle","session_name":"own-session"}`} {
 		result, err := tools.NewSearchTranscriptTool().Execute(ctx, json.RawMessage(args))
@@ -160,7 +159,6 @@ func TestBrokeredTranscriptSearchReauthorizesAfterNamespaceCleanup(t *testing.T)
 					}
 					storeCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 					defer cancel()
-					// This write proves Kubernetes authorization holds no SQLite connection.
 					if err := data.SaveResult(storeCtx, task.Namespace, "unrelated", []byte("progress")); err != nil {
 						return err
 					}
@@ -172,7 +170,6 @@ func TestBrokeredTranscriptSearchReauthorizesAfterNamespaceCleanup(t *testing.T)
 					if err := c.Update(ctx, peer); err != nil {
 						return err
 					}
-					// Cleanup of a different Task's session must invalidate the old list.
 					if err := data.DeleteSession(storeCtx, task.Namespace, "peer-session", time.Now().UTC()); err != nil {
 						return err
 					}
@@ -203,10 +200,6 @@ func TestBrokeredTranscriptSearchReauthorizesAfterNamespaceCleanup(t *testing.T)
 	}
 }
 
-// TestBrokeredTranscriptSearchRefusesReadAfterCleanup deletes the searched
-// Session after the brokered search is authorized but before it reads. The
-// fenced read is refused instead of returning deleted history, and the
-// repeated search with a fresh fence finds nothing.
 func TestBrokeredTranscriptSearchRefusesReadAfterCleanup(t *testing.T) {
 	task, kube, _ := setupBrokeredTranscriptSearch(t)
 	dbPath := filepath.Join(t.TempDir(), "search.db")

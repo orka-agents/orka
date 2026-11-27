@@ -616,31 +616,6 @@ Scan name:         ${DEMO_SECURITY_SCAN_NAME}
 Beyond this demo, any scanner that emits structured findings (custom rules, LLM-driven heuristics, IaC checks, secrets detection) can plug into the same RepositoryScan / Finding / Patch flow. Same RBAC, same audit log, same Task primitive."
 }
 
-# Demo 70 — Agent Substrate (real agentic run in a gVisor workspace).
-#
-# Substrate is a SECOND execution-workspace provider (distinct from Demo 60's
-# agent-sandbox). Orka Tasks request `execution.workspace.classRef.name: ${DEMO_SUBSTRATE_CLASS_REF}`;
-# the controller claims a gVisor-isolated Actor from a Substrate WorkerPool via
-# the ActorTemplate and runs a REAL codex agent inside it. These renderers
-# assume install-substrate.sh already stood up: the Substrate control plane, a
-# WorkerPool + ActorTemplate on a codex-capable image, an in-cluster model
-# proxy (vekil), and the model + git Secrets.
-#
-# Two beats, both with a live gpt model:
-#   COLD  — fresh gVisor workspace: agent clones the repo, makes a change;
-#           Orka pushes the branch; the demo opens a real PR.
-#   WARM  — same sessionRef reattaches the RETAINED workspace (reused=true,
-#           repo already cloned) for a follow-up change — no cold start.
-#
-# Clean-exit contract (validated): the agent EDITS FILES ONLY and stops. Orka's
-# pushBranch pushes the branch; the demo script opens/updates the PR via gh.
-# Having the agent run post-edit commands (git status, a PR curl) can make the
-# codex CLI exit nonzero even when the work succeeded.
-#
-# gVisor contract (validated): the Task sets ORKA_CODEX_DISABLE_SANDBOX=true so
-# codex runs danger-full-access — correct, because gVisor IS the sandbox; its
-# inner bubblewrap cannot nest under runsc.
-# ---------------------------------------------------------------------------
 : "${DEMO_SUBSTRATE_NAMESPACE:=${DEMO_NAMESPACE:-default}}"
 : "${DEMO_SUBSTRATE_AGENT:=demo-substrate-codex}"
 : "${DEMO_SUBSTRATE_TEMPLATE_NAME:=orka-codex-ci}"
@@ -690,11 +665,6 @@ spec:
 EOF
 }
 
-# render_substrate_task <name> <reuse:none|session> <create:true|false> <prompt>
-# Emits a REAL agentic Task in a Substrate gVisor workspace. The COLD beat uses
-# reuse=session + create=true (mints the warm workspace, retained); the WARM
-# beat uses reuse=session + create=false (reattaches it). Both push the same
-# branch via Orka pushBranch; the demo opens/updates the PR afterward.
 render_substrate_task() {
   local name="$1"
   local reuse="${2:-session}"

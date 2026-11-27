@@ -16,8 +16,6 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
-// testMCPBrokerForwardWriteRequest is testMCPBrokerRequest for an ungated
-// forwarded write.
 func testMCPBrokerForwardWriteRequest(t *testing.T) (harnessv2.MCPBrokerCallRequest, harnessv2.RuntimeProfile) {
 	t.Helper()
 	request, profile := testMCPBrokerRequest(t, harnessv2.MCPToolEffectConsequential)
@@ -47,10 +45,6 @@ func testMCPBrokerForwardWriteRequest(t *testing.T) (harnessv2.MCPBrokerCallRequ
 	return request, profile
 }
 
-// TestACPMCPBrokerForwardedWriteRefusedBeforeSendingIsADefiniteFailure
-// covers an ungated forwarded write that fails before it is sent, such as
-// on a readOnly link: it is a definite no-effect failure, not an unknown
-// outcome, and a redelivery replays that answer without executing again.
 func TestACPMCPBrokerForwardedWriteRefusedBeforeSendingIsADefiniteFailure(t *testing.T) {
 	effects, fence := newMCPBrokerControlStore(t)
 	request, profile := testMCPBrokerForwardWriteRequest(t)
@@ -89,9 +83,6 @@ func TestACPMCPBrokerForwardedWriteRefusedBeforeSendingIsADefiniteFailure(t *tes
 	}
 }
 
-// TestACPMCPBrokerForwardedActionAnswerIsNotKept covers an ungated Azure
-// action (POST) whose answer carries a secret: the caller gets the answer,
-// the effect record keeps only a note, and a redelivery gets that note.
 func TestACPMCPBrokerForwardedActionAnswerIsNotKept(t *testing.T) {
 	effects, fence := newMCPBrokerControlStore(t)
 	request, profile := testMCPBrokerForwardWriteRequest(t)
@@ -150,9 +141,6 @@ func TestACPMCPBrokerForwardedActionAnswerIsNotKept(t *testing.T) {
 	}
 }
 
-// TestForwardedWriteKeptResultKeepsNoAnswer covers what an effect record
-// keeps of a forwarded write: never its answer, which can carry a secret,
-// only a note with its status; a tool error is kept as it is.
 func TestForwardedWriteKeptResultKeepsNoAnswer(t *testing.T) {
 	request, _ := testMCPBrokerForwardWriteRequest(t)
 	descriptor := request.Authorization.ToolPolicy.Tools[0]
@@ -166,8 +154,6 @@ func TestForwardedWriteKeptResultKeepsNoAnswer(t *testing.T) {
 		!strings.Contains(note.Body, "OrkaResultNotKept") || strings.Contains(note.Body, "private-function-key") {
 		t.Fatalf("PUT note = %#v, %v", note, err)
 	}
-	// A throttled answer keeps its status and delay, so a replay still
-	// tells the client to retry.
 	throttled, err := harnessv2.DecodeMCPForwardResponse(forwardedWriteKeptResult(descriptor,
 		json.RawMessage(`{"status":429,"headers":{"Retry-After":"7"},"body":"{\"error\":{\"code\":\"TooManyRequests\"}}"}`)))
 	if err != nil || throttled.Status != http.StatusTooManyRequests || throttled.Headers["Retry-After"] != "7" ||
@@ -176,9 +162,6 @@ func TestForwardedWriteKeptResultKeepsNoAnswer(t *testing.T) {
 	}
 }
 
-// TestMaskForwardedWriteArgumentsKeepsOnlyTheShape covers the approval
-// preview of a forwarded write: its method, path, and body fields, with no
-// body value, whatever the field is called.
 func TestMaskForwardedWriteArgumentsKeepsOnlyTheShape(t *testing.T) {
 	aks := "/subscriptions/s1/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/aks1"
 	masked := string(maskForwardedWriteArguments(json.RawMessage(
@@ -197,11 +180,6 @@ func TestMaskForwardedWriteArgumentsKeepsOnlyTheShape(t *testing.T) {
 	if strings.Contains(masked, "private-") {
 		t.Fatalf("masked preview kept a secret: %s", masked)
 	}
-	// Nothing outside a known resource's sizing paths is shown: a
-	// deployment's secure parameters, an action's own parameters, a resource
-	// type without a known schema, an empty key posing as the root, and a
-	// literal key that spells a nested path, and a sizing field holding a
-	// value of the wrong type.
 	for _, request := range []string{
 		`{"method":"PUT","path":"` + aks + `","body":{"location":482913,"properties":{"agentPoolProfiles":[` +
 			`{"count":"private-count","enableAutoScaling":"private-flag","vmSize":true,"maxCount":{"v":"private-nested"}}]}}}`,
@@ -217,8 +195,6 @@ func TestMaskForwardedWriteArgumentsKeepsOnlyTheShape(t *testing.T) {
 			t.Errorf("preview exposed a value: %s", preview)
 		}
 	}
-	// A sizing field shows only sizing-value text: a value shaped like a
-	// credential, or longer than any size name, is masked.
 	shaped := string(maskForwardedWriteArguments(json.RawMessage(
 		`{"method":"PUT","path":"` + aks + `","body":{"location":"West US 2","sku":{"name":"private+key/==","tier":"` +
 			strings.Repeat("p", 65) + `"},"properties":{"kubernetesVersion":"1.30.3","agentPoolProfiles":[{"vmSize":"Standard_D2s_v3","mode":"private:colon"}]}}}`)))
@@ -230,7 +206,6 @@ func TestMaskForwardedWriteArgumentsKeepsOnlyTheShape(t *testing.T) {
 	if strings.Contains(shaped, "private") || strings.Contains(shaped, "ppppp") {
 		t.Errorf("preview showed a value that is not sizing text: %s", shaped)
 	}
-	// Query values are masked, except the API version.
 	signed := string(maskForwardedWriteArguments(json.RawMessage(
 		`{"method":"POST","path":"/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Web/sites/s/restart","query":"sig=private-sig&api-version=2024-04-01&se=private-expiry&flag"}`)))
 	if strings.Contains(signed, "private-") || !strings.Contains(signed, `"query":"sig=[masked]\u0026api-version=2024-04-01\u0026se=[masked]\u0026flag"`) {
@@ -249,11 +224,6 @@ func TestMaskForwardedWriteArgumentsKeepsOnlyTheShape(t *testing.T) {
 	}
 }
 
-// TestMCPApprovalForwardedWriteAnswerIsNotKept covers the default
-// approval-required path for a forwarded write whose answer carries a
-// secret: the approved caller gets the answer, the effect record and the
-// approval events keep none of it, and a redelivery gets the kept note
-// without another execution.
 func TestMCPApprovalForwardedWriteAnswerIsNotKept(t *testing.T) {
 	f := newMCPApprovalFixture(t)
 	request, profile := testMCPBrokerForwardWriteRequest(t)

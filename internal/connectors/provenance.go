@@ -21,17 +21,10 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-// requesterStampDomain separates the stamp from every other HMAC use of the
-// controller key.
 const requesterStampDomain = "orka.requester-stamp.v1"
 
-// MinRequesterStampKeyBytes is the smallest stamp key accepted.
 const MinRequesterStampKeyBytes = 32
 
-// RequesterStamp computes the stamp that binds a Task's UID to the requester
-// the API server verified for it. The UID is server-assigned, so the stamp
-// can only be sealed after creation and cannot be transplanted onto another
-// Task, even one re-created under the same name.
 func RequesterStamp(key []byte, uid types.UID, issuer, subject string) string {
 	if len(key) < MinRequesterStampKeyBytes || strings.TrimSpace(string(uid)) == "" {
 		return ""
@@ -44,9 +37,6 @@ func RequesterStamp(key []byte, uid types.UID, issuer, subject string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// RequesterStampValid reports whether the Task carries the API server's
-// source annotation and a stamp that matches its UID and requester under
-// key. Without a key nothing is valid: provenance fails closed.
 func RequesterStampValid(key []byte, task *corev1alpha1.Task) bool {
 	if task == nil || task.Spec.RequestedBy == nil ||
 		task.Annotations[labels.AnnotationRequestedBySource] != labels.RequestedBySourceAPI {
@@ -57,10 +47,6 @@ func RequesterStampValid(key []byte, task *corev1alpha1.Task) bool {
 	return want != "" && len(got) == len(want) && hmac.Equal([]byte(got), []byte(want))
 }
 
-// SealRequesterStamp writes the stamp onto a Task the API server has just
-// created and stamped. A Task without the source annotation, or without a
-// requester, is left alone. The stamp is patched onto the live object so the
-// server-assigned UID is bound.
 func SealRequesterStamp(ctx context.Context, c client.Client, key []byte, task *corev1alpha1.Task) error {
 	if task == nil || task.Spec.RequestedBy == nil ||
 		task.Annotations[labels.AnnotationRequestedBySource] != labels.RequestedBySourceAPI {

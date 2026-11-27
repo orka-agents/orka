@@ -270,8 +270,6 @@ func TestRecoverPublicationPullRequestPreservesLegacyCommittedEffect(t *testing.
 	identity := store.ExternalEffectIdentity{
 		Kind: "publisher.pull-request", Namespace: task.Namespace, AggregateID: publication.ID, OperationID: operation,
 	}
-	// The previous controller persisted this exact request without sessionUid,
-	// although the Publication already had its immutable Session owner.
 	legacy := publisherservice.PullRequestReconcileRequest{
 		Metadata: publisherservice.OperationMetadata{Namespace: task.Namespace, PublicationID: publication.ID, OperationID: operation},
 		Intent: publisher.PullRequestIntent{
@@ -305,8 +303,6 @@ func TestRecoverPublicationPullRequestPreservesLegacyCommittedEffect(t *testing.
 	}
 	projection := &publicationPRRecoveryReceiptStore{DurableControlStore: controlStore, publication: publication}
 	dispatcher.Store = projection
-	// Publisher is intentionally absent: recovery must consume the durable
-	// original response, without another forge request or a new intent key.
 	verification := &store.PublicationVerificationReceipt{Outcome: store.PublicationVerifiedExact}
 	got, gotVerification, reason, err := dispatcher.recoverPublicationPullRequest(ctx, publication, verification, "verify-original",
 		persistedPublicationRecoveryContext{task: task, fence: fence, pullRequestBase: base, target: head})
@@ -489,7 +485,6 @@ func TestCompletedPresentationRecoveryDoesNotProbePublisher(t *testing.T) {
 		DurableControlStore: &recoveredPublicationStore{DurableControlStore: controlStore, publication: publication}, publication: publication,
 	}
 	dispatcher.Store = projection
-	// No publisher client exists, so either a probe or another mutation would fail.
 	loaded, recovery, err := dispatcher.loadPersistedPublicationRecovery(ctx, task, "cached-attempt", fence)
 	if err != nil {
 		t.Fatalf("loading durable recovery contacted the publisher: %v", err)
@@ -503,7 +498,6 @@ func TestCompletedPresentationRecoveryDoesNotProbePublisher(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(after, effect) {
 		t.Fatal("cached recovery rewrote the durable effect")
 	}
-	// Capability unavailability must not become permission to replay mismatched input.
 	task.Spec.Workspace.PRTitle = "different title"
 	if _, _, _, err := dispatcher.recoverPublicationPullRequest(ctx, loaded, verification, "cached-verify", recovery); !errors.Is(err, store.ErrConflict) {
 		t.Fatal("completed response was adopted for mismatched presentation")

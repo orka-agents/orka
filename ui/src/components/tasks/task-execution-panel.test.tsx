@@ -58,11 +58,8 @@ describe('TaskExecutionPanel', () => {
       '[data-testid="progress-steps"]',
     ) as HTMLElement
     const circles = steps.querySelectorAll('.rounded-full')
-    expect(circles).toHaveLength(3) // Pending / Running / Completed
-    // Pending (step 0) is the current/highlighted step.
+    expect(circles).toHaveLength(3)
     expect(circles[0].className).toContain('bg-status-running-bg')
-    // Completed (step 2) is NOT highlighted and still shows its index ("3") —
-    // a scheduled task is not mislabeled as completed.
     expect(circles[2].className).toContain('bg-muted')
     expect(circles[2].textContent).toBe('3')
   })
@@ -164,7 +161,6 @@ describe('TaskExecutionPanel', () => {
     )
     expect(screen.getByText('Failed')).toBeInTheDocument()
     expect(screen.getByText('OOMKilled')).toBeInTheDocument()
-    // Attempts count "3" appears both in step indicator and attempts display
     expect(screen.getAllByText('3').length).toBeGreaterThanOrEqual(1)
   })
 
@@ -259,8 +255,6 @@ describe('TaskExecutionPanel', () => {
       <TaskExecutionPanel
         task={makeTask({ status: { phase: 'Succeeded', attempts: 1 } })}
         events={[
-          // The native worker nests its usage observation in content; the
-          // event itself carries no model or token fields.
           { ...native, id: 'usage-1', seq: 1, type: 'ModelUsageUpdated', content: { usage: { model: 'gpt-4.1', inputTokens: 100, outputTokens: 20 } } },
           { ...native, id: 'done-1', seq: 2, type: 'ModelRequestCompleted', provider: 'openai', model: 'gpt-4.1', inputTokens: 100, outputTokens: 20, stopReason: 'tool_calls' },
           { ...native, id: 'usage-2', seq: 3, type: 'ModelUsageUpdated', content: { usage: { model: 'gpt-4.1', inputTokens: 150, outputTokens: 30 } } },

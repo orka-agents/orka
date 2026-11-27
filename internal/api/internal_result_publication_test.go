@@ -46,8 +46,6 @@ func TestSubmitResultWaitsForJobIdentityPublication(t *testing.T) {
 		submitErr := h.SubmitResult(c)
 		if requests.Add(1) == 1 {
 			_, resultErr := data.GetResult(c.Context(), task.Namespace, task.Name)
-			// Publish only after the first submission has passed through the real
-			// handler, reproducing a worker that finishes before the status write.
 			current := &corev1alpha1.Task{}
 			publicationErr := kube.Get(c.Context(), client.ObjectKeyFromObject(task), current)
 			if publicationErr == nil {

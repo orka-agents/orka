@@ -45,8 +45,6 @@ func TestStreamTaskEventsSendsLiveFramesOnlyWhenAsked(t *testing.T) {
 	}
 }
 
-// Live events are published by name, so a Task created again under the name
-// while the stream is open never reaches it: only the authorized Task's do.
 func TestStreamTaskEventsSendsOnlyTheAuthorizedTasksLiveEvents(t *testing.T) {
 	task := testTask("default", "task-live")
 	task.UID = "task-uid"

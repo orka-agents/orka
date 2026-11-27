@@ -45,7 +45,6 @@ func person(subject string) *UserInfo {
 	return &UserInfo{AuthType: AuthTypeOIDC, Username: subject, Subject: subject, Issuer: connectorTestIssuer, Namespace: agentHostTestNamespace}
 }
 
-// linkedHost is the host the controller would create for subject's link.
 func linkedHost(name, subject string) *corev1alpha1.AgentHost {
 	return &corev1alpha1.AgentHost{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: agentHostTestNamespace},
@@ -83,7 +82,6 @@ func newAgentHostAPI(t *testing.T, objects ...client.Object) *agentHostAPI {
 	return h
 }
 
-// rebuild serves the routes from h.client.
 func (h *agentHostAPI) rebuild() {
 	reader := h.reader
 	if reader == nil {
@@ -136,10 +134,7 @@ func (h *agentHostAPI) host(name string) (*corev1alpha1.AgentHost, bool) {
 	return host, true
 }
 
-// Each person reaches only the host fed by their own link.
 func TestOwnAgentHostIsTheCallersOnly(t *testing.T) {
-	// A host someone created by hand names alice's link; it is not the
-	// controller's, and the API never serves it.
 	stray := linkedHost("gh-stray", "alice")
 	stray.Spec.GitHubTokenFrom.ConnectionRef.Name = "github-someone-else"
 	aliceHost, bobHost := linkedHost("gh-alice", "alice"), linkedHost("gh-bob", "bob")
@@ -160,7 +155,6 @@ func TestOwnAgentHostIsTheCallersOnly(t *testing.T) {
 	if status, _ := h.do(http.MethodGet, "/api/v1/agent-hosts/me"); status != http.StatusNotFound {
 		t.Fatalf("carol: %d, want 404", status)
 	}
-	// A host being deleted keeps its last Ready condition, but is not ready.
 	if deleting := agentHostResponse(func() *corev1alpha1.AgentHost {
 		host := linkedHost("gh-alice", "alice")
 		now := metav1.Now()
@@ -172,7 +166,6 @@ func TestOwnAgentHostIsTheCallersOnly(t *testing.T) {
 	if status, _ := h.do(http.MethodGet, "/api/v1/agent-hosts/me"); status != http.StatusNotFound {
 		t.Fatalf("carol: %d, want 404", status)
 	}
-	// Deleting reaches only the caller's own host.
 	h.identity = person("bob")
 	if status, deleted := h.do(http.MethodDelete, "/api/v1/agent-hosts/me"); status != http.StatusAccepted || deleted.Name != "gh-bob" ||
 		!deleted.Deleting || deleted.Ready {
@@ -201,7 +194,6 @@ func TestOwnAgentHostNeedsAVerifiedPerson(t *testing.T) {
 
 func TestWakeOwnAgentHost(t *testing.T) {
 	idle := linkedHost("gh-alice", "alice")
-	// Suspended this very second: the wake must still date after it.
 	asleep := metav1.NewTime(time.Now().UTC().Truncate(time.Second))
 	idle.Status.IdleSuspendedAt = &asleep
 	idle.Status.Phase = corev1alpha1.AgentHostPhaseSuspended
@@ -214,7 +206,6 @@ func TestWakeOwnAgentHost(t *testing.T) {
 		t.Fatalf("wakeRequestedAt = %v, want after the idle suspension", host.Spec.WakeRequestedAt)
 	}
 
-	// An operator's suspension is theirs to lift.
 	held := linkedHost("gh-alice", "alice")
 	held.Spec.Suspended = true
 	h = newAgentHostAPI(t, held)
@@ -223,8 +214,6 @@ func TestWakeOwnAgentHost(t *testing.T) {
 	}
 }
 
-// A host replaced under the same name after the ownership check, which may
-// be another person's, is neither woken nor deleted.
 func TestOwnAgentHostWritesAreFencedToTheHostThatWasChecked(t *testing.T) {
 	for _, method := range []string{http.MethodPost, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
@@ -288,8 +277,6 @@ func readyHostConnection(host *corev1alpha1.AgentHost, uid string, grant int64) 
 	return connection
 }
 
-// A Ready condition from an earlier consent, or an older Connection with the
-// same name, cannot make a freshly linked account look ready.
 func TestOwnAgentHostRequiresCurrentConnectionGrant(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -371,8 +358,6 @@ func TestOwnAgentHostReadFailureCannotAdvertiseReadiness(t *testing.T) {
 	}
 }
 
-// A host kept after its provider stopped serving hosts stays its person's to
-// see and delete.
 func TestOwnAgentHostOutlivesItsProvidersOptIn(t *testing.T) {
 	h := newAgentHostAPI(t, linkedHost("gh-alice", "alice"))
 	provider := &corev1alpha1.ConnectorProvider{}
@@ -394,8 +379,6 @@ func TestOwnAgentHostOutlivesItsProvidersOptIn(t *testing.T) {
 	}
 }
 
-// A host kept after its person disconnected stays theirs to see and delete
-// after an operator deletes its provider, and stays no one else's.
 func TestOwnAgentHostOutlivesItsProvider(t *testing.T) {
 	retired := linkedHost("gh-alice-old", "alice")
 	retired.Spec.GitHubTokenFrom.ConnectionRef.Name = connectors.ConnectionName("github-retired", connectorTestIssuer, "alice")
@@ -416,8 +399,6 @@ func TestOwnAgentHostOutlivesItsProvider(t *testing.T) {
 	}
 }
 
-// A link's name keeps only a prefix of a long provider name, so after such a
-// provider is deleted the kept host's own record says which provider it was.
 func TestOwnAgentHostOutlivesALongNamedProvider(t *testing.T) {
 	provider := "github-enterprise-cloud-agent-hosts-for-the-platform-team"
 	link := connectors.ConnectionName(provider, connectorTestIssuer, "alice")
@@ -438,8 +419,6 @@ func TestOwnAgentHostOutlivesALongNamedProvider(t *testing.T) {
 	}
 }
 
-// An upgraded provisioner repairs a legacy host while its Connection still
-// exists, so losing a long-named provider cannot strand self-service cleanup.
 func TestOwnAgentHostOutlivesBackfilledProvider(t *testing.T) {
 	provider := &corev1alpha1.ConnectorProvider{ObjectMeta: metav1.ObjectMeta{
 		Name: "github-enterprise-cloud-agent-hosts-for-the-platform-team", Namespace: agentHostTestNamespace,
@@ -483,8 +462,6 @@ func TestOwnAgentHostOutlivesBackfilledProvider(t *testing.T) {
 	}
 }
 
-// With a retired provider's host kept, the host of the provider serving hosts
-// now is the person's host.
 func TestOwnAgentHostPrefersTheCurrentProvidersHost(t *testing.T) {
 	retired := linkedHost("gh-alice-old", "alice")
 	retired.Spec.GitHubTokenFrom.ConnectionRef.Name = connectors.ConnectionName("github-old", connectorTestIssuer, "alice")
@@ -497,7 +474,6 @@ func TestOwnAgentHostPrefersTheCurrentProvidersHost(t *testing.T) {
 	if status, _ := h.do(http.MethodDelete, "/api/v1/agent-hosts/me"); status != http.StatusAccepted {
 		t.Fatalf("delete: %d", status)
 	}
-	// Once that one is gone, the retained host is still the person's.
 	if status, host := h.do(http.MethodGet, "/api/v1/agent-hosts/me"); status != http.StatusOK || host.Name != "gh-alice-old" {
 		t.Fatalf("get after delete: %d %+v, want the retained host", status, host)
 	}

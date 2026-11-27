@@ -28,8 +28,6 @@ import (
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
-// allowSubstrateEgressForTest stands in for the native control API in tests
-// that are not about egress policy.
 func allowSubstrateEgressForTest(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) error {
 	return nil
 }
@@ -62,9 +60,6 @@ func reconcileEgressTestTool(t *testing.T, tool *corev1alpha1.Tool, apply egress
 	return executor, got, probes
 }
 
-// reconcileEgressTestToolWith reconciles with a caller-built executor, so an
-// applier can observe what the executor has been asked to do so far. It returns
-// the first reconcile error instead of failing the test.
 func reconcileEgressTestToolWith(t *testing.T, tool *corev1alpha1.Tool, executor *recordingToolWorkspaceExecutor, apply egressTestApplier) (corev1alpha1.Tool, int, error) {
 	t.Helper()
 	scheme := newToolScheme()
@@ -103,8 +98,6 @@ func reconcileEgressTestToolWith(t *testing.T, tool *corev1alpha1.Tool, executor
 func TestToolReconcilerAppliesActorEgressBeforeResume(t *testing.T) {
 	var appliedActor string
 	var appliedRules []workspace.SubstrateEgressRule
-	// Each reconcile must install the policy before it resumes the actor, so
-	// every apply has to see exactly as many resumes as applies before it.
 	applies := 0
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	got, _, err := reconcileEgressTestToolWith(t, newEgressTestMCPTool(
@@ -169,14 +162,10 @@ func TestToolReconcilerFailsClosedWhenEgressPolicyApplyFails(t *testing.T) {
 	}
 }
 
-// A reattached actor may be running under the policy an earlier reconcile
-// installed. When a later apply fails, that policy is unverified and possibly
-// broader than the Tool now allows, so the actor must be suspended.
 func TestToolReconcilerSuspendsRunningActorWhenEgressPolicyApplyFails(t *testing.T) {
 	fail := false
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	got, _, err := reconcileEgressTestToolWith(t, newEgressTestMCPTool(), executor, func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) error {
-		// Applies succeed until the actor has been resumed, then fail.
 		if fail = fail || executor.waitReadyCalled; fail {
 			return errors.New("control API unavailable")
 		}
@@ -219,8 +208,6 @@ func TestToolReconcilerSurfacesFailedSuspendAfterEgressPolicyApplyFails(t *testi
 	}
 }
 
-// An actor this reconcile created has never been resumed, and one observed
-// suspended has nothing running; neither needs a suspend call.
 func TestToolReconcilerSkipsSuspendForActorsThatAreNotRunning(t *testing.T) {
 	for name, executor := range map[string]*recordingToolWorkspaceExecutor{
 		"created":   {claimCreated: true},
@@ -278,8 +265,6 @@ func TestToolReconcilerRejectsReservedSubstrateMCPHeaders(t *testing.T) {
 	}
 }
 
-// runningEgressTestTool reconciles a Tool until its Actor is running under a
-// verified egress policy, and returns the reconciler for the next change.
 func runningEgressTestTool(t *testing.T, executor *recordingToolWorkspaceExecutor, apply egressTestApplier, objects ...client.Object) (*ToolReconciler, corev1alpha1.Tool) {
 	t.Helper()
 	tool := newEgressTestMCPTool(corev1alpha1.SubstrateActorEgressRule{Scheme: "https", Host: "api.github.com"})
@@ -300,8 +285,6 @@ func runningEgressTestTool(t *testing.T, executor *recordingToolWorkspaceExecuto
 	return r, got
 }
 
-// newEgressTestReconcilerFor builds a reconciler around a Tool that has not
-// been reconciled yet.
 func newEgressTestReconcilerFor(t *testing.T, tool *corev1alpha1.Tool, executor *recordingToolWorkspaceExecutor, apply egressTestApplier, objects ...client.Object) *ToolReconciler {
 	t.Helper()
 	scheme := newToolScheme()
@@ -309,7 +292,6 @@ func newEgressTestReconcilerFor(t *testing.T, tool *corev1alpha1.Tool, executor 
 	t.Cleanup(srv.Close)
 	validator := substrateFixtureTemplateValidator
 	for _, object := range objects {
-		// A pool in another namespace keeps its Actor leases there.
 		if pool, ok := object.(*corev1alpha1.SubstrateActorPool); ok {
 			tool.Spec.MCP.SubstrateActor.PoolRef = &corev1alpha1.SubstrateActorPoolReference{Name: pool.Name, Namespace: pool.Namespace}
 			validator = substrateActorPoolFixtureValidator
@@ -340,8 +322,6 @@ func getEgressTestTool(t *testing.T, r *ToolReconciler) corev1alpha1.Tool {
 	return got
 }
 
-// editEgressTestTool changes the running Tool's specification, as an API
-// server would, to a new generation.
 func editEgressTestTool(t *testing.T, r *ToolReconciler, edit func(*corev1alpha1.Tool)) {
 	t.Helper()
 	tool := getEgressTestTool(t, r)
@@ -366,12 +346,8 @@ func requireEgressUnverified(t *testing.T, tool corev1alpha1.Tool) {
 	}
 }
 
-// An edit that the controller rejects never reaches the egress policy step.
-// The Actor must not keep running under the allowlist of the previous
-// specification, which can be broader than the one the edit asked for.
 func TestToolReconcilerStopsRunningActorWhenAnEditFailsBeforeItsEgressPolicy(t *testing.T) {
 	invalidEgress := func(tool *corev1alpha1.Tool) {
-		// Passes the schema, fails the controller: tls needs explicit ports.
 		tool.Spec.MCP.SubstrateActor.Egress = []corev1alpha1.SubstrateActorEgressRule{{Scheme: "tls", Host: "example.com"}}
 	}
 	missingSecret := func(tool *corev1alpha1.Tool) {
@@ -400,8 +376,6 @@ func TestToolReconcilerStopsRunningActorWhenAnEditFailsBeforeItsEgressPolicy(t *
 	}
 }
 
-// A pooled Actor's ownership lease lives in the pool's namespace, on both
-// paths that stop one.
 func TestToolReconcilerStopsItsPooledActorWithoutAVerifiedEgressPolicy(t *testing.T) {
 	for _, name := range []string{"edit rejected before the policy", "policy apply fails"} {
 		t.Run(name, func(t *testing.T) {
@@ -441,7 +415,6 @@ func TestToolReconcilerStopsItsPooledActorWithoutAVerifiedEgressPolicy(t *testin
 	}
 }
 
-// A failure after admission, such as no executor, is handled the same way.
 func TestToolReconcilerRetriesWhenAnEditedToolHasNoExecutorToStopItsActor(t *testing.T) {
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	r, _ := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
@@ -458,10 +431,6 @@ func TestToolReconcilerRetriesWhenAnEditedToolHasNoExecutorToStopItsActor(t *tes
 	requireEgressUnverified(t, got)
 }
 
-// An invalid Tool has its egress denied and its Actor stopped. With the
-// template gone the controller cannot tell whether to suspend or delete, so it
-// does neither and keeps retrying, with egress already denied. Repeating the
-// reconcile changes nothing.
 func TestToolReconcilerDeniesEgressAndRetriesTheStopWhenAnInvalidToolsTemplateIsGone(t *testing.T) {
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	r, _ := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
@@ -482,12 +451,6 @@ func TestToolReconcilerDeniesEgressAndRetriesTheStopWhenAnInvalidToolsTemplateIs
 	}
 }
 
-// Suspend or delete depends on the template the Actor runs, and Substrate lets
-// an Actor outlive its template. Without the template Substrate cannot suspend
-// the Actor, and a delete could discard data on its durable volumes, so the
-// controller denies the Actor all egress instead, and keeps retrying the stop.
-// This applier reports no policy state, so the deny-all counts as enforced at
-// once; see the next test for one the gateway may not apply yet.
 func TestToolReconcilerDeniesEgressToAnActorWhoseTemplateIsGone(t *testing.T) {
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	var applied []struct {
@@ -505,8 +468,6 @@ func TestToolReconcilerDeniesEgressToAnActorWhoseTemplateIsGone(t *testing.T) {
 		t.Fatalf("Delete template: %v", err)
 	}
 	applied = nil
-	// Change the allowlist: the running Actor must keep neither the old one
-	// nor, without a verified stop, get the new one.
 	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
 		tool.Spec.MCP.SubstrateActor.Egress = []corev1alpha1.SubstrateActorEgressRule{{Scheme: "https", Host: "docs.example.com"}}
 	})
@@ -514,8 +475,6 @@ func TestToolReconcilerDeniesEgressToAnActorWhoseTemplateIsGone(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "read the actor's template") || !strings.Contains(err.Error(), "egress is denied") {
 		t.Fatalf("Reconcile() error = %v, want the unreadable template reported, egress denied, and a retry", err)
 	}
-	// An invalid Tool's egress is revoked and the stop then falls back to
-	// denying it again, so every policy applied must be deny-all.
 	if len(applied) == 0 {
 		t.Fatalf("applied = %+v, want a deny-all policy for %q", applied, running.Status.Actor.ActorID)
 	}
@@ -530,7 +489,6 @@ func TestToolReconcilerDeniesEgressToAnActorWhoseTemplateIsGone(t *testing.T) {
 	}
 	requireEgressUnverified(t, got)
 
-	// A deny-all that cannot be installed is reported with the template error.
 	denyErr := errors.New("control API unavailable")
 	r.SubstrateEgressPolicyApplier = func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) error { return denyErr }
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); !errors.Is(err, denyErr) || !strings.Contains(err.Error(), "read the actor's template") {
@@ -538,11 +496,6 @@ func TestToolReconcilerDeniesEgressToAnActorWhoseTemplateIsGone(t *testing.T) {
 	}
 }
 
-// A deny-all is enforced only once the gateway drops its cached copy of the
-// previous rules. Until then a running Actor whose template is gone could keep
-// reaching what they allowed, so it is deleted, which needs no template, and
-// the reconcile retries until it is. A suspended one runs nothing and keeps
-// its data.
 func TestToolReconcilerDeletesARunningActorWhoseTemplateIsGoneWhileItsDenyAllPropagates(t *testing.T) {
 	deleteErr := errors.New("delete failed")
 	for _, tc := range []struct {
@@ -562,7 +515,6 @@ func TestToolReconcilerDeletesARunningActorWhoseTemplateIsGoneWhileItsDenyAllPro
 			var applied [][]workspace.SubstrateEgressRule
 			r.SubstrateEgressPolicyStateApplier = func(_ context.Context, _ SubstrateConfig, _ string, rules []workspace.SubstrateEgressRule) (workspace.SubstrateEgressPolicyState, error) {
 				applied = append(applied, rules)
-				// The deny-all replaces the stored rules now.
 				denied := *policy
 				denied.Version, denied.UpdateTime = policy.Version+1, time.Now()
 				return denied, nil
@@ -608,7 +560,6 @@ func TestToolReconcilerDeletesARunningActorWhoseTemplateIsGoneWhileItsDenyAllPro
 	}
 }
 
-// The lease is what makes an Actor this Tool's. Without it the Tool stops nothing.
 func TestToolReconcilerDoesNotStopAnActorItHoldsNoLeaseFor(t *testing.T) {
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	r, _ := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
@@ -626,7 +577,6 @@ func TestToolReconcilerDoesNotStopAnActorItHoldsNoLeaseFor(t *testing.T) {
 	}
 	requireEgressUnverified(t, getEgressTestTool(t, r))
 
-	// Nor does it touch an unowned Actor's egress when the template is gone.
 	denied := false
 	r.SubstrateEgressPolicyApplier = func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) error {
 		denied = true
@@ -644,9 +594,6 @@ func TestToolReconcilerDoesNotStopAnActorItHoldsNoLeaseFor(t *testing.T) {
 	}
 }
 
-// Substrate cannot suspend an Actor whose template snapshots volumes only and
-// mounts no durable directory: the attempt fails before the workload stops.
-// Such an Actor is deleted under its UID instead, on both paths that stop one.
 func TestToolReconcilerDeletesAnActorThatCannotBeSuspended(t *testing.T) {
 	stateless := func(r *ToolReconciler) {
 		validate := r.SubstrateTemplateValidator
@@ -711,11 +658,6 @@ func TestToolReconcilerDeletesAnActorThatCannotBeSuspended(t *testing.T) {
 	})
 }
 
-// Substrate lets an Actor outlive its template, and a template deleted and
-// created again under the same name may differ in whether its Actors can be
-// suspended. The replacement decides how an Actor is stopped only when the
-// Actor booted from it; otherwise the Actor is stopped as one whose template
-// cannot be read.
 func TestToolReconcilerStopsAnActorOfAReplacedTemplateAsOneWithoutItsTemplate(t *testing.T) {
 	for name, tc := range map[string]struct {
 		actorTemplateUID string
@@ -760,9 +702,6 @@ func TestToolReconcilerStopsAnActorOfAReplacedTemplateAsOneWithoutItsTemplate(t 
 	}
 }
 
-// A Tool moved to another template gets a new Actor. Until that one is ready
-// the previous Actor is still running; when the new policy cannot be applied,
-// the previous Actor must stop too.
 func TestToolReconcilerStopsThePreviousActorWhenItsReplacementHasNoEgressPolicy(t *testing.T) {
 	second := approvedMCPActorTemplateForTest()
 	second.SetName("mcp-template-next")
@@ -792,10 +731,6 @@ func TestToolReconcilerStopsThePreviousActorWhenItsReplacementHasNoEgressPolicy(
 	}
 }
 
-// A Tool can hold a replacement Actor while its status still names the one it
-// replaces, for example after the replacement's endpoint check failed. When the
-// Tool then becomes invalid, every Actor it holds has its egress denied, even
-// past one that cannot be reached, and every one is stopped.
 func TestToolReconcilerRevokesAndStopsEveryHeldActorOfAnInvalidTool(t *testing.T) {
 	second := approvedMCPActorTemplateForTest()
 	second.SetName("mcp-template-next")
@@ -818,9 +753,6 @@ func TestToolReconcilerRevokesAndStopsEveryHeldActorOfAnInvalidTool(t *testing.T
 	if err := r.Create(context.Background(), newSubstrateMCPToolActorLease(&tool, defaultNS, replacement)); err != nil {
 		t.Fatalf("Create replacement lease: %v", err)
 	}
-	// The replacement was claimed for mcp-template-next; the Tool has since
-	// moved to a third template, whose suspend support must not decide how the
-	// replacement is stopped.
 	executor.describeTemplates = map[string]workspace.TemplateRef{replacement: {Namespace: "ate-demo", Name: "mcp-template-next"}}
 	third := approvedMCPActorTemplateForTest()
 	third.SetName("mcp-template-stateless")
@@ -840,8 +772,6 @@ func TestToolReconcilerRevokesAndStopsEveryHeldActorOfAnInvalidTool(t *testing.T
 		tool.Spec.MCP.SubstrateActor.TemplateRef.Name = "mcp-template-stateless"
 		tool.Spec.HTTP = &corev1alpha1.HTTPExecution{AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "missing", Key: "token"}}
 	})
-	// Fail whichever Actor is denied first, so the other is denied only if the
-	// loop goes on past the failure.
 	failFor = min(previous, replacement)
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err == nil {
 		t.Fatal("Reconcile() error = nil, want the failed revocation so the reconcile retries")
@@ -854,7 +784,6 @@ func TestToolReconcilerRevokesAndStopsEveryHeldActorOfAnInvalidTool(t *testing.T
 	for _, req := range executor.releaseReqs {
 		stopped[req.Ref.ID] = true
 	}
-	// Both run templates that keep data, so both are suspended, not deleted.
 	if !stopped[previous] || !stopped[replacement] || len(executor.deleteReqs) != 0 {
 		t.Fatalf("releases=%v deletes=%v, want both %q and %q suspended", executor.releaseReqs, executor.deleteReqs, previous, replacement)
 	}
@@ -865,8 +794,6 @@ func TestToolReconcilerRevokesAndStopsEveryHeldActorOfAnInvalidTool(t *testing.T
 	}
 }
 
-// failingPoolLeaseGetClient fails every Lease read in one namespace, as when
-// the API server cannot serve a pool's lease.
 type failingPoolLeaseGetClient struct {
 	client.Client
 	namespace string
@@ -879,11 +806,6 @@ func (c failingPoolLeaseGetClient) Get(ctx context.Context, key client.ObjectKey
 	return c.Client.Get(ctx, key, obj, opts...)
 }
 
-// During a pooled-to-dedicated replacement the Tool holds the dedicated Actor
-// while its status still names the pooled one. When the Tool becomes invalid
-// and the pooled Actor's lease cannot be read, the dedicated Actor, whose
-// lease is proven, still has its egress denied and is stopped, and the lookup
-// failure is returned so the reconcile retries.
 func TestToolReconcilerRevokesAProvenActorWhenAnotherLeaseCannotBeRead(t *testing.T) {
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: "pools"},
@@ -910,7 +832,6 @@ func TestToolReconcilerRevokesAProvenActorWhenAnotherLeaseCannotBeRead(t *testin
 	if err := r.Create(context.Background(), newSubstrateMCPToolActorLease(&tool, defaultNS, dedicated)); err != nil {
 		t.Fatalf("Create dedicated lease: %v", err)
 	}
-	// The dedicated Actor booted from the template its name still resolves to.
 	executor.describeTemplates = map[string]workspace.TemplateRef{dedicated: {Namespace: "ate-demo", Name: "mcp-template", UID: "validated-native-template-uid"}}
 	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
 		tool.Spec.HTTP = &corev1alpha1.HTTPExecution{AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "missing", Key: "token"}}
@@ -937,8 +858,6 @@ func TestToolReconcilerRevokesAProvenActorWhenAnotherLeaseCannotBeRead(t *testin
 	}
 }
 
-// A held Actor that Substrate no longer has needs no stop: Describe reports it
-// deleted, without a template, and the invalid Tool must not keep retrying.
 func TestToolReconcilerTreatsAnAbsentHeldActorAsStopped(t *testing.T) {
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	r, _ := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
@@ -993,12 +912,8 @@ func TestNativeSubstrateTemplateSuspendUnsupported(t *testing.T) {
 	}
 }
 
-// propagatingEgressTestTool is a running Tool whose stored egress policy the
-// test controls, with the gateway's default propagation window. The Actor is
-// reported running to every later claim.
 func propagatingEgressTestTool(t *testing.T, executor *recordingToolWorkspaceExecutor) (*ToolReconciler, *workspace.SubstrateEgressPolicyState) {
 	t.Helper()
-	// Both long ago: nothing to wait for while the Tool starts.
 	long := time.Now().Add(-time.Hour)
 	policy := &workspace.SubstrateEgressPolicyState{Version: 1, CreateTime: long, UpdateTime: long, ActorCreateTime: long}
 	r, _ := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
@@ -1018,17 +933,12 @@ func requireEgressPropagating(t *testing.T, tool corev1alpha1.Tool) {
 	}
 }
 
-// The Substrate egress gateway caches an Actor's policy and nothing invalidates
-// the entry, so a replaced policy is stored before it is enforced. A running
-// Actor could go on reaching what the old rules allowed, so it is stopped, and
-// resumed only once the gateway must have dropped them.
 func TestToolReconcilerStopsARunningActorWhileItsReplacedEgressPolicyPropagates(t *testing.T) {
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	r, policy := propagatingEgressTestTool(t, executor)
 	running := getEgressTestTool(t, r)
 	resumes := len(executor.waitReadyBoots)
 
-	// The allowlist was tightened two seconds ago.
 	policy.Version, policy.UpdateTime = 2, time.Now().Add(-2*time.Second)
 	result, err := r.Reconcile(context.Background(), mcpToolRequest())
 	if err != nil {
@@ -1045,7 +955,6 @@ func TestToolReconcilerStopsARunningActorWhileItsReplacedEgressPolicyPropagates(
 		t.Fatalf("release request = %+v, want a retained suspend of %q without scrub", req, running.Status.Actor.ActorID)
 	}
 
-	// Still inside the window, now suspended: nothing more to stop.
 	executor.claimPhase = workspace.PhaseRetained
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -1054,7 +963,6 @@ func TestToolReconcilerStopsARunningActorWhileItsReplacedEgressPolicyPropagates(
 		t.Fatalf("releases=%d resumes=%d, want the suspended actor left alone until the window passes", len(executor.releaseReqs), len(executor.waitReadyBoots)-resumes)
 	}
 
-	// The window has passed: the gateway can no longer hold the old rules.
 	policy.UpdateTime = time.Now().Add(-defaultSubstrateEgressPolicyPropagation - time.Second)
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -1065,9 +973,6 @@ func TestToolReconcilerStopsARunningActorWhileItsReplacedEgressPolicyPropagates(
 	}
 }
 
-// A policy deleted and created again for the same running Actor starts at
-// version 1, while the gateway may still apply the deleted rules. It is held
-// back like a replaced one, and the Actor is stopped meanwhile.
 func TestToolReconcilerStopsARunningActorWhoseEgressPolicyWasRecreated(t *testing.T) {
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	r, policy := propagatingEgressTestTool(t, executor)
@@ -1084,8 +989,6 @@ func TestToolReconcilerStopsARunningActorWhoseEgressPolicyWasRecreated(t *testin
 	}
 }
 
-// A running Actor that cannot be stopped is reported, and the reconcile
-// retries, instead of waiting quietly while it runs under the old rules.
 func TestToolReconcilerRetriesWhenItCannotStopAnActorWhoseEgressPolicyPropagates(t *testing.T) {
 	suspendErr := errors.New("suspend refused")
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
@@ -1102,9 +1005,6 @@ func TestToolReconcilerRetriesWhenItCannotStopAnActorWhoseEgressPolicyPropagates
 	}
 }
 
-// An Actor that Substrate cannot suspend is deleted. Deleting it deletes its
-// policy, and the gateway may remember that policy under the same name, so the
-// Actor created in its place waits out its own window before its first boot.
 func TestToolReconcilerRecreatesAnUnsuspendableActorWhileItsEgressPolicyPropagates(t *testing.T) {
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	r, policy := propagatingEgressTestTool(t, executor)
@@ -1135,7 +1035,6 @@ func TestToolReconcilerRecreatesAnUnsuspendableActorWhileItsEgressPolicyPropagat
 	}
 	requireEgressPropagating(t, getEgressTestTool(t, r))
 
-	// The replacement exists, with a policy of its own, but has not run.
 	created := time.Now()
 	*policy = workspace.SubstrateEgressPolicyState{Version: 1, CreateTime: created, UpdateTime: created, ActorCreateTime: created}
 	executor.claimCreateds, executor.claimPhase = []bool{true}, workspace.PhaseRetained
@@ -1147,7 +1046,6 @@ func TestToolReconcilerRecreatesAnUnsuspendableActorWhileItsEgressPolicyPropagat
 		t.Fatalf("resumes=%d deletes=%d, want the new actor neither booted nor deleted", len(executor.waitReadyBoots)-resumes, len(executor.deleteReqs))
 	}
 
-	// Its window has passed. It has never run, so it boots from scratch.
 	policy.ActorCreateTime = time.Now().Add(-defaultSubstrateEgressPolicyPropagation - time.Second)
 	policy.UpdateTime, policy.CreateTime = policy.ActorCreateTime, policy.ActorCreateTime
 	for range 2 {
@@ -1161,10 +1059,6 @@ func TestToolReconcilerRecreatesAnUnsuspendableActorWhileItsEgressPolicyPropagat
 	}
 }
 
-// An Actor name is derived from the Tool, so a Tool deleted and created again
-// gets an Actor of the same name, whose predecessor's policy the gateway may
-// remember. Nothing on the new Tool records that, so every newly created Actor
-// waits one window before its first boot.
 func TestToolReconcilerWaitsBeforeTheFirstBootOfANewActor(t *testing.T) {
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	created := time.Now()
@@ -1176,7 +1070,6 @@ func TestToolReconcilerWaitsBeforeTheFirstBootOfANewActor(t *testing.T) {
 	r.SubstrateEgressPolicyStateApplier = func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) (workspace.SubstrateEgressPolicyState, error) {
 		return *policy, nil
 	}
-	// The first reconcile only records which Actor the Tool owns.
 	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
@@ -1202,9 +1095,6 @@ func TestToolReconcilerWaitsBeforeTheFirstBootOfANewActor(t *testing.T) {
 	}
 }
 
-// A policy that has not been written for longer than the window is all the
-// gateway can apply, so a Tool that finds one, for example after its status was
-// lost, is not delayed. Nor is a later edit that leaves the allowlist alone.
 func TestToolReconcilerDoesNotWaitForAnEgressPolicyStoredLongAgo(t *testing.T) {
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	tool := newEgressTestMCPTool()
@@ -1232,7 +1122,6 @@ func TestToolReconcilerDoesNotWaitForAnEgressPolicyStoredLongAgo(t *testing.T) {
 	}
 }
 
-// With the gateway's policy cache disabled there is nothing to wait for.
 func TestToolReconcilerDoesNotWaitWhenEgressPolicyPropagationIsZero(t *testing.T) {
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	r, policy := propagatingEgressTestTool(t, executor)

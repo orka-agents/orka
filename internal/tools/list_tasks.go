@@ -23,7 +23,6 @@ const (
 	maxListTasksLimit     = 100
 )
 
-// ListTasksTool lists Task CRDs with optional status filter.
 type ListTasksTool struct{}
 
 func (t *ListTasksTool) Name() string { return listTasksToolName }

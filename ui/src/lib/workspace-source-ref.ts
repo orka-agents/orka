@@ -1,12 +1,3 @@
-/**
- * Client-side mirror of the controller's workspace source-ref validation
- * (publisherservice.CanonicalWorkspaceSourceRef via runtimeWorkspaceSourceRef):
- * a selector must be a full lower-case commit SHA, a refs/heads/... branch, a
- * refs/tags/... tag, or a short ref name; other refs/ namespaces and malformed
- * refs are rejected. The controller preflight remains authoritative; this
- * rejects obviously doomed selectors before a Task is created, so it must
- * never be stricter than the controller's rule.
- */
 
 import { isWellFormedText } from './workspace-repository'
 
@@ -64,7 +55,6 @@ function refPathError(refPath: string): string | null {
   return null
 }
 
-/** Returns an error description for an invalid source ref selector, or null when the controller would accept it. */
 export function workspaceSourceRefError(ref: string): string | null {
   if (isCanonicalObjectId(ref)) return null
   if (looksLikeObjectId(ref)) return 'Git object ID must be a lower-case SHA-1 or SHA-256'
@@ -82,17 +72,11 @@ export function workspaceSourceRefError(ref: string): string | null {
   return refPathError(ref)
 }
 
-/** Validates a branch selector, defaulting short names into refs/heads/ like the controller does. */
 export function workspaceSourceBranchError(branch: string): string | null {
   const candidate = branch.startsWith('refs/') ? branch : `refs/heads/${branch}`
   return workspaceSourceRefError(candidate)
 }
 
-/**
- * Mirror of the controller's canonicalWorkspaceBranchRef validation
- * (store.ValidateFullBranchRef) for publication branch fields such as
- * pushBranch and prBaseBranch.
- */
 export function workspacePublicationBranchError(branch: string): string | null {
   const ref = branch.startsWith('refs/heads/') ? branch : `refs/heads/${branch}`
   if (ref !== ref.trim() || hasControl(ref) || !isWellFormedText(ref)) {

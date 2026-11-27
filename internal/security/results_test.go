@@ -45,8 +45,6 @@ func TestParseThreatModelResultRequiresExactEnvelopeAndBinding(t *testing.T) {
 
 func TestParseThreatModelResultRedactsCredentials(t *testing.T) {
 	expected := AgentResultBinding{RepositoryScan: "repo", ScanID: "scan_123", PolicyDigest: "sha256:policy"}
-	// Synthetic values are assembled here so the fixtures cannot be mistaken
-	// for credentials copied from a repository.
 	token := "ghp_" + strings.Repeat("a", 36)
 	value := strings.Repeat("b", 32)
 	const prefix = "# Threat model\n\nCredential handling in `config/auth.go:12`.\n\n"
@@ -220,7 +218,6 @@ func TestParseValidationResultRestrictsEvidenceToAcceptedFinding(t *testing.T) {
 		t.Fatalf("ParseValidationResult() error = %v", err)
 	}
 
-	// Evidence the finding cannot absorb is dropped; the verdict survives.
 	for name, ref := range map[string]store.FindingEvidenceRef{
 		"out of range": {Kind: "file", Path: "internal/api/server.go", StartLine: 1, EndLine: 15},
 		"artifact":     {Kind: "artifact", Name: "transcript.txt"},
@@ -435,6 +432,13 @@ func TestParseSecurityResultsRejectPromptPlaceholders(t *testing.T) {
 		t.Fatalf("ParseThreatModelResult(placeholder) error = %v, want placeholder rejection", err)
 	}
 
+	threatPayload.ThreatModel = "# Threat Model\n\n…"
+	if _, err := ParseThreatModelResult(mustMarshalSecurityResult(t, threatPayload), AgentResultBinding{
+		RepositoryScan: binding.RepositoryScan, ScanID: binding.ScanID, PolicyDigest: binding.PolicyDigest,
+	}); err == nil || !strings.Contains(err.Error(), "placeholder") {
+		t.Fatalf("ParseThreatModelResult(unicode ellipsis placeholder) error = %v, want placeholder rejection", err)
+	}
+
 	findingsPayload := FindingsResultEnvelope{
 		SchemaVersion:  AgentResultSchemaVersion,
 		Kind:           AgentResultKindFindings,
@@ -490,6 +494,24 @@ func TestReviewResultIsInconclusive(t *testing.T) {
 		Findings: []FindingsV2Finding{},
 	}) {
 		t.Fatal("placeholder-summary zero-finding review should be inconclusive")
+	}
+	if !ReviewResultIsInconclusive(FindingsV2Artifact{
+		Scan:     FindingsV2Scan{Summary: "...", ReviewedFiles: []string{"..."}},
+		Findings: []FindingsV2Finding{},
+	}) {
+		t.Fatal("placeholder-only reviewedFiles should be inconclusive")
+	}
+	if !ReviewResultIsInconclusive(FindingsV2Artifact{
+		Scan:     FindingsV2Scan{ResolvedQuestions: []FindingsV2ResolvedQuestion{{Question: "Is auth enforced?", Resolution: ""}}},
+		Findings: []FindingsV2Finding{},
+	}) {
+		t.Fatal("unanswered resolvedQuestions should be inconclusive")
+	}
+	if ReviewResultIsInconclusive(FindingsV2Artifact{
+		Scan:     FindingsV2Scan{ResolvedQuestions: []FindingsV2ResolvedQuestion{{Question: "Is auth enforced?", Resolution: "Yes, middleware checks token on line 42."}}},
+		Findings: []FindingsV2Finding{},
+	}) {
+		t.Fatal("substantively answered resolvedQuestions should not be inconclusive")
 	}
 	if ReviewResultIsInconclusive(FindingsV2Artifact{
 		Scan:     FindingsV2Scan{Summary: "Checked auth middleware; no bypass found.", ReviewedFiles: []string{"internal/api/auth.go"}},

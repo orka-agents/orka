@@ -21,11 +21,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-const maxSubmitExecutionEventRequestBytes = 256 << 10 // 256 KiB
+const maxSubmitExecutionEventRequestBytes = 256 << 10
 
-// SubmitExecutionEvent handles POST /internal/v1/events/{namespace}/{streamType}/{streamID}.
-// Workers call this to append sanitized execution timeline events.
-//
 //nolint:gocyclo // Event authentication, replay checks, and durable acceptance form one boundary.
 func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	namespace := strings.TrimSpace(c.Params("namespace"))
@@ -77,8 +74,6 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 		event.Type == events.ExecutionEventTypeApprovalExecutionUpdated {
 		return fiber.NewError(fiber.StatusForbidden, "this event must use a controller-owned path")
 	}
-	// The harness identity is controller-owned; workers may submit only their
-	// own call records, bound below to the authenticated Task UID.
 	var eventContent map[string]json.RawMessage
 	usageReport := false
 	if json.Unmarshal(event.Content, &eventContent) == nil {
@@ -120,8 +115,6 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 		return nil
 	}, func(ctx context.Context) error {
 		if usageReport {
-			// The storage client counts a worker usage report only for the
-			// authenticated Task verified above.
 			ctx = store.WithUsageAttribution(ctx, store.UsageAttribution{TaskUID: string(writerTask.UID)})
 		}
 		var err error

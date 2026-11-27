@@ -17,7 +17,6 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
-// Helper function to get counter value
 func getCounterValue(counter *prometheus.CounterVec, labels ...string) float64 {
 	var m dto.Metric
 	if err := counter.WithLabelValues(labels...).Write(&m); err != nil {
@@ -26,11 +25,9 @@ func getCounterValue(counter *prometheus.CounterVec, labels ...string) float64 {
 	return m.GetCounter().GetValue()
 }
 
-// Helper function to get histogram count
 func getHistogramCount(histogram *prometheus.HistogramVec, labels ...string) uint64 {
 	var m dto.Metric
 	observer := histogram.WithLabelValues(labels...)
-	// Type assert Observer to Metric to access Write method
 	metric, ok := observer.(prometheus.Metric)
 	if !ok {
 		return 0
@@ -103,7 +100,6 @@ func TestRecordAPIRequest(t *testing.T) {
 }
 
 func TestMetricsRegistered(t *testing.T) {
-	// Verify that all metrics are not nil (registered during init)
 	metrics := []any{
 		APIRequestsTotal,
 		APIRequestDuration,
@@ -234,8 +230,6 @@ func TestExecutionEventMetricsOwnRequestLabels(t *testing.T) {
 		streamType := c.Params("streamType")
 		RecordExecutionEventAppend(streamType, "ModelMessage", true, 0.01)
 
-		// Reuse Fiber's actual path buffer before another writer records the
-		// same label. No pooling timing or unsafe string conversion is needed.
 		c.Path("/events/xxxx")
 		if streamType != "xxxx" {
 			return fiber.NewError(http.StatusInternalServerError, "fixture did not reuse the borrowed path buffer")
@@ -253,8 +247,6 @@ func TestExecutionEventMetricsOwnRequestLabels(t *testing.T) {
 		t.Fatalf("request status = %d, want 204", response.StatusCode)
 	}
 
-	// A retained borrowed label leaves two series under different hashes but
-	// identical label values, which turns the entire metrics scrape into a 500.
 	scrape := httptest.NewRecorder()
 	promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(
 		scrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))

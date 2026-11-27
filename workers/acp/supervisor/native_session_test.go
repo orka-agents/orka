@@ -111,8 +111,6 @@ func TestSupervisorNativeCaptureStopsChildReplaysAndRetainsUntilDelete(t *testin
 	if _, err := state.runtime.StartPrompt(context.Background(), "new-prompt", "digest", []acp.ContentBlock{acp.Text("continue")}); err == nil {
 		t.Fatal("captured provider admitted another prompt")
 	}
-	// Rebinding controller authority cannot replay the old fence. A fresh
-	// receipt-only operation names the original immutable capture explicitly.
 	cfg.Fence.ControllerEpoch++
 	server.cfg.Fence.ControllerEpoch = cfg.Fence.ControllerEpoch
 	reconcile := request
@@ -495,8 +493,6 @@ func forceNativeReceiptPersistenceFailure(ctx context.Context, paths acp.Session
 	if err != nil {
 		return "", nil, err
 	}
-	// SessionKit has published and verified, but its exact receipt cannot be
-	// durably renamed. This exercises the actual codec unknown boundary.
 	if err := os.Remove(filepath.Join(journal, "receipt.json")); err != nil {
 		return "", nil, err
 	}
@@ -507,8 +503,6 @@ func TestSupervisorTransientNativeCaptureCanRetryRetainedHome(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("descendant exit proof requires Linux")
 	}
-	// A missing rollout is terminal, not transient; see
-	// TestSupervisorMissingNativeSessionFileIsTerminal.
 	for _, failPersistence := range []bool{true} {
 		t.Run(fmt.Sprint(failPersistence), func(t *testing.T) {
 			server, cfg, profile := newTestServer(t, "native-capture")
@@ -586,10 +580,6 @@ func TestSupervisorTransientNativeCaptureCanRetryRetainedHome(t *testing.T) {
 	}
 }
 
-// A Codex session that wrote no rollout has nothing a retry could capture: its
-// writer is already stopped. The capture ends as unsupported and is never
-// offered for retry, so the controller settles with its existing checkpoint or
-// transcript instead of retrying until a drain deadline.
 func TestSupervisorMissingNativeSessionFileIsTerminal(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("descendant exit proof requires Linux")
@@ -611,8 +601,6 @@ func TestSupervisorMissingNativeSessionFileIsTerminal(t *testing.T) {
 		failure.Code != harnessv2.ErrorCodeNativeCaptureUnsupported || failure.Retryable {
 		t.Fatalf("missing session file: %d %s, want a terminal unsupported capture", first.Code, first.Body.String())
 	}
-	// Even once a rollout appears, a fresh capture is not started: the failed
-	// receipt is not retry-ready.
 	writeTestNativeRollout(t, filepath.Join(state.paths.Home, ".codex"))
 	retry := request
 	retry.Metadata = testMetadata(create.Metadata.Fence, "retry-missing-native", false)
@@ -643,7 +631,6 @@ func TestSupervisorNativeCaptureRetryRejectsDeletionReservation(t *testing.T) {
 	state.nativeCapture = capture
 	state.nativeCaptureReceipts = map[harnessv2.OperationID]*nativeSessionCapture{original.Metadata.OperationID: capture}
 	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
-	// DELETE reserves Deleting under the same mutex before touching the home.
 	ready, err := prepareSessionDeletionLocked(state, false, time.Now().UTC())
 	server.mu.Unlock()
 	if err != nil || !ready {

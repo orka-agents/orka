@@ -38,26 +38,17 @@ import (
 
 const serverName = "storage.adapterkit.test"
 
-// memoryArtifacts is an in-memory artifacts.v1 provider. hold, when set,
-// runs at the start of SaveArtifact, so a test can block a call or inspect
-// its context.
 type memoryArtifacts struct {
-	// ArtifactProvider is nil: the adapter serves only the ArtifactStore,
-	// Describe and HealthCheck methods, so the other families are never
-	// called.
 	storagev1.ArtifactProvider
-	dataset string
-	mu      sync.Mutex
-	files   map[storagev1.ArtifactKey]storedArtifact
-	healthy atomic.Bool
-	hold    func(ctx context.Context)
-	// panicDescribe and panicHealth make Describe and HealthCheck panic;
-	// panics counts the panics.
+	dataset       string
+	mu            sync.Mutex
+	files         map[storagev1.ArtifactKey]storedArtifact
+	healthy       atomic.Bool
+	hold          func(ctx context.Context)
 	panicDescribe atomic.Bool
 	panicHealth   atomic.Bool
 	panics        atomic.Int32
-	// healthErr, when set, is the error HealthCheck returns.
-	healthErr atomic.Pointer[error]
+	healthErr     atomic.Pointer[error]
 }
 
 type storedArtifact struct {
@@ -157,7 +148,6 @@ func randomHex(size int) string {
 	return strings.ToLower(new(big.Int).SetBytes(raw).Text(16))
 }
 
-// authority is a test certificate authority.
 type authority struct {
 	cert *x509.Certificate
 	key  *ecdsa.PrivateKey
@@ -186,14 +176,11 @@ func (a authority) pool() *x509.CertPool {
 	return pool
 }
 
-// issue returns a PEM certificate and key signed by a.
 func (a authority) issue(t *testing.T, serial int64, usage x509.ExtKeyUsage, dnsNames []string, uris ...string) ([]byte, []byte) {
 	t.Helper()
 	return a.issueUntil(t, time.Now().Add(time.Hour), serial, usage, dnsNames, uris...)
 }
 
-// issueUntil returns a PEM certificate valid until notAfter and its key,
-// signed by a.
 func (a authority) issueUntil(t *testing.T, notAfter time.Time, serial int64, usage x509.ExtKeyUsage, dnsNames []string,
 	uris ...string) ([]byte, []byte) {
 	t.Helper()
@@ -230,7 +217,6 @@ func writeFile(t *testing.T, path string, content []byte) {
 	require.NoError(t, os.WriteFile(path, content, 0o600))
 }
 
-// adapter is a running Serve.
 type adapter struct {
 	address string
 	probe   string
@@ -239,7 +225,6 @@ type adapter struct {
 	roots   *x509.CertPool
 }
 
-// fixture holds the files and authorities one adapter serves with.
 type fixture struct {
 	dir       string
 	serverCA  authority
@@ -267,7 +252,6 @@ func newFixture(t *testing.T) *fixture {
 	return f
 }
 
-// serveCertificate writes a serving certificate with serial.
 func (f *fixture) serveCertificate(t *testing.T, serial int64) {
 	t.Helper()
 	certPEM, keyPEM := f.serverCA.issue(t, serial, x509.ExtKeyUsageServerAuth, []string{serverName})
@@ -315,7 +299,6 @@ func start(t *testing.T, f *fixture, config adapterkit.Config) *adapter {
 	return running
 }
 
-// tokenSource sends a bearer token the test can change.
 type tokenSource struct{ token atomic.Pointer[string] }
 
 func newTokenSource(token string) *tokenSource {
@@ -330,8 +313,6 @@ func (s *tokenSource) GetRequestMetadata(context.Context, ...string) (map[string
 
 func (*tokenSource) RequireTransportSecurity() bool { return true }
 
-// dial connects to the adapter with an optional client certificate and
-// bearer token.
 func (a *adapter) dial(t *testing.T, certificate *tls.Certificate, token credentials.PerRPCCredentials) *grpc.ClientConn {
 	t.Helper()
 	config := &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: a.roots, ServerName: serverName}
@@ -346,7 +327,6 @@ func (a *adapter) dial(t *testing.T, certificate *tls.Certificate, token credent
 	return conn
 }
 
-// bind describes the adapter and returns a client bound to its dataset.
 func bind(t *testing.T, conn *grpc.ClientConn) *wire.Client {
 	t.Helper()
 	info, server, err := wire.NewClient(conn, wire.ClientConfig{}).DescribeServer(t.Context())
@@ -378,9 +358,6 @@ func (a *adapter) waitReady(t *testing.T, ready bool) {
 	}, 5*time.Second, 10*time.Millisecond, "readiness %v", ready)
 }
 
-// awaitEntry waits for a call to reach the provider's hold. It fails the
-// test with the call's error if the call ends first, and after a deadline if
-// it never arrives, so a call refused before the provider never hangs a test.
 func awaitEntry(t *testing.T, entered <-chan struct{}, result <-chan error) {
 	t.Helper()
 	select {
@@ -392,9 +369,6 @@ func awaitEntry(t *testing.T, entered <-chan struct{}, result <-chan error) {
 	}
 }
 
-// The adapter serves the artifact store over TLS with bearer
-// authentication, through the generated client. The full artifacts.v1 suite
-// runs over the wire against the SQLite provider.
 func TestServeRoundTripsArtifacts(t *testing.T) {
 	f := newFixture(t)
 	running := start(t, f, f.bearerConfig(newMemoryArtifacts()))
@@ -420,8 +394,6 @@ func TestServeRoundTripsArtifacts(t *testing.T) {
 	require.ErrorIs(t, err, storagev1.ErrNotFound)
 }
 
-// Bearer tokens rotate by adding a second key, moving clients to it and
-// removing the first, without restarting the adapter.
 func TestServeRotatesBearerTokens(t *testing.T) {
 	f := newFixture(t)
 	running := start(t, f, f.bearerConfig(newMemoryArtifacts()))
@@ -449,8 +421,6 @@ func TestServeRotatesBearerTokens(t *testing.T) {
 		5*time.Second, 10*time.Millisecond, "with no tokens left every call is refused")
 }
 
-// A token file the adapter cannot inspect is a failed reload, not a removed
-// token: the adapter keeps its last good tokens and reports the failure.
 func TestServeKeepsTokensItCannotInspect(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the directory permissions this test relies on")
@@ -460,8 +430,6 @@ func TestServeKeepsTokensItCannotInspect(t *testing.T) {
 	client := bind(t, running.dial(t, nil, newTokenSource("first-token")))
 	require.NoError(t, client.HealthCheck(t.Context()))
 
-	// A listable directory without search permission: the names can be
-	// read, but no file in it can be inspected.
 	require.NoError(t, os.Chmod(f.tokenDir, 0o400))
 	t.Cleanup(func() { _ = os.Chmod(f.tokenDir, 0o700) })
 	require.Eventually(t, func() bool {
@@ -476,8 +444,6 @@ func TestServeKeepsTokensItCannotInspect(t *testing.T) {
 		5*time.Second, 10*time.Millisecond, "a token really removed is refused")
 }
 
-// peerSerial returns the serial of the certificate the adapter presents to a
-// new connection.
 func (a *adapter) peerSerial(t *testing.T) int64 {
 	t.Helper()
 	conn, err := tls.Dial("tcp", a.address, &tls.Config{
@@ -488,8 +454,6 @@ func (a *adapter) peerSerial(t *testing.T) int64 {
 	return conn.ConnectionState().PeerCertificates[0].SerialNumber.Int64()
 }
 
-// The adapter serves a renewed certificate to new connections without a
-// restart, and keeps its certificate when the files hold an invalid one.
 func TestServeReloadsTheServingCertificate(t *testing.T) {
 	f := newFixture(t)
 	running := start(t, f, f.bearerConfig(newMemoryArtifacts()))
@@ -508,8 +472,6 @@ func TestServeReloadsTheServingCertificate(t *testing.T) {
 	require.Equal(t, int64(200), running.peerSerial(t), "an invalid certificate never replaces a valid one")
 }
 
-// With mTLS, a client needs a certificate from the client CA that names an
-// allowed client, and the CA bundle can rotate without a restart.
 func TestServeAuthenticatesClientCertificates(t *testing.T) {
 	f := newFixture(t)
 	running := start(t, f, f.mtlsConfig(newMemoryArtifacts()))
@@ -539,11 +501,8 @@ func TestServeAuthenticatesClientCertificates(t *testing.T) {
 		"the old CA stays trusted while the bundle holds both")
 }
 
-// A CA bundle with any malformed entry never replaces the trusted CAs, so a
-// rotation bundle with a broken copy of the old CA does not drop it.
 func TestServeRefusesPartlyInvalidCABundles(t *testing.T) {
 	broken := func(t *testing.T, f *fixture) []byte {
-		// A PEM block that decodes but holds no valid certificate.
 		return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not a certificate")})
 	}
 	undecodable := func(t *testing.T, f *fixture) []byte {
@@ -572,14 +531,9 @@ func TestServeRefusesPartlyInvalidCABundles(t *testing.T) {
 	}
 }
 
-// A connection outlives its handshake, so every call verifies the client
-// certificate again: removing its CA from the bundle, or the certificate
-// expiring, stops a connection that is already open.
 func TestServeReverifiesClientCertificatesOnEveryCall(t *testing.T) {
 	f := newFixture(t)
 	running := start(t, f, f.mtlsConfig(newMemoryArtifacts()))
-	// The adapter loads the bundle as it starts; rewriting it before then
-	// could hand the startup load a partly written file.
 	running.waitReady(t, true)
 
 	rotated := newAuthority(t, "rotated client CA")
@@ -604,7 +558,6 @@ func TestServeReverifiesClientCertificatesOnEveryCall(t *testing.T) {
 		10*time.Second, 50*time.Millisecond, "the open connection is refused once its certificate expires")
 }
 
-// With both methods configured, a call must pass both.
 func TestServeRequiresBothMethodsWhenBothAreConfigured(t *testing.T) {
 	f := newFixture(t)
 	config := f.mtlsConfig(newMemoryArtifacts())
@@ -621,8 +574,6 @@ func TestServeRequiresBothMethodsWhenBothAreConfigured(t *testing.T) {
 	require.ErrorIs(t, err, storagev1.ErrUnavailable, "a token without a certificate cannot connect")
 }
 
-// The probe port reports liveness, readiness from the provider's health and
-// metrics without request content.
 func TestServeProbesAndMetrics(t *testing.T) {
 	f := newFixture(t)
 	provider := newMemoryArtifacts()
@@ -661,9 +612,6 @@ func TestServeProbesAndMetrics(t *testing.T) {
 	running.waitReady(t, true)
 }
 
-// The probe port closes a connection whose peer stalls a request body or
-// leaves the connection idle, so a probe connection never stays open
-// indefinitely.
 func TestServeClosesStalledAndIdleProbeConnections(t *testing.T) {
 	t.Cleanup(adapterkit.SetProbeTimeouts(200*time.Millisecond, 200*time.Millisecond))
 	f := newFixture(t)
@@ -692,7 +640,6 @@ func TestServeClosesStalledAndIdleProbeConnections(t *testing.T) {
 	}
 }
 
-// syncBuffer is a bytes.Buffer safe for a logger's concurrent writes.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -710,8 +657,6 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// A failed readiness check logs why the adapter is not ready without the
-// provider's error text or panic value, which can carry backend credentials.
 func TestServeNeverLogsProviderReadinessErrors(t *testing.T) {
 	f := newFixture(t)
 	provider := newMemoryArtifacts()
@@ -738,8 +683,6 @@ func TestServeNeverLogsProviderReadinessErrors(t *testing.T) {
 	require.NotContains(t, logs.String(), "panic-secret")
 }
 
-// Stopping reports not ready at once, lets a call in progress finish and
-// then returns.
 func TestServeStopsGracefully(t *testing.T) {
 	f := newFixture(t)
 	provider := newMemoryArtifacts()
@@ -782,8 +725,6 @@ func TestServeStopsGracefully(t *testing.T) {
 	require.Error(t, err, "the storage port is closed")
 }
 
-// A provider can settle a commit it already sent after the caller's context
-// ends, within the adapter's settle timeout.
 func TestSettleContextOutlivesTheCaller(t *testing.T) {
 	f := newFixture(t)
 	provider := newMemoryArtifacts()
@@ -830,7 +771,6 @@ func TestSettleContextOutlivesTheCaller(t *testing.T) {
 		"outside Serve the default settle timeout applies")
 }
 
-// Serve refuses an incomplete or insecure configuration before it listens.
 func TestServeValidatesItsConfiguration(t *testing.T) {
 	f := newFixture(t)
 	provider := newMemoryArtifacts()
@@ -868,9 +808,6 @@ func TestServeValidatesItsConfiguration(t *testing.T) {
 	}
 }
 
-// A provider that panics while the adapter checks readiness makes it not
-// ready instead of ending the process, from the first check on, and it
-// becomes ready again once the provider recovers.
 func TestServeSurvivesProviderPanicsInReadinessChecks(t *testing.T) {
 	f := newFixture(t)
 	provider := newMemoryArtifacts()

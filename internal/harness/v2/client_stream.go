@@ -12,10 +12,6 @@ import (
 	"time"
 )
 
-// PromptStream is one non-reconnectable prompt response. Decode must be called
-// until io.EOF so the client can prove that the stream contained accepted and
-// exactly one terminal event with no trailing frames. A transport disconnect is
-// never converted into a reconnect or replay.
 type PromptStream struct {
 	client     *Client
 	ctx        context.Context
@@ -35,7 +31,6 @@ type PromptStream struct {
 	terminal     *Event
 }
 
-// PromptStreamSummary is a stable snapshot after or during stream processing.
 type PromptStreamSummary struct {
 	Accepted      bool
 	EventCount    uint64
@@ -43,8 +38,6 @@ type PromptStreamSummary struct {
 	WriteEvidence RequestWriteEvidence
 }
 
-// StartPrompt opens a single v2 NDJSON prompt stream. It deliberately has no
-// reconnect parameter and performs no automatic retry.
 func (c *Client) StartPrompt(ctx context.Context, sessionID RuntimeSessionID, request StartPromptRequest) (*PromptStream, error) {
 	const operation = "start_prompt"
 	if err := c.requireMutationAuth(operation); err != nil {
@@ -172,9 +165,6 @@ func (c *Client) StartPrompt(ctx context.Context, sessionID RuntimeSessionID, re
 	}
 }
 
-// StreamPrompt consumes a complete prompt stream and invokes emit for each
-// validated event. It returns only after clean EOF following exactly one
-// terminal event.
 func (c *Client) StreamPrompt(
 	ctx context.Context,
 	sessionID RuntimeSessionID,
@@ -206,9 +196,6 @@ func (c *Client) StreamPrompt(
 	}
 }
 
-// Decode returns the next validated event. After the body reaches EOF it calls
-// EventStreamValidator.Finish, so EOF is successful only after accepted and one
-// terminal event were observed.
 func (s *PromptStream) Decode() (Event, error) {
 	if s == nil || s.decoder == nil {
 		return Event{}, clientError("prompt_stream", ClientErrorConfiguration, "prompt stream is not initialized", ErrClientConfiguration)

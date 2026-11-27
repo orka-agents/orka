@@ -25,8 +25,6 @@ describe('StatusDot', () => {
   })
 
   it('preserves the literal phase text for unknown phases (no silent relabel)', () => {
-    // Regression guard: an unrecognized/custom backend phase must keep its own
-    // text — only the dot *color* falls back to Pending, never the label.
     render(<StatusDot phase="Terminating" />)
     expect(screen.getByText('Terminating')).toBeInTheDocument()
     expect(screen.queryByText('Pending')).not.toBeInTheDocument()
@@ -63,8 +61,6 @@ describe('StatusDot', () => {
 
   it('can hide the visible label but still expose it to screen readers', () => {
     render(<StatusDot phase="Running" hideLabel />)
-    // Label text remains in the accessibility tree (sr-only), so color is
-    // never the only signal — it's just visually hidden.
     expect(screen.getByText('Running')).toHaveClass('sr-only')
     expect(screen.getByTestId('status-dot')).toBeInTheDocument()
   })

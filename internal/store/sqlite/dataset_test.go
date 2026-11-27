@@ -18,10 +18,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// priorReleaseStore stores the sealed writes of a storage client without the
-// client's write envelope, as the earlier releases whose layout a fixture
-// loads stored them. Those releases wrote without envelopes, and the store
-// refuses an envelope for a layout it cannot serve.
 type priorReleaseStore struct{ *Store }
 
 func (s priorReleaseStore) CreateSealedAgentExecutionSnapshot(_ context.Context, snapshot storagev1.SealedAgentExecutionSnapshot) error {
@@ -40,8 +36,6 @@ func (s priorReleaseStore) StageSealedNativeSessionImport(
 	return s.Store.StageSealedNativeSessionImport(context.Background(), request)
 }
 
-// priorReleaseFence is the fence the client puts on the envelopes that
-// priorReleaseStore drops.
 type priorReleaseFence struct{}
 
 func (priorReleaseFence) WriteFence(context.Context, string) (string, storagev1.ControllerEpochFence, error) {
@@ -53,8 +47,6 @@ func loadPriorSchemaFixture(t *testing.T) string {
 	path, db := historicalSchemaDB(t, "abd2c040")
 	seedMigrationRecords(t, db, path)
 	s := NewStore(db, path)
-	// The storage client seals with the record formats earlier releases used;
-	// the pre-metadata layout has no bootstrap history to complete.
 	prior := priorReleaseStore{Store: s}
 	c, err := storageclient.New(storageclient.Options{State: prior, Artifacts: prior, Embedded: prior, Fences: priorReleaseFence{}})
 	require.NoError(t, err)
@@ -64,8 +56,6 @@ func loadPriorSchemaFixture(t *testing.T) string {
 		TaskUID: "fixture-task-uid", Digest: store.CanonicalAgentExecutionSnapshotDigest(body), SchemaVersion: 1, Body: body,
 	}))
 	require.NoError(t, c.PutConnectorCredential(t.Context(), testCredentialRef(), store.ConnectorCredential{AccessToken: "fixture-token-not-a-credential"}))
-	// Written through SQL that the historical layout accepts: the current
-	// store's statements only fit the current layout.
 	_, err = db.Exec(`INSERT INTO artifacts(namespace, task_name, filename, content_type, size, data) VALUES('fixture', 'task', 'proof.txt', 'text/plain', 17, ?)`,
 		[]byte("retained artifact"))
 	require.NoError(t, err)
@@ -75,8 +65,6 @@ func loadPriorSchemaFixture(t *testing.T) string {
 	return path
 }
 
-// Capture every application/control/artifact table, not just records selected
-// for round-trip assertions. No plaintext from encrypted rows is emitted.
 func applicationRows(t *testing.T, db *sql.DB) map[string][]string {
 	t.Helper()
 	rows, err := db.Query(`SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' AND name <> 'store_dataset' ORDER BY name`)
@@ -120,10 +108,6 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	require.NoError(t, err)
 	before := applicationRows(t, raw)
 	require.NoError(t, raw.Close())
-	// The upgrade drops the empty harness v1 tables, adds an empty operation
-	// receipt table, the empty AHP tables and the empty sign-in session table,
-	// and gives existing results and artifacts the write stamp (0, 0); every
-	// other value is unchanged.
 	for _, retired := range []string{"harness_v1_attempts", "runtime_sessions"} {
 		require.Contains(t, before, retired)
 		require.Empty(t, before[retired])
@@ -210,9 +194,6 @@ func TestDatasetFreshAndInterruptedBootstrap(t *testing.T) {
 	}
 }
 
-// immutable=1 reads only the main database, without replaying or checkpointing
-// its WAL. This proves metadata has crossed the startup synchronization boundary
-// while the production store is still open, rather than on graceful close.
 func requireCheckpointedDataset(t *testing.T, path, id string, complete bool) {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+path+"?immutable=1")
@@ -267,14 +248,10 @@ func TestDatasetCompletionCheckpointBusyFailsClosedAndRetries(t *testing.T) {
 	require.Zero(t, complete)
 	_, err = s.db.Exec(`PRAGMA busy_timeout=20`)
 	require.NoError(t, err)
-	// Startup closes the store when completion fails, so consumers never
-	// receive a store whose bootstrap history is not synchronized.
 	_, err = activateSnapshotKey(t, s, testSnapshotKey)
 	require.ErrorContains(t, err, "checkpoint incomplete")
 	requireCheckpointedDataset(t, s.dbPath, info.ID, false)
 	require.NoError(t, tx.Rollback())
-	// The first completion transaction committed. A retry must synchronize even
-	// when its read already observes bootstrap_complete=1.
 	activateTestKey(t, s)
 	requireCheckpointedDataset(t, s.dbPath, info.ID, true)
 }

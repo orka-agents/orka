@@ -331,8 +331,6 @@ func TestTaskSpecAgentRuntimeField(t *testing.T) {
 }
 
 func TestAgentRuntimeRequiredForAgentType(t *testing.T) {
-	// When type is "agent", AgentRuntime and AgentRef should be set for proper configuration.
-	// This tests the structural expectation (not webhook validation).
 	task := TaskSpec{
 		Type: TaskTypeAgent,
 	}
@@ -344,13 +342,11 @@ func TestAgentRuntimeRequiredForAgentType(t *testing.T) {
 		t.Error("AgentRef should be nil when not explicitly set")
 	}
 
-	// A well-formed agent task should have AgentRef
 	task.AgentRef = &AgentReference{Name: "my-agent"}
 	if task.AgentRef == nil {
 		t.Error("AgentRef should not be nil after being set")
 	}
 
-	// And optionally AgentRuntime for overrides
 	maxTurns := int32(20)
 	task.AgentRuntime = &AgentRuntimeSpec{MaxTurns: &maxTurns}
 	if task.AgentRuntime == nil {
@@ -359,7 +355,6 @@ func TestAgentRuntimeRequiredForAgentType(t *testing.T) {
 }
 
 func TestAgentRuntimeTypeAssignment(t *testing.T) {
-	// Verify AgentRuntimeType can be used in AgentCLIRuntime
 	tests := []struct {
 		name        string
 		runtimeType AgentRuntimeType

@@ -9,8 +9,6 @@ real_jq="$(command -v jq)"
 real_mktemp="$(command -v mktemp)"
 mkdir "${test_root}/bin"
 
-# JSON is valid YAML; this structural schema has the same shape as a large
-# generated CRD without relying on a live API server or a YAML parser.
 python3 - "${test_root}/target.json" <<'PY'
 import json
 import sys

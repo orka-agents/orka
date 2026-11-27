@@ -7,7 +7,6 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { displayedTaskResource } from '@/lib/task-resource'
 import type { Task } from '@/schemas/task'
 
-// Theme colors that already have dark-mode values; there are no code tokens.
 const TOKEN = {
   key: 'text-primary',
   string: 'text-status-succeeded',
@@ -18,7 +17,6 @@ const TOKEN = {
 
 const KEY_LINE = /^(\s*)(- )?("(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^\s#'"-][^:#]*?|-[^\s:#][^:#]*?):(?=\s|$)(.*)$/
 const LIST_ITEM = /^(\s*)- (.*)$/
-// A block scalar header: `|` or `>`, then a chomping sign and indent digit in either order (`|-`, `|2-`).
 const BLOCK_INDICATOR = /^[|>](?:[1-9][-+]?|[-+][1-9]?)?$/
 
 function valueToken(value: string): keyof typeof TOKEN {
@@ -35,10 +33,6 @@ function Value({ text }: { text: string }) {
   return <>{lead}<span className={TOKEN[valueToken(value)]}>{value}</span></>
 }
 
-/**
- * Colors the YAML that the yaml library writes: keys, scalars by type, list
- * dashes, and block scalars (`|`, `>`), whose lines are all text.
- */
 function highlightYaml(text: string): ReactNode[] {
   let blockIndent: number | null = null
   const lines = text.split('\n')
@@ -67,7 +61,6 @@ function highlightYaml(text: string): ReactNode[] {
         const [, space, rest] = item
         content = <>{space}<span className={TOKEN.punctuation}>- </span><Value text={rest} /></>
       } else {
-        // A long scalar the writer folded onto the next line.
         content = <span className={TOKEN.string}>{line}</span>
       }
     }
@@ -79,11 +72,8 @@ type Stringify = (value: unknown) => string
 
 const loadYaml = () => import('yaml').then((yaml): Stringify => yaml.stringify)
 
-/** The Task resource as YAML. The yaml library loads only when this view opens. */
 export function TaskYaml({ task, load = loadYaml }: { task: Task; load?: () => Promise<Stringify> }) {
   const [stringify, setStringify] = useState<Stringify | null>(null)
-  // A failed chunk load (a redeploy, a dropped connection) offers a retry
-  // instead of a skeleton that never resolves.
   const [failed, setFailed] = useState(false)
   const [attempt, setAttempt] = useState(0)
   useEffect(() => {

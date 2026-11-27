@@ -2,16 +2,11 @@ import { describe, it, expect } from 'vitest'
 import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 
-/**
- * Phase 0 token invariants — parsed directly from index.css so the design
- * system's structural guarantees are enforced in CI, not just by eye.
- */
 const css = readFileSync(
   path.resolve(__dirname, './index.css'),
   'utf8',
 )
 
-/** Extract the body of a top-level block (`@theme {…}` or `.dark {…}`). */
 function block(selector: string): string {
   const start = css.indexOf(selector)
   expect(start, `selector ${selector} present`).toBeGreaterThan(-1)
@@ -32,7 +27,6 @@ function tokenValue(body: string, name: string): string | undefined {
   return m?.[1].trim()
 }
 
-/** WCAG 2 contrast ratio of two #rrggbb colors. */
 function contrast(a: string, b: string): number {
   const luminance = (hex: string) => {
     const [r, g, bl] = [1, 3, 5].map((i) => {
@@ -45,7 +39,6 @@ function contrast(a: string, b: string): number {
   return (high + 0.05) / (low + 0.05)
 }
 
-/** `color` at `alpha` over `base`, as #rrggbb: how a Tailwind `bg-x/10` tint renders. */
 function over(color: string, base: string, alpha: number): string {
   const channel = (hex: string, i: number) => parseInt(hex.slice(i, i + 2), 16)
   return `#${[1, 3, 5]
@@ -56,19 +49,15 @@ function over(color: string, base: string, alpha: number): string {
 
 describe('index.css design tokens', () => {
   const themeBody = block('@theme')
-  // Anchored to the rule itself: the header comment also mentions ".dark".
   const darkBody = block('\n.dark {')
 
   it('defines every CSS variable the components read', () => {
-    // A variable that is never defined makes its whole declaration invalid, so a
-    // toast that reads one is drawn with no background at all.
     const defined = new Set([...css.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1]))
     const sources = readdirSync(__dirname, { recursive: true, encoding: 'utf8' })
       .filter((file) => /\.(tsx?|css)$/.test(file) && !/\.test\.tsx?$/.test(file))
     for (const file of sources) {
       const text = readFileSync(path.resolve(__dirname, file), 'utf8')
       for (const [, name] of text.matchAll(/var\((--[\w-]+)/g)) {
-        // Radix sets its --radix-* variables on the element at runtime.
         if (name.startsWith('--radix-')) continue
         expect(defined.has(name), `${file} reads ${name}`).toBe(true)
       }
@@ -129,7 +118,6 @@ describe('index.css design tokens', () => {
   it('gives native controls the color scheme of the app theme', () => {
     expect(tokenValue(block('\n:root {'), 'color-scheme')).toBe('light')
     expect(tokenValue(darkBody, 'color-scheme')).toBe('dark')
-    // Equal specificity, so the dark rule must come later to win.
     expect(css.indexOf('\n:root {')).toBeLessThan(css.indexOf('\n.dark {'))
   })
 
@@ -149,7 +137,6 @@ describe('index.css design tokens', () => {
         const color = tokenValue(body, `--color-type-${type}`)!
         const card = tokenValue(body, '--color-card')!
         expect(contrast(color, card)).toBeGreaterThanOrEqual(4.5)
-        // typeStyle() badges draw the label on a 10% tint of the same colour.
         expect(contrast(color, over(color, card, 0.1))).toBeGreaterThanOrEqual(4.5)
       }
     },

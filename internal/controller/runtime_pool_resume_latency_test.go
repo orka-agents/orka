@@ -24,8 +24,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// runtimePoolPatchCounter counts metadata/spec patches of RuntimePools (not
-// status writes) made through the wrapped client.
 type runtimePoolPatchCounter struct {
 	client.Client
 	mu      sync.Mutex
@@ -55,8 +53,6 @@ func countRuntimePoolPatches(f *externalRuntimePoolFixture) *runtimePoolPatchCou
 	return counter
 }
 
-// The admission pass records the instance evidence and the bootstrap
-// credential binding in one pool write instead of two.
 func TestExternalRuntimePoolAdmissionBindsEvidenceAndCredentialsInOneWrite(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	_, pod := f.materialize(t)
@@ -67,9 +63,6 @@ func TestExternalRuntimePoolAdmissionBindsEvidenceAndCredentialsInOneWrite(t *te
 	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || pool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting {
 		t.Fatalf("attested startup did not serve: %s/%s: %s", pool.Status.Lifecycle, pool.Status.AdmissionState, pool.Status.Message)
 	}
-	// Before: one patch for the evidence, one for the binding, and one for
-	// recording externalRuntimeServedAnnotation after serving. Merging
-	// evidence+binding brings the first admission pass down to 2 patches.
 	if got := counter.take(); got != 2 {
 		t.Fatalf("RuntimePool patches on the admission pass = %d, want 2", got)
 	}
@@ -87,9 +80,6 @@ func TestExternalRuntimePoolAdmissionBindsEvidenceAndCredentialsInOneWrite(t *te
 	}
 }
 
-// Merging the writes keeps both conflict checks: credentials bound to another
-// workload still close admission before bootstrap, with the evidence recorded
-// and the foreign binding untouched, exactly as with two writes.
 func TestExternalRuntimePoolAdmissionKeepsBootstrapBindingConflict(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	f.publish(t)
@@ -117,8 +107,6 @@ func TestExternalRuntimePoolAdmissionKeepsBootstrapBindingConflict(t *testing.T)
 	}
 }
 
-// stopExternalRuntime retires the served instance of f for a scale-to-zero
-// and reports it stopped, leaving the Pod for the caller to remove.
 func stopExternalRuntime(t *testing.T, f *externalRuntimePoolFixture) {
 	t.Helper()
 	pool := runtimePoolTestGetPool(t, f.r, f.pool)
@@ -136,8 +124,6 @@ func stopExternalRuntime(t *testing.T, f *externalRuntimePoolFixture) {
 	}
 }
 
-// reconcileExternalRuntimeUntilStopped reconciles a retiring pool whose
-// instance is gone until it reports Stopped.
 func reconcileExternalRuntimeUntilStopped(t *testing.T, f *externalRuntimePoolFixture) corev1alpha1.RuntimePool {
 	t.Helper()
 	var pool corev1alpha1.RuntimePool
@@ -151,10 +137,6 @@ func reconcileExternalRuntimeUntilStopped(t *testing.T, f *externalRuntimePoolFi
 	return pool
 }
 
-// The consumed private credentials rotate when the stop is proven, so the
-// cold boot that resumes the workspace publishes on its first pass. The
-// rotation still waits for the independent proof, and the resumed request
-// carries credentials the stopped instance never had.
 func TestExternalRuntimePoolRotatesConsumedCredentialsWhenStopIsProven(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	workspace, pod := f.serve(t)
@@ -162,7 +144,6 @@ func TestExternalRuntimePoolRotatesConsumedCredentialsWhenStopIsProven(t *testin
 	oldAuth := runtimePoolTestPrivateAuthSecret(t, f.r, f.pool)
 	stopExternalRuntime(t, f)
 
-	// The provider asserts the stop, but the Pod still exists: nothing rotates.
 	runtimePoolReconcile(t, f.r, f.pool)
 	pool := runtimePoolTestGetPool(t, f.r, f.pool)
 	if pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped {
@@ -175,8 +156,6 @@ func TestExternalRuntimePoolRotatesConsumedCredentialsWhenStopIsProven(t *testin
 		t.Fatal("credentials rotated before the stop was proven")
 	}
 
-	// The independent proof: the exact Pod is gone. The same pass reports
-	// Stopped and rotates.
 	if err := f.r.Delete(context.Background(), &pod); err != nil {
 		t.Fatal(err)
 	}
@@ -201,9 +180,6 @@ func TestExternalRuntimePoolRotatesConsumedCredentialsWhenStopIsProven(t *testin
 		t.Fatalf("consumed Secret still exists after rotation: %v", err)
 	}
 
-	// The next cold boot publishes on its first pass, with the rotated
-	// bootstrap material. Before this change it first spent two passes
-	// rotating.
 	pool.Spec.DesiredReplicas = 1
 	if err := f.r.Update(context.Background(), &pool); err != nil {
 		t.Fatal(err)
@@ -227,8 +203,6 @@ func TestExternalRuntimePoolRotatesConsumedCredentialsWhenStopIsProven(t *testin
 	}
 }
 
-// A cleanup-only controller never mints runtime credentials, so a proven stop
-// it observes leaves the rotation to the controller that cold-boots next.
 func TestExternalRuntimePoolDoesNotRotateCredentialsForCleanupOnlyController(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	_, pod := f.serve(t)
@@ -244,14 +218,6 @@ func TestExternalRuntimePoolDoesNotRotateCredentialsForCleanupOnlyController(t *
 	}
 }
 
-// A published cold boot is a wait, not a failure, until the provider reports
-// the new allocation. Core re-admits the publication's generation before the
-// provider's next status write lands, so passes in between still see the
-// predecessor's stopped allocation. They used to report Degraded ("stopped
-// allocation does not prove the current runtime terminated"), which is the
-// reopenedFrom=Degraded of spare and shared resumes in round 9c: those
-// providers report the new allocation only with its startup evidence, so the
-// label lasted until admission. The wait still never publishes again.
 func TestExternalRuntimePoolPublishedResumeWaitsForProviderWithoutDegrading(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	_, pod := f.serve(t)
@@ -272,9 +238,6 @@ func TestExternalRuntimePoolPublishedResumeWaitsForProviderWithoutDegrading(t *t
 		t.Fatalf("cold boot did not publish the successor request: %#v", request)
 	}
 
-	// Advance the workspace generation explicitly (the fake client does not bump
-	// Generation on spec updates) and re-admit it in Core while the provider has
-	// not yet reported the new allocation.
 	prevObserved := workspace.Status.ObservedGeneration
 	workspace.Generation++
 	workspace.Spec.CoreAdmission.AdmittedGeneration = workspace.Generation
@@ -314,8 +277,6 @@ func TestExternalRuntimePoolPublishedResumeWaitsForProviderWithoutDegrading(t *t
 		}
 	}
 
-	// A stopped allocation that does not continue the published request is
-	// still a failure.
 	workspace.Status.Allocation.Sequence = request.Sequence
 	if err := f.r.Status().Update(context.Background(), workspace); err != nil {
 		t.Fatal(err)
@@ -327,8 +288,6 @@ func TestExternalRuntimePoolPublishedResumeWaitsForProviderWithoutDegrading(t *t
 	}
 }
 
-// runtimePoolStatusWriteCounter counts RuntimePool status writes made
-// through the wrapped client, and how many of them conflicted.
 type runtimePoolStatusWriteCounter struct {
 	client.Client
 	mu        sync.Mutex
@@ -373,10 +332,6 @@ func (w *runtimePoolCountingStatusWriter) Update(ctx context.Context, object cli
 	return w.counter.record(object, w.SubResourceWriter.Update(ctx, object, options...))
 }
 
-// resumeExternalRuntime takes a served pool through a proven stop and the
-// next cold boot, as a resume does: the replica changes advance the pool's
-// generation, core re-admits the published successor, and the provider
-// reports its attested startup on a new Pod. It returns that Pod.
 func resumeExternalRuntime(t *testing.T, f *externalRuntimePoolFixture, oldPod corev1.Pod) corev1.Pod {
 	t.Helper()
 	ctx := context.Background()
@@ -385,8 +340,6 @@ func resumeExternalRuntime(t *testing.T, f *externalRuntimePoolFixture, oldPod c
 		t.Fatal(err)
 	}
 	pool := reconcileExternalRuntimeUntilStopped(t, f)
-	// The API server advances the generation for the scale-down and again for
-	// the scale-up; the fake client does neither.
 	pool.Generation += 2
 	pool.Spec.DesiredReplicas = 1
 	if err := f.r.Update(ctx, &pool); err != nil {
@@ -425,20 +378,6 @@ func resumeExternalRuntime(t *testing.T, f *externalRuntimePoolFixture, oldPod c
 	return pod
 }
 
-// The probe→Serving sequence of a resumed runtime, pinned pass by pass.
-//
-// In round 11 the provider's Ready report woke the pool to admit the resumed
-// runtime and, at the same moment, the waiting Task to finish its workspace
-// handshake. That handshake re-stamped the pool's image provenance because
-// the resume's replica change had advanced the pool's generation. The status
-// write landed while the pool probed, so the pool's optimistic Serving write
-// conflicted and the whole admission pass (attest, bootstrap, probe, fence)
-// ran again: admit.probeToServingMs rose from 179 to 434 ms on private
-// resumes and from 242 to 510 ms on shared ones.
-//
-// Here the Task's handshake runs inside every probe. A ready supervisor must
-// serve on the first pass and a booting one on the pass its one-second
-// re-probe starts, with one probe per pass and no conflicted status write.
 func TestExternalRuntimePoolResumeServesWhileTheTaskHandshakeLands(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -453,7 +392,6 @@ func TestExternalRuntimePoolResumeServesWhileTheTaskHandshakeLands(t *testing.T)
 			_, oldPod := f.serve(t)
 			taskWrites := &runtimePoolStatusWriteCounter{Client: f.r.Client}
 			task := &TaskReconciler{Client: taskWrites}
-			// The first turn's Task proved the pool's image provenance.
 			served := runtimePoolTestGetPool(t, f.r, f.pool)
 			if err := task.recordACPRuntimePoolImageProvenance(ctx, &served); err != nil {
 				t.Fatal(err)
@@ -525,7 +463,6 @@ func TestExternalRuntimePoolResumeServesWhileTheTaskHandshakeLands(t *testing.T)
 			if handshakes != wantHandshakes {
 				t.Fatalf("Task handshakes = %d, want %d", handshakes, wantHandshakes)
 			}
-			// The proof from the first turn still holds; the Task wrote nothing.
 			if writes, _ := taskWrites.take(); writes != 0 {
 				t.Fatalf("Task provenance writes during the resumed admission = %d, want 0", writes)
 			}
@@ -536,8 +473,6 @@ func TestExternalRuntimePoolResumeServesWhileTheTaskHandshakeLands(t *testing.T)
 	}
 }
 
-// The Task stamps image provenance once per pool. A replica-only generation
-// change keeps the proof; a pool without a true proof is still stamped.
 func TestRecordACPRuntimePoolImageProvenanceKeepsAnEarlierGenerationProof(t *testing.T) {
 	ctx := context.Background()
 	f := newExternalRuntimePoolFixture(t)

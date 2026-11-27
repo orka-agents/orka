@@ -1,10 +1,6 @@
 import type { Tool } from '@/schemas/tool'
 import { ago, DEMO_NAMESPACE, uid } from '../shared'
 
-// Built-in tools are listed in every namespace with the flat shape the API
-// server returns for them; custom tools are Tool CRs in the demo namespace.
-// Built-in descriptions and schemas mirror internal/tools.
-
 export interface BuiltinTool {
   name: string
   builtin: true

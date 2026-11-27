@@ -29,98 +29,53 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// acpWorkspaceProviderControllerName is the reserved adapter identity for the
-// in-tree ACP RuntimePool execution-workspace adapter. Only
-// ExecutionWorkspaceProvider objects carrying this controllerName may back
-// class-selected ACP RuntimeSessions.
 const acpWorkspaceSuspendDataOnly = "DataOnly"
 
 const acpWorkspaceProviderControllerName = "acp.workspace.orka.ai/runtime-pool"
 
-// acpWorkspaceControllerLabelValue is the label-safe encoding of the reserved
-// controllerName (label values cannot contain '/'); it marks ACP-owned
-// ExecutionWorkspaces for the adapter and the retention reconciler.
 const acpWorkspaceControllerLabelValue = "runtime-pool.acp.workspace.orka.ai"
 
-// ACPWorkspaceClassDeletionPolicy freezes the class deletion dispositions that
-// finalization must honor independently for each retained-data category.
 type ACPWorkspaceClassDeletionPolicy struct {
 	ProviderResources string
 	PersistentVolumes string
 	Checkpoints       string
 }
 
-// ACPSandboxDurableVolume is the frozen durable workspace PVC shape for a
-// suspend-capable agent-sandbox class binding.
 type ACPSandboxDurableVolume struct {
 	StorageClassName string
-	// StorageClassUID pins the exact StorageClass whose Delete reclaim
-	// semantics were validated at class resolution; provisioning reverifies
-	// it so a same-name replacement class cannot silently retain volumes.
-	StorageClassUID string
-	AccessModes     []string
-	Capacity        string
+	StorageClassUID  string
+	AccessModes      []string
+	Capacity         string
 }
 
-// ACPWorkspaceClassBinding is the frozen controller-first class identity for
-// one ACP execution-workspace binding. Every field is immutable snapshot
-// input: live class or provider drift is rejected against these exact values
-// instead of silently rebinding.
 type ACPWorkspaceClassBinding struct {
-	Name               string
-	UID                string
-	Generation         int64
-	ProfileHash        string
-	ProviderName       string
-	ProviderUID        string
-	ProviderGeneration int64
-	// External bindings pin the installed lifecycle contract and both opaque
-	// provider-owned parameter objects. Empty ControllerName identifies only
-	// the legacy snapshot format retained for migration.
+	Name                     string
+	UID                      string
+	Generation               int64
+	ProfileHash              string
+	ProviderName             string
+	ProviderUID              string
+	ProviderGeneration       int64
 	ControllerName           string
 	LifecycleContractVersion string
 	ProviderConfigRef        *workspacev1alpha1.TypedObjectReference
 	ProviderConfigBinding    *workspacev1alpha1.ImmutableObjectBinding
 	ParametersRef            *workspacev1alpha1.TypedObjectReference
 	ParametersBinding        *workspacev1alpha1.ImmutableObjectBinding
-	// ProviderConfigUID pins the exact cluster-scoped RuntimeProviderConfig
-	// that selected the physical backend: recreating the immutable config
-	// under the same name must read as drift, never as a silent backend swap.
-	ProviderConfigUID string
-	// EffectiveOnDetach is the validated detach action for this Task: the
-	// Task-requested value when the class allows it, otherwise the class
-	// default. Delete is always executable; Suspend is executable only for
-	// session-reused workspaces whose backend profile permits DataOnly
-	// suspension.
-	EffectiveOnDetach string
-	// SuspendMode freezes the operator-permitted suspension scope from the
-	// class profile. Empty means suspension is not permitted; DataOnly is the
-	// only supported value.
-	SuspendMode string
-	// SandboxVolume freezes the durable workspace PVC shape for
-	// suspend-capable agent-sandbox classes. It is nil for every other class.
-	SandboxVolume *ACPSandboxDurableVolume
-	// MaxSuspendedWorkspaces freezes the class retention cap. Nil means
-	// per-workspace age must be bounded by idleTimeout or maxLifetime.
-	MaxSuspendedWorkspaces *int32
-	// SuspendAfterDetach freezes the profile warm-detach window (ADR 0055)
-	// as a Go duration string. Empty means the frozen Suspend applies at
-	// detach.
-	SuspendAfterDetach string
-	// DefaultOnDetach and AllowedOnDetach freeze the class lifecycle policy in
-	// class order so the materialized ExecutionWorkspace carries the exact
-	// class lifecycle and never drifts from it.
-	DefaultOnDetach string
-	AllowedOnDetach []string
-	DetachTimeout   string
-	IdleTimeout     string
-	MaxLifetime     string
-	DeletionPolicy  ACPWorkspaceClassDeletionPolicy
+	ProviderConfigUID        string
+	EffectiveOnDetach        string
+	SuspendMode              string
+	SandboxVolume            *ACPSandboxDurableVolume
+	MaxSuspendedWorkspaces   *int32
+	SuspendAfterDetach       string
+	DefaultOnDetach          string
+	AllowedOnDetach          []string
+	DetachTimeout            string
+	IdleTimeout              string
+	MaxLifetime              string
+	DeletionPolicy           ACPWorkspaceClassDeletionPolicy
 }
 
-// Lifecycle rebuilds the exact class lifecycle frozen into this binding. The
-// result must match the live class spec byte for byte, or the workspace core
-// controller rejects the materialized workspace as policy drift.
 func (c *ACPWorkspaceClassBinding) Lifecycle() (workspacev1alpha1.ExecutionWorkspaceLifecycle, error) {
 	detachTimeout, err := time.ParseDuration(c.DetachTimeout)
 	if err != nil {
@@ -155,9 +110,6 @@ func (c *ACPWorkspaceClassBinding) Lifecycle() (workspacev1alpha1.ExecutionWorks
 	return lifecycle, nil
 }
 
-// acpResolvedWorkspaceClass carries the live-resolved class data consumed by
-// the pure binding resolver. Binding is frozen; the remaining fields validate
-// the Task request against class policy without entering the snapshot.
 type acpResolvedWorkspaceClass struct {
 	Binding                    ACPWorkspaceClassBinding
 	Backend                    corev1alpha1.WorkspaceProvider
@@ -191,12 +143,6 @@ func taskRequestsWorkspaceClass(task *corev1alpha1.Task) bool {
 		task.Spec.Execution.Workspace.ClassRef != nil
 }
 
-// mayResolveFrozenACPContinuation permits an established session to continue
-// through a current-generation class condition that is stricter than its Task
-// binding. This covers a frozen RuntimePool volume after its StorageClass is
-// retired and a Delete-bound continuation after the provider withdraws the
-// class's implied Suspend feature. Every provider, profile-hash, and frozen-
-// binding fence below still runs.
 func mayResolveFrozenACPContinuation(
 	task *corev1alpha1.Task,
 	class *workspacev1alpha1.ExecutionWorkspaceClass,
@@ -226,10 +172,6 @@ func mayResolveFrozenACPContinuation(
 		!slices.Contains(requiredFeatures, workspacev1alpha1.WorkspaceFeatureSuspend)
 }
 
-// acpWorkspaceResolutionRequiredFeatures derives the provider capabilities the
-// Task will freeze into its class binding. A Delete-bound continuation can
-// omit the class's implied Suspend feature only when its existing workspace
-// is already running and needs no provider resume operation.
 func acpWorkspaceResolutionRequiredFeatures(
 	task *corev1alpha1.Task,
 	class *workspacev1alpha1.ExecutionWorkspaceClass,
@@ -258,12 +200,6 @@ func acpWorkspaceResolutionRequiredFeatures(
 	})
 }
 
-// frozenACPContinuationExists proves that the planned Session UID already
-// owns the deterministic class workspace and its exact UID-linked RuntimePool.
-// It separately reports whether the workspace is already running, because a
-// suspended or settling workspace still needs the provider's Suspend feature
-// to resume. A planned Session UID alone is not continuation evidence because
-// every new session-reused Task resolves one before class readiness is checked.
 func (r *TaskReconciler) frozenACPContinuationExists(
 	ctx context.Context,
 	reader client.Reader,
@@ -390,12 +326,6 @@ func frozenACPContinuationPoolMatches(
 		strings.TrimSpace(pool.Spec.ExecutionWorkspace.BindingDigest) != ""
 }
 
-// resolveACPWorkspaceClass resolves and pins Task.spec.execution.workspace.classRef
-// against the live ExecutionWorkspaceClass, its provider, and the adapter-owned
-// parameter objects. Every mismatch fails closed before any workspace or
-// RuntimePool demand exists. The `use` authorization for the class is enforced
-// at admission by the workspace-class-use webhook and policy; this resolver
-// re-verifies object identity and policy, not caller authority.
 func (r *TaskReconciler) resolveACPWorkspaceClass(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -468,15 +398,8 @@ func (r *TaskReconciler) resolveACPWorkspaceClassWithSessionUID(
 	return r.resolveExternalACPWorkspaceClass(ctx, reader, task, class, provider, workspaceSessionUID, frozenContinuation, requiredFeatures)
 }
 
-// errACPWorkspacePlanningTransient marks workspace-plan resolution failures
-// caused by transient reads (uncached quota lists, durable session-store
-// lookups): the Task must requeue instead of being permanently rejected by a
-// brief API-server or control-store outage.
 var errACPWorkspacePlanningTransient = errors.New("transient execution workspace planning failure")
 
-// enforceACPWorkspaceSuspendQuota rejects a Task whose prospective Suspend
-// detach action would exceed the class retention cap. Settlement re-checks
-// the live count so a race between admissions still cannot exceed the cap.
 func (r *TaskReconciler) enforceACPWorkspaceSuspendQuota(
 	ctx context.Context,
 	reader client.Reader,
@@ -494,34 +417,14 @@ func (r *TaskReconciler) enforceACPWorkspaceSuspendQuota(
 	if prospective != workspacev1alpha1.WorkspaceOnDetachSuspend {
 		return nil
 	}
-	// A continuation resuming its own suspended session workspace frees the
-	// slot it occupies: that workspace never counts against admission, or the
-	// Task that would resume it could never reach ensureACPClassWorkspace.
-	// The exclusion matches the immutable Session UID, never the reusable
-	// name: a Session recreated under the same name resolves a different UID
-	// and creates a different workspace, so the old incarnation's suspended
-	// workspace still consumes the cap. Session reuse currently admits only
-	// the default workspace slot in resolveACPWorkspaceSessionScope, so the UID
-	// identifies the only reusable workspace this Task can resume.
 	sessionUID := ""
 	if task.Spec.SessionRef != nil && strings.TrimSpace(task.Spec.SessionRef.Name) != "" &&
 		r.DurableControlStore != nil && r.SessionManager != nil && r.ControllerEpochManager != nil {
-		// Without the durable session stores (validation-only resolution) the
-		// exclusion is simply skipped: counting the own workspace is stricter,
-		// never looser.
 		resolvedUID, sessionErr := r.planACPWorkspaceSessionUID(ctx, task)
 		if sessionErr != nil {
 			if permanentACPWorkspaceSessionPlanningError(sessionErr) {
-				// A nonexistent create:false Session or failed stored-Session
-				// validation is terminal: the binding stage classifies these
-				// permanent, and marking them transient here would requeue
-				// the Task forever instead of surfacing the validation
-				// failure.
 				return sessionErr
 			}
-			// A store-read outage stays retryable: the primary binding
-			// resolution re-runs this lookup with full classification, and
-			// here it only shapes the quota exclusion.
 			return fmt.Errorf("%w: %v", errACPWorkspacePlanningTransient, sessionErr)
 		}
 		sessionUID = strings.TrimSpace(resolvedUID)
@@ -556,11 +459,6 @@ func (r *TaskReconciler) enforceACPWorkspaceSuspendQuota(
 	return nil
 }
 
-// readySessionWorkspaceAwaitingSuspendQuota reports whether this Task can
-// reuse its exact session workspace while the class cap is full. The existing
-// Ready workspace has already consumed the only materialization for this
-// session and cannot suspend until a slot opens, so admitting its continuation
-// creates no additional retained workspace.
 func (r *TaskReconciler) readySessionWorkspaceAwaitingSuspendQuota(
 	ctx context.Context,
 	reader client.Reader,
@@ -603,10 +501,6 @@ func (r *TaskReconciler) readySessionWorkspaceAwaitingSuspendQuota(
 	return true, nil
 }
 
-// workspaceProviderProfileIdentity is the provider identity pinned into the
-// profile hash of every class that is not served by an external ACP provider.
-// Its JSON encoding is part of hashes frozen into existing class bindings and
-// execution snapshots, so its fields, order, and tags must not change.
 type workspaceProviderProfileIdentity struct {
 	UID               types.UID                              `json:"uid"`
 	ControllerName    string                                 `json:"controllerName"`
@@ -625,9 +519,6 @@ func newWorkspaceProviderProfileIdentity(provider *workspacev1alpha1.ExecutionWo
 	}
 }
 
-// acpWorkspaceClassProfileHash is the profile hash of a class that names a
-// provider directly, computed from the provider identity and the resolved
-// class parameters.
 func acpWorkspaceClassProfileHash(
 	class *workspacev1alpha1.ExecutionWorkspaceClass,
 	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
@@ -657,9 +548,6 @@ func onDetachActionsToStrings(actions []workspacev1alpha1.WorkspaceOnDetach) []s
 	return values
 }
 
-// effectiveACPWorkspaceOnDetach selects and validates the detach action for a
-// class-backed Task request: the explicit Task value when the class allows it,
-// otherwise the class default.
 func effectiveACPWorkspaceOnDetach(
 	requested corev1alpha1.WorkspaceOnDetachPolicy,
 	resolved *acpResolvedWorkspaceClass,
@@ -693,8 +581,6 @@ func effectiveACPWorkspaceOnDetach(
 	return effective, nil
 }
 
-// acpWorkspaceReuseScopeAllowed reports whether the class permits the reuse
-// scope implied by the Task's reusePolicy.
 func acpWorkspaceReuseScopeAllowed(reuse corev1alpha1.WorkspaceReusePolicy, resolved *acpResolvedWorkspaceClass) bool {
 	scope := workspacev1alpha1.WorkspaceReuseScopeNone
 	if reuse == corev1alpha1.WorkspaceReusePolicySession {
@@ -703,8 +589,6 @@ func acpWorkspaceReuseScopeAllowed(reuse corev1alpha1.WorkspaceReusePolicy, reso
 	return slices.Contains(resolved.AllowedReuseScopes, scope)
 }
 
-// validateACPWorkspaceClassBindingValues re-verifies a frozen class binding
-// without consulting live cluster state.
 func validateACPWorkspaceClassBindingValues(class *ACPWorkspaceClassBinding) error {
 	if class == nil {
 		return nil
@@ -763,9 +647,6 @@ func validateACPWorkspaceClassLifecycleValues(class *ACPWorkspaceClassBinding) e
 			return fmt.Errorf("frozen execution workspace class binding warm-detach window requires a DataOnly Suspend policy")
 		}
 	}
-	// Retention bounds gate new class resolution. Frozen snapshots admitted by
-	// older controllers remain executable so an upgrade cannot wedge a Task
-	// whose immutable binding predates that requirement.
 	if class.SandboxVolume != nil {
 		if class.SuspendMode != acpWorkspaceSuspendDataOnly {
 			return fmt.Errorf("frozen execution workspace class binding carries a durable volume without a DataOnly suspension policy")
@@ -804,12 +685,6 @@ func validateACPWorkspaceClassLifecycleValues(class *ACPWorkspaceClassBinding) e
 		class.DeletionPolicy.PersistentVolumes,
 		class.DeletionPolicy.Checkpoints,
 	} {
-		// Only the all-Delete lifecycle is executable: class admission
-		// rejects retained policies, and settlement destroys the workspace
-		// and its pool. A snapshot frozen by a newer controller with Retain
-		// semantics must fail closed here after a rollback rather than begin
-		// destructive cleanup under a retention contract this version cannot
-		// honor.
 		if action != string(workspacev1alpha1.WorkspaceDeletionActionDelete) {
 			return fmt.Errorf("frozen execution workspace class binding deletion policy action %q is not executable; only Delete is supported", action)
 		}

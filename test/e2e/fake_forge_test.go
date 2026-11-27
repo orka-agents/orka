@@ -35,11 +35,6 @@ import (
 	"github.com/orka-agents/orka/test/utils"
 )
 
-// The fake forge serves real Git smart HTTP and the GitHub REST subset the
-// clean-room publisher calls (test/fixtures/fakeforge), so the default lane
-// exercises clone, CAS push, verification, and pull request reconciliation
-// without github.com. The ACP runtime's model is the aimock stand-in for
-// Vekil behind the production provider proxy.
 const (
 	fakeForgeName          = "e2e-fakeforge"
 	fakeForgeImage         = "ghcr.io/orka-agents/orka/e2e-fakeforge:e2e"
@@ -54,13 +49,10 @@ func fakeForgeHost() string {
 	return fakeForgeName + "." + namespace + ".svc.cluster.local"
 }
 
-// fakeForgeToken is the fixture token the fake forge accepts for one
-// credential role, only on the surfaces that role may use.
 func fakeForgeToken(role string) string {
 	return "e2e-fakeforge-" + role + "-token-0123456789"
 }
 
-// fakeForgeCredential names the Secret holding one role's token.
 func fakeForgeCredential(role string) string {
 	return "e2e-fakeforge-" + role
 }
@@ -94,8 +86,6 @@ var _ = Describe("Clean-room publication against a fake forge", Ordered, func() 
 		projectDir, err := utils.GetProjectDir()
 		Expect(err).NotTo(HaveOccurred())
 
-		// Each cleanup is registered only once its resource exists, so a
-		// skipped run never touches a live Vekil in vekil-system.
 		By("deploying the fake forge with a test CA")
 		DeferCleanup(deleteE2EObjects, "deployment,service,secret", fakeForgeName)
 		caPEM := deployFakeForge()
@@ -265,7 +255,6 @@ var _ = Describe("Clean-room publication against a fake forge", Ordered, func() 
 		)))
 
 		By("verifying each credential reached only its own forge surface")
-		// The forge refuses a role's token on another surface with 403.
 		used := map[string][]string{}
 		for _, request := range state.Requests {
 			Expect(request.Status).NotTo(Equal(http.StatusForbidden), "credential on the wrong surface: %+v", request)
@@ -273,8 +262,6 @@ var _ = Describe("Clean-room publication against a fake forge", Ordered, func() 
 				used[request.Surface] = append(used[request.Surface], request.Role)
 			}
 		}
-		// The source clone transfers objects; preflight and verification only
-		// need to read the target, which may be a ref listing.
 		Expect(used[fakeforge.SurfaceGitFetch]).To(ContainElement(fakeforge.RoleRead))
 		Expect(append(used[fakeforge.SurfaceGitRefs], used[fakeforge.SurfaceGitFetch]...)).
 			To(ContainElement(fakeforge.RolePublicationRead))
@@ -283,14 +270,10 @@ var _ = Describe("Clean-room publication against a fake forge", Ordered, func() 
 	})
 })
 
-// deleteE2EObjects deletes the named objects of the given kinds in the test
-// namespace.
 func deleteE2EObjects(kinds, name string) {
 	_, _ = utils.Run(exec.Command("kubectl", "delete", kinds, name, "-n", namespace, "--ignore-not-found"))
 }
 
-// deployFakeForge serves the fake forge on port 443 behind a serving
-// certificate from a fresh test CA, and returns that CA.
 func deployFakeForge() []byte {
 	caPEM, certPEM, keyPEM := newFakeForgeTLS(fakeForgeHost())
 	config := map[string]string{"tls.crt": string(certPEM), "tls.key": string(keyPEM)}
@@ -373,16 +356,11 @@ spec:
 	return caPEM
 }
 
-// trustFakeForgeInPublisher allows the publisher to clone from, push to, and
-// reconcile pull requests on the fake forge. The publisher rebuilds Git's
-// environment from scratch, so the test CA is appended to the image's system
-// bundle, which both libcurl and Go read.
 func trustFakeForgeInPublisher(caPEM []byte) {
 	cmd := exec.Command("kubectl", "exec", "-n", namespace, "deployment/"+publisherDeployment, "-c", "publisher",
 		"--", "cat", publisherCABundlePath)
 	bundle, err := cmd.Output()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to read the publisher CA bundle")
-	// The system bundle is too large for a command-line literal.
 	bundlePath := filepath.Join(GinkgoT().TempDir(), "ca-certificates.crt")
 	ExpectWithOffset(1, os.WriteFile(bundlePath, append(bundle, caPEM...), 0o600)).To(Succeed())
 	cmd = exec.Command("kubectl", "create", "configmap", fakeForgeCABundle, "-n", namespace,
@@ -419,8 +397,6 @@ spec:
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 
-	// Cleanups run last in, first out: the publisher returns to its own
-	// template before the CA bundle it mounts is deleted.
 	output, err := exec.Command("kubectl", "get", "deployment", publisherDeployment, "-n", namespace,
 		"-o", "json").Output()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to read the publisher Deployment")
@@ -448,8 +424,6 @@ spec:
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "publisher did not roll out with the fake forge trust")
 }
 
-// restorePublisherTemplate puts back the publisher's pod template from before
-// trustFakeForgeInPublisher patched it.
 func restorePublisherTemplate(template json.RawMessage) {
 	patch := `[{"op":"replace","path":"/spec/template","value":` + string(template) + `}]`
 	_, err := utils.Run(exec.Command("kubectl", "patch", "deployment", publisherDeployment, "-n", namespace,
@@ -460,7 +434,6 @@ func restorePublisherTemplate(template json.RawMessage) {
 	Expect(err).NotTo(HaveOccurred(), "publisher did not roll out its restored template")
 }
 
-// newFakeForgeTLS returns a test CA and a serving certificate for host.
 func newFakeForgeTLS(host string) (caPEM, certPEM, keyPEM []byte) {
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	ExpectWithOffset(2, err).NotTo(HaveOccurred())
@@ -520,9 +493,6 @@ func secretResourceVersion(name string) string {
 	return strings.TrimSpace(output)
 }
 
-// expectPublisherCannotReadSecrets ports assert_publisher_cannot_access_secret:
-// the publisher's ServiceAccount can neither read the credential Secrets nor
-// create workloads that could.
 func expectPublisherCannotReadSecrets(secrets ...string) {
 	account, err := utils.Run(exec.Command("kubectl", "get", "deployment", publisherDeployment, "-n", namespace,
 		"-o", "jsonpath={.spec.template.spec.serviceAccountName}"))

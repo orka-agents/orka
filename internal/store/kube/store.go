@@ -1,9 +1,3 @@
-// Package kube implements Kubernetes-authoritative ACP control records.
-//
-// Controller epochs and Session mutation ownership are serialized by
-// coordination.k8s.io Leases. The CR status resourceVersion is the CAS token
-// for all other logical state transitions. SessionTurn persistence remains a
-// separate SQLite concern supplied through NewComposite.
 package kube
 
 import (
@@ -17,30 +11,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ErrSessionTurnStoreNotConfigured is returned by the SessionTurn methods when
-// the Kubernetes control store was constructed without SQLite turn persistence.
 var ErrSessionTurnStoreNotConfigured = errors.New("session turn persistence is not configured")
 
-// ErrOutboxStoreNotConfigured is returned when the composite SQLite outbox
-// persistence adapter was not configured.
 var ErrOutboxStoreNotConfigured = errors.New("outbox persistence is not configured")
 
-// SQLitePersistence is the complete database-owned half of the hard-cutover
-// control store. The storage client satisfies this interface, sealing native
-// session state before its provider sees it, without treating any database
-// control row as authoritative.
 type SQLitePersistence interface {
 	store.SessionTurnPersistenceStore
 	store.OutboxPersistenceStore
 	store.SessionCleanupPersistenceStore
 }
 
-// Option configures Store.
 type Option func(*Store) error
 
-// WithAPIReader configures the uncached reader used for authoritative control
-// records. Controller-runtime cached clients remain the writer, but must not be
-// trusted for immediate read-after-write recovery decisions.
 func WithAPIReader(reader client.Reader) Option {
 	return func(s *Store) error {
 		if reader == nil {
@@ -51,9 +33,6 @@ func WithAPIReader(reader client.Reader) Option {
 	}
 }
 
-// WithWatchNamespace confines namespaced control-record lookups to the static
-// controller installation's immutable watch namespace. Cluster-scoped control
-// records, such as BranchClaims, remain unaffected.
 func WithWatchNamespace(namespace string) Option {
 	return func(s *Store) error {
 		namespace = strings.TrimSpace(namespace)
@@ -65,8 +44,6 @@ func WithWatchNamespace(namespace string) Option {
 	}
 }
 
-// WithSessionRuntimeCleanup closes resident runtimes before the Session's
-// durable authority and transcript are deleted.
 func WithSessionRuntimeCleanup(cleanup store.SessionRuntimeCleanupFunc) Option {
 	return func(s *Store) error {
 		if cleanup == nil {
@@ -77,7 +54,6 @@ func WithSessionRuntimeCleanup(cleanup store.SessionRuntimeCleanupFunc) Option {
 	}
 }
 
-// Store maps ACP control-store interfaces to Kubernetes CR status and Leases.
 type Store struct {
 	client                client.Client
 	reader                client.Reader
@@ -91,9 +67,6 @@ type Store struct {
 	epochMutations        *semaphore.Weighted
 }
 
-// NewComposite constructs the hard-cutover DurableControlStore: Kubernetes is
-// authoritative for controller/session/prompt/publication/branch state while
-// persistence stores only SQLite-owned SessionTurn, transcript, and outbox data.
 func NewComposite(kubeClient client.Client, controlNamespace string, persistence SQLitePersistence, options ...Option) (*Store, error) {
 	if persistence == nil {
 		return nil, store.ValidationErrorf("SQLite persistence store is required")
@@ -108,9 +81,6 @@ func NewComposite(kubeClient client.Client, controlNamespace string, persistence
 	return result, nil
 }
 
-// New constructs a Kubernetes ACP control store. The caller must add the core
-// v1alpha1 and coordination/v1 APIs to the client's scheme. controlNamespace
-// contains the singleton ControllerEpoch record and its authoritative Lease.
 func New(kubeClient client.Client, controlNamespace string, options ...Option) (*Store, error) {
 	if kubeClient == nil {
 		return nil, store.ValidationErrorf("Kubernetes client is required")
@@ -134,7 +104,6 @@ func New(kubeClient client.Client, controlNamespace string, options ...Option) (
 	return result, nil
 }
 
-// GetSessionTurn delegates SQLite-only SessionTurn reads.
 func (s *Store) GetSessionTurn(ctx context.Context, id string) (*store.SessionTurn, error) {
 	if s.sessionTurns == nil {
 		return nil, ErrSessionTurnStoreNotConfigured

@@ -76,7 +76,6 @@ func TestACPMCPPromptLeaseRegistryRequiresExactIdentity(t *testing.T) {
 			require.ErrorIs(t, registry.authorize(changed), errACPMCPPromptLeaseInactive)
 		})
 	}
-	// No release callback or cleanup goroutine has run when cancellation lands.
 	cancel()
 	require.ErrorIs(t, registry.authorize(request), errACPMCPPromptLeaseInactive)
 	require.ErrorIs(t, entry.renew(approvalLeaseRenewal(request, time.Now().UTC().Add(3*time.Minute))), errACPMCPPromptLeaseInactive)

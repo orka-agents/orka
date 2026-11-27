@@ -14,15 +14,10 @@ import (
 var _ store.OutboxProjectionStore = (*Store)(nil)
 var _ store.OutboxPersistenceStore = (*Store)(nil)
 
-// EnqueueOutboxProjection inserts a restart-safe projection record. Reusing an
-// ID with byte-identical payload and metadata is idempotent; any mismatch conflicts.
 func (s *Store) EnqueueOutboxProjection(ctx context.Context, projection *store.OutboxProjection, fence store.ControllerEpochFence) (*store.OutboxProjection, error) {
 	return s.enqueueOutboxProjection(ctx, projection, fence)
 }
 
-// EnqueueOutboxProjectionRecord persists an outbox record for a Kubernetes
-// control store. The fence is checked against the dataset's controller epoch
-// in the transaction that commits the record.
 func (s *Store) EnqueueOutboxProjectionRecord(ctx context.Context, projection *store.OutboxProjection, fence store.ControllerEpochFence) (*store.OutboxProjection, error) {
 	return writeOperation(ctx, s, "EnqueueOutboxProjectionRecord", &fence, func(ctx context.Context) (*store.OutboxProjection, error) {
 		return s.enqueueOutboxProjection(ctx, projection, fence)
@@ -56,7 +51,6 @@ func (s *Store) enqueueOutboxProjection(ctx context.Context, projection *store.O
 	return &created, nil
 }
 
-// GetOutboxProjection returns one outbox record.
 func (s *Store) GetOutboxProjection(ctx context.Context, id string) (*store.OutboxProjection, error) {
 	id = strings.TrimSpace(id)
 	if err := store.ValidateControlIdentifier("outbox projection ID", id); err != nil {
@@ -69,15 +63,10 @@ func (s *Store) GetOutboxProjection(ctx context.Context, id string) (*store.Outb
 	return &projection, nil
 }
 
-// ClaimOutboxProjections leases due pending records and expired delivering
-// records in one transaction. Attempts and versions advance before records are returned.
 func (s *Store) ClaimOutboxProjections(ctx context.Context, request store.ClaimOutboxProjectionsRequest) ([]store.OutboxProjection, error) {
 	return s.claimOutboxProjections(ctx, request)
 }
 
-// ClaimOutboxProjectionRecords claims due records for a Kubernetes control
-// store. The fence is checked against the dataset's controller epoch in the
-// transaction that commits the claim.
 func (s *Store) ClaimOutboxProjectionRecords(ctx context.Context, request store.ClaimOutboxProjectionsRequest) ([]store.OutboxProjection, error) {
 	return writeOperation(ctx, s, "ClaimOutboxProjectionRecords", &request.Fence, func(ctx context.Context) ([]store.OutboxProjection, error) {
 		return s.claimOutboxProjections(ctx, request)
@@ -182,16 +171,11 @@ func (s *Store) claimOutboxProjections(ctx context.Context, request store.ClaimO
 	return claimed, nil
 }
 
-// CompleteOutboxProjection completes, retries, or dead-letters the exact lease.
-//
 //nolint:gocyclo // Completion validates distinct retry, delivery, and dead-letter invariants.
 func (s *Store) CompleteOutboxProjection(ctx context.Context, request store.CompleteOutboxProjectionRequest) (*store.OutboxProjection, error) {
 	return s.completeOutboxProjection(ctx, request)
 }
 
-// CompleteOutboxProjectionRecord completes a claimed record for a Kubernetes
-// control store. The fence is checked against the dataset's controller epoch
-// in the transaction that commits the completion.
 func (s *Store) CompleteOutboxProjectionRecord(ctx context.Context, request store.CompleteOutboxProjectionRequest) (*store.OutboxProjection, error) {
 	return writeOperation(ctx, s, "CompleteOutboxProjectionRecord", &request.Fence, func(ctx context.Context) (*store.OutboxProjection, error) {
 		return s.completeOutboxProjection(ctx, request)
@@ -483,8 +467,6 @@ func getOutboxProjection(ctx context.Context, q controlQueryRower, id string) (s
 	return projection, nil
 }
 
-// CountUnsettledOutboxProjections reports Pending or Delivering projections
-// without claiming them. It is used only by the planned-upgrade drain barrier.
 func (s *Store) CountUnsettledOutboxProjections(ctx context.Context) (int64, error) {
 	var count int64
 	if err := s.db.QueryRowContext(ctx,

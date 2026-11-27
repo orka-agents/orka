@@ -21,35 +21,23 @@ const (
 	maxOpenToolAccumulators     = 128
 	maxBufferedToolContentBytes = 1 << 20
 
-	// mappedAppendReconcileTimeout is the shortest budget a failed append's
-	// reconcile reads under. See reconcileFailedAppend.
 	mappedAppendReconcileTimeout = 5 * time.Second
 )
 
-// Journal owns duplicate-safe persistence of mapped harness v2 updates.
 type Journal struct {
 	EventStore       store.ExecutionEventStore
 	MapContext       MapContext
 	RecoveryIdentity MappedUpdateIdentity
 }
 
-// PromptTerminalEvidence is the durable terminal classification for one exact
-// harness v2 prompt identity. Result content remains in ResultStore and is not
-// copied into the public execution-event journal.
 type PromptTerminalEvidence struct {
 	Identity           MappedUpdateIdentity
 	TerminalEvent      harnessv2.EventType
 	CancellationReason harnessv2.CancelReason
-	// FailureCode and FailureMessage carry the journaled (already redacted
-	// and bounded) classification of a Failed terminal so restart recovery
-	// projects the same durable reason the live path would have.
-	FailureCode    string
-	FailureMessage string
+	FailureCode        string
+	FailureMessage     string
 }
 
-// FindPromptTerminal walks the task stream backward and returns the newest
-// prompt-terminal record matching RecoveryIdentity. Records for prior attempts,
-// runtime restarts, or Session generations are ignored.
 func (j Journal) FindPromptTerminal(ctx context.Context) (*PromptTerminalEvidence, error) {
 	if j.EventStore == nil {
 		return nil, fmt.Errorf("execution event store is required")
@@ -101,7 +89,6 @@ func (j Journal) FindPromptTerminal(ctx context.Context) (*PromptTerminalEvidenc
 	return nil, nil
 }
 
-// promptTerminalFailure is the journaled classification of a Failed terminal.
 type promptTerminalFailure struct {
 	code    string
 	message string
@@ -162,12 +149,6 @@ func promptTerminalClassification(event store.ExecutionEvent) (harnessv2.EventTy
 	return terminalEvent, content.CancellationReason, failure, nil
 }
 
-// State is the mutable aggregation state for one non-reconnectable prompt
-// stream. Public lifecycle/telemetry updates are durable as they arrive.
-// Untrusted assistant/tool text becomes durable only after its logical stream
-// ends, so redaction can see credential shapes split across protocol frames.
-// Controller takeover deliberately terminalizes accepted prompts as
-// OutcomeUnknown rather than replaying or persisting a raw-content crash buffer.
 type State struct {
 	journal                      Journal
 	promptIdentity               MappedUpdateIdentity
@@ -211,9 +192,6 @@ func (s *streamText) append(value string) {
 	runes := utf8.RuneCountInString(value)
 	remaining := executionevents.MaxExecutionEventContentTextChars - s.runes
 	if runes > remaining {
-		// A truncated prefix cannot be redacted safely when a credential spans
-		// the cutoff. Discard all buffered text and persist only truncation
-		// metadata when the tool reaches a terminal update.
 		s.omitForOverflow()
 		return
 	}
@@ -252,10 +230,6 @@ func (s *streamText) omitForOverflow() {
 	s.multipleBlocksOmitted = false
 }
 
-// HasUpdate reports whether event was already persisted or processed during
-// this journal pass. Validated harness streams use strictly increasing event
-// sequences, so one high-water mark bounds deduplication state for any prompt
-// duration.
 func (s *State) HasUpdate(event harnessv2.Event) bool {
 	if s == nil {
 		return false
@@ -265,7 +239,6 @@ func (s *State) HasUpdate(event harnessv2.Event) bool {
 		identity.samePrompt(s.promptIdentity) && identity.Sequence <= s.processedSequence
 }
 
-// Open loads persisted harness v2 sequence state for the current prompt.
 func (j Journal) Open(ctx context.Context) (*State, error) {
 	if j.EventStore == nil {
 		return nil, fmt.Errorf("execution event store is required")
@@ -326,11 +299,6 @@ func (j Journal) failClosedForExistingSessionHistory(
 				!executionEventCarriesSessionRedactionText(sessionEvent.ExecutionEvent) {
 				continue
 			}
-			// A session timeline aggregates multiple task streams, while the exact
-			// logical-field boundaries used for journal redaction are intentionally
-			// not persisted. Once any mapped journal event or other public text event
-			// is durable, redact all later runtime text rather than risk completing a
-			// credential fragment from an earlier turn or from a pre-recovery append.
 			state.logicalFieldHistory = nil
 			state.logicalFieldHistorySaturated = true
 			return nil
@@ -352,8 +320,6 @@ func executionEventCarriesSessionRedactionText(event store.ExecutionEvent) bool 
 	if strings.TrimSpace(event.Summary) == "" {
 		return false
 	}
-	// Lifecycle summaries are controller-owned status descriptions, not runtime
-	// text. Ignore them so the first task turn does not begin in fail-closed mode.
 	switch event.Type {
 	case executionevents.ExecutionEventTypeTaskCreated,
 		executionevents.ExecutionEventTypeTaskPhaseChanged,
@@ -443,8 +409,6 @@ func (j Journal) loadCurrentPromptIdentities(
 	latestSeq := pageEnd
 	var earliestSeq int64
 	stop := false
-	// Per-stream sequence numbers are monotonic and gap-tolerant. Fixed-width
-	// AfterSeq windows let recovery walk backward without expanding the store API.
 	for pageEnd > 0 {
 		pageStart := max(int64(0), pageEnd-int64(store.MaxExecutionEventLimit))
 		listed, err := j.EventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
@@ -619,9 +583,6 @@ func (s *State) rememberToolClosure(sequence uint64) {
 	s.toolClosureSequences[sequence] = struct{}{}
 }
 
-// ProjectPlanUpdate applies the prompt's bounded public plan-field history so
-// a credential split across successive plan notifications is redacted from
-// the update that would make it reconstructable.
 func (s *State) ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
 	if s == nil {
 		return ProjectPlanUpdate(update)
@@ -639,18 +600,10 @@ func (s *State) projectPlanUpdate(update harnessv2.PlanUpdate) (PlanProjection, 
 	return projectPlanUpdate(update, s.logicalFieldHistory, s.logicalFieldHistorySaturated)
 }
 
-// AppendUpdateIfNew maps and appends event unless its full protocol identity is
-// already persisted or was processed earlier in this pass. Assistant chunks
-// and content-only tool fragments are retained only for same-pass
-// deduplication; complete assistant/tool text is persisted only after the
-// logical stream ends so redaction sees update boundaries.
 func (s *State) AppendUpdateIfNew(ctx context.Context, event harnessv2.Event) (*store.ExecutionEvent, bool, error) {
 	return s.appendUpdateIfNew(ctx, event, nil)
 }
 
-// AppendPlanUpdateIfNew atomically persists a plan update's journal event and
-// materialized plan projection when the configured store supports that
-// capability. Duplicate protocol updates leave the current plan unchanged.
 func (s *State) AppendPlanUpdateIfNew(
 	ctx context.Context,
 	event harnessv2.Event,
@@ -708,27 +661,18 @@ func (s *State) appendUpdateIfNew(
 		return nil, false, nil
 	}
 	if s.aggregateToolUpdate(event, identity.Sequence) {
-		// The journal's in-memory telemetry bound must not abort a valid
-		// prompt. Omit excess open-tool updates until capacity is available.
 		s.markProcessed(identity)
 		return nil, false, nil
 	}
 	if event.Update.Kind == harnessv2.UpdateAssistantMessageChunk || event.Update.Kind == harnessv2.UpdateAssistantThoughtChunk {
-		// The complete terminal transcript is persisted once redaction can see
-		// all chunk boundaries, and reasoning is never persisted. Advance only
-		// the bounded sequence high-water.
 		s.markProcessed(identity)
 		return nil, false, nil
 	}
 	if isLiveOnlyToolUpdate(event) && s.toolStartPersisted(event) {
-		// Raw input and file edits are live-only; once the start is durable an
-		// update carrying nothing else adds no telemetry.
 		s.markProcessed(identity)
 		return nil, false, nil
 	}
 	if isBufferedToolContentUpdate(event) {
-		// Persist one metadata-free start so trace consumers retain the real
-		// start time, then buffer later content-bearing updates until closure.
 		if s.toolStartPersisted(event) {
 			s.markProcessed(identity)
 			return nil, false, nil
@@ -794,9 +738,6 @@ func (s *State) rememberLogicalFields(published []logicalFieldBoundaries) {
 		return
 	}
 	if len(s.logicalFieldHistory)+len(published) > maxLogicalFieldPermutationFields {
-		// Retain the complete history collected so far and fail closed for all
-		// later runtime text. Evicting old boundaries would let a later fragment
-		// complete a credential that consumers can reconstruct from durable events.
 		s.logicalFieldHistorySaturated = true
 		return
 	}
@@ -816,8 +757,6 @@ func isBufferedToolContentUpdate(event harnessv2.Event) bool {
 		tool.Status != harnessv2.ToolCallStatusCompleted && tool.Status != harnessv2.ToolCallStatusFailed
 }
 
-// isLiveOnlyToolUpdate reports a non-terminal tool update whose only payload
-// is live-update fields.
 func isLiveOnlyToolUpdate(event harnessv2.Event) bool {
 	if event.Update == nil || event.Update.ToolCall == nil || isTerminalToolUpdate(event) {
 		return false
@@ -859,9 +798,6 @@ func (s *State) markToolStartPersisted(event harnessv2.Event) {
 	}
 }
 
-// AppendAssistantTranscriptIfNew persists a complete terminal transcript as
-// one model-message event. Redaction therefore sees secrets split across any
-// number of streamed assistant chunks before durable storage.
 func (s *State) AppendAssistantTranscriptIfNew(
 	ctx context.Context,
 	terminal harnessv2.Event,
@@ -912,9 +848,6 @@ func (s *State) mapAssistantTranscript(
 	return mapped, publishedFields, err
 }
 
-// AppendTerminalUsageIfNew persists usage carried only by a completed result.
-// It uses a distinct journal identity so the same terminal event can also own
-// the final assistant transcript without ambiguous retry reconciliation.
 func (s *State) AppendTerminalUsageIfNew(
 	ctx context.Context,
 	terminal harnessv2.Event,
@@ -951,8 +884,6 @@ func (s *State) AppendTerminalUsageIfNew(
 	return appended, isNew, err
 }
 
-// AppendPromptLifecycleIfNew persists accepted and terminal model-request
-// lifecycle events with distinct identities from terminal usage/transcripts.
 func (s *State) AppendPromptLifecycleIfNew(
 	ctx context.Context,
 	event harnessv2.Event,
@@ -994,10 +925,6 @@ func (s *State) AppendPromptLifecycleIfNew(
 	return appended, isNew, err
 }
 
-// AppendPromptStreamFailureIfNew closes a persisted prompt-acceptance
-// lifecycle when the controller observes a stream failure before a runtime
-// terminal event. The synthetic terminal record is anchored to the accepted
-// event identity so retries and recovery use one stable deduplication key.
 func (s *State) AppendPromptStreamFailureIfNew(
 	ctx context.Context,
 	at time.Time,
@@ -1028,9 +955,6 @@ func (s *State) AppendPromptStreamFailureIfNew(
 	return appended, isNew, err
 }
 
-// AppendPromptSettlementIfNew closes a persisted prompt-acceptance lifecycle
-// from a proven settlement when the terminal stream event was unavailable.
-// The accepted identity supplies a stable deduplication key.
 func (s *State) AppendPromptSettlementIfNew(
 	ctx context.Context,
 	settlement harnessv2.PromptSettlement,
@@ -1061,10 +985,6 @@ func (s *State) AppendPromptSettlementIfNew(
 	return appended, isNew, err
 }
 
-// AppendAssistantStreamClosureIfNew persists the complete assistant text seen
-// before a non-terminal stream closure. The last assistant update supplies the
-// durable protocol identity; the complete buffered text supplies the redaction
-// boundary that individual chunks cannot provide safely.
 func (s *State) AppendAssistantStreamClosureIfNew(
 	ctx context.Context,
 	lastUpdate harnessv2.Event,
@@ -1101,11 +1021,6 @@ func (s *State) AppendAssistantStreamClosureIfNew(
 	return appended, isNew, err
 }
 
-// AppendBufferedStreamsIfNew persists buffered assistant and interrupted tool
-// streams in the order of their last protocol updates. assistantEvent supplies
-// the durable identity; assistantOrderSequence is the last assistant chunk's
-// sequence, or the assistant event sequence when no chunks preceded it. An
-// omitted assistant stream persists truncation metadata without unsafe text.
 func (s *State) AppendBufferedStreamsIfNew(
 	ctx context.Context,
 	assistantEvent *harnessv2.Event,
@@ -1170,15 +1085,10 @@ func (s *State) AppendBufferedStreamsIfNew(
 	return nil
 }
 
-// AppendToolStreamClosuresIfNew persists buffered output for tools that did
-// not emit a completed/failed update before the prompt stream closed. The last
-// observed tool update supplies the durable protocol identity.
 func (s *State) AppendToolStreamClosuresIfNew(ctx context.Context) error {
 	return s.AppendBufferedStreamsIfNew(ctx, nil, 0, "", false)
 }
 
-// AppendPersistedToolClosuresIfNew closes tool lifecycles whose starts were
-// durable before controller recovery but whose terminal updates were not.
 func (s *State) AppendPersistedToolClosuresIfNew(ctx context.Context, at time.Time) error {
 	if s == nil {
 		return fmt.Errorf("harness v2 journal state is required")
@@ -1242,9 +1152,6 @@ func (s *State) appendToolStreamClosureIfNew(ctx context.Context, toolID string,
 	return nil
 }
 
-// appendMappedEvent uses the store's stream-scoped atomic deduplication key,
-// then reconciles an ambiguous append error against the durable stream before
-// one safe retry.
 func (s *State) appendMappedEvent(
 	ctx context.Context,
 	identity MappedUpdateIdentity,
@@ -1263,15 +1170,9 @@ func (s *State) appendMappedEventWithPlan(
 	plan *store.PlanState,
 	operation string,
 ) (*store.ExecutionEvent, bool, error) {
-	// Usage attribution comes from the controller's frozen profile, not the
-	// runtime's free-text model field or the cross-turn redacted public event.
-	// Set it at the append boundary so mapped content cannot override it, and
-	// only for the appends: reconciliation reads do not carry it.
 	appendCtx := store.WithUsageAttribution(ctx, store.UsageAttribution{Model: s.journal.MapContext.normalized().Model})
 	key := identity.Key()
 	if isMappedToolTerminalEvent(*mapped) {
-		// Real runtime terminal updates and synthesized recovery closures race
-		// on one prompt-and-tool-scoped key so the first durable outcome wins.
 		key = mappedToolTerminalKey(identity, mapped.ToolCallID)
 	} else {
 		switch kind {
@@ -1318,8 +1219,6 @@ func (s *State) appendMappedEventWithPlan(
 		return nil, false, nil
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		// The caller's context has ended, so a retry under it cannot reach
-		// the store, and its reconcile would only repeat the scan above.
 		return nil, false, errors.Join(firstErr, fmt.Errorf("%s retry skipped: %w", operation, ctxErr))
 	}
 
@@ -1345,8 +1244,6 @@ func (s *State) appendMappedEventWithPlan(
 
 func (s *State) markPersisted(identity MappedUpdateIdentity, kind mappedJournalRecordKind, isNew bool) {
 	if !isNew {
-		// A duplicate or reconciled append may have a different durable winner.
-		// Its public boundaries are unknown, so later runtime text fails closed.
 		s.logicalFieldHistory = nil
 		s.logicalFieldHistorySaturated = true
 	}
@@ -1365,14 +1262,6 @@ func (s *State) markPersisted(identity MappedUpdateIdentity, kind mappedJournalR
 	}
 }
 
-// reconcileFailedAppend reports whether a failed append's key is durable.
-// An append that waited out its caller's deadline, for example behind a
-// stalled store, leaves no time to read under that deadline, and a read
-// under it would fail without reaching the store. So the reconcile reads
-// under at least mappedAppendReconcileTimeout, detached from the caller's
-// deadline. A caller that cancelled its context gets no further reads, and
-// one that cancels it before the deadline passes stops the reconcile. The
-// retry append that may follow still runs under the caller's context.
 func (j Journal) reconcileFailedAppend(ctx context.Context, key string) (bool, error) {
 	if deadline, ok := ctx.Deadline(); ok && !errors.Is(ctx.Err(), context.Canceled) &&
 		time.Until(deadline) < mappedAppendReconcileTimeout {
@@ -1518,8 +1407,6 @@ func (s *State) rememberOverflowTool(toolID string) {
 		s.overflowToolIDs[toolID] = struct{}{}
 		return
 	}
-	// Once the bounded exact set is full, conservatively mark otherwise
-	// untracked terminal tools as omitted for the rest of this prompt.
 	s.untrackedOverflowTool = true
 }
 

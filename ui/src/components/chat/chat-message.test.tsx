@@ -148,7 +148,6 @@ describe('ChatMessage', () => {
       const pill = text.parentElement as HTMLElement
       expect(pill.className).toContain('max-w-full')
       expect(pill.className).toContain('min-w-0')
-      // A fully rounded box would clip the corners of a wrapped line.
       expect(pill.className).not.toMatch(/(^|\s)rounded-full(\s|$)/)
     }
     const { rerender } = render(<ChatMessage message={{ ...statusMsg, content: model }} />)

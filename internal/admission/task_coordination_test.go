@@ -128,7 +128,6 @@ func TestTaskProvenanceValidatorCoordinationAncestryImmutable(t *testing.T) {
 		}
 	}
 
-	// The controller may establish a delegated child's ancestry at creation.
 	resp := validator.Handle(t.Context(), admissionRequest(t, admissionv1.Create, trustedControllerUser, child, nil, ""))
 	require.True(t, resp.Allowed)
 
@@ -144,10 +143,6 @@ func TestTaskProvenanceValidatorCoordinationAncestryImmutable(t *testing.T) {
 	}
 }
 
-// TestTaskProvenanceValidatorAutomationOwnerImmutable holds the
-// RepositoryScan or RepositoryMonitor that created a Task: removing or
-// replacing it would let the Task pass as a root Task when it binds to an
-// identity-bound Agent. The garbage collector may still orphan it.
 func TestTaskProvenanceValidatorAutomationOwnerImmutable(t *testing.T) {
 	validator := newTestTaskProvenanceValidator(t)
 	for _, kind := range []string{"RepositoryMonitor", "RepositoryScan"} {
@@ -177,7 +172,7 @@ func TestTaskProvenanceValidatorAutomationOwnerImmutable(t *testing.T) {
 			labels.LabelRepositoryMonitor: "monitor", labels.LabelSecurityScanID: "run-1", gateway.TaskGatewayBindingLabel: "binding",
 		}
 		marked.Annotations = map[string]string{labels.AnnotationRepositoryMonitorName: "monitor", gateway.TaskGatewayBindingAnnotation: "binding"}
-		marked.OwnerReferences = nil // already orphaned by the garbage collector
+		marked.OwnerReferences = nil
 		for name, change := range map[string]func(*corev1alpha1.Task){
 			"remove monitor label":         func(task *corev1alpha1.Task) { delete(task.Labels, labels.LabelRepositoryMonitor) },
 			"remove scan label":            func(task *corev1alpha1.Task) { delete(task.Labels, labels.LabelSecurityScanID) },

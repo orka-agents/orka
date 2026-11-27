@@ -30,10 +30,8 @@ const (
 	EnvScannerPolicyVersion = "ORKA_SECURITY_SCANNER_POLICY_VERSION"
 	EnvPolicyDigest         = "ORKA_SECURITY_POLICY_DIGEST"
 	EnvPolicyProvenance     = "ORKA_SECURITY_POLICY_PROVENANCE"
-	// EnvInvestigations carries threat-model investigations to the mapper as
-	// JSON; EnvBaselineAudit asks it for the independent audit slice.
-	EnvInvestigations = "ORKA_SECURITY_INVESTIGATIONS"
-	EnvBaselineAudit  = "ORKA_SECURITY_BASELINE_AUDIT"
+	EnvInvestigations       = "ORKA_SECURITY_INVESTIGATIONS"
+	EnvBaselineAudit        = "ORKA_SECURITY_BASELINE_AUDIT"
 
 	ScannerPolicyVersion = "2026-10-orka-cross-component-v1"
 
@@ -45,7 +43,6 @@ const (
 
 type ChangedLineRange = store.ChangedLineRange
 
-// ReviewSlicesArtifact is the deterministic mapper output.
 type ReviewSlicesArtifact struct {
 	SchemaVersion        int                 `json:"schemaVersion"`
 	BaseCommit           string              `json:"baseCommit,omitempty"`
@@ -59,29 +56,24 @@ type ReviewSlicesArtifact struct {
 }
 
 type ReviewContextManifest struct {
-	SchemaVersion     int                         `json:"schemaVersion"`
-	SliceID           string                      `json:"sliceId"`
-	ChangedFiles      []string                    `json:"changedFiles,omitempty"`
-	ChangedLineRanges []ChangedLineRange          `json:"changedLineRanges,omitempty"`
-	IncludedFiles     []ReviewContextIncludedFile `json:"includedFiles"`
-	OmittedFiles      []ReviewContextOmittedFile  `json:"omittedFiles,omitempty"`
-	// ReferenceFiles are repository files the reviewer may read from its
-	// workspace and cite beyond the included excerpts.
+	SchemaVersion     int                          `json:"schemaVersion"`
+	SliceID           string                       `json:"sliceId"`
+	ChangedFiles      []string                     `json:"changedFiles,omitempty"`
+	ChangedLineRanges []ChangedLineRange           `json:"changedLineRanges,omitempty"`
+	IncludedFiles     []ReviewContextIncludedFile  `json:"includedFiles"`
+	OmittedFiles      []ReviewContextOmittedFile   `json:"omittedFiles,omitempty"`
 	ReferenceFiles    []ReviewContextReferenceFile `json:"referenceFiles,omitempty"`
 	PromptBytes       int                          `json:"promptBytes"`
 	ApproximateTokens int                          `json:"approximateTokens"`
 	Prompt            string                       `json:"prompt,omitempty"`
 }
 
-// ReviewContextReferenceFile bounds citations to a file the mapper read:
-// evidence may cite any line from 1 through Lines.
 type ReviewContextReferenceFile struct {
 	Path     string `json:"path"`
 	Lines    int    `json:"lines"`
 	Relation string `json:"relation"`
 }
 
-// Reference file relations recorded by the mapper.
 const (
 	ReferenceRelationSlice      = "slice"
 	ReferenceRelationImports    = "imports"
@@ -89,14 +81,11 @@ const (
 	ReferenceRelationRepository = "repository"
 )
 
-// Slice kinds that are not bounded to one component.
 const (
 	SliceKindInvestigation = "investigation"
 	SliceKindBaseline      = "baseline"
 )
 
-// SecurityInvestigation is a cross-component security question from the
-// threat model. The mapper turns each one into its own review slice.
 type SecurityInvestigation struct {
 	Title    string   `json:"title"`
 	Question string   `json:"question"`
@@ -126,7 +115,6 @@ type ReviewContextOmittedFile struct {
 	Reason string `json:"reason"`
 }
 
-// FindingsV2Artifact captures evidence-backed slice review output.
 type FindingsV2Artifact struct {
 	SchemaVersion int                  `json:"schemaVersion"`
 	Repository    FindingsV2Repository `json:"repository"`
@@ -143,19 +131,14 @@ type FindingsV2Repository struct {
 }
 
 type FindingsV2Scan struct {
-	Mode    string `json:"mode"`
-	SliceID string `json:"sliceId"`
-	Summary string `json:"summary"`
-	// ReviewedFiles and ResolvedQuestions record what the reviewer examined
-	// and ruled out, so a slice without findings still explains its result.
+	Mode              string                       `json:"mode"`
+	SliceID           string                       `json:"sliceId"`
+	Summary           string                       `json:"summary"`
 	ReviewedFiles     []string                     `json:"reviewedFiles,omitempty"`
 	ResolvedQuestions []FindingsV2ResolvedQuestion `json:"resolvedQuestions,omitempty"`
 	Limitations       []string                     `json:"limitations,omitempty"`
 }
 
-// UnmarshalJSON reads the scan block leniently. Mode and sliceId are still
-// checked against the task identity, but descriptive keys a reviewer adds
-// must not discard the findings that accompany them.
 func (s *FindingsV2Scan) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		Mode              string          `json:"mode"`
@@ -171,7 +154,6 @@ func (s *FindingsV2Scan) UnmarshalJSON(data []byte) error {
 	*s = FindingsV2Scan{Mode: raw.Mode, SliceID: raw.SliceID, Summary: string(raw.Summary)}
 	s.ReviewedFiles = lenientStringList(raw.ReviewedFiles)
 	s.Limitations = lenientStringList(raw.Limitations)
-	// A single question, object or string, counts as a one-item list.
 	var questions []json.RawMessage
 	if len(raw.ResolvedQuestions) > 0 && json.Unmarshal(raw.ResolvedQuestions, &questions) != nil {
 		questions = []json.RawMessage{raw.ResolvedQuestions}
@@ -204,8 +186,6 @@ func (s *FindingsV2Scan) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// lenientStringList accepts a string array, a single string, or any other
-// JSON, which is kept as one compact entry.
 func lenientStringList(data json.RawMessage) []string {
 	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
 		return nil
@@ -225,8 +205,6 @@ func lenientStringList(data json.RawMessage) []string {
 	return nil
 }
 
-// FindingsV2ResolvedQuestion is a security question the reviewer checked and
-// answered without a finding, with the controlling evidence.
 type FindingsV2ResolvedQuestion struct {
 	Question   string `json:"question"`
 	Resolution string `json:"resolution"`
@@ -249,9 +227,6 @@ type FindingsV2Finding struct {
 	MinimumFixScope               string                  `json:"minimumFixScope"`
 }
 
-// UnmarshalJSON reads a finding leniently: unknown keys are ignored and
-// narrative fields returned as structured JSON are kept as text. Required
-// fields and evidence are still validated before the finding is accepted.
 func (f *FindingsV2Finding) UnmarshalJSON(data []byte) error {
 	type plain FindingsV2Finding
 	var raw struct {
@@ -288,13 +263,9 @@ type FindingsV2EvidenceRef struct {
 	EndLine   int     `json:"endLine"`
 	Symbol    *string `json:"symbol"`
 	Quote     *string `json:"quote"`
-	// Role places the location on the attack path: entrypoint, source,
-	// propagation, root_control, sink, or context.
-	Role string `json:"role,omitempty"`
+	Role      string  `json:"role,omitempty"`
 }
 
-// UnmarshalJSON also accepts "file" for the path, which reviewers sometimes
-// write; the location is still verified against the review context.
 func (r *FindingsV2EvidenceRef) UnmarshalJSON(data []byte) error {
 	type plain FindingsV2EvidenceRef
 	var raw struct {
@@ -311,7 +282,6 @@ func (r *FindingsV2EvidenceRef) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Evidence roles a finding location may carry.
 var findingEvidenceRoles = map[string]struct{}{
 	"entrypoint": {}, "source": {}, "propagation": {}, "root_control": {}, "sink": {}, "context": {},
 }
@@ -342,12 +312,10 @@ type PatchTestRun struct {
 	ExitCode int    `json:"exitCode"`
 }
 
-// ReviewContextArtifactName returns the context manifest artifact for a slice.
 func ReviewContextArtifactName(sliceID string) string {
 	return fmt.Sprintf("security-review-context-%s.json", sanitizeName(sliceID))
 }
 
-// ParseReviewSlicesArtifact parses and minimally validates mapper output.
 func ParseReviewSlicesArtifact(data []byte) (*ReviewSlicesArtifact, error) {
 	var artifact ReviewSlicesArtifact
 	if err := json.Unmarshal(data, &artifact); err != nil {
@@ -374,7 +342,6 @@ func ParseReviewSlicesArtifact(data []byte) (*ReviewSlicesArtifact, error) {
 	return &artifact, nil
 }
 
-// ParseReviewContextManifest parses and minimally validates a review context manifest.
 func ParseReviewContextManifest(data []byte) (*ReviewContextManifest, error) {
 	var manifest ReviewContextManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
@@ -463,7 +430,6 @@ func validChangedLineRange(lineRange ChangedLineRange) bool {
 	return SafeRepoPath(lineRange.Path) && lineRange.StartLine > 0 && lineRange.EndLine >= lineRange.StartLine
 }
 
-// SafeRepoPath returns true when p is a clean relative repository path.
 func SafeRepoPath(p string) bool {
 	p = strings.TrimSpace(strings.ReplaceAll(p, "\\", "/"))
 	if p == "" || strings.HasPrefix(p, "/") {
@@ -476,7 +442,6 @@ func SafeRepoPath(p string) bool {
 	return cleaned == p
 }
 
-// FindingV2Fingerprint computes an Orka-owned stable fingerprint for a v2 finding.
 func FindingV2Fingerprint(namespace, repositoryScan, repoURL, branch, subPath, sliceID string, finding FindingsV2Finding) string {
 	refs := make([]findingV2FingerprintEvidenceRef, 0, len(finding.Evidence))
 	seenRefs := map[string]struct{}{}
@@ -528,8 +493,6 @@ func FindingV2Fingerprint(namespace, repositoryScan, repoURL, branch, subPath, s
 	return "v2:" + hex.EncodeToString(sum[:])
 }
 
-// FindingV2TargetKey identifies the repository branch or ref and subpath that
-// produced a finding without exposing those values through the store API.
 func FindingV2TargetKey(repoURL, branch, subPath string) string {
 	payload := struct {
 		Version int    `json:"version"`

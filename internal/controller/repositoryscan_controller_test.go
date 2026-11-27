@@ -50,10 +50,7 @@ const (
 	testRepositoryScanHeadSHA   = "2222222222222222222222222222222222222222"
 	testRepositoryScanMergeSHA  = "1111111111111111111111111111111111111111"
 	testRepositoryScanLateMerge = "3333333333333333333333333333333333333333"
-	// testPatchFullDiff carries the same change content as the app.py commit
-	// stub served by newPatchCommitServer; artifact evidence must match the
-	// published commit's content, not just its file names.
-	testPatchFullDiff = testPatchDiffHeader + "\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-unsafe()\n+safe()\n"
+	testPatchFullDiff           = testPatchDiffHeader + "\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-unsafe()\n+safe()\n"
 )
 
 func repositoryScanTestAgent(name string) *corev1alpha1.Agent {
@@ -381,7 +378,6 @@ func TestRepositoryScanReconcileDatesFailedRunWithoutTaskCompletionTime(t *testi
 		},
 		Status: corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhaseScanning, LastScanID: runID, LastScanTaskName: taskName},
 	}
-	// The failed Task carries no completion time.
 	task := &corev1alpha1.Task{
 		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -555,9 +551,6 @@ func newSucceededSecurityTask(name, scanID, stage string, completed metav1.Time)
 	}
 }
 
-// markScanStageTasksIngested records stage Tasks as ingested, as the
-// reconciler's ingestion pass would, so progression tests can seed the stage
-// output directly in the store.
 func markScanStageTasksIngested(ctx context.Context, t *testing.T, cl client.Client, securityStore storepkg.SecurityStore, scan *corev1alpha1.RepositoryScan, tasks ...*corev1alpha1.Task) {
 	t.Helper()
 	for _, seeded := range tasks {
@@ -1035,10 +1028,6 @@ func TestIngestReviewTaskRejectsConflictingDeterministicRetry(t *testing.T) {
 		t.Fatalf("Create(conflicting retry) error = %v", err)
 	}
 
-	// The conflicting Task is never adopted, and the conflict must not
-	// surface as a reconcile error either: that would re-run on every
-	// reconcile and block ingestion for every run of the scan. The slice
-	// fails closed with the diagnostic instead.
 	if err := fixture.reconciler.ingestScanTask(fixture.ctx, fixture.scan, fixture.sourceTask); err != nil {
 		t.Fatalf("ingestScanTask(source) error = %v, want the conflict recorded on the run instead", err)
 	}
@@ -1065,7 +1054,6 @@ func TestIngestReviewTaskRejectsConflictingDeterministicRetry(t *testing.T) {
 			t.Fatalf("conflicting retry Task was adopted: %#v", task.OwnerReferences)
 		}
 	}
-	// A repeat ingestion pass stays quiet instead of re-raising the conflict.
 	if err := fixture.reconciler.ingestScanTask(fixture.ctx, fixture.scan, fixture.sourceTask); err != nil {
 		t.Fatalf("second ingestScanTask(source) error = %v, want none", err)
 	}
@@ -1838,7 +1826,6 @@ func TestRepositoryScanReconcileReportsMissingAnalysisAgent(t *testing.T) {
 		return current.Status.Phase, meta.FindStatusCondition(current.Status.Conditions, readyConditionType), len(tasks.Items)
 	}
 
-	// Without the Agent: an error that names it, no Task, and a recheck.
 	if result := reconcile(); result.RequeueAfter != repositoryScanAgentRecheckInterval {
 		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, repositoryScanAgentRecheckInterval)
 	}
@@ -1850,7 +1837,6 @@ func TestRepositoryScanReconcileReportsMissingAnalysisAgent(t *testing.T) {
 		t.Fatalf("created %d Tasks without the analysis Agent", tasks)
 	}
 
-	// Once the Agent exists the scan leaves the error and starts its first run.
 	if err := cl.Create(ctx, repositoryScanTestAgent("later-reviewer")); err != nil {
 		t.Fatalf("Create(Agent) error = %v", err)
 	}
@@ -3905,11 +3891,6 @@ func savePatchArtifactsWithSummary(t *testing.T, fixture patchIngestFixture, dif
 }
 
 func TestIngestPatchTaskRetriesTransientPublishedCommitFailures(t *testing.T) {
-	// A GitHub outage during verification of an otherwise succeeded patch
-	// must not settle the proposal as failed: for an unscheduled completed
-	// scan nothing else would reconcile it again. Transport errors and
-	// server-side statuses surface as reconcile errors so controller-runtime
-	// retries; client-side statuses remain terminal.
 	ctx := context.Background()
 	for _, tt := range []struct {
 		name   string
@@ -3981,9 +3962,6 @@ func TestIngestPatchTaskRetriesTransientPublishedCommitFailures(t *testing.T) {
 }
 
 func TestIngestPatchTaskRejectsCredentialShapedPreexistingSummaryArtifact(t *testing.T) {
-	// A pre-existing summary artifact is worker-supplied through the upload
-	// API and must pass the same bounded, credential-rejecting validation as
-	// a harness-v2 terminal result before it becomes durable evidence.
 	ctx := context.Background()
 	var seenToken string
 	fixture := patchFixtureWithForgeSecret(t, "secret-summary", newPatchCommitServer(t, []repositoryScanCommitFileResponse{{Filename: "app.py", Status: "modified", Additions: 1, Deletions: 1, Patch: "@@ -1 +1 @@\n-unsafe()\n+safe()"}}, &seenToken), true)
@@ -4019,10 +3997,6 @@ func TestIngestPatchTaskRejectsCredentialShapedPreexistingSummaryArtifact(t *tes
 }
 
 func TestIngestPatchTaskSanitizesPreexistingDiffArtifact(t *testing.T) {
-	// A worker-written diff artifact is raw. Once it is bound to the
-	// published commit, the durable copy must carry the same redaction as the
-	// result-contract branch so a remediation that removed a checked-in
-	// credential does not preserve it in the referenced evidence.
 	ctx := context.Background()
 	var seenToken string
 	const secret = "ak-live-0123456789abcdef"
@@ -4271,9 +4245,6 @@ func TestIngestPatchTaskUsesDurablePublicationWhenTaskDeliveryReceiptIsMissing(t
 
 func TestIngestPatchTaskRejectsArtifactsNotMatchingPublishedCommit(t *testing.T) {
 	ctx := context.Background()
-	// A stale or namespace-seeded diff/summary pair can be internally
-	// consistent; it must still be rejected unless it matches the exact
-	// published commit's file set.
 	var seenToken string
 	fixture := patchFixtureWithForgeSecret(t, "artifact-commit-mismatch", newPatchCommitServer(t, []repositoryScanCommitFileResponse{{Filename: "evil.py", Status: "modified", Additions: 1, Deletions: 1, Patch: "@@ -1 +1 @@\n-x\n+y"}}, &seenToken), true)
 	savePatchArtifacts(t, fixture, testPatchFullDiff, []string{"app.py"})
@@ -4431,9 +4402,6 @@ func TestIngestPatchTaskLegacyResultDiffCannotRescueMismatchedArtifact(t *testin
 	if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, patchTaskForFixture(fixture, true)); err != nil {
 		t.Fatalf("ingestPatchTask() error = %v", err)
 	}
-	// The legacy structured result's matching diff must not rescue the
-	// stored artifact: its content differs from the published commit, so
-	// the proposal fails closed on the content binding.
 	assertPatchIngestState(t, fixture, scanRunPhaseFailed, findingStateOpen)
 	proposals, err := fixture.store.ListPatchProposals(ctx, fixture.proposal.Namespace, fixture.finding.ID)
 	if err != nil || len(proposals) != 1 {
@@ -6301,9 +6269,6 @@ func TestRefreshScanRunStatusSetsBothTimestampsOnSuccess(t *testing.T) {
 	}
 }
 
-// setupControllerSQLiteStore returns an in-memory SQLite store behind the
-// storage client, as production wires it. Scan ingestion and other Orka-side
-// protocols are implemented by the client.
 func setupControllerSQLiteStore(t *testing.T) *storageclient.Client {
 	t.Helper()
 
@@ -6701,8 +6666,6 @@ const (
 	testPatchBinaryFile      = "logo.png"
 )
 
-// repositoryScanPatchResultEnvelope renders the harness-v2 terminal result a
-// patch agent returns instead of writing artifact files.
 func repositoryScanPatchResultEnvelope(fixture patchIngestFixture, changedFiles []string) []byte {
 	data, _ := json.Marshal(security.PatchResultEnvelope{
 		SchemaVersion:  security.AgentResultSchemaVersion,
@@ -6717,10 +6680,6 @@ func repositoryScanPatchResultEnvelope(fixture patchIngestFixture, changedFiles 
 	return data
 }
 
-// newPatchCommitServer serves GET /repos/example/kaset/commits/<sha> with the
-// given files, recording the bearer token it saw.
-// patchPullRequestDecoration records the publisher-created PR as GitHub
-// would return it and the PATCH the controller sends to decorate it.
 type patchPullRequestDecoration struct {
 	title      string
 	body       string
@@ -6854,8 +6813,6 @@ func TestIngestPatchTaskDerivesArtifactsFromV2ResultAndPublishedCommit(t *testin
 	if proposals[0].DiffArtifact != diffName || proposals[0].SummaryArtifact != summaryName {
 		t.Fatalf("proposal artifacts = %q/%q", proposals[0].DiffArtifact, proposals[0].SummaryArtifact)
 	}
-	// The publisher's generic pull request is decorated with the finding
-	// while its intent marker stays the final body line.
 	if pullRequest.patched == nil || pullRequest.title != "fix(security): Patch target" {
 		t.Fatalf("pull request decoration = %#v", pullRequest.patched)
 	}
@@ -6864,7 +6821,6 @@ func TestIngestPatchTaskDerivesArtifactsFromV2ResultAndPublishedCommit(t *testin
 		!strings.HasSuffix(pullRequest.body, " -->") || strings.Count(pullRequest.body, "orka.publisher.pr-intent.v1") != 1 {
 		t.Fatalf("decorated body = %q", pullRequest.body)
 	}
-	// A second ingestion leaves the already-decorated pull request alone.
 	pullRequest.patched = nil
 	if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, task); err != nil {
 		t.Fatalf("ingestPatchTask() second pass error = %v", err)
@@ -6924,13 +6880,10 @@ func TestIngestPatchTaskV2ResultFailsClosed(t *testing.T) {
 func TestPatchHunkBindingRejectsRelocatedAndPrefixAmbiguousContent(t *testing.T) {
 	t.Parallel()
 	commit := "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-unsafe()\n+safe()\n"
-	// Same added/deleted strings at a different hunk position must not match.
 	relocated := "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -40 +40 @@\n-unsafe()\n+safe()\n"
 	if samePatchHunks(relocated, commit) {
 		t.Fatal("relocated hunk content was accepted as the published commit")
 	}
-	// In-hunk content that begins with "+++"/"---" is change content, not a
-	// header, and must participate in the comparison.
 	plusCommit := "diff --git a/notes.md b/notes.md\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1 @@\n-old\n+++extra line\n"
 	plusOther := "diff --git a/notes.md b/notes.md\n--- a/notes.md\n+++ b/notes.md\n@@ -1 +1 @@\n-old\n+different\n"
 	if samePatchHunks(plusOther, plusCommit) {
@@ -6939,7 +6892,6 @@ func TestPatchHunkBindingRejectsRelocatedAndPrefixAmbiguousContent(t *testing.T)
 	if !samePatchHunks(commit, commit) {
 		t.Fatal("identical diffs did not match")
 	}
-	// Index-line formatting differences outside hunks stay tolerated.
 	withIndex := "diff --git a/app.py b/app.py\nindex 1111111..2222222 100644\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-unsafe()\n+safe()\n"
 	if !samePatchHunks(withIndex, commit) {
 		t.Fatal("index-line formatting difference was not tolerated")
@@ -6980,15 +6932,12 @@ func TestPatchHunkBindingRejectsMismatchedPathHeaders(t *testing.T) {
 
 func TestPatchEvidenceRejectsTruncatedAndDuplicateCommitContent(t *testing.T) {
 	t.Parallel()
-	// A nonempty patch whose totals disagree with the reported counts is a
-	// truncated fragment and must fail closed.
 	_, _, reason := repositoryScanDiffFromPublishedCommit([]repositoryScanCommitFileResponse{
 		{Filename: "big.go", Status: "modified", Additions: 400, Deletions: 10, Patch: "@@ -1 +1 @@\n-a\n+b"},
 	})
 	if !strings.Contains(reason, "inconsistent file patch") {
 		t.Fatalf("reason = %q, want inconsistent-patch rejection", reason)
 	}
-	// A commit listing repeating a path must fail closed.
 	_, _, reason = repositoryScanDiffFromPublishedCommit([]repositoryScanCommitFileResponse{
 		{Filename: "a.go", Status: "modified", Additions: 1, Deletions: 1, Patch: "@@ -1 +1 @@\n-a\n+b"},
 		{Filename: "a.go", Status: "modified", Additions: 1, Deletions: 1, Patch: "@@ -1 +1 @@\n-c\n+d"},
@@ -6996,28 +6945,21 @@ func TestPatchEvidenceRejectsTruncatedAndDuplicateCommitContent(t *testing.T) {
 	if !strings.Contains(reason, "repeats a file path") {
 		t.Fatalf("reason = %q, want duplicate-path rejection", reason)
 	}
-	// Normalization must not silently change the identity of a legal Git path.
 	_, _, reason = repositoryScanDiffFromPublishedCommit([]repositoryScanCommitFileResponse{
 		{Filename: " fix.go", Status: "modified", Additions: 1, Deletions: 1, Patch: "@@ -1 +1 @@\n-a\n+b"},
 	})
 	if !strings.Contains(reason, "whitespace-altered file path") {
 		t.Fatalf("reason = %q, want whitespace-path rejection", reason)
 	}
-	// An artifact repeating a diff --git block cannot hide extra hunks
-	// behind a second block that matches the commit.
 	genuine := "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-a\n+b\n"
 	spoof := "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -9 +9 @@\n-evil\n+worse\n" + genuine
 	if samePatchHunks(spoof, genuine) {
 		t.Fatal("duplicate file block was accepted as matching the commit")
 	}
-	// A hunkless duplicate block (arbitrary non-hunk lines under a repeated
-	// header) must invalidate the diff just the same.
 	hunkless := genuine + "diff --git a/a.go b/a.go\narbitrary smuggled line\n"
 	if samePatchHunks(hunkless, genuine) {
 		t.Fatal("hunkless duplicate file block was accepted as matching the commit")
 	}
-	// A fabricated reviewer-facing line before the first hunk of a single
-	// block must invalidate the diff too.
 	prefixSmuggle := "diff --git a/a.go b/a.go\n+fake line reviewers will see\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-a\n+b\n"
 	if samePatchHunks(prefixSmuggle, genuine) {
 		t.Fatal("unknown pre-hunk content was accepted as matching the commit")
@@ -7026,10 +6968,6 @@ func TestPatchEvidenceRejectsTruncatedAndDuplicateCommitContent(t *testing.T) {
 
 func TestIngestPatchTaskSecondReconcileAcceptsSanitizedStoredDiff(t *testing.T) {
 	ctx := context.Background()
-	// The result-contract path persists the commit diff credential-redacted;
-	// a later reconcile enters the pre-existing-artifact branch and must not
-	// fail an already verified proposal because [REDACTED] differs from the
-	// removed secret.
 	const secret = "ak-live-0123456789abcdef"
 	commitPatch := "@@ -1 +1 @@\n-api_key=" + secret + "\n+api_key=vault://key"
 	var seenToken string
@@ -7037,7 +6975,6 @@ func TestIngestPatchTaskSecondReconcileAcceptsSanitizedStoredDiff(t *testing.T) 
 	savePatchStructuredResult(t, fixture, &common.StructuredResult{
 		Summary: "rotated credential", Files: []string{"config.env"}, PushBranch: fixture.proposal.Branch,
 	})
-	// First reconcile derives and persists the sanitized artifacts.
 	task := patchTaskForFixture(fixture, true)
 	envelope := `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"` + fixture.finding.ID + `","summary":"rotated credential","changedFiles":["config.env"],"risk":"low"}`
 	if err := fixture.store.SaveResult(ctx, task.Namespace, task.Name, []byte(envelope)); err != nil {
@@ -7048,8 +6985,6 @@ func TestIngestPatchTaskSecondReconcileAcceptsSanitizedStoredDiff(t *testing.T) 
 		t.Fatalf("first ingest error = %v", err)
 	}
 	assertPatchIngestState(t, fixture, patchProposalStatusPROpened, findingStatePROpen)
-	// Second reconcile takes the pre-existing-artifact path against the
-	// stored (redacted) diff and must stay verified.
 	if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, task); err != nil {
 		t.Fatalf("second ingest error = %v", err)
 	}
@@ -7085,7 +7020,6 @@ func TestMapperCrossComponentEnvAppliesOnlyToFullScans(t *testing.T) {
 	var investigations []security.SecurityInvestigation
 	for _, item := range env {
 		if item.Name == security.EnvInvestigations {
-			// The kubelet reduces $$ to $, so the worker reads the text literally.
 			if !strings.Contains(item.Value, "$$(HOME)") {
 				t.Fatalf("investigations env = %q, want $ escaped from Kubernetes expansion", item.Value)
 			}
@@ -7172,14 +7106,11 @@ func TestIngestReviewTaskRetriesFailedPromptOnce(t *testing.T) {
 	if progress := fixture.reconciler.collectScanRunProgress(fixture.ctx, tasks.Items); progress.reviewCount != 1 || len(progress.failedStages) != 0 || !progress.hasActive {
 		t.Fatalf("progress = %#v, want the superseded failure ignored", progress)
 	}
-	// A cache that has not seen the retry yet must not end the run on the
-	// failure the retry replaces.
 	stale := []corev1alpha1.Task{*fixture.sourceTask}
 	if progress := fixture.reconciler.collectScanRunProgress(fixture.ctx, stale); len(progress.failedStages) != 0 || !progress.hasActive {
 		t.Fatalf("progress from a stale cache = %#v, want the retry observed", progress)
 	}
 
-	// The retry is the slice's last chance: its failure fails the run.
 	retryTask.Status.Phase = corev1alpha1.TaskPhaseFailed
 	retryTask.Status.Message = "prompt failed"
 	retryTask.Status.CompletionTime = &metav1.Time{Time: time.Now()}
@@ -7260,7 +7191,6 @@ func TestReviewTasksStayBoundedAndRefillWhileReviewsRun(t *testing.T) {
 	if _, err := reconciler.progressLatestScanRun(ctx, scan); err != nil {
 		t.Fatalf("progressLatestScanRun() error = %v", err)
 	}
-	// The run's RuntimePool is unknown until a review is queued to it.
 	if got := len(listReviews()); got != 4 {
 		t.Fatalf("review tasks after mapper = %d, want 4 before the pool is known", got)
 	}
@@ -7282,7 +7212,6 @@ func TestReviewTasksStayBoundedAndRefillWhileReviewsRun(t *testing.T) {
 		t.Fatalf("review tasks once the pool is known = %d, want the %d outstanding bound", got, maxOutstandingReviewTasks)
 	}
 
-	// Nothing to add while every queued review is still outstanding.
 	if err := reconciler.topUpReviewTasks(ctx, scan); err != nil {
 		t.Fatalf("topUpReviewTasks(full) error = %v", err)
 	}
@@ -7290,7 +7219,6 @@ func TestReviewTasksStayBoundedAndRefillWhileReviewsRun(t *testing.T) {
 		t.Fatalf("review tasks with a full queue = %d", got)
 	}
 
-	// Finishing three reviews frees three places while others still run.
 	for i, task := range listReviews()[:3] {
 		task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 		if err := cl.Update(ctx, &task); err != nil {
@@ -7304,8 +7232,6 @@ func TestReviewTasksStayBoundedAndRefillWhileReviewsRun(t *testing.T) {
 		t.Fatalf("review tasks after top-up = %d, want %d", got, maxOutstandingReviewTasks+3)
 	}
 
-	// The cache can miss a retry created earlier in the same reconcile, so
-	// the bound is counted from an authoritative read.
 	var outstanding []corev1alpha1.Task
 	for _, task := range listReviews() {
 		if task.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
@@ -7341,9 +7267,7 @@ func TestReviewTasksStayBoundedAndRefillWhileReviewsRun(t *testing.T) {
 func TestIngestReviewTaskStoresRepeatedControlAsDuplicateOutsideCap(t *testing.T) {
 	run, all := ingestOneSliceUnderCapOfOne(t,
 		duplicateTestFinding("Missing authorization check", "authz", 5),
-		// Same broken control, reported again under other words.
 		duplicateTestFinding("Callers bypass the API permission gate", "CWE-863", 6),
-		// A different control competes for the run's single place.
 		duplicateTestFinding("Audit bypass", "authz", 9),
 	)
 	if run.AcceptedFindings != 1 || run.DroppedFindings != 1 {
@@ -7369,7 +7293,6 @@ func TestIngestReviewTaskDropsRepeatOfCappedFinding(t *testing.T) {
 	run, all := ingestOneSliceUnderCapOfOne(t,
 		duplicateTestFinding("Missing authorization check", "authz", 5),
 		duplicateTestFinding("Audit bypass", "authz", 9),
-		// Repeats the capped finding, so it has no stored canonical to alias.
 		duplicateTestFinding("Audit bypass, reported again", "authz", 11),
 	)
 	if run.AcceptedFindings != 1 || run.DroppedFindings != 1 {
@@ -7387,17 +7310,11 @@ func duplicateTestFinding(title, category string, start int) security.FindingsV2
 	}
 }
 
-// ingestOneSliceUnderCapOfOne ingests one review result into a run limited to
-// a single finding and returns the run and every stored finding, duplicates
-// included.
 func ingestOneSliceUnderCapOfOne(t *testing.T, items ...security.FindingsV2Finding) (*storepkg.ScanRun, []storepkg.Finding) {
 	t.Helper()
 	return ingestReviewSlices(t, 1, items)
 }
 
-// ingestReviewSlices ingests one review result per slice, in order, into a run
-// limited to maxFindings and returns the run and every stored finding,
-// duplicates included. Every slice owns the same file, as overlapping slices do.
 func ingestReviewSlices(t *testing.T, maxFindings int32, results ...[]security.FindingsV2Finding) (*storepkg.ScanRun, []storepkg.Finding) {
 	t.Helper()
 	fixture := newSliceIngestionFixture(t, maxFindings)
@@ -7423,7 +7340,6 @@ func newSliceIngestionFixture(t *testing.T, maxFindings int32) *sliceIngestionFi
 	return &sliceIngestionFixture{store: store, reconciler: reconciler, scan: scan, policyDigest: security.ScannerPolicyDigest(security.ScannerPolicy{})}
 }
 
-// ingestRun ingests one review result per slice, in order, into a new run.
 func (f *sliceIngestionFixture) ingestRun(t *testing.T, runID string, results ...[]security.FindingsV2Finding) (*storepkg.ScanRun, []storepkg.Finding) {
 	t.Helper()
 	ctx := context.Background()
@@ -7489,8 +7405,6 @@ func TestIngestReviewTaskCarriesADecisionOnARepeatToItsCanonical(t *testing.T) {
 		t.Fatalf("UpdateFindingState() error = %v", err)
 	}
 
-	// The next run keeps another report of the same control first, so the
-	// dismissed finding becomes its duplicate.
 	_, all := fixture.ingestRun(t, "scan_second",
 		[]security.FindingsV2Finding{duplicateTestFinding("Missing authorization check", "authz", 5)},
 		[]security.FindingsV2Finding{repeat},
@@ -7680,7 +7594,6 @@ func TestUnreviewableFirstBatchKeepsRunForPendingSlices(t *testing.T) {
 	if err := store.UpsertReviewSlice(ctx, pending); err != nil {
 		t.Fatalf("UpsertReviewSlice() error = %v", err)
 	}
-	// Every started slice failed its retry, but another has not started.
 	progress := scanRunProgress{hasThreatModelReady: true, hasReview: true, reviewCount: 16, reviewUnreviewable: 16}
 	run := &storepkg.ScanRun{ID: "scan_batch", Phase: scanRunPhaseRunning}
 	applyScanRunProgress(run, progress)
@@ -7694,8 +7607,6 @@ func TestUnreviewableFirstBatchKeepsRunForPendingSlices(t *testing.T) {
 }
 
 func TestReviewTaskWindowFollowsDispatchCapacity(t *testing.T) {
-	// Before any review is queued the run's pool is unknown, so the first
-	// batch assumes one prompt whatever the configured limits.
 	for _, dispatch := range []int{0, 1, 8, 100} {
 		reconciler := &RepositoryScanReconciler{ACPDispatchMaxConcurrentTasks: dispatch}
 		if got := reconciler.reviewTaskWindow(context.Background(), nil, "scan_window"); got != 4 {
@@ -7703,8 +7614,6 @@ func TestReviewTaskWindowFollowsDispatchCapacity(t *testing.T) {
 		}
 	}
 
-	// Once reviews are queued, the smaller of dispatch and the pool they run
-	// on decides; an existing pool keeps the capacity it was created with.
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
@@ -7720,7 +7629,7 @@ func TestReviewTaskWindowFollowsDispatchCapacity(t *testing.T) {
 		{8, 8, 32},
 		{1, 8, 4},
 		{32, 4, 16},
-		{0, 8, 16}, // the default dispatch capacity of 4
+		{0, 8, 16},
 	} {
 		pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{Name: "acp-codex-pool", Namespace: defaultNS}}
 		pool.Status.Capacity.MaxRunningPrompts = int32(test.poolPrompts)
@@ -7735,7 +7644,6 @@ func TestReviewTaskWindowFollowsDispatchCapacity(t *testing.T) {
 }
 
 func TestRecordValidationErrorKeepsAnEarlierVerdict(t *testing.T) {
-	// A revalidation is pending over the earlier refutation, then errors.
 	refuted := &storepkg.Finding{ID: "fnd_refuted", ValidationStatus: findingValidationStatusPending, ValidationJSON: `{"status":"failed","summary":"Not reachable."}`}
 	recordValidationError(refuted, "validation task failed")
 	if refuted.ValidationStatus != findingValidationStatusFailed || !strings.Contains(refuted.ValidationJSON, "Not reachable.") {
@@ -7762,15 +7670,12 @@ func TestReviewTaskBudgetIsSharedAcrossScans(t *testing.T) {
 			Status: corev1alpha1.TaskStatus{Phase: phase},
 		}
 	}
-	// Another scan already has 14 reviews waiting for the shared dispatcher.
 	objects := make([]client.Object, 0, 15)
 	objects = append(objects, review("other-done", "scan_other", corev1alpha1.TaskPhaseSucceeded))
 	for i := range 14 {
 		objects = append(objects, review(fmt.Sprintf("other-%02d", i), "scan_other", corev1alpha1.TaskPhasePending))
 	}
 	reconciler := &RepositoryScanReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()}
-	// This run's own window is 4 before its pool is known, but only 2 of the
-	// 16 shared places are free.
 	got, err := reconciler.reviewTaskBudget(context.Background(), nil, "scan_this")
 	if err != nil {
 		t.Fatalf("reviewTaskBudget() error = %v", err)
@@ -7779,7 +7684,6 @@ func TestReviewTaskBudgetIsSharedAcrossScans(t *testing.T) {
 		t.Fatalf("reviewTaskBudget() = %d, want the 2 shared places left", got)
 	}
 
-	// Reviews created moments ago count while the cache does not list them.
 	now := time.Now()
 	reconciler.reviewTaskLedger().record(types.NamespacedName{Namespace: defaultNS, Name: "just-created"}, types.NamespacedName{}, now)
 	if got, err = reconciler.reviewTaskBudget(context.Background(), nil, "scan_this"); err != nil || got != 1 {
@@ -7804,8 +7708,6 @@ func TestMergeFindingValidationStateEndsPendingWithError(t *testing.T) {
 	}
 }
 
-// A finding reported again keeps the ratings its earlier validation
-// calibrated; a refuted validation leaves the reviewer's ratings.
 func TestMergeFindingValidationStateKeepsCalibratedRatings(t *testing.T) {
 	existing := &storepkg.Finding{ID: "fnd_1", ScanRunID: "run_1", ValidationStatus: findingValidationStatusValidated,
 		ValidationJSON: `{"version":1,"finding_id":"fnd_1","status":"validated","severity":"low","confidence":"medium"}`}
@@ -7844,8 +7746,6 @@ func TestReviewTaskBudgetIsSharedPerRuntimePool(t *testing.T) {
 		Client:                        fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(),
 		ACPDispatchMaxConcurrentTasks: 8,
 	}
-	// The one-prompt pool allows four outstanding reviews across both scans;
-	// three are taken, so this run may add one though its window has three.
 	got, err := reconciler.reviewTaskBudget(context.Background(), []corev1alpha1.Task{*own}, "scan_this")
 	if err != nil {
 		t.Fatalf("reviewTaskBudget() error = %v", err)
@@ -7854,8 +7754,6 @@ func TestReviewTaskBudgetIsSharedPerRuntimePool(t *testing.T) {
 		t.Fatalf("reviewTaskBudget() = %d, want the 1 place left on the shared pool", got)
 	}
 
-	// Another scan's review created moments ago, not yet listed or queued,
-	// still holds a place on the pool it will run on.
 	poolKey := types.NamespacedName{Namespace: defaultNS, Name: pool.Name}
 	reconciler.reviewTaskLedger().record(types.NamespacedName{Namespace: defaultNS, Name: "other-02"}, poolKey, time.Now())
 	if got, err = reconciler.reviewTaskBudget(context.Background(), []corev1alpha1.Task{*own}, "scan_this"); err != nil || got != 0 {
@@ -7880,7 +7778,6 @@ func TestReviewTaskWindowKnowsThePoolFromTheThreatModel(t *testing.T) {
 		Client:                        fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build(),
 		ACPDispatchMaxConcurrentTasks: 8,
 	}
-	// The first review batch is sized from the pool the threat model ran on.
 	if got := reconciler.reviewTaskWindow(context.Background(), []corev1alpha1.Task{threatModel}, "scan_first"); got != 32 {
 		t.Fatalf("reviewTaskWindow(threat model on an eight-prompt pool) = %d, want 32", got)
 	}
@@ -7953,19 +7850,21 @@ func TestRepositoryScanPinsReviewAndValidationWorkspaceToObservedCommit(t *testi
 	if reviewTask.Spec.Workspace.Branch != "main" || reviewTask.Spec.Workspace.Ref != headSHA {
 		t.Fatalf("review workspace = branch:%q ref:%q, want branch:main ref:%s", reviewTask.Spec.Workspace.Branch, reviewTask.Spec.Workspace.Ref, headSHA)
 	}
-	// Branch-scoped finding identity stays "main" even though Ref is pinned to headSHA.
-	repo, problem := trustedFindingsRepositoryForRunTask(scan, run, reviewTask)
+	repo, problem := reconciler.trustedFindingsRepositoryForRunTask(ctx, scan, run, reviewTask)
 	if problem != "" || repo.Branch != "main" || repo.HeadSHA != headSHA {
 		t.Fatalf("trustedFindingsRepositoryForRunTask() = %#v, %q; want branch=main head=%s", repo, problem, headSHA)
 	}
-	// A mismatched pinned commit on the review task must be rejected.
 	mismatched := reviewTask.DeepCopy()
 	mismatched.Spec.Workspace.Ref = otherSHA
-	if _, problem := trustedFindingsRepositoryForRunTask(scan, run, mismatched); !strings.Contains(problem, "does not match scan run head commit") {
+	if _, problem := reconciler.trustedFindingsRepositoryForRunTask(ctx, scan, run, mismatched); !strings.Contains(problem, "does not match scan run head commit") {
 		t.Fatalf("trustedFindingsRepositoryForRunTask(mismatched) problem = %q, want commit mismatch", problem)
 	}
+	unpinned := reviewTask.DeepCopy()
+	unpinned.Spec.Workspace.Ref = ""
+	if _, problem := reconciler.trustedFindingsRepositoryForRunTask(ctx, scan, run, unpinned); !strings.Contains(problem, "does not match scan run head commit") {
+		t.Fatalf("trustedFindingsRepositoryForRunTask(unpinned) problem = %q, want commit mismatch", problem)
+	}
 
-	// Automatic validation task also pins Workspace.Ref to run.HeadCommit.
 	finding := &storepkg.Finding{
 		ID:               "fnd_pin",
 		Namespace:        defaultNS,

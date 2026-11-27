@@ -15,9 +15,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-// A Task deleted while no controller was running keeps the previous epoch.
-// The next leader must still cancel it before admission so its finalizer can
-// complete and the RuntimePool stops counting it as queued demand.
 func TestACPDispatcherCancelsPreSubmissionTaskDeletedDuringControllerOutage(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -70,7 +67,6 @@ func TestACPDispatcherCancelsPreSubmissionTaskDeletedDuringControllerOutage(t *t
 				t.Fatalf("queuedTasks after cancellation = %d, want 0", queued)
 			}
 
-			// A later stale scan and admission pass must leave the settled Task alone.
 			recoverAndSettleACPOutageTestTask(t, fixture)
 			again, err := fixture.controlStore.GetPromptAttempt(ctx, fixture.attemptID)
 			if err != nil {
@@ -81,7 +77,6 @@ func TestACPDispatcherCancelsPreSubmissionTaskDeletedDuringControllerOutage(t *t
 					again.ExecutionState, again.Version, attempt.Version)
 			}
 
-			// Once the terminal projection is delivered, the Task finalizer may finish.
 			projector := &ACPOutboxProjector{
 				Client: fixture.kubeClient, Store: fixture.controlStore, Epochs: fixture.dispatcher.Epochs, WorkerID: "outage-test",
 			}
@@ -99,9 +94,6 @@ func TestACPDispatcherCancelsPreSubmissionTaskDeletedDuringControllerOutage(t *t
 	}
 }
 
-// Recovery must not replay or reclassify a deleting Task, or discard runtime
-// cleanup authority its finalizer still waits on. These Tasks keep the
-// previous epoch and are left to their existing cleanup paths.
 func TestACPDispatcherRecoveryLeavesDeletedTaskWithRuntimeState(t *testing.T) {
 	const (
 		runtimeInstanceID = "runtime-old"
@@ -176,8 +168,6 @@ func TestACPDispatcherRecoveryLeavesDeletedTaskWithRuntimeState(t *testing.T) {
 	}
 }
 
-// deleteACPOutageTestTask applies mutate to the fixture Task, adds the Task
-// finalizer, and deletes it as a client would while no controller runs.
 func deleteACPOutageTestTask(t *testing.T, fixture *recoveryFixture, mutate func(*corev1alpha1.Task)) *corev1alpha1.Task {
 	t.Helper()
 	ctx := fixture.ctx
@@ -210,8 +200,6 @@ func deleteACPOutageTestTask(t *testing.T, fixture *recoveryFixture, mutate func
 	return task
 }
 
-// recoverAndSettleACPOutageTestTask runs leader startup recovery, then the
-// first dispatch scan, which settles deleting Tasks before admission.
 func recoverAndSettleACPOutageTestTask(t *testing.T, fixture *recoveryFixture) {
 	t.Helper()
 	dispatcher := fixture.dispatcher
@@ -222,7 +210,6 @@ func recoverAndSettleACPOutageTestTask(t *testing.T, fixture *recoveryFixture) {
 		t.Fatal(err)
 	}
 	err := dispatcher.dispatchOnce(fixture.ctx)
-	// Wait for any stale recovery the scan scheduled, as Start does on exit.
 	dispatcher.staleRecoveryMu.Lock()
 	dispatcher.staleRecoveryMu.Unlock() //nolint:staticcheck // SA2001: acquisition waits for the recovery worker to finish.
 	if err != nil {
@@ -230,8 +217,6 @@ func recoverAndSettleACPOutageTestTask(t *testing.T, fixture *recoveryFixture) {
 	}
 }
 
-// acpOutageTestQueuedTasks runs the dispatcher's pool demand accounting over
-// the fixture's current Tasks and returns the resulting queuedTasks.
 func acpOutageTestQueuedTasks(t *testing.T, fixture *recoveryFixture) int32 {
 	t.Helper()
 	scheme := runtime.NewScheme()

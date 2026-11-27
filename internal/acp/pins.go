@@ -1,7 +1,5 @@
 package acp
 
-// Reviewed ACP/profile pins. Artifact versions are supply-chain versions; ACP
-// wire compatibility remains protocolVersion=1 during initialize.
 const (
 	ACPSchemaArtifactVersion = "schema-v1.20.0"
 	ACPSchemaSourceCommit    = "5e89c71497fe07dd4ae633c181a17224f4a8956d"

@@ -91,8 +91,6 @@ var _ = Describe("Orka CLI substrate pool binary workflow", Ordered, func() {
 	})
 })
 
-// substratePoolManifest is minimal for the current SubstrateActorPoolSpec: templateRef is required;
-// targetActors/precreateActors provide observable spec fields for create/update assertions.
 func substratePoolManifest(name, templateName string, targetActors int32, precreateActors bool) string {
 	return fmt.Sprintf(`
 apiVersion: core.orka.ai/v1alpha1

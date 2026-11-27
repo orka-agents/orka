@@ -237,11 +237,7 @@ func TestLoadValidatesSkillMarkdown(t *testing.T) {
 	}
 }
 
-// TestFailuresWithholdCredentialShapedDiagnostics keeps image-controlled file
-// names and frontmatter keys that look like credentials out of the failure
-// line, which reaches stderr, the termination log, and resource status.
 func TestFailuresWithholdCredentialShapedDiagnostics(t *testing.T) {
-	// Split so the literal is not itself a credential-shaped string.
 	token := "gh" + "p_0123456789abcdefghijABCDEFGHIJ012345"
 	frontmatter := func(fields string) string {
 		return "---\n" + fields + "\n---\nBody.\n"
@@ -283,7 +279,6 @@ func TestFailuresWithholdCredentialShapedDiagnostics(t *testing.T) {
 			}
 		})
 	}
-	// Ordinary diagnostics keep their detail.
 	_, err := Load(writeSkill(t, map[string]string{
 		"SKILL.md": frontmatter("name: code-review\ndescription: d\nallowed-tools: Bash(*)"),
 	}), "code-review", DefaultLimits())
@@ -304,9 +299,6 @@ func requireCloseOnExec(t *testing.T, what string, fd int) {
 	}
 }
 
-// TestDuplicatedSkillFolderHandlesAreCloseOnExec covers the two places the
-// loader duplicates a folder handle. Another session can start an adapter at
-// any moment, so a duplicate must never be inheritable, even briefly.
 func TestDuplicatedSkillFolderHandlesAreCloseOnExec(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "nested"), 0o755); err != nil {

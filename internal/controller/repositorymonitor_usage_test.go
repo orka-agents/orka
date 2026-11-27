@@ -235,7 +235,6 @@ func TestUsageGitHubRefreshIsBoundedAndContinuesAfterTasks(t *testing.T) {
 	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespace, monitor, secret).Build(), Store: backend, GitHubAPIBaseURL: server.URL, HTTPClient: server.Client()}
 	work, err := r.prepareMonitorUsageWork(t.Context(), monitor, "org/repo", "issue", 1)
 	require.NoError(t, err)
-	// No Task needs to survive for the retained publication links to refresh.
 	for number := int64(1); number <= 25; number++ {
 		require.NoError(t, backend.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: monitor.Namespace, WorkID: work, Repository: "org/repo", Number: number, Origin: store.UsagePRCreated, EvidenceID: "publication"}))
 	}

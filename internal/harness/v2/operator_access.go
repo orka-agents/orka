@@ -11,24 +11,13 @@ import (
 )
 
 const (
-	// OperatorExecPathTemplate upgrades to a WebSocket that streams one
-	// operator command running as the RuntimeSession's child identity.
-	OperatorExecPathTemplate = "/v2/runtime-sessions/{sessionID}/operator-exec"
-	// OperatorFilesPathTemplate reads (GET) or writes (PUT) one regular file
-	// beneath the RuntimeSession workspace as the child identity.
-	OperatorFilesPathTemplate = "/v2/runtime-sessions/{sessionID}/operator-files"
-	// OperatorRequestHeader carries the base64url canonical JSON request so
-	// the supervisor authenticates the complete operation on headers alone,
-	// before it upgrades the connection or reads a body.
-	OperatorRequestHeader = "X-Orka-Operator-Request"
-	// MaxOperatorRequestHeaderBytes bounds the encoded request header.
+	OperatorExecPathTemplate      = "/v2/runtime-sessions/{sessionID}/operator-exec"
+	OperatorFilesPathTemplate     = "/v2/runtime-sessions/{sessionID}/operator-files"
+	OperatorRequestHeader         = "X-Orka-Operator-Request"
 	MaxOperatorRequestHeaderBytes = 16 << 10
-	// OperatorCapabilityTTL bounds how long a signed operator request may be
-	// presented. The operation itself is bounded by its own timeout.
-	OperatorCapabilityTTL = 2 * time.Minute
+	OperatorCapabilityTTL         = 2 * time.Minute
 )
 
-// OperatorExecPath returns the exec route for a RuntimeSession.
 func OperatorExecPath(sessionID RuntimeSessionID) (string, error) {
 	sessionPath, err := RuntimeSessionPath(sessionID)
 	if err != nil {
@@ -37,7 +26,6 @@ func OperatorExecPath(sessionID RuntimeSessionID) (string, error) {
 	return sessionPath + "/operator-exec", nil
 }
 
-// OperatorFilesPath returns the file route for a RuntimeSession.
 func OperatorFilesPath(sessionID RuntimeSessionID) (string, error) {
 	sessionPath, err := RuntimeSessionPath(sessionID)
 	if err != nil {
@@ -46,7 +34,6 @@ func OperatorFilesPath(sessionID RuntimeSessionID) (string, error) {
 	return sessionPath + "/operator-files", nil
 }
 
-// OperatorExecRequest is the signed exec request.
 type OperatorExecRequest struct {
 	Protocol string                     `json:"protocol"`
 	Metadata MutationMetadata           `json:"metadata"`
@@ -54,7 +41,6 @@ type OperatorExecRequest struct {
 	Exec     operatoraccess.ExecOptions `json:"exec"`
 }
 
-// OperatorFileRequest is the signed file request.
 type OperatorFileRequest struct {
 	Protocol string           `json:"protocol"`
 	Metadata MutationMetadata `json:"metadata"`
@@ -62,12 +48,9 @@ type OperatorFileRequest struct {
 	Path     string           `json:"path"`
 	Write    bool             `json:"write,omitempty"`
 	MaxBytes int64            `json:"maxBytes"`
-	// Size is the exact upload length. A write commits only when exactly
-	// Size bytes arrive, so a truncated upload never replaces the target.
-	Size int64 `json:"size,omitempty"`
+	Size     int64            `json:"size,omitempty"`
 }
 
-// OperatorFileResult is the JSON response of a successful write.
 type OperatorFileResult struct {
 	Protocol string `json:"protocol"`
 	Bytes    int64  `json:"bytes"`
@@ -89,7 +72,6 @@ func validateOperatorEnvelope(protocol string, metadata MutationMetadata, auditI
 	return nil
 }
 
-// ValidateAt validates and clamps the request.
 func (r *OperatorExecRequest) ValidateAt(now time.Time) error {
 	if err := validateOperatorEnvelope(r.Protocol, r.Metadata, r.AuditID, now); err != nil {
 		return err
@@ -97,7 +79,6 @@ func (r *OperatorExecRequest) ValidateAt(now time.Time) error {
 	return r.Exec.Normalize()
 }
 
-// ValidateAt validates and clamps the request.
 func (r *OperatorFileRequest) ValidateAt(now time.Time) error {
 	if err := validateOperatorEnvelope(r.Protocol, r.Metadata, r.AuditID, now); err != nil {
 		return err
@@ -118,7 +99,6 @@ func (r *OperatorFileRequest) ValidateAt(now time.Time) error {
 	return nil
 }
 
-// EncodeOperatorRequestHeader canonicalizes and encodes a request header.
 func EncodeOperatorRequestHeader(request any) (string, error) {
 	raw, err := CanonicalValue(request)
 	if err != nil {
@@ -131,8 +111,6 @@ func EncodeOperatorRequestHeader(request any) (string, error) {
 	return encoded, nil
 }
 
-// DecodeOperatorRequestHeader decodes a request header strictly and verifies
-// that metadata.requestDigest is the canonical digest of the decoded request.
 func DecodeOperatorRequestHeader(header string, target any) error {
 	header = strings.TrimSpace(header)
 	if header == "" || len(header) > MaxOperatorRequestHeaderBytes {
@@ -163,8 +141,6 @@ func DecodeOperatorRequestHeader(header string, target any) error {
 	return nil
 }
 
-// SealOperatorRequest stamps metadata.requestDigest and signs the request.
-// It returns the encoded header and the capability token.
 func SealOperatorRequest(secret []byte, request any, metadata *MutationMetadata) (string, string, error) {
 	metadata.RequestDigest = ""
 	metadata.RequestDigestSchemaVersion = RequestDigestSchemaVersion

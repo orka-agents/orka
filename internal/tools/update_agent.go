@@ -17,7 +17,6 @@ import (
 	"github.com/orka-agents/orka/internal/agentcontext"
 )
 
-// UpdateAgentTool updates an existing Agent CRD.
 type UpdateAgentTool struct{}
 
 func (t *UpdateAgentTool) Name() string { return updateAgentToolName }
@@ -104,9 +103,6 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		}
 	}
 
-	// An Agent stored without a built-in contract runs under the namespace's
-	// mode, so validate the soul against that effective contract, as creation
-	// does. Only an omitted contract is filled; a stored one is left as is.
 	if runtime := agent.Spec.Runtime; runtime != nil && runtime.Type != "" && runtime.RuntimeRef == nil && runtime.ContractVersion == nil {
 		if contract := tc.ExecutionMode.ContractVersion(); contract != "" {
 			runtime.ContractVersion = &contract
@@ -125,7 +121,6 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		}
 	}
 
-	// Keep the version whose fields were edited; concurrent publication must conflict.
 	if result, ok := authorizeAgentUpdate(ctx, tc, agent); !ok {
 		return result, nil
 	}
@@ -137,9 +132,6 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	return ChatToolSuccess(map[string]any{nameField: agent.Name, messageField: "Agent updated"})
 }
 
-// decodeUpdateAgentArgs preserves temperature's exact number text until bounds
-// validation. Other arguments retain their existing float64 decoding, and model
-// strings and null values keep their existing behavior.
 func decodeUpdateAgentArgs(args json.RawMessage) (map[string]any, error) {
 	var values map[string]any
 	if err := json.Unmarshal(args, &values); err != nil {

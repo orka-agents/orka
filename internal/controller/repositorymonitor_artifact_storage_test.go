@@ -15,8 +15,6 @@ import (
 	"github.com/orka-agents/orka/workers/common"
 )
 
-// unacceptedArtifactStore refuses artifacts, as the storage client does while
-// the controller's fence is not open.
 type unacceptedArtifactStore struct {
 	store.ArtifactStore
 	err error
@@ -26,8 +24,6 @@ func (s unacceptedArtifactStore) SaveArtifact(context.Context, store.SaveArtifac
 	return s.err
 }
 
-// An implementation whose patch artifacts the store has not accepted yet is
-// retried, not recorded as blocked, which would skip the action for good.
 func TestRepositoryMonitorIssuePatchArtifactsRetryATemporaryStorageRefusal(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -55,8 +51,6 @@ func TestRepositoryMonitorIssuePatchArtifactsRetryATemporaryStorageRefusal(t *te
 	}
 }
 
-// A delivered implementation whose summary artifact the store has not
-// accepted yet is retried, not recorded as blocked.
 func TestRepositoryMonitorDeliveredImplementationRetriesATemporaryStorageRefusal(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)

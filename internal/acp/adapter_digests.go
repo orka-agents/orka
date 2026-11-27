@@ -4,11 +4,6 @@ const (
 	acpSchemaDependency = "acp-schema"
 )
 
-// BuiltInRuntimeAdapterDigests returns the reviewed adapter artifact digests
-// advertised by the built-in ACP runtime for the given provider kind
-// ("codex", "claude", "copilot", or "opencode"). It is the single source of
-// truth shared by controller runtime planning and the runtime supervisor.
-// Unknown providers return nil. Every call returns a fresh map.
 func BuiltInRuntimeAdapterDigests(provider string) map[string]string {
 	schema := "sha256:" + ACPSchemaSHA256
 	switch provider {

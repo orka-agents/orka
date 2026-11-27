@@ -14,8 +14,6 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-// autonomousSystemPromptSuffix returns additional system prompt instructions
-// for autonomous coordinator mode. It is appended to the agent's base system prompt.
 func autonomousSystemPromptSuffix(iteration int, maxIterations int) string {
 	iterInfo := fmt.Sprintf("Current iteration: %d", iteration)
 	if maxIterations > 0 {
@@ -65,7 +63,6 @@ If no further progress is possible, set 'goal_complete: true' and explain why.
 %s%s`, iterInfo, prCISection, triageSection)
 }
 
-// githubPRCISection returns guidance for PR workflows that include CI checks.
 func githubPRCISection() string {
 	return `
 ## GitHub PR CI Workflow
@@ -94,9 +91,6 @@ When your workflow creates or updates a GitHub pull request and check_pull_reque
 `
 }
 
-// githubTriageSection returns the GitHub triage workflow guidance when GitHub
-// tools (list_issues, list_pull_requests) are available. It returns an empty
-// string when the tools are not present.
 func githubTriageSection() string {
 	if !hasGitHubTools() {
 		return ""
@@ -137,9 +131,6 @@ When you have access to list_issues and list_pull_requests tools, follow this wo
 `
 }
 
-// hasGitHubTools checks whether GitHub issue/PR tools are available by
-// inspecting the ORKA_AI_TOOLS env var for known tool names, or by checking
-// if ORKA_GIT_REPO is set (indicating a workspace tied to a GitHub repo).
 func hasGitHubTools() bool {
 	if os.Getenv(workerenv.GitRepo) != "" {
 		return true

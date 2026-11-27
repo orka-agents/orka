@@ -16,8 +16,6 @@ type sessionCleanupLock struct {
 	refs int
 }
 
-// sessionCleanupLockSet serializes retries of one Session while runtime I/O
-// releases the global epoch slot. Entries exist only while held or awaited.
 type sessionCleanupLockSet struct {
 	mu    sync.Mutex
 	locks map[sessionCleanupLockKey]*sessionCleanupLock

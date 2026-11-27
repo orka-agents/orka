@@ -54,8 +54,6 @@ func TestTaskProvenanceValidator_Create(t *testing.T) {
 			allowed: true,
 		},
 		{
-			// The mark only makes a Task more private; a delegated child a
-			// worker creates carries it from its parent.
 			name:    "untrusted create with the AHP turn mark allowed",
 			user:    untrustedUsername,
 			task:    withAHPTurn(newAdmissionTestTask()),
@@ -566,12 +564,6 @@ func TestNewTaskProvenanceConfigDefaults(t *testing.T) {
 	require.ElementsMatch(t, []string{"orka-ai-worker", "orka-vendor-worker"}, cfg.TrustedServiceAccountNames)
 }
 
-// Deployment-supplied controller identities (the release-specific Helm
-// ServiceAccount passed through --execution-mode-controller-usernames) are
-// EXCLUSIVE: only the explicit list receives controller-only settlement
-// trust, and the namespace-derived ServiceAccount defaults apply solely when
-// no explicit identities were configured - appending them would silently
-// widen authorization to any same-named ServiceAccount in the namespace.
 func TestNewTaskProvenanceConfigUsesExplicitControllerUsernamesExclusively(t *testing.T) {
 	release := "system:serviceaccount:orka-system:my-release-orka"
 	exclusive := NewTaskProvenanceConfig(true, release, "", "", "orka-system")
@@ -594,8 +586,6 @@ func TestNewTaskProvenanceConfigUsesExplicitControllerUsernamesExclusively(t *te
 		"the deployment-supplied controller identity must be allowed to write workspace settlement metadata")
 }
 
-// Flag-listed trusted users keep only the provenance-field allowance: the
-// reserved workspace settlement metadata stays controller-only.
 func TestTaskProvenanceFlagTrustedUserCannotWriteWorkspaceMetadata(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
@@ -613,7 +603,6 @@ func TestTaskProvenanceFlagTrustedUserCannotWriteWorkspaceMetadata(t *testing.T)
 		t.Fatal("a flag-trusted provenance writer must not set workspace settlement metadata")
 	}
 
-	// The same principal keeps the provenance allowance.
 	provenance := newAdmissionTestTask()
 	provenance.Spec.RequestedBy = &corev1alpha1.RequestedBy{Subject: "someone"}
 	response = validator.Handle(context.Background(),

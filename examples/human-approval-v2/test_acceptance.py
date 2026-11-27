@@ -351,8 +351,6 @@ class CancellationReceiptTest(unittest.TestCase):
             run.approval = Mock()
 
             def late_decision(*_args):
-                # The first post-settlement operation sees evidence already on
-                # disk, even if its transport or the receipt assertion fails.
                 saved = json.loads(run.args.report.read_text())
                 self.assertEqual(saved["cancellationDiagnostics"][0]["execution"]["reason"], "PromptFailed")
                 self.assertNotIn(text, run.args.report.read_text())

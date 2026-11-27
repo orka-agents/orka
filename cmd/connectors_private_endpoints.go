@@ -13,17 +13,8 @@ import (
 	"strings"
 )
 
-// ConnectorPrivateEndpointsAcknowledgement is the only value that turns on
-// --connectors-allow-private-endpoints. Spelling out the consequence is the
-// point: a person's linked-account token may be sent to a private address.
 const ConnectorPrivateEndpointsAcknowledgement = "i-understand-tokens-may-leave-the-cluster"
 
-// connectorPrivateEndpointsPermitted decides whether the fixture-only
-// private-endpoint allowance may be enabled. It requires the literal
-// acknowledgement and a plain-http localhost connector callback base URL,
-// which only a local or CI deployment can have (production callback bases
-// must be public HTTPS origins), so a released configuration cannot turn
-// the allowance on by accident.
 func connectorPrivateEndpointsPermitted(acknowledgement, callbackBaseURL string) (bool, error) {
 	acknowledgement = strings.TrimSpace(acknowledgement)
 	if acknowledgement == "" {
@@ -41,8 +32,6 @@ func connectorPrivateEndpointsPermitted(acknowledgement, callbackBaseURL string)
 	return true, nil
 }
 
-// localhostName accepts the loopback names the connector callback validator
-// accepts: localhost and the IPv4/IPv6 loopback literals.
 func localhostName(host string) bool {
 	switch strings.ToLower(host) {
 	case "localhost", "127.0.0.1", "::1":

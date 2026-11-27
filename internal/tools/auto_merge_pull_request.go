@@ -25,29 +25,20 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// AutoMergePullRequestTool polls GitHub CI checks and auto-merges a PR when all checks pass.
 type AutoMergePullRequestTool struct {
 	k8sClient  client.Client
-	apiBaseURL string // override for testing; empty uses https://api.github.com
+	apiBaseURL string
 }
 
-// AutoMergePullRequestArgs are the arguments for the auto_merge_pull_request tool.
 type AutoMergePullRequestArgs struct {
-	// TaskName is the name of the child task to read workspace config from.
-	TaskName string `json:"task_name"`
-	// PRNumber is the GitHub PR number to merge.
-	PRNumber int `json:"pr_number"`
-	// MergeMethod is the merge method: "merge", "squash", "rebase". Defaults to "squash".
-	MergeMethod string `json:"merge_method,omitempty"`
-	// CommitTitle is the custom merge commit title.
-	CommitTitle string `json:"commit_title,omitempty"`
-	// CommitMessage is the custom merge commit message.
+	TaskName      string `json:"task_name"`
+	PRNumber      int    `json:"pr_number"`
+	MergeMethod   string `json:"merge_method,omitempty"`
+	CommitTitle   string `json:"commit_title,omitempty"`
 	CommitMessage string `json:"commit_message,omitempty"`
-	// Timeout is the maximum time to wait for CI checks (e.g. "30m"). Defaults to "30m".
-	Timeout string `json:"timeout,omitempty"`
+	Timeout       string `json:"timeout,omitempty"`
 }
 
-// AutoMergePullRequestResult is the result of the auto-merge operation.
 type AutoMergePullRequestResult struct {
 	Merged        bool   `json:"merged"`
 	ChecksPassed  bool   `json:"checks_passed"`
@@ -57,7 +48,6 @@ type AutoMergePullRequestResult struct {
 	ChecksDetails string `json:"checks_details,omitempty"`
 }
 
-// CICheckResult categorizes CI check status into passed, failed, or pending.
 type CICheckResult struct {
 	Passed  bool
 	Failed  bool
@@ -67,25 +57,21 @@ type CICheckResult struct {
 
 var errNoCIChecksConfigured = errors.New("no CI checks configured for this PR")
 
-// NewAutoMergePullRequestTool creates a new auto_merge_pull_request tool.
 func NewAutoMergePullRequestTool(k8sClient client.Client) *AutoMergePullRequestTool {
 	return &AutoMergePullRequestTool{
 		k8sClient: k8sClient,
 	}
 }
 
-// Name returns the tool name.
 func (t *AutoMergePullRequestTool) Name() string {
 	return autoMergePullRequestToolName
 }
 
-// Description returns the tool description.
 func (t *AutoMergePullRequestTool) Description() string {
 	return "Poll GitHub CI checks and automatically merge a pull request when all checks pass. " +
 		"Waits up to the specified timeout, retrying on transient errors."
 }
 
-// Parameters returns the JSON schema for tool parameters.
 func (t *AutoMergePullRequestTool) Parameters() json.RawMessage {
 	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: childWorkspaceTaskDescription}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number to merge"}, mergeMethodField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Merge method: 'merge', 'squash', or 'rebase'. Defaults to 'squash'",
 		jsonSchemaEnumField: []string{mergeMethodMerge, defaultMergeMethod, mergeMethodRebase},
@@ -97,7 +83,6 @@ func (t *AutoMergePullRequestTool) Parameters() json.RawMessage {
 	return data
 }
 
-// Execute polls CI checks and merges the PR when all checks pass.
 func (t *AutoMergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMessage) (string, error) {
 	var args AutoMergePullRequestArgs
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
@@ -124,19 +109,16 @@ func (t *AutoMergePullRequestTool) Execute(ctx context.Context, argsJSON json.Ra
 		return "", fmt.Errorf("invalid timeout %q: %w", args.Timeout, err)
 	}
 
-	// Determine namespace from environment
 	ns := os.Getenv(envOrkaTaskNamespace)
 	if ns == "" {
 		ns = defaultNamespace
 	}
 
-	// Look up the child task to get workspace config
 	var task corev1alpha1.Task
 	if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: args.TaskName, Namespace: ns}, &task); err != nil {
 		return "", fmt.Errorf("failed to get task %s: %w", args.TaskName, err)
 	}
 
-	// Extract repo URL and git secret from the task's workspace config
 	ws := taskWorkspace(&task)
 	if ws == nil {
 		return "", fmt.Errorf("task %s does not have workspace configuration", args.TaskName)
@@ -147,14 +129,11 @@ func (t *AutoMergePullRequestTool) Execute(ctx context.Context, argsJSON json.Ra
 		return "", fmt.Errorf("task %s workspace has no gitRepo configured", args.TaskName)
 	}
 
-	// Parse owner/repo from the git URL
 	owner, repo, err := parseGitHubRepo(repoURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse GitHub repo from %s: %w", repoURL, err)
 	}
 
-	// Forge API operations must use the forge credential, not the repository
-	// publication credential used for Git pushes.
 	if ws.ForgeCredentialRef == nil {
 		return "", fmt.Errorf("task %s workspace has no forgeCredentialRef configured", args.TaskName)
 	}
@@ -181,7 +160,6 @@ func (t *AutoMergePullRequestTool) Execute(ctx context.Context, argsJSON json.Ra
 		baseURL: baseURL, logger: logger,
 	}
 
-	// Run the first check immediately, then poll on ticker
 	for first := true; ; first = false {
 		if !first {
 			select {
@@ -209,7 +187,6 @@ func (t *AutoMergePullRequestTool) Execute(ctx context.Context, argsJSON json.Ra
 	}
 }
 
-// pollContext holds the parameters needed for each poll iteration.
 type pollContext struct {
 	token, owner, repo                      string
 	prNumber                                int
@@ -218,8 +195,6 @@ type pollContext struct {
 	logger                                  logr.Logger
 }
 
-// pollOnce performs a single poll iteration. It returns a result and done=true
-// if the poll loop should stop, or done=false if polling should continue.
 func (pc *pollContext) pollOnce(ctx context.Context) (*AutoMergePullRequestResult, bool, error) {
 	headSHA, state, merged, err := getGitHubPRDetails(ctx, pc.token, pc.owner, pc.repo, pc.prNumber, pc.baseURL)
 	if err != nil {
@@ -275,13 +250,11 @@ func (pc *pollContext) pollOnce(ctx context.Context) (*AutoMergePullRequestResul
 	return nil, false, nil
 }
 
-// marshalResult serializes an AutoMergePullRequestResult to JSON string.
 func marshalResult(r AutoMergePullRequestResult) string {
 	data, _ := json.Marshal(r)
 	return string(data)
 }
 
-// getGitHubPRDetails retrieves the head SHA, state, and merged status for a pull request.
 func getGitHubPRDetails(ctx context.Context, token, owner, repo string, prNumber int, baseURL string) (headSHA, state string, merged bool, err error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", baseURL, owner, repo, prNumber)
 
@@ -323,10 +296,7 @@ func getGitHubPRDetails(ctx context.Context, token, owner, repo string, prNumber
 	return prResp.Head.SHA, prResp.State, prResp.Merged, nil
 }
 
-// checkCIStatusDetailed checks CI status and categorizes checks into passed, failed, or pending.
 func checkCIStatusDetailed(ctx context.Context, token, owner, repo, sha, baseURL string) (CICheckResult, error) {
-	// GitHub pages check runs (30 by default): every page is read, up to a
-	// bound, so a failing or pending run on a later page is never missed.
 	var runs []checkRun
 	total := 0
 	for page := 1; page <= maxCheckRunPages; page++ {
@@ -348,13 +318,11 @@ func checkCIStatusDetailed(ctx context.Context, token, owner, repo, sha, baseURL
 	var failed, pending []string
 	for _, check := range runs {
 		if check.Status != "completed" {
-			// queued, in_progress, etc.
 			pending = append(pending, fmt.Sprintf("%s (status=%s)", check.Name, check.Status))
 			continue
 		}
 		switch check.Conclusion {
 		case successStatusString, "neutral", "skipped":
-			// passed — nothing to report
 		case "failure", cancelledStatusString, "timed_out", "action_required", "stale":
 			failed = append(failed, fmt.Sprintf("%s (conclusion=%s)", check.Name, check.Conclusion))
 		default:
@@ -376,7 +344,6 @@ func checkCIStatusDetailed(ctx context.Context, token, owner, repo, sha, baseURL
 		}, nil
 	}
 
-	// Runs that could not be read are not evidence of success.
 	if len(runs) < total {
 		return CICheckResult{
 			Pending: true,
@@ -387,8 +354,6 @@ func checkCIStatusDetailed(ctx context.Context, token, owner, repo, sha, baseURL
 	return CICheckResult{Passed: true}, nil
 }
 
-// checkRunsPerPage is the page size requested for check runs (GitHub's
-// maximum); maxCheckRunPages bounds how many pages one check reads.
 const (
 	checkRunsPerPage = 100
 	maxCheckRunPages = 10
@@ -405,11 +370,8 @@ type checkRunsPage struct {
 	CheckRuns  []checkRun `json:"check_runs"`
 }
 
-// checkRunsErrorBodyLimit caps the error body kept from a failed check-runs
-// request.
 const checkRunsErrorBodyLimit = 4 << 10
 
-// fetchCheckRunsPage reads one page of a commit's check runs.
 func fetchCheckRunsPage(ctx context.Context, token, owner, repo, sha, baseURL string, page int) (checkRunsPage, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs?per_page=%d&page=%d", baseURL, owner, repo, sha, checkRunsPerPage, page)
 
@@ -429,15 +391,12 @@ func fetchCheckRunsPage(ctx context.Context, token, owner, repo, sha, baseURL st
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// The error body only explains the status; it is capped so a large
-		// one cannot swell the tool result.
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, checkRunsErrorBodyLimit))
 		return checkRunsPage{}, &githubAPIError{
 			StatusCode: resp.StatusCode,
 			Body:       string(respBody),
 		}
 	}
-	// An oversized page is refused, never decoded from a cut prefix.
 	respBody, err := readGitHubResponse(resp.Body, 1<<20)
 	if err != nil {
 		return checkRunsPage{}, err
@@ -450,7 +409,6 @@ func fetchCheckRunsPage(ctx context.Context, token, owner, repo, sha, baseURL st
 	return checkResp, nil
 }
 
-// githubAPIError represents an HTTP error from the GitHub API, carrying the status code.
 type githubAPIError struct {
 	StatusCode int
 	Body       string
@@ -460,7 +418,6 @@ func (e *githubAPIError) Error() string {
 	return fmt.Sprintf("GitHub API returned %d: %s", e.StatusCode, e.Body)
 }
 
-// isTransientHTTPError returns true if the error represents a transient GitHub API error (429 or 5xx).
 func isTransientHTTPError(err error) bool {
 	if apiErr, ok := errors.AsType[*githubAPIError](err); ok {
 		return apiErr.StatusCode == 429 || apiErr.StatusCode >= 500

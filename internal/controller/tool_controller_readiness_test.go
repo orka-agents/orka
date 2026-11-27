@@ -14,12 +14,11 @@ import (
 
 func TestSubstrateMCPReadinessTreatsActorAuthenticationAsReachable(t *testing.T) {
 	for status, reachable := range map[int]bool{
-		http.StatusOK:               true,
-		http.StatusMethodNotAllowed: true,
-		http.StatusUnauthorized:     true, // Actor protected by spec.http.authSecretRef
-		http.StatusForbidden:        true,
-		http.StatusNotFound:         false,
-		// Redirects are not followed, so the MCP path cannot be served.
+		http.StatusOK:                  true,
+		http.StatusMethodNotAllowed:    true,
+		http.StatusUnauthorized:        true,
+		http.StatusForbidden:           true,
+		http.StatusNotFound:            false,
 		http.StatusMovedPermanently:    false,
 		http.StatusFound:               false,
 		http.StatusNotModified:         false,
@@ -35,7 +34,6 @@ func TestSubstrateMCPReadinessTreatsActorAuthenticationAsReachable(t *testing.T)
 				requests++
 				target = r.Header.Get("ate-target-actor")
 				if status >= http.StatusMultipleChoices && status < http.StatusBadRequest {
-					// Somewhere that would answer 200 if the probe followed it.
 					w.Header().Set("Location", "/healthy")
 				}
 				w.WriteHeader(status)

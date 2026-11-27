@@ -144,7 +144,6 @@ func TestRun_TranscriptInput(t *testing.T) {
 			t.Setenv(workerenv.EnableTelemetry, "false")
 			t.Setenv(workerenv.ControllerURL, "")
 			t.Setenv("OPENAI_API_KEY", "")
-			// Exercise real startup and file loading, stopping before external dependencies.
 			err := run(path)
 			if err == nil || !strings.Contains(err.Error(), test.wantError) {
 				t.Fatalf("run() = %v, want %q", err, test.wantError)

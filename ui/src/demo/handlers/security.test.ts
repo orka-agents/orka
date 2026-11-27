@@ -26,8 +26,6 @@ import { handleDemoRequest } from '../server'
 import { TASKS } from '../world'
 import { createDemoTask } from './tasks'
 
-// Monitor commands hand work to the task domain; stub it so these tests cover
-// only this domain's side of the contract.
 vi.mock('./tasks', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./tasks')>()),
   createDemoTask: vi.fn(() => 'review-pr-1482-demo1'),
@@ -39,7 +37,6 @@ const post = (path: string, body?: unknown) =>
   call(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body), headers: { 'Content-Type': 'application/json' } })
 const listOf = <T extends z.ZodTypeAny>(schema: T) => z.object({ items: z.array(schema), metadata: z.object({ continue: z.string().optional() }).optional() })
 
-/** Moves the demo clock forward so timed work (scans, validation, patches) settles. */
 function advance(ms: number) {
   const base = Date.now()
   vi.spyOn(Date, 'now').mockReturnValue(base + ms)

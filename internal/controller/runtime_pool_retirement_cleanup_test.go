@@ -80,8 +80,6 @@ func TestRuntimePoolDrainPreservesDeletingStandaloneTaskCleanup(t *testing.T) {
 	task.Status.Phase = corev1alpha1.TaskPhaseCancelled
 	task.Status.Execution.State = corev1alpha1.TaskExecutionStateCancelled
 	task.Status.Execution.Outcome = corev1alpha1.TaskExecutionOutcomeCancelled
-	// Standalone dispatch pins the profile in AgentExecutionBinding and does
-	// not populate the additional digest used for Session reuse.
 	task.Status.Execution.RuntimeSessionProfileDigest = ""
 	if err := r.Create(ctx, task); err != nil {
 		t.Fatal(err)
@@ -173,8 +171,6 @@ func TestRuntimePoolReplacementRetainsSessionCleanupProof(t *testing.T) {
 			if !runtimeSessionCleanupCompleteForUID(task, task.UID) {
 				t.Fatal("replacement barrier persisted without Task cleanup proof")
 			}
-			// A controller upgraded after persisting the quiescent barrier must
-			// still record receipts before it destroys the old runtime.
 			task.Status.Execution.RuntimeSessionCleanupDigest = ""
 			if err := r.Status().Update(ctx, task); err != nil {
 				t.Fatal(err)

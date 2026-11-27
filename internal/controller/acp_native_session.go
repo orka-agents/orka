@@ -27,10 +27,6 @@ var errNativeSessionRuntimeUnsupported = fmt.Errorf("%w: staged native Session r
 var errNativeSessionHistoryBoundary = fmt.Errorf("%w: native Session restore loads the whole saved conversation, so sessionRef.throughMessageId must be empty or name the latest message", store.ErrConflict)
 var errNativeSessionCheckpointRequired = fmt.Errorf("%w: native Session continuity requires a checkpoint before canonical settlement; exact lease and runtime evidence retained", store.ErrNotReady)
 
-// Appending a terminal result without the corresponding native state would make
-// the previous checkpoint diverge from canonical history. A non-success marker
-// settles with the existing checkpoint carried forward instead; see
-// carriedNativeCheckpoint.
 func (d *ACPDispatcher) guardNativeSessionSettlement(ctx context.Context, task *corev1alpha1.Task, session *acpTaskSession, checkpoint *store.NativeSessionRecord) error {
 	if session == nil || session.Turn == nil || session.finalized || session.Turn.Turn.State == store.SessionTurnFinalized || checkpoint != nil {
 		return nil
@@ -86,25 +82,13 @@ func (d *ACPDispatcher) retainNativeSessionInstall(ctx context.Context, task *co
 	})
 }
 
-// Only immutable, non-secret request identity is retained on the Task. The
-// client signs each send with the current controller credentials separately.
 type nativeCaptureIntent struct {
 	Request        harnessv2.CaptureNativeSessionRequest  `json:"request"`
 	Reconciliation *harnessv2.CaptureNativeSessionRequest `json:"reconciliation,omitempty"`
 	Unsupported    bool                                   `json:"unsupported,omitempty"`
-	// Supersedes records the request digest of an intent whose original capture
-	// the same runtime incarnation proved it never started or can safely retry.
-	Supersedes harnessv2.RequestDigest `json:"supersedes,omitempty"`
+	Supersedes     harnessv2.RequestDigest                `json:"supersedes,omitempty"`
 }
 
-// carriedNativeCheckpoint returns the Session's existing checkpoint when a
-// non-success outcome may settle with it. A failed, cancelled, or lost prompt
-// produces no new native state: the supervisor poisons and retires that
-// runtime rather than retaining capture evidence, so holding the lease for a
-// capture that can never happen would wedge the Session. The prior checkpoint
-// omits only the prompt that produced no result, and its boundary advances
-// with the marker. A pending capture intent from a successful prompt remains
-// strict because its exact receipt must be reconciled.
 func (d *ACPDispatcher) carriedNativeCheckpoint(ctx context.Context, task *corev1alpha1.Task, session *acpTaskSession) (*store.NativeSessionRecord, error) {
 	if session == nil || session.Turn == nil || session.Turn.SkipTranscriptAppend || task.Annotations[nativeCaptureIntentAnnotation] != "" {
 		return nil, nil
@@ -139,9 +123,6 @@ func (d *ACPDispatcher) loadTaskNativeSession(ctx context.Context, task *corev1a
 	return record, nil
 }
 
-// Reject an incompatible Task without binding a staged import to a new Session
-// control or acquiring its mutation lease. The preparation path checks again
-// before opening a turn in case an import was staged after this read.
 func (d *ACPDispatcher) validateTaskNativeSessionRuntime(ctx context.Context, task *corev1alpha1.Task, supported bool) error {
 	if task.Spec.SessionRef == nil || d.nativeSessionStore() == nil {
 		return nil
@@ -171,16 +152,11 @@ func (d *ACPDispatcher) validateTaskNativeSessionRuntime(ctx context.Context, ta
 	return nil
 }
 
-// nativeRestoreHonorsHistoryBoundary reports whether restoring checkpoint keeps
-// the Task within its sessionRef cutoff. The provider reloads its whole saved
-// conversation, so only an absent cutoff or the checkpoint's own boundary fits.
 func nativeRestoreHonorsHistoryBoundary(ref *corev1alpha1.SessionReference, checkpoint *store.NativeSessionRecord) bool {
 	through := strings.TrimSpace(ref.ThroughMessageID)
 	return through == "" || through == checkpoint.ThroughMessageID
 }
 
-// rejectNativeSessionRuntime fails a Task that cannot use the Session's native
-// checkpoint before it binds the Session. cause selects the reported reason.
 func (d *ACPDispatcher) rejectNativeSessionRuntime(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, cause error) error {
 	reason := corev1alpha1.TaskExecutionReason("NativeSessionRuntimeUnsupported")
 	message := errNativeSessionRuntimeUnsupported.Error()
@@ -202,8 +178,6 @@ func nativeRestoreForTask(session *acpTaskSession, request harnessv2.CreateRunti
 		return nil, errNativeSessionRuntimeUnsupported
 	}
 	snapshot := session.NativeSession.Snapshot
-	// Imported/captured runtime and policy identities never become destination
-	// authority. The supervisor installs and loads with its actual fresh cwd.
 	snapshot.RuntimeSessionUID = request.Metadata.Fence.RuntimeSessionUID
 	snapshot.RuntimeProfileDigest = request.Metadata.Fence.RuntimeProfileDigest
 	snapshot.WorkingDirectory = "/workspace"
@@ -218,7 +192,6 @@ func verifyTaskNativeRestoration(session *acpTaskSession, proof *harnessv2.Nativ
 	if proof == nil || !proof.Loaded || proof.DataDigest != want.DataDigest || proof.ProviderSessionID != want.ProviderSessionID {
 		return fmt.Errorf("%w: runtime did not prove loading the exact private native Session", store.ErrConflict)
 	}
-	// Canonical bootstrap is suppressed only after the exact ACP load proof.
 	session.Bootstrap = nil
 	return nil
 }
@@ -227,9 +200,6 @@ func nativeCaptureEligible(session *acpTaskSession, supported bool) bool {
 	return supported && session != nil && session.Turn != nil && !session.Turn.SkipTranscriptAppend
 }
 
-// freshNativeCaptureRequest seals a new capture operation for the Task's exact
-// runtime generation. suffix distinguishes a superseding capture from the
-// original operation identifier.
 func freshNativeCaptureRequest(runtimeFence harnessv2.Fence, task *corev1alpha1.Task, suffix string) (harnessv2.CaptureNativeSessionRequest, error) {
 	request := harnessv2.CaptureNativeSessionRequest{
 		Protocol: harnessv2.ProtocolVersion,
@@ -241,8 +211,6 @@ func freshNativeCaptureRequest(runtimeFence harnessv2.Fence, task *corev1alpha1.
 	return request, nil
 }
 
-// supersedeRetryableNativeCapture starts one fresh capture only after the exact
-// runtime proves the original never started or failed with no surviving writer.
 func (d *ACPDispatcher) supersedeRetryableNativeCapture(ctx context.Context, runtimeClient *harnessv2.Client, task *corev1alpha1.Task, runtimeFence harnessv2.Fence, intent *nativeCaptureIntent) (*harnessv2.CaptureNativeSessionResponse, error) {
 	replacement, err := freshNativeCaptureRequest(runtimeFence, task, "-"+strconv.FormatInt(time.Now().UTC().UnixNano(), 10))
 	if err != nil {
@@ -300,11 +268,6 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 	if session.NativeCapture != nil {
 		return nil
 	}
-	// Operator access may have changed the child's private agent state, so a
-	// tainted runtime never becomes the Session's native continuity source.
-	// A first turn falls back to the canonical transcript; a Session that
-	// already depends on native continuity fails closed rather than silently
-	// continuing from an older checkpoint.
 	if skip, err := d.skipNativeCaptureForOperatorTaint(ctx, task, session); skip || err != nil {
 		return err
 	}
@@ -338,8 +301,6 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 	}
 	request := intent.Request
 	if harnessv2.CompareFence(runtimeFence, request.Metadata.Fence, true) != harnessv2.FenceMatch || !request.Metadata.ExpiresAt.After(time.Now().UTC()) {
-		// Receipt reconciliation can only retrieve the immutable result of the
-		// original capture. It cannot stop a child or begin another capture.
 		if intent.Reconciliation == nil || harnessv2.CompareFence(runtimeFence, intent.Reconciliation.Metadata.Fence, true) != harnessv2.FenceMatch ||
 			!intent.Reconciliation.Metadata.ExpiresAt.After(time.Now().UTC()) {
 			reconciliation := harnessv2.CaptureNativeSessionRequest{
@@ -374,13 +335,6 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 	return d.acceptNativeCapture(ctx, task, runtimeFence, session, intent, response)
 }
 
-// acceptNativeCapture adopts a captured (or receipt-reconciled) snapshot as
-// the Session's native continuity source. An operator exec admitted before
-// the capture closed operator admission may have changed the private home;
-// the capture barrier killed it, but its effects are in the snapshot. orka-api
-// persists the taint before forwarding any operator write, so the
-// authoritative taint read after capture proves whether the snapshot is clean.
-// A tainted snapshot is discarded.
 func (d *ACPDispatcher) acceptNativeCapture(
 	ctx context.Context, task *corev1alpha1.Task, runtimeFence harnessv2.Fence, session *acpTaskSession,
 	intent nativeCaptureIntent, response *harnessv2.CaptureNativeSessionResponse,
@@ -404,10 +358,6 @@ func (d *ACPDispatcher) acceptNativeCapture(
 	})
 }
 
-// skipNativeCaptureForOperatorTaint reports whether an operator-tainted
-// runtime must be excluded from native capture, recording the transcript
-// fallback for a first turn or failing closed when the Session already
-// depends on native continuity.
 func (d *ACPDispatcher) skipNativeCaptureForOperatorTaint(ctx context.Context, task *corev1alpha1.Task, session *acpTaskSession) (bool, error) {
 	tainted, err := acpTaskOperatorTainted(ctx, uncachedReader(d.APIReader, d.Client), task)
 	if err != nil || !tainted {
@@ -416,12 +366,6 @@ func (d *ACPDispatcher) skipNativeCaptureForOperatorTaint(ctx context.Context, t
 	return true, d.fallBackFromOperatorTaintedCapture(ctx, task, session)
 }
 
-// fallBackFromOperatorTaintedCapture excludes a tainted runtime from native
-// continuity. A Session that already depends on native continuity fails
-// closed. Otherwise a persisted capture intent is first reconciled to record
-// that this turn has no native checkpoint, since settlement and runtime
-// deletion otherwise keep waiting for one, and the turn then falls back to
-// the canonical transcript.
 func (d *ACPDispatcher) fallBackFromOperatorTaintedCapture(ctx context.Context, task *corev1alpha1.Task, session *acpTaskSession) error {
 	if session.NativeSession != nil {
 		return fmt.Errorf("%w: native continuity cannot be captured from a runtime tainted by operator access: %w",
@@ -442,7 +386,6 @@ func (d *ACPDispatcher) fallBackFromOperatorTaintedCapture(ctx context.Context, 
 	return d.recordNativeCaptureSkipped(ctx, task)
 }
 
-// A durable deduplication key survives annotation/event write ordering and restart.
 func (d *ACPDispatcher) recordNativeCaptureSkipped(ctx context.Context, task *corev1alpha1.Task) error {
 	eventStore, ok := d.EventStore.(store.DeduplicatingExecutionEventStore)
 	if !ok {
@@ -466,9 +409,6 @@ func (d *ACPDispatcher) recordNativeCaptureSkipped(ctx context.Context, task *co
 	return err
 }
 
-// Recovery captures the exact surviving built-in RuntimePool incarnation.
-// Before a checkpoint or capture intent exists, confirmed pool replacement or
-// deletion permits canonical settlement through the existing cleanup gates.
 func (d *ACPDispatcher) recoverTaskNativeCapture(ctx context.Context, task *corev1alpha1.Task, session *acpTaskSession) error {
 	if session == nil || session.Turn == nil || session.Turn.SkipTranscriptAppend {
 		return nil
@@ -507,7 +447,6 @@ func (d *ACPDispatcher) recoverTaskNativeCapture(ctx context.Context, task *core
 		}
 		return nil
 	}
-	// Recovery settles an existing session even when admission for new work is closed.
 	runtimeClient, runtimeFence, _, _, err := d.runtimePoolClient(ctx, pool, false)
 	if err != nil {
 		return err
@@ -555,8 +494,6 @@ func (d *ACPDispatcher) nativeCaptureRecoveryPool(ctx context.Context, task *cor
 	return pool, nil
 }
 
-// Poisoned workspace validation cannot produce a native checkpoint. Callers
-// with an existing capture intent must still reconcile its exact receipt.
 func (d *ACPDispatcher) nativeCaptureWorkspaceUnsupported(ctx context.Context, task *corev1alpha1.Task, attemptID string) (bool, error) {
 	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
 	if err != nil {

@@ -1,5 +1,3 @@
-// The connectors E2E fixture binary: plain HTTP for the OIDC issuer, model,
-// and state; TLS for the OAuth provider and resource API.
 package main
 
 import (

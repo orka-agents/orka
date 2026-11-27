@@ -20,8 +20,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// Synthetic credential shapes, assembled at run time so the source holds no
-// literal token.
 var (
 	repositoryMonitorEvidenceTestGitHubToken = "gh" + "p_" + strings.Repeat("A1b2C3d4", 5)
 	repositoryMonitorEvidenceTestBearer      = strings.Repeat("Zq7vK2", 8)
@@ -90,8 +88,6 @@ func TestRepositoryMonitorEvidenceTextRedactsCredentials(t *testing.T) {
 	}
 }
 
-// repositoryMonitorEvidenceTestSplit puts every size bytes of value on its
-// own line.
 func repositoryMonitorEvidenceTestSplit(value string, size int) string {
 	parts := make([]string, 0, len(value)/size+1)
 	for len(value) > size {
@@ -127,7 +123,6 @@ func TestRepositoryMonitorEvidenceTextBounds(t *testing.T) {
 			}
 		})
 	}
-	// A huge line with spaces keeps its head within the bound.
 	got, truncated := repositoryMonitorEvidenceText(strings.Repeat("word ", repositoryMonitorEvidenceRawLimit(64)), 64, 5)
 	if !truncated || len(got) > 64 || !strings.HasPrefix(got, "word word") {
 		t.Fatalf("huge spaced line = %q, %t", got, truncated)
@@ -189,8 +184,6 @@ func TestRepositoryMonitorCIEvidenceNormalizesFailingChecks(t *testing.T) {
 	annotations := make([]map[string]any, 0, 120)
 	for i := range 120 {
 		level := "notice"
-		// Failures on the second page are kept ahead of earlier notices;
-		// the one past the page limit is never read.
 		if i == 60 || i == 61 || i == 110 {
 			level = "failure"
 		}
@@ -227,7 +220,6 @@ func TestRepositoryMonitorCIEvidenceNormalizesFailingChecks(t *testing.T) {
 	if got := slices.Sorted(slices.Values(input.FailingChecks)); fmt.Sprint(got) != "[docs e2e jenkins lint stale unit]" {
 		t.Fatalf("failingChecks = %v", got)
 	}
-	// Annotation reads stop at the page limit and at the first rate limit.
 	if fmt.Sprint(github.annotationReads) != "[101:1 101:2 102:1 103:1]" {
 		t.Fatalf("annotation reads = %v", github.annotationReads)
 	}
@@ -373,9 +365,6 @@ func repositoryMonitorRepairPromptPayload(t *testing.T, prompt string) repositor
 	return payload
 }
 
-// TestRepositoryMonitorCIRepairEvidenceIsFrozenPerAttempt covers a retried
-// repair handoff after its Task was created: GitHub's evidence changed, but
-// the rebuilt prompt must match the existing Task's prompt byte for byte.
 func TestRepositoryMonitorCIRepairEvidenceIsFrozenPerAttempt(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -419,7 +408,6 @@ func TestRepositoryMonitorCIRepairEvidenceIsFrozenPerAttempt(t *testing.T) {
 		t.Fatalf("first prompt payload = %+v", payload)
 	}
 
-	// GitHub now reports different evidence for the same head.
 	run["output"].(map[string]any)["summary"] = "a later summary"
 	github.annotations[301][0]["message"] = "a later failure"
 	created, second, err := reconciler.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, monitorRun, command, "orka-agents", "orka", pr, item, 1, 1)
@@ -437,9 +425,6 @@ func TestRepositoryMonitorCIRepairEvidenceIsFrozenPerAttempt(t *testing.T) {
 	repositoryMonitorAssertRepairEvidenceRecorded(t, reconciler, monitorStore, monitor, monitorRun, command, pr, task.Name, second)
 }
 
-// A retried handoff adopts the repair Task's stored prompt with its frozen
-// evidence, even when another prompt input moved since: the first handoff
-// clears the item's skip reason after writing it into the prompt.
 func TestRepositoryMonitorCIRepairRetryKeepsStoredPrompt(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -489,10 +474,6 @@ func TestRepositoryMonitorCIRepairRetryKeepsStoredPrompt(t *testing.T) {
 	}
 }
 
-// A fix_ci repair Task that a controller created before repair prompts
-// carried CI evidence is recovered with its stored prompt, and no fresh
-// evidence is reported as having informed it. A pre-evidence prompt for
-// another head is not adopted.
 func TestRepositoryMonitorCIRepairRecoversPreEvidenceTask(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -578,8 +559,6 @@ func TestRepositoryMonitorCIRepairRecoversPreEvidenceTask(t *testing.T) {
 	}
 }
 
-// repositoryMonitorAssertRepairEvidenceRecorded checks that the attempt's
-// work action and audit event record the evidence it used.
 func repositoryMonitorAssertRepairEvidenceRecorded(t *testing.T, reconciler *RepositoryMonitorReconciler, monitorStore *storageclient.Client, monitor *corev1alpha1.RepositoryMonitor, monitorRun *store.MonitorRun, command *store.CommandEvent, pr repositoryMonitorPullRequest, taskName string, input *repositoryMonitorRepairCIInput) {
 	t.Helper()
 	ctx := context.Background()
@@ -604,7 +583,6 @@ func repositoryMonitorAssertRepairEvidenceRecorded(t *testing.T, reconciler *Rep
 	if err != nil || len(events) == 0 || !strings.Contains(events[0].MetadataJSON, digest) {
 		t.Fatalf("repair_task_created events = %+v err=%v", events, err)
 	}
-	// A rerun of the updated metadata keeps the action kind and replaces the digest.
 	if err := reconciler.recordRepositoryMonitorWorkActionStateWithMetadata(ctx, monitor, monitorRun, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorRepairWorkflowActionKind(command.Intent), repositoryMonitorWorkActionStatusRunning, repositoryMonitorRepairPhaseQueued, taskName, "", map[string]any{repositoryMonitorCIEvidenceDigestMetadataKey: "sha256:other"}); err != nil {
 		t.Fatal(err)
 	}
@@ -614,8 +592,6 @@ func repositoryMonitorAssertRepairEvidenceRecorded(t *testing.T, reconciler *Rep
 	}
 }
 
-// repositoryMonitorEvidenceTestPEMBody is a synthetic, base64-shaped PEM
-// body of lines 64 characters wide.
 func repositoryMonitorEvidenceTestPEMBody(lines int) []string {
 	body := make([]string, 0, lines)
 	for i := range lines {
@@ -636,8 +612,6 @@ func TestRepositoryMonitorEvidenceWithholdsPEMBlocks(t *testing.T) {
 		{name: "encrypted block with headers", input: "key:\n  " + begin + "\n  Proc-Type: 4,ENCRYPTED\n  DEK-Info: AES-128-CBC,0A1B2C3D\n\n  " + strings.Join(body, "\n  ") + "\n  " + end + "\n(after key)", want: []string{"(after key)"}},
 		{name: "block begun mid-line", input: "value=\"" + begin + "\n" + strings.Join(body, "\n") + "\n" + end + "\"\n(after key)", want: []string{"(after key)"}},
 		{name: "block without an end", input: "loading key\n" + begin + "\n" + strings.Join(body[:10], "\n") + "\n\n" + strings.Join(body[10:], "\n"), want: []string{"loading key"}},
-		// Tiny wrapped lines exhaust the per-field check budget before the
-		// block starts; the block is still withheld through its end.
 		{name: "block past the check budget", input: strings.Repeat("a\n", repositoryMonitorEvidenceSecretCheckBudget) + "(before key)\n" + begin + "\n" + strings.Join(body[:10], "\n") + "\n\n" + strings.Join(body[10:], "\n") + "\n" + end + "\n(after key)", want: []string{"(before key)", "(after key)"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -658,18 +632,12 @@ func TestRepositoryMonitorEvidenceWithholdsPEMBlocks(t *testing.T) {
 			}
 		})
 	}
-	// The summary path withholds the block too.
 	got, _ := repositoryMonitorEvidenceText("FAIL\n"+begin+"\n"+strings.Join(body, "\n")+"\n"+end+"\n(after key)", repositoryMonitorCIEvidenceSummaryBytes, repositoryMonitorCIEvidenceSummaryLines)
 	if strings.Contains(got, body[0][:20]) || !strings.Contains(got, "FAIL") {
 		t.Fatalf("summary = %q", got)
 	}
 }
 
-// TestRepositoryMonitorEvidenceSanitizerStaysFast bounds the sanitizer's
-// work on input shaped to defeat it: every line continues into the next, so
-// each is checked with its whole text as context, or every line is a PEM
-// marker. A summary-sized field stays fast, and the work stays linear on
-// input far larger than any field.
 func TestRepositoryMonitorEvidenceSanitizerStaysFast(t *testing.T) {
 	shapes := func(size int) map[string]string {
 		return map[string]string{
@@ -684,8 +652,6 @@ func TestRepositoryMonitorEvidenceSanitizerStaysFast(t *testing.T) {
 		limit time.Duration
 	}{
 		{size: repositoryMonitorEvidenceRawLimit(repositoryMonitorCIEvidenceSummaryBytes), limit: time.Second},
-		// The withholding loop once rewrote every line of a long chain from
-		// each of its lines: quadratic, about 40s for the tiny lines here.
 		{size: 256 << 10, limit: 10 * time.Second},
 	} {
 		for name, input := range shapes(tc.size) {
@@ -701,8 +667,6 @@ func TestRepositoryMonitorEvidenceSanitizerStaysFast(t *testing.T) {
 }
 
 func TestRepositoryMonitorCIEvidenceBoundsEscapedEntries(t *testing.T) {
-	// JSON escapes <, >, and & as six bytes each, so these fields encode to
-	// several times their sanitized size.
 	status := map[string]any{
 		"id": 9100, "context": strings.Repeat("<", 300), "state": "failure",
 		"description": strings.Repeat("&", 600), "target_url": "https://ci.example/" + strings.Repeat("&", 480),
@@ -727,7 +691,6 @@ func TestRepositoryMonitorCIEvidenceBoundsEscapedEntries(t *testing.T) {
 			t.Fatalf("entry %s = %s %v, want its bounded fields named", check.ID, check.Availability, check.Truncated)
 		}
 	}
-	// Bounding keeps name ahead of description and URL.
 	entry := repositoryMonitorCheckEvidence{ID: "commit_status:1", Kind: repositoryMonitorEvidenceKindCommitStatus, Name: strings.Repeat("<", 200), Description: strings.Repeat("&", 512), URL: "https://ci.example/" + strings.Repeat("&", 480), Availability: repositoryMonitorEvidenceUnsupported}
 	fitted := fitRepositoryMonitorCheckEvidence(entry, 1500)
 	if size := repositoryMonitorEvidenceEncodedSize(fitted); size > 1500 || fitted.Name != entry.Name || fitted.URL != "" ||
@@ -750,8 +713,6 @@ func TestRepositoryMonitorCIEvidenceBoundsPendingChecks(t *testing.T) {
 		pendingName string
 	}{
 		{name: "count limit", failing: 1, pending: repositoryMonitorCIEvidenceMaxPendingChecks + 2, pendingName: "pending"},
-		// Four failing checks of about 3.6 KiB each leave room for only
-		// some of the escaped pending names.
 		{name: "total budget", failing: 4, summary: strings.Repeat("&", 560), pending: repositoryMonitorCIEvidenceMaxPendingChecks, pendingName: strings.Repeat("<", 150)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -791,15 +752,11 @@ func TestRepositoryMonitorCIEvidenceBoundsPendingChecks(t *testing.T) {
 }
 
 func TestRepositoryMonitorEvidenceWithholdsCredentialYAMLBlocks(t *testing.T) {
-	// Twelve opaque value lines, each too short and plain for any check.
 	value := make([]string, 0, 12)
 	for i := range 12 {
 		value = append(value, strings.Repeat(string(rune('A'+i)), 4)+"x9Q2mP7rT4")
 	}
 	block := func(indent string, lines []string) string { return indent + strings.Join(lines, "\n"+indent) }
-	// A header ending in a chomping or indentation indicator also continues
-	// a chain into its block, which can reach the next key; the sibling key
-	// shows where the block ends only for the other headers.
 	for _, tc := range []struct {
 		name        string
 		header      string
@@ -837,16 +794,12 @@ func TestRepositoryMonitorEvidenceWithholdsCredentialYAMLBlocks(t *testing.T) {
 			}
 		})
 	}
-	// A block under a key that names no credential is kept.
 	kept := "description: |\n" + block("  ", value) + "\nnext step"
 	if got, _ := repositoryMonitorEvidenceText(kept, 4096, 50); !strings.Contains(got, value[11]) {
 		t.Fatalf("evidence withheld a plain block: %q", got)
 	}
 }
 
-// TestRepositoryMonitorCIRepairPromptBoundsIndentedEvidence checks the
-// evidence limits against the repair prompt itself, which indents each entry
-// three levels deep: annotation-heavy entries grow most when indented.
 func TestRepositoryMonitorCIRepairPromptBoundsIndentedEvidence(t *testing.T) {
 	runs := make([]map[string]any, 0, 16)
 	annotations := map[int64][]map[string]any{}
@@ -874,7 +827,6 @@ func TestRepositoryMonitorCIRepairPromptBoundsIndentedEvidence(t *testing.T) {
 	if !ok {
 		t.Fatalf("prompt has no input: %s", prompt)
 	}
-	// RawMessage keeps each entry's bytes exactly as the prompt has them.
 	var payload struct {
 		Evidence struct {
 			Checks        []json.RawMessage `json:"checks"`

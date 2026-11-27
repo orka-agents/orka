@@ -12,27 +12,16 @@ import (
 	"time"
 )
 
-// ExportFieldKind is the type of one field of an exported record.
 type ExportFieldKind uint8
 
 const (
-	// ExportString is a string, carried byte for byte. Its Go value is a
-	// string.
 	ExportString ExportFieldKind = iota + 1
-	// ExportInt is a signed 64-bit integer. Its Go value is an int64.
 	ExportInt
-	// ExportBool is a boolean. Its Go value is a bool.
 	ExportBool
-	// ExportTime is an instant, exact to the nanosecond. Its Go value is a
-	// time.Time; the encoding keeps the instant, not the location, and
-	// decoding returns it in UTC.
 	ExportTime
-	// ExportBytes is a byte string, such as sealed ciphertext or a nonce,
-	// carried byte for byte. Its Go value is a []byte.
 	ExportBytes
 )
 
-// String returns the kind's name.
 func (k ExportFieldKind) String() string {
 	switch k {
 	case ExportString:
@@ -50,52 +39,24 @@ func (k ExportFieldKind) String() string {
 	}
 }
 
-// ExportField is one field of a family's canonical record.
 type ExportField struct {
-	// Name is the field name, unique within the family.
-	Name string
-	// Kind is the field's type.
-	Kind ExportFieldKind
-	// Nullable says whether the field may be absent, which is distinct from
-	// its zero value. A provider that keeps an absent value as SQL NULL
-	// exports nil.
+	Name     string
+	Kind     ExportFieldKind
 	Nullable bool
-	// Key marks one of the fields that together identify a record within
-	// its family. No two records of a family have equal key fields, and a
-	// key field is never nullable.
-	Key bool
+	Key      bool
 }
 
-// ExportFamilySchema defines a family's canonical record: the fields of one
-// record, in order, some of them marked as the key that identifies it. It
-// describes what a provider holds for the family, not how it stores it.
 type ExportFamilySchema struct {
-	// Name is the family name.
-	Name string
-	// Contract is the contract part the family belongs to.
+	Name     string
 	Contract string
-	// Version is the version of the record encoding. It changes whenever the
-	// fields change.
-	Version int
-	// Fields lists every field of a record, in encoding order.
-	Fields []ExportField
+	Version  int
+	Fields   []ExportField
 }
 
-// Encoding returns the name of the family's record encoding,
-// "orka.storage.v1/export/<family>/v<version>".
 func (s ExportFamilySchema) Encoding() string {
 	return ContractVersion + "/export/" + s.Name + "/v" + strconv.Itoa(s.Version)
 }
 
-// The canonical encoding of a record is the field count as an unsigned
-// varint, then each field in schema order as one tag byte and its value:
-// strings and bytes as an unsigned varint length and the bytes, integers as
-// a signed varint, booleans as one byte 0 or 1, and times as the signed
-// varint of their Unix seconds and the unsigned varint of the nanoseconds
-// within that second. An absent nullable field is the tag alone. A record has
-// exactly one encoding, so equal records have equal bytes. A key is the same
-// encoding of the key fields alone, in field order, in base64url without
-// padding.
 const (
 	exportTagNull   = 'n'
 	exportTagString = 's'
@@ -105,11 +66,6 @@ const (
 	exportTagBytes  = 'y'
 )
 
-// Encode encodes a record whose values are given in field order, as the Go
-// types [ExportFieldKind] names. An int or int32 is accepted for an
-// [ExportInt], and nil for an absent nullable field. A value of another type,
-// a missing or extra value, or nil for a field that is not nullable returns
-// ErrValidation.
 func (s ExportFamilySchema) Encode(values []any) (RawRecord, error) {
 	if len(values) != len(s.Fields) {
 		return RawRecord{}, ValidationErrorf("export family %q record has %d values, want %d", s.Name, len(values), len(s.Fields))
@@ -128,10 +84,6 @@ func (s ExportFamilySchema) Encode(values []any) (RawRecord, error) {
 	return RawRecord{Family: s.Name, Key: key, Encoding: s.Encoding(), Body: body}, nil
 }
 
-// Decode checks that record belongs to the family, in its encoding, with a
-// canonical body and a Key that matches its key fields, and returns its
-// values in field order, as Encode accepts them, with times in UTC. Anything
-// else returns ErrValidation.
 func (s ExportFamilySchema) Decode(record RawRecord) ([]any, error) {
 	if record.Family != s.Name {
 		return nil, ValidationErrorf("record of family %q decoded as family %q", record.Family, s.Name)
@@ -247,7 +199,6 @@ func appendExportValue(dst []byte, field ExportField, value any) ([]byte, error)
 	return nil, fmt.Errorf("holds %T, want %s", value, field.Kind)
 }
 
-// tag returns the tag byte of a present value of kind k.
 func (k ExportFieldKind) tag() byte {
 	switch k {
 	case ExportString:
@@ -346,25 +297,17 @@ func (r *exportReader) value(field ExportField) (any, error) {
 	}
 }
 
-// exportRecordDomain and exportFamilyDomain separate export digests from every
-// other digest Orka computes. Changing an encoding changes them.
 const (
 	exportRecordDomain   = "orka.storage.v1 export record 1\x00"
 	exportFamilyDomain   = "orka.storage.v1 export family 1\x00"
 	exportManifestDomain = "orka.storage.v1 export manifest 1\x00"
 )
 
-// FamilyDigester computes a family's [FamilyDigest] from its records in any
-// order: the SHA-256 of the family's encoding name, the record count and the
-// sorted SHA-256 digests of the records, each over its encoding and body. Both sides
-// of an import compute it the same way.
 type FamilyDigester struct {
 	schema  ExportFamilySchema
 	records [][sha256.Size]byte
 }
 
-// NewFamilyDigester returns a digester for a family, or ErrValidation for an
-// unknown family.
 func NewFamilyDigester(family string) (*FamilyDigester, error) {
 	schema, ok := LookupExportSchema(family)
 	if !ok {
@@ -373,8 +316,6 @@ func NewFamilyDigester(family string) (*FamilyDigester, error) {
 	return &FamilyDigester{schema: schema}, nil
 }
 
-// Add adds one record. A record of another family or encoding returns
-// ErrValidation; Add does not decode the body.
 func (d *FamilyDigester) Add(record RawRecord) error {
 	if record.Family != d.schema.Name || record.Encoding != d.schema.Encoding() {
 		return ValidationErrorf("record of family %q in encoding %q added to the digest of family %q", record.Family, record.Encoding, d.schema.Name)
@@ -389,7 +330,6 @@ func (d *FamilyDigester) Add(record RawRecord) error {
 	return nil
 }
 
-// Sum returns the digest of the records added so far.
 func (d *FamilyDigester) Sum() FamilyDigest {
 	sorted := slices.Clone(d.records)
 	slices.SortFunc(sorted, func(a, b [sha256.Size]byte) int { return bytes.Compare(a[:], b[:]) })
@@ -408,11 +348,6 @@ func (d *FamilyDigester) Sum() FamilyDigest {
 	}
 }
 
-// ManifestDigest returns the "sha256:<hex>" digest of a manifest: the
-// [FamilyDigest] of each family, in [ExportSchemas] order whatever order the
-// manifest lists them in. Each entry must name a defined family once, in its
-// current encoding, with a non-negative count and a canonical digest, or
-// ManifestDigest returns ErrValidation.
 func ManifestDigest(manifest []FamilyDigest) (string, error) {
 	byFamily := make(map[string]FamilyDigest, len(manifest))
 	for _, family := range manifest {

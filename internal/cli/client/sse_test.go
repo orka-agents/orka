@@ -108,7 +108,6 @@ func TestSSEReader_Next(t *testing.T) {
 
 func TestSSEReader_Err(t *testing.T) {
 	r := NewSSEReader(strings.NewReader("data: hello\n"))
-	// Drain events
 	for {
 		_, ok := r.Next()
 		if !ok {
@@ -121,7 +120,6 @@ func TestSSEReader_Err(t *testing.T) {
 }
 
 func TestSSEReader_LargeData(t *testing.T) {
-	// Test that the reader can handle large data lines (buffer is configured for 1MB)
 	largeData := strings.Repeat("x", 100000)
 	input := "data: " + largeData + "\n\n"
 	r := NewSSEReader(strings.NewReader(input))

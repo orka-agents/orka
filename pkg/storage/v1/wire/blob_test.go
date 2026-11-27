@@ -24,8 +24,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/wiretest"
 )
 
-// pattern returns size bytes that differ at every position modulo 251, so a
-// reordered or dropped chunk changes the content.
 func pattern(size int) []byte {
 	data := make([]byte, size)
 	for index := range data {
@@ -34,8 +32,6 @@ func pattern(size int) []byte {
 	return data
 }
 
-// Blobs larger than one message cross the wire whole, in both directions,
-// with nested blobs, absent records and empty blobs preserved.
 func TestBlobsCrossTheWireWhole(t *testing.T) {
 	provider := newRecordingProvider()
 	client := wiretest.Serve(t, serveBoth(provider))
@@ -87,8 +83,6 @@ func TestBlobsCrossTheWireWhole(t *testing.T) {
 	require.Empty(t, result)
 }
 
-// chunkCounter counts the messages its side of a call sends, records the
-// largest, and counts the messages it receives.
 type chunkCounter struct {
 	messages atomic.Int64
 	largest  atomic.Int64
@@ -113,8 +107,6 @@ func (c *chunkCounter) HandleRPC(_ context.Context, event stats.RPCStats) {
 func (*chunkCounter) TagConn(ctx context.Context, _ *stats.ConnTagInfo) context.Context { return ctx }
 func (*chunkCounter) HandleConn(context.Context, stats.ConnStats)                       {}
 
-// A blob moves in messages of at most one chunk, so a large transfer never
-// sends one large message.
 func TestBlobsMoveInChunks(t *testing.T) {
 	provider := newRecordingProvider()
 	server, err := wire.NewServer(serveBoth(provider))
@@ -132,8 +124,6 @@ func TestBlobsMoveInChunks(t *testing.T) {
 	require.LessOrEqual(t, counter.largest.Load(), int64(wire.MaxChunkBytes+64))
 }
 
-// uploadContext names the contract, revision and dataset, and declares a blob
-// of size bytes with digest.
 func uploadContext(ctx context.Context, size int, digest []byte) context.Context {
 	return metadata.AppendToOutgoingContext(contractContext(ctx),
 		wire.HeaderBlobSize, strconv.Itoa(size), wire.HeaderBlobSHA256, hex.EncodeToString(digest))
@@ -144,8 +134,6 @@ func digestOf(data []byte) []byte {
 	return sum[:]
 }
 
-// rawUpload sends messages on a raw SaveResult stream and returns the call's
-// result.
 func rawUpload(ctx context.Context, conn *grpc.ClientConn, messages ...*storagepb.SaveResultRequest) error {
 	stream, err := storagepb.NewResultsClient(conn).SaveResult(ctx)
 	if err != nil {
@@ -160,8 +148,6 @@ func rawUpload(ctx context.Context, conn *grpc.ClientConn, messages ...*storagep
 	return err
 }
 
-// The server reassembles and checks an upload before the provider runs, so
-// a broken, oversized or malformed upload never reaches it.
 func TestUploadsAreCheckedBeforeTheProviderRuns(t *testing.T) {
 	provider := newRecordingProvider()
 	conn := wiretest.Dial(t, wire.ServerConfig{State: provider, Artifacts: provider, MaxBlobBytes: storagev1.MaxResultBytes})
@@ -211,10 +197,6 @@ func TestUploadsAreCheckedBeforeTheProviderRuns(t *testing.T) {
 	require.True(t, bytes.Equal(data, calls[0].args[2].([]byte)))
 }
 
-// A write's envelope digest covers its arguments as the caller wrote them,
-// and the server hands the provider empty blobs as empty slices. Nil and
-// empty bytes digest alike, so a write of nil data that carries an envelope
-// passes the server's digest check.
 func TestNilBlobWritesPassTheDigestCheck(t *testing.T) {
 	provider := newRecordingProvider()
 	client := wiretest.Serve(t, serveBoth(provider))
@@ -232,9 +214,6 @@ func TestNilBlobWritesPassTheDigestCheck(t *testing.T) {
 	require.Len(t, provider.callsTo("SaveArtifact"), 1)
 }
 
-// An upload's envelope names the dataset its call names, as a unary write's
-// does: the client refuses one for another dataset before it streams any of
-// the blob, and the server refuses it before the provider runs.
 func TestUploadEnvelopesMustNameTheCallsDataset(t *testing.T) {
 	provider := newRecordingProvider()
 	request := storagev1.SaveArtifactRequest{
@@ -265,8 +244,6 @@ func TestUploadEnvelopesMustNameTheCallsDataset(t *testing.T) {
 	require.Empty(t, provider.callsTo("SaveResult"), "the server refuses it before the provider runs")
 }
 
-// A nested blob belongs to a record the first message carries; a sender
-// cannot create the record with a later message.
 func TestNestedBlobsNeedTheirRecord(t *testing.T) {
 	provider := newRecordingProvider()
 	conn := wiretest.Dial(t, serveBoth(provider))
@@ -281,7 +258,6 @@ func TestNestedBlobsNeedTheirRecord(t *testing.T) {
 	require.Empty(t, provider.callsTo("SavePromptResultReceipt"))
 }
 
-// The client refuses a blob over its limits before sending anything.
 func TestClientRefusesOversizedBlobsWithoutSending(t *testing.T) {
 	provider := newRecordingProvider()
 	client := wiretest.Serve(t, serveBoth(provider))
@@ -306,8 +282,6 @@ func TestClientRefusesOversizedBlobsWithoutSending(t *testing.T) {
 	require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown))
 }
 
-// An artifact over the provider's described limit is refused by the server
-// before its bytes are read, even from a client that does not check.
 func TestServerRefusesArtifactsOverTheProviderLimit(t *testing.T) {
 	provider := newRecordingProvider()
 	conn := wiretest.Dial(t, serveBoth(provider))
@@ -322,7 +296,6 @@ func TestServerRefusesArtifactsOverTheProviderLimit(t *testing.T) {
 	require.Empty(t, provider.callsTo("SaveArtifact"))
 }
 
-// Streaming calls use the bulk connection and unary calls the main one.
 func TestBulkCallsUseTheBulkConnection(t *testing.T) {
 	control, bulk := newRecordingProvider(), newRecordingProvider()
 	client := wire.NewClient(wiretest.Dial(t, serveBoth(control)), wire.ClientConfig{
@@ -339,8 +312,6 @@ func TestBulkCallsUseTheBulkConnection(t *testing.T) {
 	require.Empty(t, control.callsTo("SaveResult"))
 }
 
-// A provider failure on a streaming write may follow a commit; on a
-// streaming read it is a plain error.
 func TestStreamingProviderFailures(t *testing.T) {
 	provider := newRecordingProvider()
 	client := wiretest.Serve(t, serveBoth(provider))
@@ -373,7 +344,6 @@ func TestStreamingProviderFailures(t *testing.T) {
 	require.NoError(t, client.SaveResult(t.Context(), "n", "t", []byte("r")), "the server keeps serving after a panic")
 }
 
-// A cancelled upload never reaches the provider.
 func TestCancelledUploadsNeverReachTheProvider(t *testing.T) {
 	provider := newRecordingProvider()
 	conn := wiretest.Dial(t, serveBoth(provider))

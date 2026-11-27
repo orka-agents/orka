@@ -140,7 +140,6 @@ var _ = Describe("API Extended Coverage", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		bodyStr := string(body)
 
-		// Should include built-in tools
 		Expect(bodyStr).To(ContainSubstring("web_search"), "Should list web_search tool")
 		Expect(bodyStr).To(ContainSubstring("code_exec"), "Should list code_exec tool")
 		Expect(bodyStr).To(ContainSubstring("file_read"), "Should list file_read tool")
@@ -165,7 +164,6 @@ var _ = Describe("API Extended Coverage", Ordered, func() {
 		err = json.Unmarshal(body, &result)
 		Expect(err).NotTo(HaveOccurred())
 
-		// Should have items array
 		items, ok := result["items"]
 		Expect(ok).To(BeTrue(), "Response should have items field")
 		Expect(items).NotTo(BeNil())

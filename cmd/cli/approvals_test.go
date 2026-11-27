@@ -181,7 +181,6 @@ func TestTaskApproveWithFullIDPostsDirectly(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, r.Method+" "+r.URL.Path)
 		if r.Method == http.MethodGet {
-			// A least-privilege approver may not read the task at all.
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
@@ -235,11 +234,6 @@ func TestTaskApproveSendsFullIDForPrefixAndPrintsDecision(t *testing.T) {
 	}
 }
 
-// approvalsWatchServer serves the approvals list from a function of the call
-// count, with the task's phase in the response the way the server reports
-// it, so a test can script the moment a request appears. The task detail
-// route answers with the same phase and counts its calls, for the fallback
-// a server without taskPhase needs.
 func approvalsWatchServer(t *testing.T, phase string, approvals func(call int) []map[string]any) *httptest.Server {
 	t.Helper()
 	return approvalsWatchServerWith(t, phase, true, approvals, nil)
@@ -286,7 +280,6 @@ func approvalsWatchServerFull(t *testing.T, phase string, deleting, includePhase
 	}))
 }
 
-// runCLISplit is runCLI with stdout and stderr captured separately.
 func runCLISplit(t *testing.T, serverURL string, args ...string) (string, string, error) {
 	t.Helper()
 	var out, errOut bytes.Buffer
@@ -330,7 +323,7 @@ func TestTaskApprovalsWatchIgnoresDecidedRequests(t *testing.T) {
 	fixtures := approvalFixtures(time.Now().Add(9 * time.Minute))
 	srv := approvalsWatchServer(t, "Running", func(call int) []map[string]any {
 		if call < 2 {
-			return fixtures[1:] // approved and declined only
+			return fixtures[1:]
 		}
 		return fixtures
 	})

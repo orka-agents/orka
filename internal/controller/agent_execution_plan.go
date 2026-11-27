@@ -33,10 +33,7 @@ type agentExecutionPlan struct {
 	externalRuntimeName  string
 	rejectionReason      string
 	workspaceStatusError error
-	// transientError defers planning instead of rejecting: the reconcile
-	// returns it so a brief read outage requeues rather than permanently
-	// failing the Task.
-	transientError error
+	transientError       error
 }
 
 func agentACPPlan() agentExecutionPlan {
@@ -53,14 +50,6 @@ func rejectAgentExecutionPlanWithWorkspaceStatus(reason string, err error) agent
 	return plan
 }
 
-// planAgentExecution owns the controller routing decision for type: agent
-// Tasks. Built-in Codex, Claude, Copilot, and OpenCode runtimes use only the Orka harness v2
-// RuntimePool path; a Task.spec.execution.workspace request additionally binds
-// that path to a workspace-provider-backed RuntimePool when enabled and fails
-// closed otherwise. Strict-governed external runtimeRef registrations use the
-// same ACP Task and RuntimeSession state machines without becoming managed
-// RuntimePools. Unsupported contracts fail before work starts.
-//
 //nolint:gocyclo // Execution planning resolves every frozen input in one deterministic pass.
 func (r *TaskReconciler) planAgentExecution(
 	ctx context.Context,
@@ -74,11 +63,6 @@ func (r *TaskReconciler) planAgentExecution(
 	return plan
 }
 
-// requesterPermissionDecisionsRejection fails closed on every route that
-// cannot honor spec.agentRuntime.permissionDecisions: Requester. Only a
-// built-in runtime on the harness v2 RuntimePool path can be launched to ask
-// before each policy-allowed native tool that acts; any other route would run
-// those tools without asking the requester.
 func requesterPermissionDecisionsRejection(task *corev1alpha1.Task, agent *corev1alpha1.Agent, plan agentExecutionPlan) string {
 	if !taskPermissionDecisionsByRequester(task) {
 		return ""
@@ -194,33 +178,17 @@ func (r *TaskReconciler) planAgentExecutionRoute(
 	}
 }
 
-// taskRequestsExecutionWorkspace treats every present workspace as a request.
-// Malformed or pruned requests must fail validation rather than run normally.
 func taskRequestsExecutionWorkspace(task *corev1alpha1.Task) bool {
 	return task != nil && task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil
 }
 
-// rejectUnsupportedACPWorkspacePlan fails closed on every workspace request the
-// ACP RuntimePool path cannot host, before any workspace or RuntimePool demand
-// exists. A nil plan with rejected=false admits the workspace-backed ACP path.
 func (r *TaskReconciler) rejectUnsupportedACPWorkspacePlan(ctx context.Context, task *corev1alpha1.Task) (agentExecutionPlan, bool) {
 	if task.Status.AgentExecutionBinding != nil {
-		// The execution binding is frozen: new-allocation readiness (live
-		// class resolution, provider Active lifecycle) no longer applies -
-		// core deliberately admits Draining providers for already-admitted
-		// workspaces, and ensureAgentExecutionBinding re-verifies the frozen
-		// snapshot on every pass. The configuration-level dispatch gates are
-		// enforced against the VERIFIED frozen plan at the queue chokepoint
-		// (queueACPRuntimeTask), which both this path and bound-task
-		// recovery flow through - the public status projection may still be
-		// nil here and is never the gate's authority.
 		return agentExecutionPlan{}, false
 	}
 	resolvedClass, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		if errors.Is(err, errACPWorkspacePlanningTransient) || isRetryableACPWorkspaceClassResolutionError(err) {
-			// API, provider-authorization and control-store outages requeue.
-			// Actual quota exhaustion and validation failures stay rejections.
 			return agentExecutionPlan{path: agentExecutionPathRejected, transientError: err}, true
 		}
 		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
@@ -277,9 +245,6 @@ func externalAgentRuntimeConformanceError(
 	if task != nil {
 		intent := effectiveACPWorkspaceIntent(task)
 		if runtime.Spec.Capabilities.Profile.WorkspaceIntent != intent {
-			// The current conformed profile cannot execute this Task. Preserve the
-			// permanent classification so binding fails with the mismatch instead
-			// of treating it as runtime readiness and retrying until Task timeout.
 			return permanentACPAgentConfiguration(fmt.Errorf("external AgentRuntime %q profile workspace intent %q does not match Task intent %q", runtime.Name, runtime.Spec.Capabilities.Profile.WorkspaceIntent, intent))
 		}
 	}
@@ -298,8 +263,6 @@ func (r *TaskReconciler) rejectPlannedAgentExecution(
 	plan agentExecutionPlan,
 ) (ctrl.Result, error) {
 	if plan.transientError != nil {
-		// Requeue with the controller's error backoff; nothing terminal has
-		// been decided about this Task.
 		return ctrl.Result{}, plan.transientError
 	}
 	if plan.workspaceStatusError != nil {
@@ -342,11 +305,6 @@ func effectiveAgentResources(task *corev1alpha1.Task, agent *corev1alpha1.Agent)
 	return agent != nil && (len(agent.Spec.Resources.Requests) > 0 || len(agent.Spec.Resources.Limits) > 0)
 }
 
-// frozenWorkspaceDispatchDisabledReason enforces the configuration-level
-// workspace dispatch gates against the VERIFIED frozen execution plan. It is
-// the single authority for bound Tasks: both ordinary planning and bound-task
-// recovery reach it through the queue chokepoint, so a flag disabled after
-// the binding froze can never create new RuntimePool demand.
 func (r *TaskReconciler) frozenWorkspaceDispatchDisabledReason(binding *ACPRuntimeWorkspaceBinding) string {
 	if binding != nil && (binding.Class == nil || binding.Class.ControllerName == "") {
 		return "legacy execution workspace bindings are cleanup-only and must retire under their original controller before upgrade"
@@ -359,9 +317,6 @@ func (r *TaskReconciler) frozenWorkspaceDispatchDisabledReason(binding *ACPRunti
 		return "workspace-provider-backed RuntimeSession dispatch is disabled; enable --acp-workspace-dispatch-enabled"
 	}
 	if binding.Class != nil && !r.WorkspaceProviderAPIEnabled {
-		// The class-backed lifecycle needs the core workspace reconciler; in
-		// cleanup-only mode a newly materialized workspace would never be
-		// admitted and the Task would stay Pending forever.
 		return "class-backed execution workspaces require --enable-workspace-provider-api"
 	}
 	return ""

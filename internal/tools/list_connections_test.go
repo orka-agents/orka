@@ -21,8 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/connectors"
 )
 
-// listConnectionsFor runs list_connections for requester against a reader
-// holding objects and decodes the result.
 func listConnectionsFor(t *testing.T, scheme *runtime.Scheme, requester *corev1alpha1.RequestedBy, objects ...client.Object) ListConnectionsResult {
 	t.Helper()
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
@@ -39,11 +37,6 @@ func listConnectionsFor(t *testing.T, scheme *runtime.Scheme, requester *corev1a
 	return envelope.Data
 }
 
-// listConnectionsFixture is the providers and links the list_connections
-// tests read: an accepted GitHub provider with the requester's Ready link,
-// an unlinked Slack provider, an unaccepted Jira provider, somebody else's
-// Connection under the requester's Slack name, and a link whose provider
-// was removed.
 type listConnectionsFixture struct {
 	scheme                    *runtime.Scheme
 	requester                 *corev1alpha1.RequestedBy
@@ -82,15 +75,12 @@ func newListConnectionsFixture() listConnectionsFixture {
 			{Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonProviderResolved, ObservedGeneration: 2},
 		}},
 	}
-	// Somebody else's Connection under the name this requester would get
-	// (a collision) is never listed as theirs.
 	foreign := &corev1alpha1.Connection{
 		ObjectMeta: metav1.ObjectMeta{Name: connectors.ConnectionName("slack", requester.Issuer, requester.Subject), Namespace: "tenant",
 			Labels: map[string]string{connectors.ConnectionSubjectLabel: connectors.ConnectionSubjectLabelValue(requester.Issuer, requester.Subject)}},
 		Spec: corev1alpha1.ConnectionSpec{Subject: corev1alpha1.ConnectionSubject{Issuer: requester.Issuer, Subject: "bob"},
 			ProviderRef: corev1alpha1.LocalObjectReference{Name: "slack"}},
 	}
-	// A link whose provider was removed is still the person's, and still listed.
 	retained := &corev1alpha1.Connection{
 		ObjectMeta: metav1.ObjectMeta{Name: connectors.ConnectionName("gone", requester.Issuer, requester.Subject), Namespace: "tenant",
 			Labels: map[string]string{connectors.ConnectionSubjectLabel: connectors.ConnectionSubjectLabelValue(requester.Issuer, requester.Subject)}},
@@ -129,7 +119,6 @@ func TestListConnectionsTool(t *testing.T) {
 		strings.Join(result.Connections[0].Tools, ",") != "list_pull_requests (read),create_pull_request (write)" {
 		t.Fatalf("connections = %+v", result.Connections)
 	}
-	// The link to the removed provider is reported, unusable, with no tools.
 	if gone := result.Connections[1]; gone.Provider != "gone" || !gone.ProviderMissing || gone.Ready || len(gone.Tools) != 0 ||
 		!strings.Contains(gone.Message, "no longer configured") {
 		t.Fatalf("retained = %+v", gone)
@@ -142,7 +131,6 @@ func TestListConnectionsTool(t *testing.T) {
 		t.Fatalf("result = %s", out)
 	}
 
-	// No verified person: an explicit error result, never a listing.
 	anonymous := WithToolContext(context.Background(), &ToolContext{Namespace: "tenant", PolicyReader: reader})
 	out, err = tool.Execute(anonymous, json.RawMessage(`{}`))
 	if err != nil || !strings.Contains(out, "no_identity") {
@@ -153,22 +141,18 @@ func TestListConnectionsTool(t *testing.T) {
 	}
 }
 
-// TestListConnectionsToolReportsUnusableLinks covers links the resolver
-// refuses: each is reported, unusable, with the reason.
 func TestListConnectionsToolReportsUnusableLinks(t *testing.T) {
 	f := newListConnectionsFixture()
 	scheme, requester, github, linked := f.scheme, f.requester, f.github, f.linked
-	// A link whose provider is not accepted right now is reported unusable.
 	unaccepted := github.DeepCopy()
 	unaccepted.Generation++
 	fresh := linked.DeepCopy()
-	fresh.Status.State = "" // not reconciled yet
+	fresh.Status.State = ""
 	laggingResult := listConnectionsFor(t, scheme, requester, unaccepted, fresh)
 	if len(laggingResult.Connections) != 1 || laggingResult.Connections[0].Ready || !strings.Contains(laggingResult.Connections[0].Message, "not accepted") ||
 		laggingResult.Connections[0].State != corev1alpha1.ConnectionStatePending {
 		t.Fatalf("lagging provider connections = %+v", laggingResult.Connections)
 	}
-	// Two links to one provider are both reported, both unusable.
 	duplicate := linked.DeepCopy()
 	duplicate.Name = "my-second-github-link"
 	dupResult := listConnectionsFor(t, scheme, requester, github, linked, duplicate)
@@ -176,15 +160,12 @@ func TestListConnectionsToolReportsUnusableLinks(t *testing.T) {
 		!strings.Contains(dupResult.Connections[0].Message, "several links") {
 		t.Fatalf("duplicate connections = %+v", dupResult.Connections)
 	}
-	// A provider changed since consent refuses the token at once, so the
-	// listing says so before the Connection's conditions catch up.
 	retargeted := github.DeepCopy()
 	retargeted.Spec.OAuth.TokenURL = "https://github.example.test/login/oauth/access_token"
 	retargetedResult := listConnectionsFor(t, scheme, requester, retargeted, linked)
 	if len(retargetedResult.Connections) != 1 || retargetedResult.Connections[0].Ready || !strings.Contains(retargetedResult.Connections[0].Message, "changed since you consented") {
 		t.Fatalf("retargeted provider connections = %+v", retargetedResult.Connections)
 	}
-	// A link being disconnected says so instead of a contradictory Ready.
 	terminating := linked.DeepCopy()
 	terminating.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
 	terminating.Finalizers = []string{"test"}
@@ -195,17 +176,12 @@ func TestListConnectionsToolReportsUnusableLinks(t *testing.T) {
 	}
 }
 
-// TestListConnectionsToolGuidanceFollowsDashboard covers where the tool
-// sends the person to fix a link: the dashboard page only when the
-// controller serves one, the CLI otherwise.
 func TestListConnectionsToolGuidanceFollowsDashboard(t *testing.T) {
 	f := newListConnectionsFixture()
 	retargeted := f.github.DeepCopy()
 	retargeted.Spec.OAuth.TokenURL = "https://github.example.test/login/oauth/access_token"
 	duplicate := f.linked.DeepCopy()
 	duplicate.Name = "my-second-github-link"
-	// `orka connect` would add a second link beside one created under
-	// another name, so that one is removed before relinking.
 	renamed := f.linked.DeepCopy()
 	renamed.Name = "my-github"
 	for _, tt := range []struct {
@@ -276,9 +252,6 @@ func TestListConnectionsToolHonoursConnectorReadGate(t *testing.T) {
 	}
 }
 
-// TestListConnectionsToolListsUnlabeledLinks covers a link without the owner
-// index label (created through Kubernetes, or with the label stripped): it
-// is still the person's and still listed, as credential resolution sees it.
 func TestListConnectionsToolListsUnlabeledLinks(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)

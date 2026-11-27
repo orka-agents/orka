@@ -6,67 +6,36 @@ import (
 	"strings"
 )
 
-// ConnectionRequiredKind names why a requester's linked account cannot serve
-// a call.
 type ConnectionRequiredKind string
 
 const (
-	// ConnectionNotLinked: the requester has no link to the provider, or it
-	// is being removed.
-	ConnectionNotLinked ConnectionRequiredKind = "NotLinked"
-	// ConnectionExpired: the link's grant has expired.
-	ConnectionExpired ConnectionRequiredKind = "Expired"
-	// ConnectionNotReady: the link exists but is not Ready, for example
-	// Revoked or still Pending consent.
-	ConnectionNotReady ConnectionRequiredKind = "NotReady"
-	// ConnectionNoCredential: the link is Ready but Orka holds no credential
-	// for it.
-	ConnectionNoCredential ConnectionRequiredKind = "NoCredential"
-	// ConnectionAmbiguous: the requester has several links to the provider.
-	ConnectionAmbiguous ConnectionRequiredKind = "Ambiguous"
-	// ConnectionNotBound: the link is Ready but was not bound to the Task,
-	// because its consent or granted scopes did not match the provider.
-	ConnectionNotBound ConnectionRequiredKind = "NotBound"
-	// ConnectionRevoked: the provider revoked the link's grant.
-	ConnectionRevoked ConnectionRequiredKind = "Revoked"
-	// ConnectionClientChanged: the provider's OAuth client changed since the
-	// link's token was issued.
+	ConnectionNotLinked     ConnectionRequiredKind = "NotLinked"
+	ConnectionExpired       ConnectionRequiredKind = "Expired"
+	ConnectionNotReady      ConnectionRequiredKind = "NotReady"
+	ConnectionNoCredential  ConnectionRequiredKind = "NoCredential"
+	ConnectionAmbiguous     ConnectionRequiredKind = "Ambiguous"
+	ConnectionNotBound      ConnectionRequiredKind = "NotBound"
+	ConnectionRevoked       ConnectionRequiredKind = "Revoked"
 	ConnectionClientChanged ConnectionRequiredKind = "ClientChanged"
-	// ConnectionDeleting: the link is being deleted.
-	ConnectionDeleting ConnectionRequiredKind = "Deleting"
-	// ConnectionChanged: the link changed after the Task started; a new run
-	// binds the current one.
-	ConnectionChanged ConnectionRequiredKind = "Changed"
-	// ConnectionRelinked: the person linked again after the Task started; a
-	// new run binds the new grant.
-	ConnectionRelinked ConnectionRequiredKind = "Relinked"
+	ConnectionDeleting      ConnectionRequiredKind = "Deleting"
+	ConnectionChanged       ConnectionRequiredKind = "Changed"
+	ConnectionRelinked      ConnectionRequiredKind = "Relinked"
 )
 
-// ConnectionRequiredError refuses a call that the person who asked fixes by
-// linking or re-linking an account, or that a new run of the Task fixes.
-// Nothing was sent. Its message is built only from the provider's name,
-// display name, and namespace and the link's state, never from a credential
-// or an upstream response, so the agent can relay it and the controller can
-// log it.
 type ConnectionRequiredError struct {
 	Kind        ConnectionRequiredKind
 	Provider    string
 	DisplayName string
 	Namespace   string
-	// State is the link's state for ConnectionNotReady.
-	State string
-	// Links counts the requester's links for ConnectionAmbiguous.
-	Links int
+	State       string
+	Links       int
 }
 
-// Error tells the agent what the person must do, for the agent to pass on.
 func (e *ConnectionRequiredError) Error() string {
 	name := strings.TrimSpace(e.DisplayName)
 	if name == "" {
 		name = strings.TrimSpace(e.Provider)
 	}
-	// "Azure is not linked" and "The Azure link", or generic phrases when the
-	// provider is unknown.
 	notLinked, theLink := "No account is linked for the person who asked.", "The linked account of the person who asked"
 	if name != "" {
 		notLinked, theLink = name+" is not linked for the person who asked.", "The "+name+" link for the person who asked"
@@ -93,8 +62,6 @@ func (e *ConnectionRequiredError) Error() string {
 	case ConnectionNoCredential:
 		return theLink + " holds no credential. " + link
 	case ConnectionAmbiguous:
-		// The commands name the Task's namespace when it is known, so the
-		// person lists and deletes links there, not in their CLI default.
 		scope := ""
 		if namespace := strings.TrimSpace(e.Namespace); namespace != "" {
 			scope = " -n " + namespace

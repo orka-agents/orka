@@ -15,10 +15,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// No ACP write newly reports execution success while storage is held for
-// recovery, including one whose Task phase reports a failed delivery or a
-// cancellation, one that leaves the Task running, and a restored Task's
-// settlement; once the hold is released the same write goes through.
 func TestACPExecutionSuccessWaitsWhileStorageIsHeld(t *testing.T) {
 	ctx := context.Background()
 	succeeded := corev1alpha1.TaskExecutionStatus{
@@ -68,8 +64,6 @@ func TestACPExecutionSuccessWaitsWhileStorageIsHeld(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			// A binding whose Task UID differs from the Task's is a restored
-			// incarnation's, which the restored settlement requires.
 			binding := testACPExecuteBindingForDispatcher()
 			binding.Task.UID = types.UID("source-uid")
 			task := &corev1alpha1.Task{

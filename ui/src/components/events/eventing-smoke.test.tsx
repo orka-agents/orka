@@ -9,9 +9,6 @@ import { makeEvent } from '@/test/fixtures/events'
 import { makeTrace } from '@/test/fixtures/trace'
 import type { UseExecutionEventStreamResult } from '@/hooks/use-execution-event-stream'
 
-// End-to-end UI smoke for the evented-execution surfaces. One mocked backend,
-// exercised through the real task/session detail components and their tabs.
-
 vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
@@ -33,7 +30,6 @@ vi.mock('@tanstack/react-router', async () => {
   }
 })
 
-// Deterministic stream output, swappable per test.
 const streamState: { current: Partial<UseExecutionEventStreamResult> } = { current: {} }
 vi.mock('@/hooks/use-execution-event-stream', () => ({
   useExecutionEventStream: () => ({
@@ -73,11 +69,8 @@ describe('evented execution UI smoke', () => {
 
   it('walks the task timeline, trace, approval, and fork flows end to end', async () => {
     const user = userEvent.setup()
-    // The approval flips to approved once a decision is posted, like the backend.
     let approvalDecided = false
     server.use(
-      // The task is still Running so its pending approval is actionable (the
-      // backend rejects decisions once a task is terminal).
       http.get(`${API}/tasks/:id`, () => HttpResponse.json(mockTask({ status: { phase: 'Running' } }))),
       http.get(`${API}/tasks/:id/events`, () =>
         HttpResponse.json({
@@ -123,27 +116,23 @@ describe('evented execution UI smoke', () => {
     render(<TaskDetail taskId="smoke-task" />)
     await waitFor(() => expect(screen.getByText('smoke-task')).toBeInTheDocument())
 
-    // 1. Activity's raw events show the task's events.
     await user.click(screen.getByRole('tab', { name: 'Activity' }))
     await user.click(screen.getByRole('button', { name: 'Raw events' }))
     await waitFor(() => expect(screen.getByText('task started')).toBeInTheDocument())
     expect(screen.getByText('task done')).toBeInTheDocument()
     expect(screen.getAllByTestId('event-row')).toHaveLength(3)
 
-    // 2. Activity's trace explains model + tool sections.
     await user.click(screen.getByRole('button', { name: 'Trace' }))
     await waitFor(() => expect(screen.getByText('Execution trace')).toBeInTheDocument())
     expect(screen.getByText('Model requests')).toBeInTheDocument()
     expect(screen.getByText('one model call')).toBeInTheDocument()
     expect(screen.getByText('Tool calls')).toBeInTheDocument()
 
-    // 3. Approvals tab: approve the pending request.
     await user.click(screen.getByRole('tab', { name: 'Approvals' }))
     await waitFor(() => expect(screen.getByText('fetch external URL')).toBeInTheDocument())
     await user.click(screen.getByRole('button', { name: 'Approve' }))
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument())
 
-    // 4. Fork from a raw event row.
     await user.click(screen.getByRole('tab', { name: 'Activity' }))
     await user.click(screen.getByRole('button', { name: 'Raw events' }))
     await waitFor(() => expect(screen.getAllByRole('button', { name: /fork from here/i }).length).toBeGreaterThan(0))
@@ -175,7 +164,6 @@ describe('evented execution UI smoke', () => {
     await user.click(screen.getByRole('button', { name: 'Raw events' }))
     await waitFor(() => expect(screen.getByText('task started')).toBeInTheDocument())
 
-    // Simulate a browser refresh: unmount and remount; history reloads from the API.
     view.unmount()
     render(<TaskDetail taskId="smoke-task" />)
     await waitFor(() => expect(screen.getByText('smoke-task')).toBeInTheDocument())
@@ -207,7 +195,6 @@ describe('evented execution UI smoke', () => {
     await user.click(screen.getByRole('tab', { name: 'Timeline' }))
     await waitFor(() => expect(screen.getByText('a started')).toBeInTheDocument())
     expect(screen.getByText('b started')).toBeInTheDocument()
-    // Task identities link to their detail pages.
     const links = screen.getAllByRole('link', { name: 'task-a' })
     expect(links[0]).toHaveAttribute('href', '/tasks/task-a')
     expect(screen.getByRole('link', { name: 'task-b' })).toBeInTheDocument()

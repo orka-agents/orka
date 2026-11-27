@@ -7,7 +7,6 @@ describe('Sparkline', () => {
     const { container } = render(<Sparkline data={[1, 5, 2, 8, 3]} />)
     const poly = container.querySelector('polyline')
     expect(poly).toBeInTheDocument()
-    // 5 points => 5 coordinate pairs
     expect(poly!.getAttribute('points')!.trim().split(' ')).toHaveLength(5)
   })
 

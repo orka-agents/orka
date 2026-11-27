@@ -15,13 +15,11 @@ import (
 	"testing"
 )
 
-// trackedFile is one entry in the git index.
 type trackedFile struct {
 	mode string
 	path string
 }
 
-// repoRoot returns the repository root, two levels above this package.
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
@@ -31,7 +29,6 @@ func repoRoot(t *testing.T) string {
 	return root
 }
 
-// trackedFiles lists every file in the git index with its mode.
 func trackedFiles(t *testing.T, root string) []trackedFile {
 	t.Helper()
 	cmd := exec.Command("git", "ls-files", "--stage", "-z")
@@ -45,7 +42,6 @@ func trackedFiles(t *testing.T, root string) []trackedFile {
 		if len(entry) == 0 {
 			continue
 		}
-		// <mode> SP <object> SP <stage> TAB <path>
 		meta, path, ok := strings.Cut(string(entry), "\t")
 		if !ok {
 			t.Fatalf("unexpected git ls-files entry %q", entry)
@@ -56,10 +52,6 @@ func trackedFiles(t *testing.T, root string) []trackedFile {
 	if len(files) == 0 {
 		t.Fatal("git ls-files listed no files")
 	}
-	// The test cache tracks only files a test opens or stats. Stat the
-	// index so staging a file invalidates a cached pass. Go skips inputs
-	// outside the module root, such as a linked worktree's index, so the
-	// documented command also passes -count=1.
 	cmd = exec.Command("git", "rev-parse", "--path-format=absolute", "--git-path", "index")
 	cmd.Dir = root
 	index, err := cmd.Output()

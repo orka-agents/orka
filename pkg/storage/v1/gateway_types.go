@@ -7,7 +7,6 @@ import (
 	"time"
 )
 
-// GatewayEventState is the durable ingress processing state.
 type GatewayEventState string
 
 const (
@@ -21,7 +20,6 @@ const (
 	GatewayEventExpired      GatewayEventState = "Expired"
 )
 
-// GatewayDeliveryState is the durable outbound delivery state.
 type GatewayDeliveryState string
 
 const (
@@ -34,7 +32,6 @@ const (
 	GatewayDeliveryExpired        GatewayDeliveryState = "Expired"
 )
 
-// GatewayEvent is a normalized, provider-neutral durable ingress record.
 type GatewayEvent struct {
 	ID                string            `json:"id"`
 	Namespace         string            `json:"namespace"`
@@ -82,7 +79,6 @@ type GatewayEvent struct {
 	CompletedAt       *time.Time        `json:"completedAt,omitempty"`
 }
 
-// GatewayEventAdmission atomically records an event and optionally appends its user message.
 type GatewayEventAdmission struct {
 	Event               GatewayEvent
 	AppendUserMessage   bool
@@ -91,7 +87,6 @@ type GatewayEventAdmission struct {
 	RejectedRecordLimit int
 }
 
-// GatewayEventFilter constrains event queries.
 type GatewayEventFilter struct {
 	Namespace          string
 	NamespaceUID       string
@@ -114,7 +109,6 @@ type GatewayEventFilter struct {
 	Limit              int
 }
 
-// GatewayTerminalProjection atomically appends one terminal Session message and creates one delivery.
 type GatewayTerminalProjection struct {
 	EventID     string
 	Message     SessionMessage
@@ -122,8 +116,6 @@ type GatewayTerminalProjection struct {
 	CompletedAt time.Time
 }
 
-// GatewayExpiryProjection atomically expires one event and creates its visible
-// error delivery so a crash cannot leave external users without a response.
 type GatewayExpiryProjection struct {
 	EventID     string
 	Owner       string
@@ -132,7 +124,6 @@ type GatewayExpiryProjection struct {
 	CompletedAt time.Time
 }
 
-// GatewayMessageBudgetQuery identifies a receipt without content or worker policy.
 type GatewayMessageBudgetQuery struct {
 	Namespace    string
 	NamespaceUID string
@@ -142,18 +133,11 @@ type GatewayMessageBudgetQuery struct {
 	RequestID    string
 }
 
-// GatewayMessageBudget is a read-only snapshot, not an admission reservation.
 type GatewayMessageBudget struct {
 	Accepted      int  `json:"accepted"`
 	RequestExists bool `json:"requestExists"`
 }
 
-// GatewayMessageEnqueue admits one bounded nonterminal message for an exact Task/event.
-// All routing and delivery identity are derived from the durable event and RequestID;
-// callers must authorize the live Task and Gateway identity before entering the writer.
-// If current readiness/capability denies admission, ReplayOnly permits only receipt recovery.
-// MaxMessages and MaxAttempts are positive controller policy, not worker input.
-// Replays compare identity and Text, not mutable retry policy or request time.
 type GatewayMessageEnqueue struct {
 	Namespace    string
 	NamespaceUID string
@@ -162,14 +146,13 @@ type GatewayMessageEnqueue struct {
 	TaskUID      string
 	RequestID    string
 	Text         string
-	ReplayOnly   bool // Controller-only control bit; never persisted or accepted from workers.
+	ReplayOnly   bool
 	MaxMessages  int
 	MaxAttempts  int
 	Now          time.Time
 	ExpiresAt    time.Time
 }
 
-// GatewayDelivery is a normalized durable outbound delivery record.
 type GatewayDelivery struct {
 	ID                string               `json:"id"`
 	IdempotencyID     string               `json:"idempotencyId"`
@@ -206,7 +189,6 @@ type GatewayDelivery struct {
 	DeliveredAt       *time.Time           `json:"deliveredAt,omitempty"`
 }
 
-// GatewayDeliveryFilter constrains delivery queries.
 type GatewayDeliveryFilter struct {
 	Namespace       string
 	NamespaceUID    string
@@ -224,7 +206,6 @@ type GatewayDeliveryFilter struct {
 	Limit           int
 }
 
-// GatewayQueueStats contains low-cardinality queue depth and age inputs for metrics.
 type GatewayQueueStats struct {
 	PendingEvents       int
 	OldestEventReceived *time.Time
@@ -232,7 +213,6 @@ type GatewayQueueStats struct {
 	OldestDeliveryDue   *time.Time
 }
 
-// GatewayMaintenanceResult reports bounded expiry and cleanup work.
 type GatewayMaintenanceResult struct {
 	ExpiredEvents          int `json:"expiredEvents"`
 	ExpiredDeliveries      int `json:"expiredDeliveries"`
@@ -244,16 +224,12 @@ type GatewayMaintenanceResult struct {
 	DeletedSessions        int `json:"deletedSessions"`
 }
 
-// GatewayUserMessageID returns the stable canonical user-message ID for an ingress event.
 func GatewayUserMessageID(eventID string) string { return "gateway:" + eventID + ":user" }
 
-// GatewayAssistantMessageID returns the stable canonical successful terminal-message ID.
 func GatewayAssistantMessageID(eventID string) string { return "gateway:" + eventID + ":assistant" }
 
-// GatewayErrorMessageID returns the stable canonical failed/expired terminal-message ID.
 func GatewayErrorMessageID(eventID string) string { return "gateway:" + eventID + ":error" }
 
-// GatewayEventEnvelopeDigest returns a stable digest of immutable normalized ingress fields.
 func GatewayEventEnvelopeDigest(event *GatewayEvent) string {
 	if event == nil {
 		return ""
@@ -296,7 +272,6 @@ func GatewayEventEnvelopeDigest(event *GatewayEvent) string {
 	return hex.EncodeToString(digest[:])
 }
 
-// IsValidGatewayEventState reports whether state is a known durable ingress state.
 func IsValidGatewayEventState(state GatewayEventState) bool {
 	switch state {
 	case GatewayEventAccepted, GatewayEventQueued, GatewayEventDispatching, GatewayEventTaskCreated,
@@ -307,7 +282,6 @@ func IsValidGatewayEventState(state GatewayEventState) bool {
 	}
 }
 
-// IsValidGatewayDeliveryState reports whether state is a known durable outbox state.
 func IsValidGatewayDeliveryState(state GatewayDeliveryState) bool {
 	switch state {
 	case GatewayDeliveryPending, GatewayDeliverySending, GatewayDeliveryDelivered,

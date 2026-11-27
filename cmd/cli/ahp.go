@@ -27,8 +27,6 @@ const (
 	ahpStatusRevoked = "Revoked"
 )
 
-// ahpTokenView is the API's view of an AHP connection token. Token is set
-// only in the response that minted it.
 type ahpTokenView struct {
 	ID          string     `json:"id"`
 	Token       string     `json:"token,omitempty"`
@@ -39,19 +37,16 @@ type ahpTokenView struct {
 	RevokedAt   *time.Time `json:"revokedAt,omitempty"`
 }
 
-// ahpMintRequest asks the API for an AHP connection token.
 type ahpMintRequest struct {
 	TTL         string `json:"ttl,omitempty"`
 	Description string `json:"description,omitempty"`
 }
 
-// ahpTokenListItem is one row of 'orka ahp tokens list' structured output.
 type ahpTokenListItem struct {
 	ahpTokenView
 	Status string `json:"status"`
 }
 
-// ahpConnectResult is the structured output of 'orka ahp connect'.
 type ahpConnectResult struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name,omitempty"`
@@ -127,8 +122,6 @@ func newAHPConnectCmd() *cobra.Command {
 					ExpiresAt: minted.ExpiresAt, URL: connectURL,
 				})
 			}
-			// Only the URL goes to standard output, so it can be piped to a
-			// clipboard; the instructions go to standard error.
 			errOut := cmd.ErrOrStderr()
 			label := minted.ID
 			if minted.Description != "" {
@@ -154,9 +147,6 @@ func newAHPConnectCmd() *cobra.Command {
 	return cmd
 }
 
-// ahpHostURL turns an Orka API address into its AHP WebSocket endpoint. It
-// reports whether the host is this machine, and refuses to put a token in a
-// plaintext URL for any other host unless insecure is set.
 func ahpHostURL(base string, insecure bool) (*url.URL, bool, error) {
 	parsed, err := url.Parse(strings.TrimSpace(base))
 	if err != nil || parsed.Host == "" {
@@ -191,7 +181,6 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// defaultAHPDeviceName names a token after this machine.
 func defaultAHPDeviceName() string {
 	host, err := os.Hostname()
 	if err != nil {
@@ -302,8 +291,6 @@ func newAHPTokensRevokeCmd() *cobra.Command {
 	}
 }
 
-// ahpError explains the failures people hit first: a token that is not a
-// person's, and a controller without the AHP endpoint.
 func ahpError(err error) error {
 	if err == nil {
 		return nil

@@ -35,8 +35,6 @@ func TestExecutionEventStoreLatestSeqsScopesAndRefreshesHeads(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, map[string]int64{"task-a": 5, "task-b": 0}, other)
 
-	// Recovery reads persisted stream heads after a store reopen, without a
-	// process-local append notification or sequence cache.
 	require.NoError(t, s.db.Close())
 	db, err := NewDB(s.dbPath)
 	require.NoError(t, err)
@@ -66,7 +64,6 @@ func TestExecutionEventStoreLatestSeqsReturnsEveryBoundedBatch(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, want, latest)
 
-	// Query rows must release the single connection before projection writes.
 	appendSequenceBatchEvents(t, s, "default", requested[0], 1)
 	refreshed, err := s.GetLatestExecutionEventSeqs(t.Context(), "default", "", requested)
 	require.NoError(t, err)
