@@ -792,7 +792,7 @@ func BuildPatchPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding,
 	prompt.WriteString("2. Apply the fix directly to the checked-out workspace files. Do not stop at a diff artifact or a written description.\n")
 	prompt.WriteString("3. Keep the code diff as small and reviewable as possible.\n")
 	prompt.WriteString("4. Preserve existing behavior unless the vulnerability requires a behavior change.\n")
-	prompt.WriteString("5. Run focused tests when available.\n")
+	prompt.WriteString("5. Run focused tests when available and record only commands you actually executed in testsRun. All reported testsRun entries must pass (exitCode 0); leave testsRun empty if no tests could be run.\n")
 	prompt.WriteString("6. The changedFiles you report in the terminal result below must exactly match the workspace files you actually edited.\n")
 	prompt.WriteString("7. Do not commit, push, or open a pull request directly. Leave the final file changes in the workspace so Orka can create the commit and push it to the patch branch automatically.\n")
 	prompt.WriteString("8. Change only source files that belong to the fix. Do not create diff, summary, or metadata files anywhere in the workspace (no .orka-artifacts directory): every workspace change becomes part of the published commit, and unexpected files fail the proposal.\n")
@@ -959,7 +959,10 @@ func RemediationPullRequestBody(finding *store.Finding, summary *PatchSummaryArt
 			for _, test := range summary.TestsRun {
 				fmt.Fprintf(&tests, "- `%s` (exit %d)\n", test.Command, test.ExitCode)
 			}
-			section("**Tests run:**", tests.String())
+			section("**Verification status:**", "Published diff verified against `changedFiles`. Agent-reported tests passed (not independently executed by Orka; CI and human review required).")
+			section("**Agent-reported tests run:**", tests.String())
+		} else {
+			section("**Verification status:**", "Published diff verified against `changedFiles` only. No regression tests were reported; fix behavior is unverified and requires CI and human review.")
 		}
 		if summary.Risk != "" {
 			section("**Risk:**", summary.Risk)

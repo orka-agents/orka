@@ -358,6 +358,7 @@ func TestParsePatchResultRejectsInvalidEnvelopes(t *testing.T) {
 		"wrong scan":                          `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"other","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"risk":"low"}`,
 		"unknown field":                       `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"risk":"low","diff":"x"}`,
 		"no changed files":                    `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":[],"risk":"low"}`,
+		"failing test run":                    `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"testsRun":[{"command":"go test ./...","exitCode":1}],"risk":"low"}`,
 		"unsafe path":                         `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["../etc/passwd"],"risk":"low"}`,
 		"bad risk":                            `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"risk":"critical"}`,
 		"tool transcript":                     `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"<tool_call>rm</tool_call>","changedFiles":["a.go"],"risk":"low"}`,
