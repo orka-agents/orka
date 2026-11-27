@@ -79,11 +79,6 @@ func (h *InternalHandlers) RelayProviderRequest(c fiber.Ctx) error {
 	if c.Request().Header.ContentLength() > providerRelayMaxRequestBytes {
 		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "request body is too large")
 	}
-	body, err := readBoundedRelayRequestBody(c)
-	if err != nil {
-		return err
-	}
-
 	if !providerproxy.TryAcquireSlot(h.providerRelaySlots) {
 		return fiber.NewError(fiber.StatusTooManyRequests, "the provider relay is at capacity")
 	}
@@ -96,42 +91,17 @@ func (h *InternalHandlers) RelayProviderRequest(c fiber.Ctx) error {
 	}
 	defer release()
 
+	body, err := readBoundedRelayRequestBody(c)
+	if err != nil {
+		return err
+	}
+
 	base, err := url.Parse(provider.Spec.BaseURL)
 	if err != nil {
 		return fiber.NewError(fiber.StatusFailedDependency, "the Provider's baseURL is invalid")
 	}
-	identity, baseURL, identities := provider.EntraIdentity(), provider.Spec.BaseURL, h.providerIdentities
-	providerUID, providerGeneration := provider.UID, provider.Generation
-	revalidateBeforeSend := func(gateCtx context.Context) error {
-		liveTask, verifyErr := h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName)
-		if verifyErr != nil {
-			return verifyErr
-		}
-		if liveTask.Spec.Type != corev1alpha1.TaskTypeAI || liveTask.Status.Phase != corev1alpha1.TaskPhaseRunning {
-			return fiber.NewError(fiber.StatusForbidden, "the provider relay serves running tasks only")
-		}
-		liveProvider, providerErr := relayedProvider(gateCtx, reader, liveTask, slot)
-		if providerErr != nil {
-			return providerErr
-		}
-		if liveProvider.UID != providerUID || liveProvider.Generation != providerGeneration ||
-			liveProvider.EntraIdentity() != identity || liveProvider.Spec.BaseURL != baseURL {
-			return fiber.NewError(fiber.StatusConflict, "the Provider changed while preparing the request")
-		}
-		return nil
-	}
 	var gateErr error
-	httpClient, err := llm.NewBearerHTTPClientWithTransport(baseURL, func(ctx context.Context) (string, error) {
-		token, tokenErr := identities.Token(ctx, identity, baseURL)
-		if tokenErr != nil {
-			return "", tokenErr
-		}
-		if err := revalidateBeforeSend(ctx); err != nil {
-			gateErr = err
-			return "", err
-		}
-		return token, nil
-	}, h.providerRelayTransport)
+	httpClient, err := h.newProviderRelayHTTPClient(c, reader, target, provider, &gateErr)
 	if err != nil {
 		return fiber.NewError(fiber.StatusFailedDependency, "the Provider's baseURL cannot carry a token")
 	}
@@ -188,6 +158,41 @@ func (h *InternalHandlers) RelayProviderRequest(c fiber.Ctx) error {
 			}
 		},
 	}, -1)
+	return nil
+}
+
+func (h *InternalHandlers) newProviderRelayHTTPClient(c fiber.Ctx, reader client.Reader, target providerRelayRequest, provider *corev1alpha1.Provider, gateErr *error) (*http.Client, error) {
+	identity, baseURL, identities := provider.EntraIdentity(), provider.Spec.BaseURL, h.providerIdentities
+	providerUID, providerGeneration := provider.UID, provider.Generation
+	return llm.NewBearerHTTPClientWithTransport(baseURL, func(ctx context.Context) (string, error) {
+		token, tokenErr := identities.Token(ctx, identity, baseURL)
+		if tokenErr != nil {
+			return "", tokenErr
+		}
+		if err := h.revalidateProviderRelayBeforeSend(ctx, c, reader, target, providerUID, providerGeneration, identity, baseURL); err != nil {
+			*gateErr = err
+			return "", err
+		}
+		return token, nil
+	}, h.providerRelayTransport)
+}
+
+func (h *InternalHandlers) revalidateProviderRelayBeforeSend(ctx context.Context, c fiber.Ctx, reader client.Reader, target providerRelayRequest, providerUID types.UID, providerGeneration int64, identity, baseURL string) error {
+	liveTask, err := h.internalCallerAuthorizer().verifyTaskCaller(c, target.namespace, target.taskName)
+	if err != nil {
+		return err
+	}
+	if liveTask.Spec.Type != corev1alpha1.TaskTypeAI || liveTask.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		return fiber.NewError(fiber.StatusForbidden, "the provider relay serves running tasks only")
+	}
+	liveProvider, err := relayedProvider(ctx, reader, liveTask, target.slot)
+	if err != nil {
+		return err
+	}
+	if liveProvider.UID != providerUID || liveProvider.Generation != providerGeneration ||
+		liveProvider.EntraIdentity() != identity || liveProvider.Spec.BaseURL != baseURL {
+		return fiber.NewError(fiber.StatusConflict, "the Provider changed while preparing the request")
+	}
 	return nil
 }
 
