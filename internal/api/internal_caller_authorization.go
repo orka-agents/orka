@@ -92,13 +92,22 @@ func (a internalCallerAuthorizer) verifyTaskCaller(
 	namespace string,
 	taskName string,
 ) (*corev1alpha1.Task, error) {
-	callerTask, err := a.resolveTaskWorker(c.Context(), GetUserInfo(c), namespace)
+	return a.verifyTaskCallerContext(c.Context(), GetUserInfo(c), namespace, taskName)
+}
+
+func (a internalCallerAuthorizer) verifyTaskCallerContext(
+	ctx context.Context,
+	userInfo *UserInfo,
+	namespace string,
+	taskName string,
+) (*corev1alpha1.Task, error) {
+	callerTask, err := a.resolveTaskWorker(ctx, userInfo, namespace)
 	if err != nil {
 		return nil, err
 	}
 
 	task := &corev1alpha1.Task{}
-	if err := a.k8sReader.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: taskName}, task); err != nil {
+	if err := a.k8sReader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: taskName}, task); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, fiber.NewError(fiber.StatusForbidden, "caller is not authorized for this task")
 		}

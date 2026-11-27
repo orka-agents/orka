@@ -89,22 +89,34 @@ type Provider struct {
 }
 
 func NewProvider(config llm.ProviderConfig) (*Provider, error) {
-	if config.BearerToken != nil {
+	switch {
+	case config.Relay != nil:
+		if config.ProviderType != providerTypeAzureOpenAI || config.APIKey != "" || config.BearerToken != nil {
+			return nil, llm.ErrBearerTokenUnsupported
+		}
+	case config.BearerToken != nil:
 		if config.ProviderType != providerTypeAzureOpenAI || config.APIKey != "" {
 			return nil, llm.ErrBearerTokenUnsupported
 		}
-	} else if config.APIKey == "" {
+	case config.APIKey == "":
 		return nil, llm.ErrAPIKeyRequired
 	}
 
 	httpClient := llm.SharedHTTPClient()
-	if config.BearerToken != nil {
+	switch {
+	case config.Relay != nil:
+		relayClient, err := llm.NewControllerRelayHTTPClient(config.BaseURL, config.Relay)
+		if err != nil {
+			return nil, err
+		}
+		httpClient = relayClient
+	case config.BearerToken != nil:
 		bearerClient, err := llm.NewBearerHTTPClientWithTransport(config.BaseURL, config.BearerToken, config.HTTPTransport)
 		if err != nil {
 			return nil, err
 		}
 		httpClient = bearerClient
-	} else if config.HTTPTransport != nil {
+	case config.HTTPTransport != nil:
 		httpClient = &http.Client{Transport: config.HTTPTransport}
 	}
 	opts := []option.RequestOption{
@@ -118,7 +130,7 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		}
 		endpoint := strings.TrimRight(config.BaseURL, "/")
 		opts = append(opts, azure.WithEndpoint(endpoint, apiVersion))
-		if config.BearerToken == nil {
+		if config.BearerToken == nil && config.Relay == nil {
 			opts = append(opts, azure.WithAPIKey(config.APIKey))
 		} else {
 			opts = append(opts, azure.WithTokenCredential(transportAuthenticated{}))

@@ -1267,6 +1267,10 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		envVars = append(envVars, corev1.EnvVar{Name: workerenv.CoordinationEnabled, Value: scheduledRunLabelValue})
 	}
 
+	relay := map[string]workerenv.ProviderRelayTarget{}
+	if providerCRD != nil && providerCRD.UsesKeylessAuth() {
+		relay[workerenv.ProviderRelayPrimary] = providerRelayTarget(providerCRD)
+	}
 	if agent != nil && agent.Spec.Model != nil && len(agent.Spec.Model.Fallbacks) > 0 {
 		envVars = append(envVars, corev1.EnvVar{
 			Name:  workerenv.AIFallbackCount,
@@ -1293,10 +1297,35 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 			}
 			envVars = append(envVars, fallbackEnv.EnvVars(i)...)
 			envVars = setControllerEnvValue(envVars, deploymentKey, fallbackEnv.AzureDeploymentName)
+			if fbProvider.UsesKeylessAuth() {
+				relay[workerenv.ProviderRelayFallback(i)] = providerRelayTarget(fbProvider)
+			}
 		}
 	}
+	relayValue, err := workerenv.EncodeProviderRelay(relay)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode the provider relay: %w", err)
+	}
+	envVars = setControllerEnvValue(envVars, workerenv.AIProviderRelay, relayValue)
 
 	return envVars, nil
+}
+
+func providerRelayTarget(provider *corev1alpha1.Provider) workerenv.ProviderRelayTarget {
+	return workerenv.ProviderRelayTarget{Namespace: provider.Namespace, Name: provider.Name, UID: string(provider.UID)}
+}
+
+func jobProviderRelaySlots(job *batchv1.Job) map[string]workerenv.ProviderRelayTarget {
+	if job == nil || len(job.Spec.Template.Spec.Containers) == 0 {
+		return nil
+	}
+	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == workerenv.AIProviderRelay {
+			slots, _ := workerenv.ParseProviderRelay(env.Value)
+			return slots
+		}
+	}
+	return nil
 }
 
 func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alpha1.Task) {
@@ -1441,7 +1470,11 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	if allowDirectProviderSecrets && agentHasFallbackProviders(agent) {
+		relayed := jobProviderRelaySlots(job)
 		for i, fb := range agent.Spec.Model.Fallbacks {
+			if _, ok := relayed[workerenv.ProviderRelayFallback(i)]; ok {
+				continue
+			}
 			fbProvider := &corev1alpha1.Provider{}
 			if err := b.Get(ctx, client.ObjectKey{
 				Namespace: task.Namespace,

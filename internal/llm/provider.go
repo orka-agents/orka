@@ -185,6 +185,7 @@ func promptTokens(input int, cached, cacheWrite *int64, excludesCache bool) int 
 type ProviderConfig struct {
 	APIKey              string
 	BearerToken         BearerTokenSource
+	Relay               *ControllerRelay
 	BaseURL             string
 	ProviderType        string
 	AzureAPIVersion     string

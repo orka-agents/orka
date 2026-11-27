@@ -266,6 +266,13 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 	if strings.HasPrefix(path, "/internal/v2/acp/") {
 		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
 	}
+	if isProviderRelayPath(path) {
+		return fasthttp.RequestConfig{
+			MaxRequestBodySize: providerRelayMaxRequestBytes,
+			ReadTimeout:        providerRelayReadTimeout,
+			WriteTimeout:       providerRelayTimeout,
+		}
+	}
 	var mcpURI fasthttp.URI
 	if mcpURI.Parse(header.Host(), header.RequestURI()) == nil && isMCPEndpointPath(string(mcpURI.PathOriginal())) {
 		return fasthttp.RequestConfig{MaxRequestBodySize: mcpMaxRequestBytes, ReadTimeout: mcpRequestReadTimeout}
@@ -636,6 +643,7 @@ func (s *Server) setupRoutes() {
 				GatewayService:           s.config.GatewayService,
 				TaskProvenanceProtected:  s.config.TaskProvenanceProtected,
 				ConnectorTools:           s.config.ConnectorTools,
+				ProviderIdentities:       s.config.Chat.ProviderIdentities,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
@@ -645,6 +653,7 @@ func (s *Server) setupRoutes() {
 		internal.Use(NewAuthMiddleware(s.client))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
 		internal.Post("/tasks/:namespace/:taskName/connector-tools/:tool", s.internalHandlers.ExecuteConnectorTool)
+		internal.All("/tasks/:namespace/:taskName/providers/:slot/*", s.internalHandlers.RelayProviderRequest)
 		internal.Post("/tasks/:namespace/:taskName/gateway-messages", s.internalHandlers.SubmitGatewayMessage)
 		internal.Post("/tasks/:namespace/:taskName/children/:child/requester-stamp", s.internalHandlers.SealChildRequesterStamp)
 		internal.Post("/tasks/:namespace/:taskName/children/:child/cancel", s.internalHandlers.CancelChildTask)

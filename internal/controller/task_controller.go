@@ -1418,20 +1418,21 @@ func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1
 	if !provider.Status.Ready {
 		return nil, fmt.Errorf("provider %s is not ready: %s", providerRef.Name, provider.Status.Message)
 	}
-	if provider.UsesKeylessAuth() {
+	if provider.UsesKeylessAuth() && (task.Spec.Type != corev1alpha1.TaskTypeAI || taskRequestsReadOnlyAgent(task)) {
 		return nil, keylessProviderTaskError(provider.Name)
 	}
 	return provider, nil
 }
 
 func keylessProviderTaskError(name string) error {
-	return fmt.Errorf("provider %s uses spec.auth, which Tasks do not support yet; use it through the chat or compatibility APIs, or use a Provider with a secretRef", name)
+	return fmt.Errorf("provider %s uses spec.auth, which only type: ai Tasks that are not read-only support; use a Provider with a secretRef", name)
 }
 
 func (r *TaskReconciler) refuseKeylessFallbackProviders(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent || !agentHasFallbackProviders(agent) {
 		return nil
 	}
+	allowKeyless := task.Spec.Type == corev1alpha1.TaskTypeAI && !taskRequestsReadOnlyAgent(task)
 	for _, fallback := range agent.Spec.Model.Fallbacks {
 		provider := &corev1alpha1.Provider{}
 		if err := r.Get(ctx, types.NamespacedName{Name: fallback.ProviderRef, Namespace: task.Namespace}, provider); err != nil {
@@ -1440,7 +1441,7 @@ func (r *TaskReconciler) refuseKeylessFallbackProviders(ctx context.Context, tas
 			}
 			return fmt.Errorf("failed to get fallback provider: %v", err)
 		}
-		if provider.UsesKeylessAuth() {
+		if !allowKeyless && provider.UsesKeylessAuth() {
 			return keylessProviderTaskError(provider.Name)
 		}
 	}

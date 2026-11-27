@@ -45,7 +45,7 @@ type Provider struct {
 }
 
 func NewProvider(config llm.ProviderConfig) (*Provider, error) {
-	if config.BearerToken != nil {
+	if config.BearerToken != nil || config.Relay != nil {
 		return nil, llm.ErrBearerTokenUnsupported
 	}
 	if config.APIKey == "" {

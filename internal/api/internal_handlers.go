@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
@@ -49,6 +50,9 @@ type InternalHandlers struct {
 	memoryConsolidationStore store.MemoryConsolidationStore
 	taskProvenanceProtected  bool
 	connectorTools           ConnectorToolExecutionConfig
+	providerIdentities       ProviderIdentityTokenSource
+	providerRelaySlots       chan struct{}
+	providerRelayTransport   http.RoundTripper
 }
 
 type InternalHandlersConfig struct {
@@ -62,15 +66,18 @@ type InternalHandlersConfig struct {
 	GatewayService           *gatewayruntime.Service
 	TaskProvenanceProtected  bool
 	ConnectorTools           ConnectorToolExecutionConfig
+	ProviderIdentities       ProviderIdentityTokenSource
+	ProviderRelayTransport   http.RoundTripper
 }
 
 func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.PlanStore, ms store.MessageStore, as store.ArtifactStore, configs ...InternalHandlersConfig) *InternalHandlers {
 	h := &InternalHandlers{
-		resultStore:   rs,
-		sessionStore:  ss,
-		planStore:     ps,
-		messageStore:  ms,
-		artifactStore: as,
+		resultStore:        rs,
+		sessionStore:       ss,
+		planStore:          ps,
+		messageStore:       ms,
+		artifactStore:      as,
+		providerRelaySlots: make(chan struct{}, providerRelayMaxConcurrent),
 	}
 	if len(configs) > 0 {
 		h.k8sClient = configs[0].Client
@@ -83,6 +90,8 @@ func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.P
 		h.gatewayService = configs[0].GatewayService
 		h.taskProvenanceProtected = configs[0].TaskProvenanceProtected
 		h.connectorTools = configs[0].ConnectorTools
+		h.providerIdentities = configs[0].ProviderIdentities
+		h.providerRelayTransport = configs[0].ProviderRelayTransport
 	}
 	return h
 }
