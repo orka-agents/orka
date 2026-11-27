@@ -37,6 +37,9 @@ type ProviderProfile struct {
 	// error fails the create permanently with a caller-visible reason.
 	ValidateWorkspace func(acp.SessionPaths) error
 	PrepareSession    func(acp.SessionPaths) error
+	// BindProviderProxy writes provider state that needs the session's
+	// provider proxy binding, after PrepareSession and before the child starts.
+	BindProviderProxy func(acp.SessionPaths, ProviderProxyBinding) error
 }
 
 type ProviderSessionProjection struct {

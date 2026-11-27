@@ -1352,6 +1352,11 @@ func (s *Server) createSession(
 			providerProxy.close()
 		}
 	}()
+	if s.cfg.Provider.BindProviderProxy != nil {
+		if err := s.cfg.Provider.BindProviderProxy(paths, proxyBinding); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider home preparation", err)
+		}
+	}
 	mcpProxy, mcpServer, err := s.mcpProxy.newSession(request.Metadata.Fence, request.MCPConfiguration)
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("MCP proxy setup", err)

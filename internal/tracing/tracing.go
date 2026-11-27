@@ -29,13 +29,6 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
-// Init initializes OpenTelemetry tracing and metrics. When enabled is false,
-// global tracer/meter providers remain the default noop implementations and the
-// returned shutdown function is a no-op. W3C propagation is always installed so
-// inject/extract calls work consistently in API/controller/worker code paths.
-//
-// The OTLP gRPC endpoint is read from the standard OTEL_EXPORTER_OTLP_ENDPOINT
-// environment variable (default: localhost:4317).
 func Init(serviceName string, enabled bool) (shutdown func(ctx context.Context) error, err error) {
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
@@ -98,7 +91,6 @@ func Init(serviceName string, enabled bool) (shutdown func(ctx context.Context) 
 	}, nil
 }
 
-// Resource builds the OTel resource shared by traces and metrics.
 func Resource(ctx context.Context, serviceName string) (*resource.Resource, error) {
 	version := "unknown"
 	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
@@ -113,28 +105,22 @@ func Resource(ctx context.Context, serviceName string) (*resource.Resource, erro
 	)
 }
 
-// Tracer returns a named tracer instance.
 func Tracer(name string, opts ...trace.TracerOption) trace.Tracer {
 	return otel.Tracer(name, opts...)
 }
 
-// GenAITracer returns a tracer with the GenAI development schema URL.
 func GenAITracer(name string) trace.Tracer {
 	return Tracer(name, trace.WithSchemaURL(genai.SchemaURL))
 }
 
-// Meter returns a named meter instance.
 func Meter(name string, opts ...metric.MeterOption) metric.Meter {
 	return otel.Meter(name, opts...)
 }
 
-// GenAIMeter returns a meter with the GenAI development schema URL.
 func GenAIMeter(name string) metric.Meter {
 	return Meter(name, metric.WithSchemaURL(genai.SchemaURL))
 }
 
-// newTracerProvider disables the SDK's panic recording, which would add the
-// panic value as exception.message to a span ended while panicking.
 func newTracerProvider(opts ...sdktrace.TracerProviderOption) *sdktrace.TracerProvider {
 	return sdktrace.NewTracerProvider(append(opts, sdktrace.WithoutPanicRecording())...)
 }

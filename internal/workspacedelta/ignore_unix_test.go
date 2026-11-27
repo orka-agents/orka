@@ -9,8 +9,6 @@ import (
 	"testing"
 )
 
-// Cargo hard-links build outputs inside target/; an ignored target/ must not
-// reach the single-link check.
 func TestBuildSkipsHardlinkedIgnoredBuildOutput(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, root, ".gitignore", "/target\n", 0o644)

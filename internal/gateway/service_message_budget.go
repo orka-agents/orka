@@ -7,14 +7,11 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// TaskMessageBudget exposes policy and receipt existence, never text or routing.
 type TaskMessageBudget struct {
 	store.GatewayMessageBudget
 	Limit int `json:"limit"`
 }
 
-// PreparedTaskMessageBudget is short-lived live authorization state. Read it
-// inside the caller's authorized task data access, just like message enqueue.
 type PreparedTaskMessageBudget struct {
 	service            *Service
 	query              store.GatewayMessageBudgetQuery

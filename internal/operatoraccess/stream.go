@@ -8,8 +8,6 @@ import (
 	"unicode/utf8"
 )
 
-// Stream channels. Every WebSocket message is binary: one channel byte
-// followed by the payload.
 const (
 	ChannelStdin   byte = 0
 	ChannelStdout  byte = 1
@@ -18,11 +16,8 @@ const (
 	ChannelStatus  byte = 4
 )
 
-// WebSocketSubprotocol versions the stream framing.
 const WebSocketSubprotocol = "orka.operator-exec.v1"
 
-// Exec bounds. The API clamps requested values into these ranges and the
-// supervisor enforces them again.
 const (
 	MaxArgs                = 256
 	MaxArgvBytes           = 8 << 10
@@ -36,7 +31,6 @@ const (
 	MaxTerminalDimension   = 1000
 )
 
-// Control is a client-to-server control message.
 type Control struct {
 	Type   string `json:"type"`
 	Rows   uint16 `json:"rows,omitempty"`
@@ -50,47 +44,38 @@ const (
 	ControlEOF    = "eof"
 )
 
-// AllowedSignals are the signals an operator may forward.
 var AllowedSignals = map[string]struct{}{"INT": {}, "TERM": {}, "HUP": {}, "QUIT": {}, "KILL": {}}
 
-// Exit reasons.
 const (
-	ExitReasonExited      = "exited"
-	ExitReasonSignaled    = "signaled"
-	ExitReasonTimeout     = "timeout"
-	ExitReasonOutputLimit = "output_limit"
-	ExitReasonDisconnect  = "disconnected"
-	// ExitReasonStdinOverflow means stdin arrived faster than the command
-	// consumed it beyond the bounded buffer.
+	ExitReasonExited        = "exited"
+	ExitReasonSignaled      = "signaled"
+	ExitReasonTimeout       = "timeout"
+	ExitReasonOutputLimit   = "output_limit"
+	ExitReasonDisconnect    = "disconnected"
 	ExitReasonStdinOverflow = "stdin_overflow"
 	ExitReasonError         = "error"
 )
 
-// Status is the final server-to-client message.
 type Status struct {
 	ExitCode int    `json:"exitCode"`
 	Reason   string `json:"reason"`
 	Message  string `json:"message,omitempty"`
 }
 
-// Frame prefixes a copy of payload with its channel.
 func Frame(channel byte, payload []byte) []byte {
 	return append([]byte{channel}, payload...)
 }
 
-// ControlFrame encodes a control message.
 func ControlFrame(control Control) []byte {
 	raw, _ := json.Marshal(control)
 	return Frame(ChannelControl, raw)
 }
 
-// StatusFrame encodes the final status.
 func StatusFrame(status Status) []byte {
 	raw, _ := json.Marshal(status)
 	return Frame(ChannelStatus, raw)
 }
 
-// ExecOptions is the operator-controlled part of an exec request.
 type ExecOptions struct {
 	Argv           []string `json:"argv"`
 	TTY            bool     `json:"tty,omitempty"`
@@ -102,7 +87,6 @@ type ExecOptions struct {
 	MaxOutputBytes int64    `json:"maxOutputBytes,omitempty"`
 }
 
-// Normalize validates argv and clamps the bounds in place.
 func (o *ExecOptions) Normalize() error {
 	if len(o.Argv) == 0 || strings.TrimSpace(o.Argv[0]) == "" {
 		return fmt.Errorf("a command is required")
@@ -163,7 +147,6 @@ func sanitizeTerm(term string) string {
 	return term
 }
 
-// ClampFileBytes clamps a requested file size bound.
 func ClampFileBytes(requested int64) int64 {
 	switch {
 	case requested <= 0:

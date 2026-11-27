@@ -106,7 +106,6 @@ func TestTaskInputsDigestIgnoresOnlyControlFields(t *testing.T) {
 	if got, err := TaskInputsDigest(&edited); err != nil || got == base {
 		t.Fatalf("a prompt edit kept the inputs digest: %v", err)
 	}
-	// An explicitly empty native tool policy is a different input than none.
 	none, empty := spec, spec
 	none.AI = &corev1alpha1.AISpec{}
 	empty.AI = &corev1alpha1.AISpec{Tools: []string{}}
@@ -117,8 +116,6 @@ func TestTaskInputsDigestIgnoresOnlyControlFields(t *testing.T) {
 	if got, err := TaskInputsDigest(&empty); err != nil || got == noneDigest {
 		t.Fatalf("an explicitly empty tool policy matched an omitted one: %v", err)
 	}
-	// An explicitly empty node selector or toleration list clears the Agent's
-	// placement, while an omitted one inherits it.
 	omitted := spec
 	omitted.Execution = &corev1alpha1.ExecutionSpec{}
 	omittedDigest, err := TaskInputsDigest(&omitted)
@@ -135,7 +132,6 @@ func TestTaskInputsDigestIgnoresOnlyControlFields(t *testing.T) {
 			t.Fatalf("an explicitly empty %s matched an omitted one: %v", name, err)
 		}
 	}
-	// The digest is deterministic, including map order.
 	selector := spec
 	selector.Execution = &corev1alpha1.ExecutionSpec{NodeSelector: map[string]string{"a": "1", "b": "2", "c": "3"}}
 	first, err := TaskInputsDigest(&selector)

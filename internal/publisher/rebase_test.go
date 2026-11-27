@@ -18,8 +18,6 @@ func TestRebaseBranchLinearSignedAndConflictRejection(t *testing.T) {
 	pub := newTestPublisher(t)
 	keyPEM, sshPub := generateTestEd25519KeyPEM(t)
 
-	// Create a bare remote repo with main -> base1, feature -> feat1 (off base1),
-	// and advance main -> base2 (non-conflicting file).
 	remoteDir := filepath.Join(t.TempDir(), "remote.git")
 	runTestGit(t, "", nil, "init", "--bare", "-b", "main", remoteDir)
 
@@ -30,7 +28,6 @@ func TestRebaseBranchLinearSignedAndConflictRejection(t *testing.T) {
 	runTestGit(t, work, fixedCommitEnvironment(), "commit", "-m", "base v1")
 	runTestGit(t, work, nil, "push", "origin", "main")
 
-	// Create feature branch off v1.
 	runTestGit(t, work, nil, "checkout", "-b", "feat/linear")
 	mustWriteFile(t, filepath.Join(work, "feat.txt"), "feature change\n", 0o644)
 	runTestGit(t, work, fixedCommitEnvironment(), "add", "--all")
@@ -38,7 +35,6 @@ func TestRebaseBranchLinearSignedAndConflictRejection(t *testing.T) {
 	headOID := strings.TrimSpace(runTestGit(t, work, nil, "rev-parse", "HEAD"))
 	runTestGit(t, work, nil, "push", "origin", "feat/linear")
 
-	// Advance main with a non-conflicting commit.
 	runTestGit(t, work, nil, "checkout", "main")
 	mustWriteFile(t, filepath.Join(work, "other.txt"), "main advance\n", 0o644)
 	runTestGit(t, work, fixedCommitEnvironment(), "add", "--all")
@@ -67,7 +63,6 @@ func TestRebaseBranchLinearSignedAndConflictRejection(t *testing.T) {
 		t.Fatalf("unexpected rebase result: %+v", result)
 	}
 
-	// Verify remote branch now has baseOID as parent and valid SSHSIG + DCO trailer.
 	parent := strings.TrimSpace(runTestGit(t, "", nil, "--git-dir="+remoteDir, "rev-parse", result.NewHeadOID+"^"))
 	if parent != baseOID {
 		t.Fatalf("rebased commit parent = %s, want %s", parent, baseOID)
@@ -93,7 +88,6 @@ func TestRebaseBranchLinearSignedAndConflictRejection(t *testing.T) {
 		)
 	}
 
-	// Conflict case: advance main on feat.txt, then try rebasing a conflicting branch.
 	runTestGit(t, work, nil, "checkout", "main")
 	mustWriteFile(t, filepath.Join(work, "feat.txt"), "conflicting main content\n", 0o644)
 	runTestGit(t, work, fixedCommitEnvironment(), "add", "--all")
@@ -112,7 +106,6 @@ func TestRebaseBranchLinearSignedAndConflictRejection(t *testing.T) {
 	if !errors.Is(conflictErr, ErrRebaseRefused) {
 		t.Fatalf("expected ErrRebaseRefused on merge conflict, got %v", conflictErr)
 	}
-	// Remote head must remain untouched.
 	afterConflict := strings.TrimSpace(runTestGit(t, "", nil, "--git-dir="+remoteDir, "rev-parse", "refs/heads/feat/linear"))
 	if afterConflict != result.NewHeadOID {
 		t.Fatalf("conflicted rebase mutated remote: got %s, want %s", afterConflict, result.NewHeadOID)

@@ -22,8 +22,6 @@ func NamespaceUID(ctx context.Context, reader client.Reader, namespace string) (
 	return string(current.UID), nil
 }
 
-// Read the namespace first, then fence the source object's UID. A stale cached
-// Task or monitor cannot be relabeled with a recreated namespace's identity.
 func NamespaceUIDForObject(ctx context.Context, reader client.Reader, object client.Object) (string, error) {
 	uid, err := NamespaceUID(ctx, reader, object.GetNamespace())
 	if err != nil {

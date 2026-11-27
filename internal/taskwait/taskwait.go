@@ -4,14 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package taskwait holds the shared, side-effect-free rules for data-only
-// parked agent turns: continuation naming and continuation-chain resolution.
-//
-// A parked Task's own turn has ended and its runtime capacity is released.
-// status.wait is the only authority that links it to the continuation Task
-// which resumes its Session. Readers follow that link to find the Task whose
-// result represents the chain, and treat a chain as settled only when its
-// newest Task is terminal and holds no active wait.
 package taskwait
 
 import (
@@ -30,28 +22,17 @@ import (
 )
 
 const (
-	// MaxChainLength bounds how many continuations one chain may create.
-	MaxChainLength = 32
-	// maxTaskNameLength is the Kubernetes object name limit.
-	maxTaskNameLength = 253
-	// continuationSuffixPrefix separates the parked Task name from the
-	// UID-derived suffix of its continuation.
+	MaxChainLength           = 32
+	maxTaskNameLength        = 253
 	continuationSuffixPrefix = "-resume-"
 )
 
-// ErrChainBroken reports a continuation link that no longer resolves to the
-// exact Task the controller created.
 var ErrChainBroken = errors.New("task continuation chain is broken")
 
-// Active reports whether a wait can still transition, so the Task's chain is
-// not settled even when the Task phase is terminal.
 func Active(wait *corev1alpha1.TaskWaitStatus) bool {
 	return wait != nil && !wait.State.IsTerminal()
 }
 
-// ContinuationTaskName returns the deterministic continuation name for one
-// parked Task incarnation. It is derived from the immutable UID, so a reused
-// Task name cannot collide with an earlier incarnation's continuation.
 func ContinuationTaskName(task *corev1alpha1.Task) string {
 	if task == nil {
 		return ""
@@ -65,7 +46,6 @@ func ContinuationTaskName(task *corev1alpha1.Task) string {
 	return prefix + suffix
 }
 
-// ChainIndex returns the number of continuations before task in its chain.
 func ChainIndex(task *corev1alpha1.Task) int32 {
 	if task == nil {
 		return 0
@@ -76,14 +56,11 @@ func ChainIndex(task *corev1alpha1.Task) int32 {
 	}
 	value, err := strconv.ParseInt(raw, 10, 32)
 	if err != nil || value < 0 {
-		// A malformed index is treated as exhausted so it cannot extend a chain.
 		return MaxChainLength
 	}
 	return int32(value)
 }
 
-// Continuation loads the continuation Task recorded by a resumed wait and
-// verifies it is the exact incarnation the controller created.
 func Continuation(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (*corev1alpha1.Task, error) {
 	if task == nil || task.Status.Wait == nil || task.Status.Wait.State != corev1alpha1.TaskWaitStateResumed {
 		return nil, nil
@@ -104,9 +81,6 @@ func Continuation(ctx context.Context, reader client.Reader, task *corev1alpha1.
 	return next, nil
 }
 
-// Predecessor loads the parked Task that task continues, and verifies the link
-// from the predecessor's controller-written status: its resumed wait must
-// name exactly this Task incarnation. Annotations alone never prove a link.
 func Predecessor(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (*corev1alpha1.Task, bool, error) {
 	if task == nil || reader == nil {
 		return nil, false, nil
@@ -126,9 +100,6 @@ func Predecessor(ctx context.Context, reader client.Reader, task *corev1alpha1.T
 	return previous, true, nil
 }
 
-// Continues reports whether task is the continuation the controller created
-// for previous: previous is the exact incarnation task names, and its resumed
-// wait, which only the controller writes, names exactly this Task incarnation.
 func Continues(previous, task *corev1alpha1.Task) bool {
 	if previous == nil || task == nil || previous.UID == "" || task.UID == "" || previous.Namespace != task.Namespace {
 		return false
@@ -140,8 +111,6 @@ func Continues(previous, task *corev1alpha1.Task) bool {
 		wait.ContinuationTaskName == task.Name && wait.ContinuationTaskUID == string(task.UID)
 }
 
-// ResolveTail follows resumed waits from task to the newest Task of its chain.
-// It returns task itself when it has not resumed.
 func ResolveTail(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (*corev1alpha1.Task, error) {
 	current := task
 	for range MaxChainLength + 1 {
@@ -157,7 +126,6 @@ func ResolveTail(ctx context.Context, reader client.Reader, task *corev1alpha1.T
 	return nil, fmt.Errorf("%w: task %s/%s exceeds %d continuations", ErrChainBroken, task.Namespace, task.Name, MaxChainLength)
 }
 
-// TerminalPhase reports whether a Task phase can no longer change.
 func TerminalPhase(phase corev1alpha1.TaskPhase) bool {
 	switch phase {
 	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
@@ -167,8 +135,6 @@ func TerminalPhase(phase corev1alpha1.TaskPhase) bool {
 	}
 }
 
-// Settled reports whether the chain tail is finished: its phase is terminal and
-// it holds no wait that could still start another turn.
 func Settled(tail *corev1alpha1.Task) bool {
 	return tail != nil && TerminalPhase(tail.Status.Phase) && !Active(tail.Status.Wait)
 }

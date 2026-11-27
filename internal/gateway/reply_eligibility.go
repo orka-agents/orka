@@ -12,12 +12,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ResolveReplyEligibility resolves durable origin before tool configuration is
-// frozen. Readiness and interim capability are admission gates, not origin:
-// temporary withdrawal must not freeze a tool-less execution. It does not require
-// Running. ErrNotReady means dispatch created the Task but has not yet linked its
-// UID: callers must defer, not freeze a tool-less Job/session. Metadata can locate
-// a pending event but can never grant access.
 func (s *Service) ResolveReplyEligibility(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
 	event, err := s.resolveReplyOrigin(ctx, task)
 	return event != nil, err
@@ -56,8 +50,6 @@ func (s *Service) resolveReplyOrigin(ctx context.Context, task *corev1alpha1.Tas
 			}
 			return nil, nil
 		}
-		// Dispatch may have linked the Task between reads. Apply the same durable
-		// ownership and live identity checks as a successful task-index lookup.
 	}
 	if err != nil {
 		return nil, err
@@ -77,21 +69,16 @@ func activeReplyOriginEvent(task *corev1alpha1.Task, event *store.GatewayEvent) 
 		task.Status.ExecutionOutcome == nil && task.DeletionTimestamp.IsZero()
 }
 
-// TaskReplyOrigin authenticates origin only. It contains no admission grant,
-// routing, content or quota; every Budget and Enqueue still authorizes afresh.
 type TaskReplyOrigin struct {
 	TaskUID string `json:"taskUID"`
 }
 
-// PreparedTaskReplyOrigin must be consumed in the caller's authorized task-data
-// transaction, with its revocation fence. Never retain it across requests.
 type PreparedTaskReplyOrigin struct {
 	service *Service
 	task    *corev1alpha1.Task
 	event   *store.GatewayEvent
 }
 
-// PrepareTaskReplyOrigin performs live identity checks outside the SQLite writer.
 func (s *Service) PrepareTaskReplyOrigin(ctx context.Context, namespace, taskName, taskUID string) (*PreparedTaskReplyOrigin, error) {
 	if s == nil || !s.Config.Enabled || s.EventStore == nil || s.DeliveryStore == nil || s.freshReader() == nil {
 		return nil, &HTTPError{Code: http.StatusServiceUnavailable, Message: "gateway reply origin is unavailable"}
@@ -116,8 +103,6 @@ func (s *Service) PrepareTaskReplyOrigin(ctx context.Context, namespace, taskNam
 	return &PreparedTaskReplyOrigin{service: s, task: task, event: event}, nil
 }
 
-// ReadPreparedTaskReplyOrigin rechecks durable ownership and lifecycle inside the
-// authorized writer. No Kubernetes reads or budget/admission gates run here.
 func (s *Service) ReadPreparedTaskReplyOrigin(ctx context.Context, prepared *PreparedTaskReplyOrigin) (*TaskReplyOrigin, error) {
 	if s == nil || prepared == nil || prepared.service != s || !s.Config.Enabled || s.EventStore == nil {
 		return nil, &HTTPError{Code: http.StatusServiceUnavailable, Message: "gateway reply origin is unavailable"}

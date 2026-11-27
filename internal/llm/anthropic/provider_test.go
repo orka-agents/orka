@@ -102,7 +102,6 @@ func TestNewProvider_APIKeyRequired(t *testing.T) {
 }
 
 func TestProvider_Implements_Interface(t *testing.T) {
-	// Verify that Provider implements llm.Provider at compile time
 	var _ llm.Provider = (*Provider)(nil)
 }
 
@@ -297,7 +296,6 @@ func TestBuildRequestParams(t *testing.T) {
 			Messages:    []llm.Message{{Role: "user", Content: "hi"}},
 		}
 		params := buildRequestParams(req)
-		// Temperature should be set (non-zero value)
 		_ = params
 	})
 
@@ -485,7 +483,6 @@ func TestStream_ServerError(t *testing.T) {
 	}
 }
 
-// unmarshalStreamEvent is a test helper that unmarshals JSON into a MessageStreamEventUnion.
 func unmarshalStreamEvent(t *testing.T, raw string) anthropic.MessageStreamEventUnion {
 	t.Helper()
 	var event anthropic.MessageStreamEventUnion
@@ -726,7 +723,6 @@ func TestHandleStreamEvent_MessageDelta_EndTurn(t *testing.T) {
 }
 
 func TestHandleStreamEvent_MessageDelta_ToolUseInferred(t *testing.T) {
-	// When hasToolCalls is true and stopReason is empty, should infer testStopReasonToolUse
 	event := unmarshalStreamEvent(t,
 		`{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":""},"usage":{"output_tokens":10}}`)
 
@@ -761,7 +757,6 @@ func TestHandleStreamEvent_MessageStop(t *testing.T) {
 
 	handleStreamEvent(event, send, &tc, &toolCallArgs, &hasToolCalls, &streamUsageState{})
 
-	// MessageStopEvent is a no-op
 	if len(chunks) != 0 {
 		t.Error("no chunk should be sent on message_stop")
 	}
@@ -912,8 +907,6 @@ func TestStream_ToolUse(t *testing.T) {
 }
 
 func TestInitRegistersProvider(t *testing.T) {
-	// The init() function registers the anthropic provider factory.
-	// Exercise the factory via llm.NewProvider.
 	provider, err := llm.NewProvider(testProviderAnthropic, llm.ProviderConfig{APIKey: "test-key"})
 	if err != nil {
 		t.Fatalf("llm.NewProvider(anthropic) error = %v", err)
@@ -923,8 +916,6 @@ func TestInitRegistersProvider(t *testing.T) {
 	}
 }
 
-// withoutCacheControl is v as JSON with every cache_control removed: the
-// prompt the cache matches on, without the breakpoints that move each step.
 func withoutCacheControl(t *testing.T, v any) string {
 	t.Helper()
 	raw, err := json.Marshal(v)
@@ -1027,8 +1018,6 @@ func TestBuildRequestParamsMarksPromptCache(t *testing.T) {
 	})
 }
 
-// TestBuildRequestParamsKeepsPromptPrefix checks that the next tool-loop step
-// sends the step before it unchanged, so the prefix cache can match it.
 func TestBuildRequestParamsKeepsPromptPrefix(t *testing.T) {
 	step := toolLoopRequest()
 	next := toolLoopRequest()
