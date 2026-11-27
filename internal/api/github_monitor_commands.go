@@ -113,9 +113,6 @@ func repositoryMonitorAcceptsLabelCommand(monitor *corev1alpha1.RepositoryMonito
 	return repositoryMonitorAcceptsCommandTarget(monitor, repo, target, intent)
 }
 
-// repositoryMonitorAcceptsCommandTarget reports whether a command for intent
-// on target is within the monitor's repository and target scope, whatever
-// source it came from.
 func repositoryMonitorAcceptsCommandTarget(monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget, intent string) bool {
 	if monitor == nil || repositoryMonitorWebhookSuspended(monitor) {
 		return false
@@ -190,7 +187,6 @@ func repositoryMonitorCommandIntentForLabel(monitor *corev1alpha1.RepositoryMoni
 	return "", false
 }
 
-// repositoryMonitorCommandIntake describes one command from any intake source.
 type repositoryMonitorCommandIntake struct {
 	Source            string
 	Label             string
@@ -200,12 +196,8 @@ type repositoryMonitorCommandIntake struct {
 	Author            string
 	AuthorAssociation string
 	DedupeKey         string
-	// PermissionAllowed decides whether the author's live permission may issue the command.
 	PermissionAllowed func(permission string) bool
-	// Metadata is frozen into the command's work action when it is first
-	// created. A command with metadata is stored as recording, not accepted,
-	// until that work action exists; see finishRepositoryMonitorCommandRecording.
-	Metadata map[string]any
+	Metadata          map[string]any
 }
 
 func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, payload githubLabelWebhookPayload, target githubLabelTarget, intent, delivery string) (*store.CommandEvent, bool, error) {
@@ -680,10 +672,6 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 	return h.upsertRepositoryMonitorCommandWorkActionWithMetadata(ctx, monitor, command, runID, nil)
 }
 
-// upsertRepositoryMonitorCommandWorkActionWithMetadata records the command's
-// work action. extra is written only when the action is first created, so a
-// redelivered or duplicate command can never replace it.
-//
 //nolint:gocyclo // Durable command/action coalescing keeps each terminal and race outcome explicit.
 func (h *Handlers) upsertRepositoryMonitorCommandWorkActionWithMetadata(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, runID string, extra map[string]any) error {
 	if monitor == nil || command == nil || h.repositoryMonitorStore == nil {
@@ -728,10 +716,6 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkActionWithMetadata(ctx cont
 			command.Error = "workflow action was cancelled"
 			return h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
 		}
-		// UpdateWorkAction replaces the whole row, so write only for a status
-		// change intake owns: a write for a run link alone could restore a
-		// copy the controller has advanced since it was read. The controller
-		// links the run itself when it records the action's state.
 		changed := false
 		if runID != "" && existing.RunID == "" {
 			existing.RunID = runID

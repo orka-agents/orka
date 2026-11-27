@@ -527,8 +527,6 @@ func TestGitHubCommentCommand_UnsignedPayloadIsRejected(t *testing.T) {
 	}
 }
 
-// contextBeforeAcceptStore checks that no comment command is ever stored as
-// accepted before its work action holds the frozen context.
 type contextBeforeAcceptStore struct {
 	store.RepositoryMonitorStore
 	t        *testing.T
@@ -602,8 +600,6 @@ func TestGitHubCommentCommand_RedeliveryFinishesAnInterruptedIntake(t *testing.T
 	}
 }
 
-// advanceAfterReadStore lets the controller start a work action right after
-// intake reads it, the interleaving an interrupted redelivery can hit.
 type advanceAfterReadStore struct {
 	store.RepositoryMonitorStore
 	actionID string
@@ -644,8 +640,6 @@ func TestGitHubCommentCommand_RedeliveryDoesNotRewindAnAdvancedWorkAction(t *tes
 	if err := env.store.CreateCommandEvent(t.Context(), command); err != nil {
 		t.Fatalf("CreateCommandEvent() error = %v", err)
 	}
-	// The interrupted intake stored the action and its context, then stopped
-	// before accepting the command.
 	actionID := store.RepositoryMonitorWorkActionID(command.ID, commandIntentPlan)
 	if err := env.store.CreateWorkAction(t.Context(), &store.WorkAction{
 		ID: actionID, MonitorNamespace: env.monitor.Namespace, MonitorName: env.monitor.Name, CommandEventID: command.ID,
@@ -677,8 +671,6 @@ func TestGitHubCommentCommand_RunLinkDoesNotRewindAnAdvancedWorkAction(t *testin
 		return advancing
 	})
 	dedupe := repositoryMonitorCommentCommandDedupeKey(env.monitor, githubWebhookRepository{FullName: "sozercan/vekil"}, "810")
-	// Intake creates the action, then reads it again to link its run. The
-	// controller starts the action right after that read.
 	advancing.actionID = store.RepositoryMonitorWorkActionID(repositoryMonitorCommandID(dedupe), commandIntentPlan)
 	env.deliver(t, "delivery-run-link", commentTestPayload{commentID: 810, body: "/orka plan keep the API stable"})
 	if !advancing.advanced {

@@ -15,7 +15,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// Work action metadata keys that carry the frozen context of a comment command.
 const (
 	RepositoryMonitorCommandContextMetadataKey          = "commandContext"
 	RepositoryMonitorCommandContextDigestMetadataKey    = "commandContextDigest"
@@ -25,11 +24,8 @@ const (
 )
 
 const (
-	// RepositoryMonitorCommandContextMaxBytes bounds the stored context of one command.
 	RepositoryMonitorCommandContextMaxBytes = 4 * 1024
-	// RepositoryMonitorCommandContextMaxLines bounds the stored context of one command.
 	RepositoryMonitorCommandContextMaxLines = 80
-	// repositoryMonitorCommandContextRawBytes bounds the raw text read before sanitizing.
 	repositoryMonitorCommandContextRawBytes = 64 * 1024
 	repositoryMonitorCommandContextLinkText = "[link removed]"
 )
@@ -43,20 +39,12 @@ var (
 	repositoryMonitorCommandContextURLPattern         = regexp.MustCompile(`(?i)\b(?:[a-z][a-z0-9+.-]*://|www\.|mailto:|data:)\S*`)
 )
 
-// RepositoryMonitorCommandContext is the sanitized, bounded free text that a
-// maintainer wrote after a comment command. It is untrusted data: it is shown
-// to the agent as context and never changes what the command does.
 type RepositoryMonitorCommandContext struct {
 	Text      string
 	Truncated bool
 	Digest    string
 }
 
-// SanitizeRepositoryMonitorCommandContext turns raw comment text into command
-// context. Hidden HTML comments, images, links and URLs are removed, control
-// and format runes are stripped, credentials are redacted, and the result is
-// bounded to RepositoryMonitorCommandContextMaxLines lines and
-// RepositoryMonitorCommandContextMaxBytes bytes.
 func SanitizeRepositoryMonitorCommandContext(raw string) RepositoryMonitorCommandContext {
 	truncated := false
 	if len(raw) > repositoryMonitorCommandContextRawBytes {
@@ -64,8 +52,6 @@ func SanitizeRepositoryMonitorCommandContext(raw string) RepositoryMonitorComman
 		truncated = true
 	}
 	raw = strings.ToValidUTF8(raw, "")
-	// Invisible runes and escapes go first, so none of them can split a link,
-	// a URL, or a hidden comment past the filters below.
 	raw = repositoryMonitorANSIEscapePattern.ReplaceAllString(raw, "")
 	raw = repositoryMonitorEvidenceStripRunes(raw)
 	raw = repositoryMonitorCommandContextHTMLCommentPattern.ReplaceAllString(raw, "")
@@ -113,8 +99,6 @@ func repositoryMonitorCommandContextDigest(text string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// RepositoryMonitorCommandContextMetadata returns the work action metadata
-// that freezes a command's context at intake.
 func RepositoryMonitorCommandContextMetadata(commandContext RepositoryMonitorCommandContext, author, commentURL string) map[string]any {
 	metadata := map[string]any{
 		RepositoryMonitorCommandContextAuthorMetadataKey: author,
@@ -130,7 +114,6 @@ func RepositoryMonitorCommandContextMetadata(commandContext RepositoryMonitorCom
 	return metadata
 }
 
-// repositoryMonitorPromptCommandContext is the commandContext prompt input.
 type repositoryMonitorPromptCommandContext struct {
 	Source     string `json:"source"`
 	Author     string `json:"author,omitempty"`
@@ -140,10 +123,6 @@ type repositoryMonitorPromptCommandContext struct {
 	Digest     string `json:"digest"`
 }
 
-// repositoryMonitorIssueCommandContext reads the frozen context of the command
-// behind an issue action. It returns nil when the command carries none. A
-// stored context that is over its bounds or does not match its digest fails
-// closed.
 func (r *RepositoryMonitorReconciler) repositoryMonitorIssueCommandContext(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent) (*repositoryMonitorPromptCommandContext, error) {
 	if r == nil || r.Store == nil || monitor == nil || command == nil || strings.TrimSpace(command.ID) == "" {
 		return nil, nil
@@ -206,7 +185,6 @@ const repositoryMonitorCommentPermissionWrite = "write"
 
 var repositoryMonitorCommentCommandNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
-// ValidateRepositoryMonitorCommentTriggers checks spec.triggers.github.comments.
 func ValidateRepositoryMonitorCommentTriggers(spec corev1alpha1.RepositoryMonitorSpec) error {
 	comments := spec.Triggers.GitHub.Comments
 	if !comments.Enabled {

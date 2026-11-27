@@ -346,24 +346,7 @@ func repositoryMonitorCommandRunIDFromCommand(commandID string) string {
 	return "monrun-" + hex.EncodeToString(sum[:])[:12]
 }
 
-// recoverInterruptedRepositoryMonitorCommandRecordings settles comment commands
-// whose intake stopped between recording the command and accepting it. GitHub
-// does not redeliver a webhook on its own, so without this a recording command
-// would leave its queued work action holding the action's dedupe key.
-//
-// Once the grace period has passed, a command whose work action holds
-// verifiable context is accepted. One whose action was coalesced completes.
-// One whose action cannot run is rejected, and a queued action it owns is
-// failed so its dedupe key is released. A recording with no work action
-// holds nothing and is left for a redelivery to finish. Every transition is
-// one a concurrent redelivery would also make, or leaves the command unable to
-// run, so recovery cannot race intake into running work twice.
-//
-// It reports whether recordings still inside their grace period remain, so the
-// reconcile can requeue for them.
 func (r *RepositoryMonitorReconciler) recoverInterruptedRepositoryMonitorCommandRecordings(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
-	// The store's cursor is an offset, and settling a recording removes it
-	// from the filter, so read every page before changing any status.
 	var recordings []store.CommandEvent
 	cursor := ""
 	for {
@@ -388,14 +371,10 @@ func (r *RepositoryMonitorReconciler) recoverInterruptedRepositoryMonitorCommand
 	return pending, nil
 }
 
-// recoverRepositoryMonitorCommandRecording settles one recording command. It
-// reports false while the command is still inside its grace period.
 func (r *RepositoryMonitorReconciler) recoverRepositoryMonitorCommandRecording(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent) (bool, error) {
 	if time.Since(command.CreatedAt) < repositoryMonitorCommandRecordingGrace {
 		return false, nil
 	}
-	// The listed recording may be stale: a redelivery can accept the command
-	// after the list was read. Settle only a command that is still recording.
 	current, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, command.ID)
 	if errors.Is(err, store.ErrNotFound) {
 		return true, nil
@@ -418,10 +397,6 @@ func (r *RepositoryMonitorReconciler) recoverRepositoryMonitorCommandRecording(c
 	case action.CommandEventID != command.ID:
 		return true, nil
 	case action.Status == store.RepositoryMonitorWorkActionStatusRetryPending:
-		// Only intake parks an action for retry, after it accepted the command
-		// and then failed to signal its run. A redelivery can do that between
-		// the read above and this one, and rejecting the command would strand
-		// the retry and its dedupe key.
 		return true, nil
 	case action.Status == store.RepositoryMonitorWorkActionStatusCompleted && action.Phase == "coalesced":
 		command.Status = repositoryMonitorCommandCompleted

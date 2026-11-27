@@ -27,8 +27,6 @@ const (
 	githubCommentCommandMaxCommandWord = 32
 )
 
-// repositoryMonitorCommentIntents lists the intents a comment command may
-// start, in the order the default command words are offered.
 var repositoryMonitorCommentIntents = []string{
 	githubActionTriage,
 	githubActionResearch,
@@ -56,7 +54,6 @@ type githubWebhookComment struct {
 	PerformedViaGitHubApp json.RawMessage   `json:"performed_via_github_app,omitempty"`
 }
 
-// repositoryMonitorCommentCommand is a parsed command comment.
 type repositoryMonitorCommentCommand struct {
 	Word    string
 	Context string
@@ -157,8 +154,6 @@ func (h *Handlers) recordRepositoryMonitorCommentCommand(c fiber.Ctx, monitor *c
 	}
 	result.CommandIDs = append(result.CommandIDs, command.ID)
 	if command.Status == githubCommandStatusRecording {
-		// Wake the controller first: if intake stops before the command is
-		// accepted, the controller still sees the recording and recovers it.
 		if err := h.annotateRepositoryMonitorRunRequest(c, monitor, &store.MonitorRun{ID: command.ID}); err != nil {
 			return result, err
 		}
@@ -182,21 +177,13 @@ func (h *Handlers) recordRepositoryMonitorCommentCommand(c fiber.Ctx, monitor *c
 	return result, nil
 }
 
-// finishRepositoryMonitorCommandRecording creates the work action that
-// freezes a recording command's context, then accepts the command. The
-// controller only acts on accepted commands, so it can never start one before
-// its context exists. A redelivery of a command left recording by an
-// interrupted intake finishes it the same way.
 func (h *Handlers) finishRepositoryMonitorCommandRecording(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, metadata map[string]any) error {
 	command.Status = githubCommandStatusAccepted
-	// Link the deterministic run now, so queueing the run later changes nothing
-	// and never writes back a copy of the action the controller has advanced.
 	if err := h.upsertRepositoryMonitorCommandWorkActionWithMetadata(ctx, monitor, command, repositoryMonitorCommandRunID(command), metadata); err != nil {
 		command.Status = githubCommandStatusRecording
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record repository monitor command context: %v", err))
 	}
 	if command.Status != githubCommandStatusAccepted {
-		// The work action coalesced the command and already settled it.
 		return nil
 	}
 	if err := h.repositoryMonitorStore.UpdateCommandEvent(ctx, command); err != nil {
@@ -207,10 +194,6 @@ func (h *Handlers) finishRepositoryMonitorCommandRecording(ctx context.Context, 
 	return nil
 }
 
-// parseRepositoryMonitorCommentCommand parses "<prefix> <command>" on the
-// comment's first line. Everything after the command word, including the
-// following lines, is returned as context. Leading blank lines are not
-// skipped: the command must be the first line of the comment.
 func parseRepositoryMonitorCommentCommand(body, prefix string) (repositoryMonitorCommentCommand, bool) {
 	prefix = strings.TrimSpace(prefix)
 	if prefix == "" || strings.ContainsFunc(prefix, isASCIISpace) {
@@ -248,8 +231,6 @@ func isASCIISpace(r rune) bool {
 	return r == ' ' || r == '\t' || r == '\r' || r == '\n' || r == '\v' || r == '\f'
 }
 
-// repositoryMonitorCommentIntent maps a command word to its configured intent.
-// Without configured commands, each supported intent is its own word.
 func repositoryMonitorCommentIntent(monitor *corev1alpha1.RepositoryMonitor, word string) (string, bool) {
 	word = strings.ToLower(strings.TrimSpace(word))
 	if monitor == nil || word == "" {
@@ -277,9 +258,6 @@ func repositoryMonitorCommentIntentSupported(intent string) bool {
 	return slices.Contains(repositoryMonitorCommentIntents, intent)
 }
 
-// repositoryMonitorCommentPermissionAllowed applies the comment minimum, which
-// defaults to maintain, to every comment command, and then the policy's
-// allowed repository permissions.
 func repositoryMonitorCommentPermissionAllowed(monitor *corev1alpha1.RepositoryMonitor, permission string) bool {
 	if monitor == nil {
 		return false
@@ -305,8 +283,6 @@ func repositoryMonitorWebhookRepositoryMatches(monitor *corev1alpha1.RepositoryM
 	return err == nil && strings.EqualFold(strings.TrimSpace(repo.FullName), owner+"/"+repository)
 }
 
-// githubCommentFromBot reports whether a bot or GitHub App wrote the comment
-// or sent the event.
 func githubCommentFromBot(payload githubIssueCommentWebhookPayload) bool {
 	for _, user := range []githubWebhookUser{payload.Comment.User, payload.Sender} {
 		if strings.EqualFold(strings.TrimSpace(user.Type), githubWebhookUserTypeBot) || strings.HasSuffix(strings.ToLower(strings.TrimSpace(user.Login)), "[bot]") {
@@ -317,10 +293,6 @@ func githubCommentFromBot(payload githubIssueCommentWebhookPayload) bool {
 	return app != "" && app != "null"
 }
 
-// repositoryMonitorCommentFromMonitorIdentity reports whether login is the
-// account behind the monitor's forge credential. GitHub App installation
-// tokens cannot read /user; their comments are already ignored as bot
-// comments, so an authorization refusal there means "not this login".
 func (h *Handlers) repositoryMonitorCommentFromMonitorIdentity(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, login string) (bool, error) {
 	login = strings.TrimSpace(login)
 	if login == "" {

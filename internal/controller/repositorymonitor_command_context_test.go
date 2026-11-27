@@ -357,18 +357,15 @@ func TestRepositoryMonitorRecoveryLeavesCommandsIntakeAlreadyAccepted(t *testing
 		}
 	}
 	cases := []struct {
-		name string
-		// acceptInStore records the redelivery's acceptance before recovery
-		// runs. Without it, the redelivery accepts the command between
-		// recovery's read of the command and its read of the action.
-		acceptInStore bool
-		advance       func(*testing.T, store.RepositoryMonitorStore, *corev1alpha1.RepositoryMonitor, *store.CommandEvent)
-		wantCommand   string
-		wantAction    string
+		name                   string
+		acceptedBeforeRecovery bool
+		advance                func(*testing.T, store.RepositoryMonitorStore, *corev1alpha1.RepositoryMonitor, *store.CommandEvent)
+		wantCommand            string
+		wantAction             string
 	}{
-		{name: "stale listing, run signal failed", acceptInStore: true, advance: retryPending, wantCommand: repositoryMonitorCommandAccepted, wantAction: store.RepositoryMonitorWorkActionStatusRetryPending},
-		{name: "stale listing, action running", acceptInStore: true, advance: setStatus(store.RepositoryMonitorWorkActionStatusRunning), wantCommand: repositoryMonitorCommandAccepted, wantAction: store.RepositoryMonitorWorkActionStatusRunning},
-		{name: "stale listing, action completed", acceptInStore: true, advance: setStatus(store.RepositoryMonitorWorkActionStatusCompleted), wantCommand: repositoryMonitorCommandAccepted, wantAction: store.RepositoryMonitorWorkActionStatusCompleted},
+		{name: "stale listing, run signal failed", acceptedBeforeRecovery: true, advance: retryPending, wantCommand: repositoryMonitorCommandAccepted, wantAction: store.RepositoryMonitorWorkActionStatusRetryPending},
+		{name: "stale listing, action running", acceptedBeforeRecovery: true, advance: setStatus(store.RepositoryMonitorWorkActionStatusRunning), wantCommand: repositoryMonitorCommandAccepted, wantAction: store.RepositoryMonitorWorkActionStatusRunning},
+		{name: "stale listing, action completed", acceptedBeforeRecovery: true, advance: setStatus(store.RepositoryMonitorWorkActionStatusCompleted), wantCommand: repositoryMonitorCommandAccepted, wantAction: store.RepositoryMonitorWorkActionStatusCompleted},
 		{name: "accepted after the command read, run signal failed", advance: retryPending, wantCommand: repositoryMonitorCommandRecording, wantAction: store.RepositoryMonitorWorkActionStatusRetryPending},
 	}
 	for _, tc := range cases {
@@ -383,7 +380,7 @@ func TestRepositoryMonitorRecoveryLeavesCommandsIntakeAlreadyAccepted(t *testing
 			}
 			commandContextTestWorkAction(t, monitorStore, monitor, command, RepositoryMonitorCommandContextMetadata(SanitizeRepositoryMonitorCommandContext("look"), "maintainer", ""))
 			listed := *command
-			if tc.acceptInStore {
+			if tc.acceptedBeforeRecovery {
 				command.Status = repositoryMonitorCommandAccepted
 				if err := monitorStore.UpdateCommandEvent(ctx, command); err != nil {
 					t.Fatalf("UpdateCommandEvent() error = %v", err)
