@@ -123,54 +123,17 @@ type RepositoryScanReconciler struct {
 	PublicationStore              store.PublicationStore
 	ACPDispatchMaxConcurrentTasks int
 	createdReviewTasks            *createdTasks
-	recordedValidationTasks       *recordedValidationLedger
 	APIReader                     client.Reader
 	HTTPClient                    *http.Client
 	GitHubAPIBaseURL              string
 }
 
-const maxRecordedValidationTasks = 4096
-
-type recordedValidationLedger struct {
-	mu    sync.Mutex
-	seen  map[string]struct{}
-	order []string
-}
-
-func (l *recordedValidationLedger) markOnce(key string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.seen == nil {
-		l.seen = map[string]struct{}{}
-	}
-	if _, exists := l.seen[key]; exists {
+func validationStatusChanged(previousStatus, previousJSON string, finding *store.Finding) bool {
+	if finding == nil {
 		return false
 	}
-	if len(l.order) >= maxRecordedValidationTasks {
-		oldest := l.order[0]
-		l.order = l.order[1:]
-		delete(l.seen, oldest)
-	}
-	l.seen[key] = struct{}{}
-	l.order = append(l.order, key)
-	return true
-}
-
-func (r *RepositoryScanReconciler) recordValidationOutcomeOnce(task *corev1alpha1.Task, status string) {
-	if task == nil {
-		return
-	}
-	key := string(task.UID)
-	if key == "" {
-		key = task.Namespace + "/" + task.Name
-	}
-	if r.recordedValidationTasks == nil {
-		r.recordedValidationTasks = &recordedValidationLedger{}
-	}
-	if !r.recordedValidationTasks.markOnce(key) {
-		return
-	}
-	metrics.RecordSecurityValidationOutcome(status)
+	return strings.TrimSpace(previousStatus) != strings.TrimSpace(finding.ValidationStatus) ||
+		strings.TrimSpace(previousJSON) != strings.TrimSpace(finding.ValidationJSON)
 }
 
 func (r *RepositoryScanReconciler) agentRuntimePolicyReader() client.Reader {
@@ -4738,6 +4701,9 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 		}
 	}
 
+	previousValidationStatus := finding.ValidationStatus
+	previousValidationJSON := finding.ValidationJSON
+
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
 		validationProblem := ""
 		if strings.TrimSpace(task.Labels[labels.LabelSecurityScanID]) != strings.TrimSpace(finding.ScanRunID) {
@@ -4799,8 +4765,8 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 		if err := r.persistValidatedFinding(ctx, finding, canonical); err != nil {
 			return err
 		}
-		if validationMetricStatus != "" {
-			r.recordValidationOutcomeOnce(task, validationMetricStatus)
+		if validationMetricStatus != "" && validationStatusChanged(previousValidationStatus, previousValidationJSON, finding) {
+			metrics.RecordSecurityValidationOutcome(validationMetricStatus)
 		}
 		return nil
 	}
@@ -4808,7 +4774,9 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 	if err := r.persistValidatedFinding(ctx, finding, canonical); err != nil {
 		return err
 	}
-	r.recordValidationOutcomeOnce(task, findingValidationStatusError)
+	if validationStatusChanged(previousValidationStatus, previousValidationJSON, finding) {
+		metrics.RecordSecurityValidationOutcome(findingValidationStatusError)
+	}
 	return nil
 }
 
