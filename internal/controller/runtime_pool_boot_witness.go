@@ -408,7 +408,7 @@ func (r *RuntimePoolReconciler) enrollRuntimePoolBoot(ctx context.Context, pool 
 		if !runtimePoolBootWitnessEqual(existing, w) {
 			return fmt.Errorf("%w: enrolled RuntimePool boot changed", store.ErrConflict)
 		}
-		retired, err := loadRuntimePoolBootRetirement(ctx, r.ControlStore, w)
+		retired, err := loadRuntimePoolBootRetirement(ctx, r.ControlStore, existing)
 		if err != nil {
 			return err
 		}
