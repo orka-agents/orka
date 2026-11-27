@@ -247,7 +247,6 @@ func runAHP(t *testing.T, newProvider StateFactory) {
 		require.NoError(t, err)
 		require.Equal(t, []string{"s1/a", "s1/b", "s10/a", "s1_x"}, ahpRecordKeys(listed), "in key order")
 
-		// Wildcards in the prefix are literal: "s1_" must not match "s10/".
 		require.NoError(t, p.DeleteAHPRecords(ctx, "alice", "content", "s1_"))
 		require.NoError(t, p.DeleteAHPRecords(ctx, "alice", "content", "s1/"))
 		listed, err = p.ListAHPRecords(ctx, "alice", "content")
@@ -261,7 +260,6 @@ func runAHP(t *testing.T, newProvider StateFactory) {
 		require.Equal(t, "bob's", string(bobs.Value))
 		require.ErrorIs(t, p.PutAHPRecord(ctx, storagev1.AHPRecord{UserKey: "alice", Kind: "content"}), storagev1.ErrValidation)
 
-		// An exact delete leaves keys that merely share the prefix.
 		put("alice", "session", "ahp-session:/one", "one")
 		put("alice", "session", "ahp-session:/one-more", "more")
 		require.NoError(t, p.DeleteAHPRecord(ctx, "alice", "session", "ahp-session:/one"))

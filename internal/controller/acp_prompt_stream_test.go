@@ -205,7 +205,6 @@ func TestStreamACPPromptWithCancellationValidatesCompletedStream(t *testing.T) {
 				result := runACPPromptStreamTest(runtimeCtx, transport, fixture, func(event harnessv2.Event) error {
 					emitted++
 					if event.Type == harnessv2.EventAccepted {
-						// Status updates must not change the frozen cancellation owner.
 						fixture.task.UID = "next-task-uid"
 						fixture.task.Status.Execution.Attempt++
 						fixture.task.Status.Execution.PromptID = "next-prompt"

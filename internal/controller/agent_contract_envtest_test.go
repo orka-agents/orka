@@ -9,9 +9,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// Reapplying an Agent manifest that no longer spells out the only supported
-// contract deletes the stored selector. The Agent CRD rule alone, with no
-// admission webhook, must allow that; the controller writes the value back.
 func TestAgentContractSelectorMayBeClearedOnAPIServer(t *testing.T) {
 	apiClient := newArchivedSessionAPIClient(t)
 	ctx := t.Context()

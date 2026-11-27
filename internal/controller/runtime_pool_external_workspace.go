@@ -49,9 +49,7 @@ type externalRuntimeInstanceEvidence struct {
 	NativeProcess bool                               `json:"nativeProcess,omitempty"`
 	RuntimeUID    types.UID                          `json:"runtimeUID,omitempty"`
 	Endpoint      string                             `json:"endpoint,omitempty"`
-	// RouterTarget binds a routed native process. Its Endpoint is then Core's
-	// configured Substrate router, never a provider-chosen authority.
-	RouterTarget string `json:"routerTarget,omitempty"`
+	RouterTarget  string                             `json:"routerTarget,omitempty"`
 }
 
 func runtimePoolHasExternalWorkspace(pool *corev1alpha1.RuntimePool) bool {
@@ -76,9 +74,6 @@ func (r *RuntimePoolReconciler) externalPoolWorkspace(ctx context.Context, pool 
 	return w, nil
 }
 
-// Core consumes provider evidence and writes intent. It never writes the
-// provider's state, attachment acknowledgement, native objects or journal.
-//
 //nolint:gocyclo // Keep admission, immutable sequence transitions and bootstrap fences explicit.
 func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx context.Context, pool *corev1alpha1.RuntimePool) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(pool, runtimePoolFinalizer) {
@@ -94,26 +89,15 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "external workspace binding is unavailable")
 	}
 	ctx = withExternalRuntimeTimingWorkspace(ctx, w)
-	// An eviction or upgrade drain of a detached warm runtime ends its
-	// window now (ADR 0055), so retention suspends it inside the drain's
-	// deadline; the runtime keeps serving no one in the meantime.
 	if ended, err := endACPWorkspaceWarmWindowForDrain(ctx, r.Client, pool, w, r.now()); err != nil || ended {
 		return ctrl.Result{RequeueAfter: time.Second}, err
 	}
 	deleting := !pool.DeletionTimestamp.IsZero() || !w.DeletionTimestamp.IsZero() || w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-	// ADR 0057: a continuation's speculative resume leaves the settled
-	// workspace Suspended until the publication below flips it back to Ready
-	// in the same write.
 	pendingResume := acpWorkspaceSpeculativeResumePending(w, r.now())
-	// A provider-reported Failed instance is terminal: retire it, never replace
-	// it. So is one the provider stopped because its Suspend authorization
-	// expired first: like an instance the worker killed, it kept no data, and
-	// a data-only class admits a successor only with verified retained data.
 	stopping := deleting || pool.Spec.DesiredReplicas == 0 ||
 		(w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady && !pendingResume) ||
 		pool.Annotations["orka.ai/external-runtime-retirement-requested"] == "true" || w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed ||
 		externalProviderSuspendDeadlineExceeded(w)
-	// Timing only: remember when this process first saw the sequence retire.
 	if w.Spec.Workload != nil {
 		r.externalTimings.observeRetirement(pool.UID, w.Spec.Workload.Sequence, stopping, r.now())
 	} else {
@@ -195,8 +179,6 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	}
 	if w.Spec.Workload == nil || (w.Status.Allocation != nil && w.Status.Allocation.State == workspacev1alpha1.AllocationStopped) {
 		if externalPublishedSuccessorAwaitsProvider(w) {
-			// The provider has not reported the published request's allocation
-			// yet. Nothing is republished or rotated while it catches up.
 			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleStarting,
 				"public workload request published; waiting for provider materialization")
 		}
@@ -211,8 +193,6 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			r.noteExternalRuntimeStopProven(pool, w)
 		}
 		if externalEvictionSettlementPending(pool, w) {
-			// An eviction whose outcome was never recorded settles against
-			// this stopped allocation before any cold boot replaces it.
 			return r.externalPoolStopped(ctx, pool, w)
 		}
 		if w.Spec.Workload != nil {
@@ -242,10 +222,6 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	if err := workspacev1alpha1.ValidateStartup(*request, allocationOrEmpty(w)); err != nil ||
 		w.Status.ObservedGeneration != w.Generation || !workspaceCurrentlyAdmittedByCore(w) {
 		if err == nil && attachmentOnlyLag {
-			// ADR 0057: only an attachment or its re-admission moved the
-			// generation; the admitted instance keeps serving, untouched,
-			// until the provider and core catch up. Keep worker eviction checks
-			// active so a terminating worker still enters deadline-bound drain.
 			if _, attestErr := r.attestExternalWorkspaceStartup(ctx, request, w.Status.Allocation.Startup); attestErr != nil {
 				if eviction := (*externalWorkerEvictionError)(nil); errors.As(attestErr, &eviction) {
 					return r.beginExternalRuntimeEviction(ctx, pool, w, externalEvictionSourceWorker, eviction.signaledAt, eviction.deadline)
@@ -265,9 +241,6 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "external workload failed independent materialization verification")
 	}
 	if externalStartupRouterTarget(w.Status.Allocation.Startup) != "" {
-		// A routed process has no worker Pod ingress to grant: Core reaches it
-		// only through the configured router, and its own egress leaves through
-		// the backend gateway under the admitted allowlist.
 		if _, err := r.SubstrateRouter.pinnedEndpoint(w.Status.Allocation.Startup.Endpoint); err != nil {
 			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "routed startup is not reachable through the configured Substrate router")
 		}
@@ -276,7 +249,6 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			return ctrl.Result{}, err
 		}
 	}
-	// The instance evidence and the credential binding land in one pool write.
 	evidenceErr, bootstrapErr := r.bindExternalRuntimeInstanceAdmission(ctx, pool, w, auth, pod.UID)
 	if evidenceErr != nil {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "startup conflicts with the independently observed instance fence")
@@ -301,8 +273,6 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	result, err := r.reconcileRuntimePoolServingWithPostProbeFence(ctx, pool, cfg, []corev1.Pod{*pod}, []corev1.Pod{*pod}, auth, status,
 		func(ctx context.Context, _ *corev1alpha1.RuntimePoolActiveInstanceStatus) (ctrl.Result, bool, error) {
 			current, err := r.externalPoolWorkspace(ctx, pool)
-			// An attachment that lands during verification of an instance the
-			// pool already serves does not invalidate it (ADR 0057).
 			lagging := err == nil && (current.Status.ObservedGeneration != current.Generation || !workspaceCurrentlyAdmittedByCore(current)) &&
 				!externalAttachmentOnlyLag(pool, current)
 			if err != nil || current.Spec.Workload == nil || current.Spec.Workload.Revision != request.Revision || !reflect.DeepEqual(current.Status.Allocation, w.Status.Allocation) || lagging {
@@ -327,13 +297,6 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	return result, err
 }
 
-// externalPublishedSuccessorAwaitsProvider reports a workspace whose
-// published request is the cold boot that follows the stopped allocation the
-// provider still reports: same allocation key, the next sequence, naming that
-// exact instance as its predecessor. That is the window between publication
-// (and its core re-admission) and the provider's first report of the new
-// allocation, not a stopped allocation that fails to prove the current
-// runtime terminated.
 func externalPublishedSuccessorAwaitsProvider(w *workspacev1alpha1.ExecutionWorkspace) bool {
 	request, a := w.Spec.Workload, w.Status.Allocation
 	return request != nil && a != nil && a.State == workspacev1alpha1.AllocationStopped &&
@@ -348,13 +311,8 @@ func allocationOrEmpty(w *workspacev1alpha1.ExecutionWorkspace) workspacev1alpha
 	return *w.Status.Allocation
 }
 
-// externalProviderOperationFailedReason marks a workspace Provisioned condition
-// whose message carries the provider's last operation error.
 const externalProviderOperationFailedReason = "ProviderOperationFailed"
 
-// externalPoolWorkspaceProgress adds the provider's current operation error to
-// startup and degraded progress. The workspace shares the pool's namespace and
-// already carries that message; Task status never receives provider text.
 func (r *RuntimePoolReconciler) externalPoolWorkspaceProgress(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace, lifecycle corev1alpha1.RuntimePoolLifecycle, message string) (ctrl.Result, error) {
 	if report := externalProviderOperationReport(w); report != "" {
 		message += "; provider reports: " + report
@@ -362,9 +320,6 @@ func (r *RuntimePoolReconciler) externalPoolWorkspaceProgress(ctx context.Contex
 	return r.externalPoolRequestProgress(ctx, pool, w.Spec.Workload, lifecycle, message)
 }
 
-// externalPoolRequestProgress is externalPoolProgress for a reconcile that
-// read the workspace's published request: it also re-derives TelemetryReady
-// from that request.
 func (r *RuntimePoolReconciler) externalPoolRequestProgress(ctx context.Context, pool *corev1alpha1.RuntimePool, request *workspacev1alpha1.WorkloadRequest, lifecycle corev1alpha1.RuntimePoolLifecycle, message string) (ctrl.Result, error) {
 	status := r.externalPoolProgressStatus(pool, lifecycle, message)
 	r.deriveExternalRuntimeTelemetryReady(pool, &status, request)
@@ -419,10 +374,6 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	}
 	template := r.runtimePoolPodTemplate(pool, cfg, cfg.labels, auth.Name, provider.Name)
 	if nativeProcess {
-		// A native Actor inherits its infrastructure template's sizing, which
-		// the operator matches to the WorkerPool; the native template below
-		// also drops Pod scratch volumes. Pod-backed requests keep the
-		// resource and scratch size quotas of an in-cluster pool.
 		template.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
 	}
 	template.Spec.Containers[0].Command = []string{"/usr/local/bin/orka-acp-runtime"}
@@ -440,8 +391,6 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	template = runtimePoolWorkspaceBootstrapTemplate(template, string(auth.Data[runtimePoolBootstrapNonceKey]), publicKey)
 	telemetryFits, telemetryMessage := true, ""
 	if nativeProcess {
-		// Fit telemetry last, to the room every other native setting leaves:
-		// the provider refuses an environment past the backend limit.
 		template.Spec.Containers[0].Env, telemetryFits, telemetryMessage = fitNativeRuntimeTelemetry(
 			template.Spec.Containers[0].Env, r.EnableTelemetry, os.Getenv)
 	}
@@ -454,9 +403,6 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		Runtime: &workspacev1alpha1.RuntimeWorkload{BootstrapPort: bootstrapPort, PoolBinding: workspacev1alpha1.ImmutableObjectBinding{Name: pool.Name, UID: pool.UID, Generation: pool.Generation, ProfileHash: pool.Spec.Runtime.Profile.Digest}, ClassBinding: w.Spec.ClassBinding, Protocol: harnessv2.ProtocolVersion, ContainerName: container.Name, Template: template},
 	}
 	if egressAllowlist {
-		// A gateway-enforced backend has no Pod network to describe: its
-		// runtime reaches only the allowlisted host names, and Core's routed
-		// supervisor calls enter through the backend router.
 		egress, injected, err := r.externalRuntimeEgressWithProviderToken(cfg, registration, provider,
 			telemetryCollectorEndpoints(request.Runtime.Template.Spec.Containers[0].Env))
 		if err != nil {
@@ -468,21 +414,14 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		}
 	} else {
 		if nativeProcess && externalProviderSupportsEgressCredentialInjection(registration) {
-			// Credential injection is a gateway feature; without the egress
-			// allowlist there is no gateway policy to inject from, and the
-			// token would reach the sandbox through the bootstrap instead.
 			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded,
 				"the workspace provider advertises "+string(workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection)+
 					" without "+string(workspacev1alpha1.WorkspaceFeatureEgressAllowlist)+"; refusing to deliver the provider token into the sandbox")
 		}
 		network := &networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}}, PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}}
 		if nativeProcess {
-			// Native infrastructure/router ingress is operator-managed. Freeze only
-			// runtime egress here; Pod ingress rules do not describe that topology.
 			network.PolicyTypes = []networkingv1.PolicyType{networkingv1.PolicyTypeEgress}
 		}
-		// Only Core's generated permissions are admission intent. Public labels
-		// on observed policies cannot authorize additional connectivity.
 		policies := r.runtimePoolNetworkPolicies(cfg)
 		slices.SortFunc(policies, func(a, b networkingv1.NetworkPolicy) int { return strings.Compare(a.Name, b.Name) })
 		for _, p := range policies {
@@ -516,15 +455,8 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	}
 	now := r.now()
 	if resume && !acpWorkspaceSpeculativeResumePending(w, now) {
-		// The speculative resume deadline expired while proving termination or
-		// rendering the workload; leave the workspace suspended so the Task can
-		// take its ordinary cold-resume path.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	// ADR 0057: a Task's staged attachment, rechecked against this exact
-	// object version, lands in the same write, so the provider acknowledges
-	// the epoch and starts the runtime on one observation and the runtime is
-	// admitted once.
 	attachment, err := installableACPWorkspaceAttachmentIntent(ctx, uncachedReader(r.APIReader, r.Client), w, resume, now)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -541,15 +473,10 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		log.FromContext(ctx).Info("Reduced supervisor telemetry to fit the native environment limit",
 			"runtimePool", pool.Name, "detail", telemetryMessage)
 	}
-	// This write may lose the status optimistic lock. Every later reconcile of
-	// the published request re-derives the same condition from the request.
 	r.setExternalRuntimeTelemetryReady(pool, &status, telemetryFits, telemetryMessage)
 	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
 }
 
-// applyExternalWorkspacePublication writes the next request and, for a
-// speculative resume or start (ADR 0057), the Ready flip and the requester's
-// staged attachment into the same workspace write.
 func applyExternalWorkspacePublication(w *workspacev1alpha1.ExecutionWorkspace, request *workspacev1alpha1.WorkloadRequest, resume bool, attachment *workspacev1alpha1.ExecutionWorkspaceAttachment) {
 	w.Spec.Workload, w.Spec.Retirement = request, nil
 	if resume {
@@ -561,10 +488,6 @@ func applyExternalWorkspacePublication(w *workspacev1alpha1.ExecutionWorkspace, 
 	}
 }
 
-// setExternalRuntimeTelemetryReady records whether a request's supervisor
-// telemetry projection carries every configured signal. A request without
-// supervisor telemetry has no condition: one from an earlier request would
-// describe a runtime that no longer exists.
 func (r *RuntimePoolReconciler) setExternalRuntimeTelemetryReady(pool *corev1alpha1.RuntimePool, status *corev1alpha1.RuntimePoolStatus, fits bool, message string) {
 	switch {
 	case message == "":
@@ -578,18 +501,6 @@ func (r *RuntimePoolReconciler) setExternalRuntimeTelemetryReady(pool *corev1alp
 	}
 }
 
-// deriveExternalRuntimeTelemetryReady re-derives TelemetryReady from the
-// telemetry projection frozen in the published request, so the condition does
-// not depend on the publishing reconcile's status write landing. Only a native
-// request is fitted to the backend environment limit; a Pod-backed request, or
-// none, carries no condition. Fitting is deterministic, so re-fitting the
-// frozen environment reproduces the publish-time verdict. The verdict is
-// against the signals the controller configures now: when a changed
-// configuration still yields the frozen projection, the runtime exports
-// exactly what that configuration asks for, and a signal turned off is not
-// reported as dropped. A request the current configuration would project
-// differently was published under another configuration, so its recorded
-// condition is kept.
 func (r *RuntimePoolReconciler) deriveExternalRuntimeTelemetryReady(pool *corev1alpha1.RuntimePool, status *corev1alpha1.RuntimePoolStatus, request *workspacev1alpha1.WorkloadRequest) {
 	if request == nil || (request.Runtime != nil && !slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess)) {
 		r.setExternalRuntimeTelemetryReady(pool, status, true, "")
@@ -611,8 +522,6 @@ func (r *RuntimePoolReconciler) deriveExternalRuntimeTelemetryReady(pool *corev1
 	}
 }
 
-// runtimeTelemetryEnv returns an environment's supervisor telemetry entries,
-// in order.
 func runtimeTelemetryEnv(env []corev1.EnvVar) []corev1.EnvVar {
 	var telemetry []corev1.EnvVar
 	for _, variable := range env {
@@ -630,8 +539,6 @@ func externalWorkspaceRuntimeRequiredFeatures(pool *corev1alpha1.RuntimePool, w 
 			return nil, fmt.Errorf("published workload cannot establish frozen materialization intent")
 		}
 		if len(required) == 0 {
-			// Older pools did not freeze this field. Their admitted predecessor
-			// proves the materialization kind across restarts and cold resume.
 			required = slices.Clone(w.Spec.Workload.Runtime.RequiredFeatures)
 		} else if slices.Contains(required, workspacev1alpha1.WorkspaceFeatureNativeProcess) != slices.Contains(w.Spec.Workload.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) {
 			return nil, fmt.Errorf("pool requirements conflict with the published materialization kind")
@@ -655,8 +562,6 @@ func externalWorkspaceRuntimeRequiredFeatures(pool *corev1alpha1.RuntimePool, w 
 	return required, nil
 }
 
-// externalNativeRuntimeUID is an opaque Core fence for one immutable workload
-// sequence. Provider identifiers remain in the separate allocation evidence.
 func externalNativeRuntimeUID(request *workspacev1alpha1.WorkloadRequest) types.UID {
 	if request == nil || request.Runtime == nil || request.Runtime.PoolBinding.UID == "" || request.Key.WorkspaceUID == "" || request.Sequence < 1 {
 		return ""
@@ -690,8 +595,6 @@ func externalNativeRuntimeIdentity(request *workspacev1alpha1.WorkloadRequest, l
 	if identity.ValueFrom == nil && identity.Value == string(opaque) {
 		return opaque, true, nil
 	}
-	// Pre-fix requests are immutable. Their admitted downward identity remains
-	// usable for exact retirement, while startup and Task dispatch deny it.
 	if identity.Value == "" && identity.ValueFrom != nil && identity.ValueFrom.FieldRef != nil && legacyInstanceID != "" {
 		field := identity.ValueFrom.FieldRef
 		if (field.APIVersion == "" || field.APIVersion == "v1") && field.FieldPath == "metadata.uid" && reflect.DeepEqual(identity.ValueFrom, &corev1.EnvVarSource{FieldRef: field}) {
@@ -711,10 +614,6 @@ func (r *RuntimePoolReconciler) attestExternalWorkspaceStartup(ctx context.Conte
 	return r.attestExternalWorkspaceStartupFor(ctx, request, evidence, false)
 }
 
-// attestExternalRetiringWorkspaceStartup also accepts the exact native worker
-// while it terminates. Only paths that never admit new work may use it: drain,
-// settlement of already-accepted prompts, and exact retirement. The worker's
-// identity, process and endpoint fences are otherwise unchanged.
 func (r *RuntimePoolReconciler) attestExternalRetiringWorkspaceStartup(ctx context.Context, request *workspacev1alpha1.WorkloadRequest, evidence *workspacev1alpha1.StartupEvidence) (*corev1.Pod, error) {
 	return r.attestExternalWorkspaceStartupFor(ctx, request, evidence, true)
 }
@@ -731,10 +630,6 @@ func (r *RuntimePoolReconciler) attestExternalWorkspaceStartupFor(ctx context.Co
 	reader := uncachedReader(r.APIReader, r.Client)
 	if evidence.Process != nil {
 		process := evidence.Process
-		// A routed process is reachable only through the backend router and is
-		// confined only by the gateway allowlist; a direct process keeps the
-		// NetworkPolicy shape (validated with its frozen ingress targets).
-		// Neither may be mistaken for the other.
 		if (process.RouterTarget != "") != (request.Runtime.Egress != nil) {
 			return nil, fmt.Errorf("native startup routing does not match the admitted runtime network shape")
 		}
@@ -787,8 +682,6 @@ func (r *RuntimePoolReconciler) attestExternalWorkspaceStartupFor(ctx context.Co
 	}
 	claimName := ""
 	for _, volume := range evidence.PersistentVolumes {
-		// A Pod resolves claimName in its own namespace, regardless of the
-		// namespace supplied by provider evidence for a same-name claim.
 		if volume.Claim.Namespace != pod.Namespace {
 			return nil, fmt.Errorf("durable storage claim is outside the observed runtime Pod namespace")
 		}
@@ -829,8 +722,6 @@ func (r *RuntimePoolReconciler) attestExternalWorkspaceStartupFor(ctx context.Co
 	return pod, nil
 }
 
-// Kubernetes combines permissions from every matching policy. Provider
-// bookkeeping labels must not select rules outside the admitted network.
 func (r *RuntimePoolReconciler) verifyExternalRuntimeNetworkPolicies(ctx context.Context, runtime *workspacev1alpha1.RuntimeWorkload, pod *corev1.Pod) error {
 	if runtime.NetworkPolicy == nil {
 		return fmt.Errorf("runtime has no admitted network policy")
@@ -867,8 +758,6 @@ func (r *RuntimePoolReconciler) verifyExternalRuntimeNetworkPolicies(ctx context
 	return nil
 }
 
-// Native ingress binds an exact infrastructure worker before any credential
-// delivery. Its endpoint namespaces come from immutable Core network intent.
 func (r *RuntimePoolReconciler) ensureExternalProcessIngress(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, w *workspacev1alpha1.ExecutionWorkspace) error {
 	process := w.Status.Allocation.Startup.Process
 	worker, err := r.externalUniqueIngressWorker(ctx, process, w.Status.Allocation.Identity)
@@ -895,16 +784,9 @@ func (r *RuntimePoolReconciler) ensureExternalProcessIngress(ctx context.Context
 			return fmt.Errorf("waiting for exact predecessor ingress policies to disappear")
 		}
 	}
-	// Save the independent worker/instance fence before policy creation. A
-	// lost Create response can then be recovered or safely retired even if
-	// the provider later clears startup evidence.
 	if err := r.bindExternalRuntimeInstanceEvidence(ctx, pool, w); err != nil {
 		return err
 	}
-	// Only the provider proxy ships ingress isolation, so only it needs a
-	// grant (targets[0]). A controller grant would itself isolate the
-	// controller and lock out its other clients; operators who isolate the
-	// controller admit native workers themselves.
 	if err := r.ensureExternalIngressPolicy(ctx, pool, cfg, targets[0], worker); err != nil {
 		return err
 	}
@@ -912,16 +794,7 @@ func (r *RuntimePoolReconciler) ensureExternalProcessIngress(ctx context.Context
 	return err
 }
 
-// externalRuntimeEgressWithProviderToken compiles the native egress allowlist
-// and selects how the runtime receives the provider-proxy bearer. A provider
-// whose gateway enforces credential injection gets the token injected from
-// Core's private provider Secret, so it never enters the sandbox. Otherwise
-// admission fails closed unless the operator explicitly allowed delivering
-// the token into the sandbox through the sealed bootstrap.
 func (r *RuntimePoolReconciler) externalRuntimeEgressWithProviderToken(cfg runtimePoolConfig, registration *workspacev1alpha1.ExecutionWorkspaceProvider, provider *corev1.Secret, collectors []string) (*workspacev1alpha1.RuntimeEgressPolicy, bool, error) {
-	// An origin that cannot be admitted at all is a configuration error, not
-	// a reason to consider delivering the token into the sandbox: report it
-	// on its own.
 	if _, err := r.externalRuntimeEgressForCollectors(cfg, nil, collectors); err != nil {
 		return nil, false, err
 	}
@@ -943,9 +816,6 @@ func (r *RuntimePoolReconciler) externalRuntimeEgressWithProviderToken(cfg runti
 	return egress, false, err
 }
 
-// externalNativeCredentialBootstrap builds the sealed bootstrap payload for
-// the admitted request. When the request injects the provider-proxy token at
-// the egress gateway, the runtime receives only the public placeholder.
 func externalNativeCredentialBootstrap(request *workspacev1alpha1.WorkloadRequest, auth, provider *corev1.Secret) (harnessv2.CredentialBootstrapRequest, error) {
 	injection, err := externalRuntimeProviderTokenInjection(request)
 	if err != nil {
@@ -1012,9 +882,6 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 		!externalProviderSuspendDeadlineExceeded(w) &&
 		w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 		w.Spec.Attachment != nil {
-		// An attachment landed concurrently with DesiredReplicas -> 0
-		// scale-down; restore pool demand instead of draining and retiring a
-		// live attached runtime.
 		before := pool.DeepCopy()
 		pool.Spec.DesiredReplicas = 1
 		if err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -1057,8 +924,6 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for independent observation of the retired Pod's absence")
 		}
 		r.noteExternalRuntimeStopProven(pool, w)
-		// The Stopped report comes first and is unchanged. The rotation after
-		// it rests on the termination proof above, not on that record.
 		result, err := r.externalPoolStopped(ctx, pool, w)
 		if err == nil && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped {
 			r.rotateWorkspaceRuntimePoolAuthAfterProvenStop(ctx, pool)
@@ -1072,16 +937,9 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 	action := externalRetirementAction(w, deleting, tainted)
 	if w.Spec.Retirement == nil {
 		if action == workspacev1alpha1.WorkloadRetirementSuspend && r.externalEvictionDeadlineExceeded(pool, w) {
-			// The worker kills the instance when its eviction window ends. A
-			// suspension issued at or after that point could not prove that it
-			// captured settled work, so it is never authorized: the instance is
-			// left to fail through the provider, its last checkpoint stays
-			// retained, and accepted prompts are never replayed.
 			return r.externalEvictionProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded,
 				"runtime worker eviction window ended before the runtime drained; suspension is not authorized and uncertain work is never replayed")
 		}
-		// Queued demand needs the replacement boot, not the retiring instance.
-		// Terminal deletion and scale-down still wait for queued Tasks to settle.
 		replacing := !deleting && pool.Spec.DesiredReplicas > 0 &&
 			w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 			pool.Annotations["orka.ai/external-runtime-retirement-requested"] == booleanTrueValue
@@ -1095,10 +953,6 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 				return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "independent runtime termination observation is unavailable")
 			}
 			if !terminated && externalNativeInstanceFailed(pool, w) {
-				// A lost native process cannot answer an authenticated drain.
-				// Its Task already settled without replay, and the provider can
-				// stop that exact Actor on its own, so its terminal Failed report
-				// may authorize the Stop below. Credentials stay until it confirms.
 				terminated = true
 			}
 			if !terminated {
@@ -1148,19 +1002,12 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 		}
 	}
 	if w.Spec.Retirement != nil && w.Spec.Retirement.Action == workspacev1alpha1.WorkloadRetirementSuspend && action == workspacev1alpha1.WorkloadRetirementSuspend {
-		// Termination can begin after Suspend was authorized and before the
-		// provider started it. Keep collecting the exact worker's signal while
-		// the instance still serves startup evidence, so the authorization
-		// below gains, or moves earlier to, the eviction deadline. Admission
-		// lets a written Suspend only narrow; the drain is never repeated.
 		if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, nil, action); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 	retirement := &workspacev1alpha1.WorkloadRetirement{Sequence: w.Spec.Workload.Sequence, Identity: a.Identity, Action: action, NotAfter: externalSuspendNotAfter(pool, w, action)}
 	if action == workspacev1alpha1.WorkloadRetirementSuspend && w.Spec.Retirement == nil && r.externalEvictionDeadlineExceeded(pool, w) {
-		// Recheck immediately before authorizing: the drain probe above can
-		// outlast a short eviction window.
 		return r.externalEvictionProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded,
 			"runtime worker eviction window ended before the runtime drained; suspension is not authorized and uncertain work is never replayed")
 	}
@@ -1183,24 +1030,6 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 	return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for identity-bound provider termination and disposition")
 }
 
-// rotateWorkspaceRuntimePoolAuthAfterProvenStop rotates the private
-// credentials a stopped instance consumed once its termination is proven and
-// the pool records Stopped, instead of when a later cold boot is published,
-// so a resume does not wait for the rotation.
-//
-// It runs the same steps, in the same order, as the rotation before
-// publication (rotateConsumedWorkspaceRuntimePoolAuthSecret), under the same
-// proof: the caller has just observed the exact instance terminated, and
-// ensureExternalPrivateAuthCredential re-checks that proof before it deletes
-// the consumed Secret, observes its absence, and only then creates the fresh
-// one. The fresh credentials therefore postdate the old instance's proven
-// termination and were never delivered to it; they reach a runtime only
-// through the sealed bootstrap to the instance bound at the next attested
-// startup. The bootstrap-instance binding is cleared last, while no
-// replacement request exists.
-//
-// It is best effort. A failure leaves the remaining steps to the rotation
-// before publication, which is unchanged and still fails closed.
 func (r *RuntimePoolReconciler) rotateWorkspaceRuntimePoolAuthAfterProvenStop(ctx context.Context, pool *corev1alpha1.RuntimePool) {
 	if r.CleanupOnly || r.WorkspaceCleanupOnly {
 		return
@@ -1214,8 +1043,6 @@ func (r *RuntimePoolReconciler) rotateWorkspaceRuntimePoolAuthAfterProvenStop(ct
 	if err != nil {
 		return
 	}
-	// Unpublish the consumed Secret, replace it, then clear the instance
-	// binding: one step per iteration, each on freshly read state.
 	for range 3 {
 		if binding, bindingErr := runtimePoolBootstrapInstanceBindingFromAnnotation(pool); bindingErr != nil || binding == nil {
 			return
@@ -1237,13 +1064,6 @@ func (r *RuntimePoolReconciler) rotateWorkspaceRuntimePoolAuthAfterProvenStop(ct
 	}
 }
 
-// externalPoolStopped records a stopped instance. An eviction outcome is
-// persisted before the retirement and eviction markers that hold the pool in
-// retirement are removed: once the status write is confirmed, the outcome is
-// acknowledged in the instance's eviction record, and the markers are cleared
-// only by a later reconcile that observes that acknowledgement, so a status
-// conflict or a controller restart retries the recording instead of letting
-// the allocation cold-boot.
 func (r *RuntimePoolReconciler) externalPoolStopped(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (ctrl.Result, error) {
 	if pool.Annotations[externalRuntimeRetirementRequestedAnnotation] != "" || pool.Annotations[externalRuntimeEvictionAnnotation] != "" {
 		if externalEvictionSettlementPending(pool, w) {
@@ -1290,9 +1110,6 @@ func (r *RuntimePoolReconciler) finalizeExternalWorkspacePool(ctx context.Contex
 	if remaining {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	// Runtime credentials are core-owned and are deleted only after provider
-	// termination is proved. Attachment credentials are revoked by workspace
-	// finalization, independently of the provider's disposition.
 	if pool.DeletionTimestamp.IsZero() {
 		return r.externalPoolStopped(ctx, pool, nil)
 	}
@@ -1301,8 +1118,6 @@ func (r *RuntimePoolReconciler) finalizeExternalWorkspacePool(ctx context.Contex
 	if err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, err
 	}
-	// A deleted pool never records Stopped: its released finalizer is the
-	// persisted proof that the runtime stopped.
 	if before.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped {
 		r.observeExternalRuntimeStop(ctx, pool)
 	}
@@ -1311,8 +1126,6 @@ func (r *RuntimePoolReconciler) finalizeExternalWorkspacePool(ctx context.Contex
 }
 
 func (r *RuntimePoolReconciler) deleteExternalRuntimePoolCoreResources(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) (bool, error) {
-	// Core observes termination; it never deletes provider compute to make a
-	// provider's deletion assertion become true.
 	w, err := r.externalPoolWorkspace(ctx, pool)
 	if err != nil {
 		return false, err
@@ -1354,11 +1167,6 @@ func (r *RuntimePoolReconciler) externalObservedInstanceTerminated(ctx context.C
 			return false, workspaceprovider.ErrStaleIdentity
 		}
 		if binding.NativeProcess || binding.Sequence != w.Status.Allocation.Sequence {
-			// The worker is infrastructure, not the native process. For an
-			// unbootstrapped replacement the saved evidence is its terminated
-			// predecessor. Neither may be mistaken for the current runtime Pod.
-			// Only the exact core-authorized current termination claim can
-			// release credentials in these cases.
 			a, retirement := w.Status.Allocation, w.Spec.Retirement
 			if retirement == nil || retirement.Sequence != a.Sequence || retirement.Identity != a.Identity ||
 				w.Status.ObservedGeneration != w.Generation || a.Startup != nil ||
@@ -1375,9 +1183,6 @@ func (r *RuntimePoolReconciler) externalObservedInstanceTerminated(ctx context.C
 	return r.externalPodUIDAbsent(ctx, namespace, uid)
 }
 
-// A replacement may be cancelled before startup attestation. Its predecessor's
-// binding remains until credential delivery; it is not a conflicting current
-// binding when the immutable request names that exact retired predecessor.
 func (r *RuntimePoolReconciler) externalRetirementEvidenceCompatible(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (bool, error) {
 	binding, err := externalRuntimeEvidence(pool)
 	if err != nil {
@@ -1398,8 +1203,6 @@ func (r *RuntimePoolReconciler) externalRetirementEvidenceCompatible(ctx context
 		return false, nil
 	}
 	if binding.NativeProcess {
-		// Core published this predecessor reference only after observing its
-		// authorized termination. A worker may survive that process lifetime.
 		return true, nil
 	}
 	return r.externalPodUIDAbsent(ctx, binding.Pod.Namespace, binding.Pod.UID)
@@ -1434,7 +1237,6 @@ func externalRuntimeEvidence(pool *corev1alpha1.RuntimePool) (*externalRuntimeIn
 		return nil, workspaceprovider.ErrStaleIdentity
 	}
 	if binding.NativeProcess && binding.RuntimeUID == "" {
-		// Old evidence can retain its exact already-admitted fence for cleanup.
 		binding.RuntimeUID = types.UID(binding.Identity.InstanceID)
 	}
 	return &binding, nil
@@ -1448,10 +1250,6 @@ func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceEvidence(ctx context.
 	return r.patchExternalRuntimeAdmissionBindings(ctx, pool, evidence, "")
 }
 
-// desiredExternalRuntimeInstanceEvidence returns the instance-evidence
-// annotation the current startup requires, or "" when the pool already
-// records exactly it. It refuses evidence that does not continue the recorded
-// instance's lineage.
 func desiredExternalRuntimeInstanceEvidence(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (string, error) {
 	a := w.Status.Allocation
 	binding := externalRuntimeInstanceEvidence{WorkspaceUID: w.UID, Sequence: a.Sequence, Identity: a.Identity, Endpoint: a.Startup.Endpoint}
@@ -1486,13 +1284,6 @@ func desiredExternalRuntimeInstanceEvidence(pool *corev1alpha1.RuntimePool, w *w
 	return string(encoded), nil
 }
 
-// bindExternalRuntimeInstanceAdmission records, in one optimistic pool
-// write, the independently observed instance evidence and the binding of the
-// private bootstrap credentials to that exact workload. Each is validated
-// exactly as when they were written separately: evidenceErr reports evidence
-// that conflicts with the recorded instance (nothing is written), and
-// bootstrapErr a credential binding to another workload (the evidence is
-// still recorded, as before, and the binding is not).
 func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceAdmission(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -1514,10 +1305,6 @@ func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceAdmission(
 	return nil, bootstrapErr
 }
 
-// patchExternalRuntimeAdmissionBindings writes the non-empty annotation
-// values in one patch, which refreshes pool in place. Evidence keeps its
-// optimistic lock; a credential binding alone keeps its plain merge patch, as
-// when each was written on its own.
 func (r *RuntimePoolReconciler) patchExternalRuntimeAdmissionBindings(ctx context.Context, pool *corev1alpha1.RuntimePool, evidence, bootstrap string) error {
 	if evidence == "" && bootstrap == "" {
 		return nil
@@ -1541,10 +1328,6 @@ func (r *RuntimePoolReconciler) patchExternalRuntimeAdmissionBindings(ctx contex
 	return r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 
-// externalProviderServesBinding reports whether a provider may still act for
-// the workspace's frozen binding. Like Task dispatch, an Active provider must
-// still be the frozen generation; Draining keeps serving the workspace it
-// already bound.
 func externalProviderServesBinding(provider *workspacev1alpha1.ExecutionWorkspaceProvider, w *workspacev1alpha1.ExecutionWorkspace) bool {
 	bound := w.Spec.ProviderBinding.Generation
 	generationMatches := provider.Generation == bound ||
@@ -1566,14 +1349,10 @@ func externalProviderUsable(provider *workspacev1alpha1.ExecutionWorkspaceProvid
 	return slices.Contains(provider.Status.SupportedContracts, workspacev1alpha1.LifecycleContractV1) && slices.Contains(provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureACPRuntime)
 }
 
-// runtimePoolWorkspaceStartupPod returns only the exact materialization whose
-// identity and complete endpoint Core observed before releasing credentials.
 func runtimePoolWorkspaceStartupPod(ctx context.Context, reader client.Reader, pool *corev1alpha1.RuntimePool) (*corev1.Pod, error) {
 	return runtimePoolWorkspaceBoundStartupPod(ctx, reader, pool, true)
 }
 
-// Cleanup retains an already-bound legacy native fence without admitting it
-// to a new Task or replacing its immutable workload identity.
 func runtimePoolWorkspaceCleanupPod(ctx context.Context, reader client.Reader, pool *corev1alpha1.RuntimePool) (*corev1.Pod, error) {
 	return runtimePoolWorkspaceBoundStartupPod(ctx, reader, pool, false)
 }
@@ -1614,8 +1393,6 @@ func runtimePoolWorkspaceBoundStartupPod(ctx context.Context, reader client.Read
 	if pinned == nil || *pinned != evidence.Pod || native != evidence.NativeProcess {
 		return nil, workspaceprovider.ErrStaleIdentity
 	}
-	// Cleanup never admits work; it must keep reaching a runtime whose worker
-	// is terminating so already-accepted prompts can settle before suspension.
 	attest := r.attestExternalWorkspaceStartup
 	if !requireOpaqueIdentity {
 		attest = r.attestExternalRetiringWorkspaceStartup
@@ -1655,8 +1432,6 @@ func runtimePoolWorkspaceCleanupEndpoint(ctx context.Context, reader client.Read
 	return endpoint, nil
 }
 
-// externalNativeInstanceFailed reports a provider's terminal Failed claim for
-// the exact native instance Core bound and admitted, with startup withdrawn.
 func externalNativeInstanceFailed(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) bool {
 	evidence, err := externalRuntimeEvidence(pool)
 	a := w.Status.Allocation
@@ -1666,10 +1441,6 @@ func externalNativeInstanceFailed(pool *corev1alpha1.RuntimePool, w *workspacev1
 		w.Spec.Workload != nil && a.Sequence == w.Spec.Workload.Sequence && a.Key == w.Spec.Workload.Key
 }
 
-// Loss of an independently observed runtime Pod makes authenticated drain
-// impossible. Its exact UID's absence can release retirement intent only after
-// controller work is quiescent. Infrastructure worker Pods cannot establish
-// this exception for a native process; see externalNativeInstanceFailed.
 func (r *RuntimePoolReconciler) externalActivePodTerminationProven(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (bool, error) {
 	evidence, err := externalRuntimeEvidence(pool)
 	if err != nil {
@@ -1684,9 +1455,6 @@ func (r *RuntimePoolReconciler) externalActivePodTerminationProven(ctx context.C
 	return r.externalPodUIDAbsent(ctx, evidence.Pod.Namespace, evidence.Pod.UID)
 }
 
-// A provider may reject a public request before allocating any instance. Its
-// terminal no-compute proof releases only core-owned resources, and only if
-// core has never attested an instance or begun credential delivery.
 func externalNeverBootstrappedDeletionProven(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) bool {
 	if pool.Status.ActiveInstance != nil || !runtimePoolControllerWorkIsQuiescent(pool.Status.Capacity) ||
 		pool.Annotations[externalRuntimeEvidenceAnnotation] != "" || pool.Annotations[runtimePoolBootstrapInstanceBindingAnnotation] != "" ||

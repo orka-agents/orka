@@ -45,8 +45,6 @@ import (
 	"github.com/orka-agents/orka/internal/taskwait"
 )
 
-// attentionFreeText marks agent- and runtime-authored text that the
-// attention views must never return.
 const attentionFreeText = "FREE-TEXT-MUST-NOT-LEAK"
 
 type attentionCountingEventStore struct {
@@ -264,7 +262,7 @@ func TestAttentionRanksSafeSummariesAndReadsOnlyCandidateStreams(t *testing.T) {
 	workerIdentifier := attentionWaitingTask("worker-identifier")
 	expired := attentionWaitingTask("expired")
 	decided := attentionWaitingTask("decided")
-	quiet := attentionTask("quiet", string(corev1alpha1.TaskPhaseRunning)) // approval events, no condition
+	quiet := attentionTask("quiet", string(corev1alpha1.TaskPhaseRunning))
 	completed := attentionTask("completed-terminal", string(corev1alpha1.TaskPhaseSucceeded))
 	completed.Status.Conditions = worker.Status.Conditions
 	unknown := attentionTask("unknown", string(corev1alpha1.TaskPhaseFailed))
@@ -334,8 +332,6 @@ func TestAttentionRanksSafeSummariesAndReadsOnlyCandidateStreams(t *testing.T) {
 	require.Empty(t, response.Items[2].Approval.Severity, "unknown severities are dropped")
 	require.Equal(t, "ErrImagePull", response.Items[8].Reason)
 	require.Equal(t, attentionPodWaitingUnknown, response.Items[7].Reason)
-	// A worker approval past its expiresAt stays decidable, as the per-Task
-	// API keeps it pending, and its untrusted expiresAt is not a deadline.
 	require.Equal(t, "expired-approval", response.Items[4].Approval.ID)
 	require.Equal(t, AttentionApprovalSourceWorker, response.Items[4].Approval.Source)
 	require.Nil(t, response.Items[4].Deadline)
@@ -364,7 +360,7 @@ func TestAttentionParkedApprovalNeedsArmedWait(t *testing.T) {
 	now := time.Now().UTC()
 	armed := attentionParkedTask("armed", "armed-approval", now.Add(time.Hour))
 	requested := attentionParkedTask("requested", "requested-approval", now.Add(time.Hour))
-	requested.Status.Wait.State = corev1alpha1.TaskWaitStateRequested // turn Succeeded: decidable
+	requested.Status.Wait.State = corev1alpha1.TaskWaitStateRequested
 	failedTurn := attentionParkedTask("failed-turn", "failed-turn-approval", now.Add(time.Hour))
 	failedTurn.Status.Phase = corev1alpha1.TaskPhaseFailed
 	failedTurn.Status.Wait.State = corev1alpha1.TaskWaitStateRequested
@@ -395,7 +391,6 @@ func TestAttentionPaginationIsStableAndCursorIsBound(t *testing.T) {
 	objects := make([]client.Object, 0, 5)
 	for _, name := range []string{"a", "b", "c", "d", "e"} {
 		task := attentionTask("failed-"+name, string(corev1alpha1.TaskPhaseFailed))
-		// Two pairs share a completion time, so names break the tie.
 		offset := map[string]time.Duration{"a": 3, "b": 1, "c": 1, "d": 2, "e": 2}[name]
 		task.Status.CompletionTime = &metav1.Time{Time: now.Add(-offset * time.Minute)}
 		objects = append(objects, task)
@@ -448,8 +443,6 @@ func TestAttentionPaginationIsStableAndCursorIsBound(t *testing.T) {
 	require.Equal(t, []string{"failed/failed-b", "failed/failed-c"}, attentionKinds(narrow.Items))
 }
 
-// A continue token is not integrity-protected, so a hand-made one cannot
-// widen the window past the since limit or move it into the future.
 func TestAttentionCursorWindowIsBounded(t *testing.T) {
 	now := time.Now().UTC()
 	f := newAttentionFixture(t, nil)
@@ -476,8 +469,6 @@ func TestAttentionCursorWindowIsBounded(t *testing.T) {
 	}
 }
 
-// An approval ID comes from event content with no length limit; the continue
-// token carries only its digest, so paging past it still works.
 func TestAttentionPaginatesPastLongApprovalIDs(t *testing.T) {
 	long := strings.Repeat("x", 3*attentionCursorMaxBytes)
 	f := newAttentionFixture(t, []client.Object{attentionWaitingTask("long"), attentionWaitingTask("short")})
@@ -521,20 +512,17 @@ func TestAttentionRequesterOnlyApproveRule(t *testing.T) {
 		return out
 	}
 
-	// Another OIDC person may decline but not approve.
 	f.user = &UserInfo{Username: "bob", AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "bob"}
 	got := capabilities()
 	require.False(t, *got["delegated"][0])
 	require.True(t, *got["delegated"][1])
 	require.True(t, *got["plain"][0])
 
-	// The requester may do both.
 	f.user = &UserInfo{Username: "requester", AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "requester"}
 	got = capabilities()
 	require.True(t, *got["delegated"][0])
 	require.True(t, *got["delegated"][1])
 
-	// A ServiceAccount can never be the requester, even with every grant.
 	f.user = &UserInfo{Username: "system:serviceaccount:default:ops", AuthType: AuthTypeTokenReview}
 	got = capabilities()
 	require.False(t, *got["delegated"][0])
@@ -650,8 +638,6 @@ func TestAttentionContextTokenAuthorization(t *testing.T) {
 	require.True(t, *response.Items[0].Approval.CanDecline)
 }
 
-// A caller that may list Tasks but not read them gets no approval detail,
-// and sources.approvals says the approval coverage is partial.
 func TestAttentionReportsPartialApprovalCoverage(t *testing.T) {
 	failed := attentionTask("failed", string(corev1alpha1.TaskPhaseFailed))
 	failed.Status.CompletionTime = &metav1.Time{Time: time.Now().Add(-time.Minute)}
@@ -779,8 +765,6 @@ func TestAttentionReportsIncompleteScans(t *testing.T) {
 		"a stream past its bound is left out, never derived from a prefix")
 }
 
-// A stream over its approval-event budget is detected with at most one event
-// past the budget, not another full page.
 func TestAttentionApprovalEventReadsStopAtBudget(t *testing.T) {
 	f := newAttentionFixture(t, []client.Object{attentionWaitingTask("busy")})
 	for i := range 50 {

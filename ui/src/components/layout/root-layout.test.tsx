@@ -34,11 +34,8 @@ describe('RootLayout', () => {
 
   it('contains sidebar, header, and main content area', () => {
     render(<RootLayout />)
-    // Sidebar renders nav items
     expect(screen.getByText('Dashboard')).toBeInTheDocument()
-    // Header renders namespace selector
     expect(screen.getByText('default')).toBeInTheDocument()
-    // Outlet is the main content area
     expect(screen.getByTestId('outlet')).toBeInTheDocument()
   })
 

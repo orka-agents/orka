@@ -16,15 +16,12 @@ const (
 	MaxControlIdentifierBytes = 1024
 )
 
-// ControllerEpochFence fences a mutation to one exact controller epoch and
-// holder. Both values are checked transactionally before a durable mutation.
 type ControllerEpochFence struct {
 	Name     string `json:"name"`
 	Epoch    int64  `json:"epoch"`
 	HolderID string `json:"holderId"`
 }
 
-// ControllerEpoch is the durable CAS record for controller ownership.
 type ControllerEpoch struct {
 	Name          string    `json:"name"`
 	Epoch         int64     `json:"epoch"`
@@ -35,14 +32,12 @@ type ControllerEpoch struct {
 	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
-// VerifiedBranchBaseline is the independently verified session baseline.
 type VerifiedBranchBaseline struct {
 	RepositoryID string `json:"repositoryId"`
 	Ref          string `json:"ref"`
 	SHA          string `json:"sha"`
 }
 
-// SessionTurnState is the durable state of a SessionTurn.
 type SessionTurnState string
 
 const (
@@ -50,7 +45,6 @@ const (
 	SessionTurnFinalized SessionTurnState = "Finalized"
 )
 
-// SessionTurnTerminalKind determines the canonical transcript terminal entry.
 type SessionTurnTerminalKind string
 
 const (
@@ -58,7 +52,6 @@ const (
 	SessionTurnOutcomeMarker   SessionTurnTerminalKind = "OutcomeMarker"
 )
 
-// SessionTurnKey is the full finalization fence.
 type SessionTurnKey struct {
 	SessionUID      string `json:"sessionUid"`
 	LeaseGeneration int64  `json:"leaseGeneration"`
@@ -67,7 +60,6 @@ type SessionTurnKey struct {
 	PromptID        string `json:"promptId"`
 }
 
-// CanonicalID returns a stable identifier for the exact finalization fence.
 func (k SessionTurnKey) CanonicalID() (string, error) {
 	if err := k.Validate(); err != nil {
 		return "", err
@@ -75,7 +67,6 @@ func (k SessionTurnKey) CanonicalID() (string, error) {
 	return CanonicalControlID("session-turn", k.SessionUID, strconv.FormatInt(k.LeaseGeneration, 10), k.TaskUID, strconv.FormatInt(k.Attempt, 10), k.PromptID), nil
 }
 
-// Validate validates a SessionTurn key.
 func (k SessionTurnKey) Validate() error {
 	if err := validateControlIdentifier("session UID", k.SessionUID); err != nil {
 		return err
@@ -92,7 +83,6 @@ func (k SessionTurnKey) Validate() error {
 	return validateControlIdentifier("prompt ID", k.PromptID)
 }
 
-// SessionTurn is one durable mutation lease use and transcript finalization.
 type SessionTurn struct {
 	ID                    string                  `json:"id"`
 	Key                   SessionTurnKey          `json:"key"`
@@ -118,7 +108,6 @@ type SessionTurn struct {
 	UpdatedAt             time.Time               `json:"updatedAt"`
 }
 
-// BranchClaimAvailability gates branch mutation.
 type BranchClaimAvailability string
 
 const (
@@ -126,19 +115,15 @@ const (
 	BranchClaimReconciliationBlocked BranchClaimAvailability = "ReconciliationBlocked"
 )
 
-// RemoteRefState is an exact remote observation. Exactly one of Absent or SHA
-// is set.
 type RemoteRefState struct {
 	Absent bool   `json:"absent"`
 	SHA    string `json:"sha,omitempty"`
 }
 
-// Equal reports exact equality.
 func (r RemoteRefState) Equal(other RemoteRefState) bool {
 	return r.Absent == other.Absent && r.SHA == other.SHA
 }
 
-// Validate validates an exact remote observation.
 func (r RemoteRefState) Validate(field string) error {
 	if r.Absent == (r.SHA != "") {
 		return ValidationErrorf("%s must set exactly one of absent or SHA", field)
@@ -149,7 +134,6 @@ func (r RemoteRefState) Validate(field string) error {
 	return nil
 }
 
-// PublicationState is the clean-room publication state.
 type PublicationState string
 
 const (
@@ -166,7 +150,6 @@ const (
 	PublicationOutcomeUnknown         PublicationState = "PublicationOutcomeUnknown"
 )
 
-// IsTerminalPublicationState reports whether publication reconciliation is resolved or terminally ambiguous.
 func IsTerminalPublicationState(state PublicationState) bool {
 	switch state {
 	case PublicationVerifiedExact, PublicationDeliveredSuperseded,
@@ -178,7 +161,6 @@ func IsTerminalPublicationState(state PublicationState) bool {
 	}
 }
 
-// PullRequestIntent is the exact forge identity persisted before a call.
 type PullRequestIntent struct {
 	BaseRepositoryID      string `json:"baseRepositoryId"`
 	BaseRef               string `json:"baseRef"`
@@ -203,7 +185,6 @@ type PreparedPublicationReceipt struct {
 	PreparedAt       time.Time `json:"preparedAt"`
 }
 
-// PublishOperationReceipt records the exact server-enforced ref CAS request.
 type PublishOperationReceipt struct {
 	OperationID            string         `json:"operationId"`
 	RequestDigest          string         `json:"requestDigest"`
@@ -215,7 +196,6 @@ type PublishOperationReceipt struct {
 	PublishedAt            time.Time      `json:"publishedAt"`
 }
 
-// PublicationVerificationReceipt is an independently observed remote receipt.
 type PublicationVerificationReceipt struct {
 	OperationID           string           `json:"operationId"`
 	RequestDigest         string           `json:"requestDigest"`
@@ -226,7 +206,6 @@ type PublicationVerificationReceipt struct {
 	VerifiedAt            time.Time        `json:"verifiedAt"`
 }
 
-// PublicationReceipt is the immutable receipt snapshot used by SessionTurn finalization.
 type PublicationReceipt struct {
 	PublicationID string                          `json:"publicationId"`
 	Generation    int64                           `json:"generation"`
@@ -237,7 +216,6 @@ type PublicationReceipt struct {
 	PullRequest   *PullRequestOperationReceipt    `json:"pullRequest,omitempty"`
 }
 
-// PullRequestOperationReceipt snapshots the exact forge reconciliation result.
 type PullRequestOperationReceipt struct {
 	OperationID   string    `json:"operationId"`
 	RequestDigest string    `json:"requestDigest"`
@@ -249,7 +227,6 @@ type PullRequestOperationReceipt struct {
 	ReconciledAt  time.Time `json:"reconciledAt"`
 }
 
-// OutboxProjectionState is the restart-safe projection delivery state.
 type OutboxProjectionState string
 
 const (
@@ -259,7 +236,6 @@ const (
 	OutboxProjectionDeadLetter OutboxProjectionState = "DeadLetter"
 )
 
-// OutboxProjection is one durable transactional-outbox record.
 type OutboxProjection struct {
 	ID                  string                `json:"id"`
 	AggregateKind       string                `json:"aggregateKind"`
@@ -285,7 +261,6 @@ type OutboxProjection struct {
 	DeliveredAt         *time.Time            `json:"deliveredAt,omitempty"`
 }
 
-// ClaimOutboxProjectionsRequest leases due projection records.
 type ClaimOutboxProjectionsRequest struct {
 	Fence         ControllerEpochFence `json:"fence"`
 	WorkerID      string               `json:"workerId"`
@@ -294,7 +269,6 @@ type ClaimOutboxProjectionsRequest struct {
 	Now           time.Time            `json:"now"`
 }
 
-// CompleteOutboxProjectionRequest completes, retries, or dead-letters an exact lease.
 type CompleteOutboxProjectionRequest struct {
 	ID              string                `json:"id"`
 	Fence           ControllerEpochFence  `json:"fence"`
@@ -323,7 +297,6 @@ func writeCanonicalComponent(w hash.Hash, value string) {
 	_, _ = w.Write([]byte(value))
 }
 
-// ValidateCanonicalDigest requires a lowercase full-entropy SHA-256 digest.
 func ValidateCanonicalDigest(field, value string) error {
 	if !strings.HasPrefix(value, "sha256:") || len(value) != len("sha256:")+sha256.Size*2 {
 		return ValidationErrorf("%s must be a canonical sha256 digest", field)
@@ -338,7 +311,6 @@ func ValidateCanonicalDigest(field, value string) error {
 	return nil
 }
 
-// ValidateGitObjectID accepts canonical lowercase SHA-1 or SHA-256 Git object IDs.
 func ValidateGitObjectID(field, value string) error {
 	if len(value) != 40 && len(value) != 64 {
 		return ValidationErrorf("%s must be a 40- or 64-character Git object ID", field)
@@ -352,7 +324,6 @@ func ValidateGitObjectID(field, value string) error {
 	return nil
 }
 
-// ValidateControlIdentifier validates a bounded, exact, non-control identifier.
 func ValidateControlIdentifier(field, value string) error {
 	return validateControlIdentifier(field, value)
 }
@@ -379,14 +350,11 @@ func validateControlIdentifier(field, value string) error {
 }
 
 const (
-	// DefaultControllerEpochName is the singleton epoch used by the first
-	// single-controller durable-control-store deployment.
 	DefaultControllerEpochName = "orka-controller"
 	maxControlReasonBytes      = 16 * 1024
 	maxControlPayloadBytes     = 4 * 1024 * 1024
 )
 
-// ValidateFullBranchRef requires a canonical full branch ref.
 func ValidateFullBranchRef(ref string) error {
 	if err := validateControlIdentifier("branch ref", ref); err != nil {
 		return err
@@ -400,12 +368,10 @@ func ValidateFullBranchRef(ref string) error {
 	return nil
 }
 
-// ValidateControlReason validates a bounded human-readable reason.
 func ValidateControlReason(field, value string) error {
 	return validateControlReason(field, value)
 }
 
-// ValidateControlPayload validates bounded JSON used in durable control records.
 func ValidateControlPayload(field string, payload []byte) error {
 	return validateControlPayload(field, payload)
 }

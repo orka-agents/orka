@@ -10,9 +10,6 @@ import (
 	"time"
 )
 
-// UsageWorkRequest identifies an original monitor request, before model work.
-// Namespace is the team boundary. It is supplied by the controller, never by
-// model output or caller-supplied billing metadata.
 type UsageWorkRequest struct {
 	ID           string    `json:"id"`
 	Namespace    string    `json:"namespace"`
@@ -25,8 +22,6 @@ type UsageWorkRequest struct {
 	StartedAt    time.Time `json:"startedAt"`
 }
 
-// UsageTask retains only identifiers, classification and execution state.
-// WorkID is set by monitor task creation or inherited from a verified parent.
 type UsageTask struct {
 	Namespace       string             `json:"namespace"`
 	NamespaceUID    string             `json:"namespaceUID,omitempty"`
@@ -45,20 +40,15 @@ type UsageTask struct {
 	PhaseObservedAt time.Time          `json:"-"`
 	PhaseAttempt    int32              `json:"-"`
 	GatewayOwner    *UsageGatewayOwner `json:"gatewayOwner,omitempty"`
-	// Requester and AHPTurn are retained for access checks only; reports
-	// omit them. AHPTurn marks a Task that was private as an AHP turn.
-	Requester *UsageRequester `json:"requester,omitempty"`
-	AHPTurn   bool            `json:"ahpTurn,omitempty"`
+	Requester       *UsageRequester    `json:"requester,omitempty"`
+	AHPTurn         bool               `json:"ahpTurn,omitempty"`
 }
 
-// UsageRequester retains who requested a Task, so access that depends on
-// the requester survives Task cleanup.
 type UsageRequester struct {
 	Issuer  string `json:"issuer"`
 	Subject string `json:"subject"`
 }
 
-// UsageGatewayOwner retains the immutable access boundary after Task cleanup.
 type UsageGatewayOwner struct {
 	Namespace    string `json:"namespace"`
 	NamespaceUID string `json:"namespaceUID"`
@@ -66,9 +56,6 @@ type UsageGatewayOwner struct {
 	UID          string `json:"uid"`
 }
 
-// UsageTaskPhase retains the lifecycle timestamp in ObservedAt for ordering
-// and retention. RecordedAt is when the store first learned this state. Legacy
-// entries without RecordedAt remain visible at their original ObservedAt.
 type UsageTaskPhase struct {
 	Phase      string    `json:"phase"`
 	ObservedAt time.Time `json:"observedAt"`
@@ -76,11 +63,6 @@ type UsageTaskPhase struct {
 	Attempt    int32     `json:"attempt,omitempty"`
 }
 
-// UsageObservation is a counts-only snapshot. CounterID identifies a cumulative
-// counter, not an event: repeated snapshots and final summaries replace its
-// high-water mark. A different provider call must use a different counter.
-// InputTokens includes cache reads/writes; those fields are breakdowns only.
-// Nil counts mean unavailable, including subscriptions without reported usage.
 type UsageObservation struct {
 	ID                    string    `json:"id"`
 	Namespace             string    `json:"namespace"`
@@ -103,7 +85,6 @@ type UsageObservation struct {
 	ObservedAt            time.Time `json:"observedAt"`
 }
 
-// UsagePRLink is written only after a controller-owned GitHub publication.
 type UsagePRLink struct {
 	Namespace    string    `json:"namespace"`
 	NamespaceUID string    `json:"namespaceUID,omitempty"`
@@ -115,8 +96,6 @@ type UsagePRLink struct {
 	LinkedAt     time.Time `json:"linkedAt"`
 }
 
-// UsagePullRequest is an authenticated GitHub observation, including readiness
-// of exactly HeadSHA. Observations are retained so an as-of report is repeatable.
 type UsagePullRequest struct {
 	Namespace       string     `json:"namespace"`
 	NamespaceUID    string     `json:"namespaceUID,omitempty"`
@@ -135,8 +114,7 @@ type UsagePullRequest struct {
 }
 
 type UsageFilter struct {
-	Namespaces []string `json:"teams"`
-	// NamespaceUIDs is supplied by the server after live namespace lookup.
+	Namespaces    []string          `json:"teams"`
 	NamespaceUIDs map[string]string `json:"-"`
 	WorkID        string            `json:"-"`
 	MaxRecords    int               `json:"-"`
@@ -149,25 +127,16 @@ type UsageFilter struct {
 }
 
 type UsageData struct {
-	Works []UsageWorkRequest
-	Tasks []UsageTask
-	// Observations with equal timestamps are in durable accounting order.
-	Observations  []UsageObservation
-	Links         []UsagePRLink
-	PullRequests  []UsagePullRequest
-	RetainedSince *time.Time
-	// HiddenTasks are accounted for only as cumulative-counter baselines. Their
-	// counts and identifiers must not appear in the public report.
-	HiddenTasks map[string]bool
-	// HiddenSessionBaselines names sessions, as namespace/session, whose
-	// counters' first total must not appear in the public report: it may hold
-	// usage of a Task the report cannot see, even one whose row is gone.
-	// Later gains are still attributed.
+	Works                  []UsageWorkRequest
+	Tasks                  []UsageTask
+	Observations           []UsageObservation
+	Links                  []UsagePRLink
+	PullRequests           []UsagePullRequest
+	RetainedSince          *time.Time
+	HiddenTasks            map[string]bool
 	HiddenSessionBaselines map[string]bool
 }
 
-// UsageStore is independent of task/transcript cleanup. Implementations must
-// make repeated observations idempotent and preserve immutable work ownership.
 type UsageStore interface {
 	RegisterUsageWork(context.Context, UsageWorkRequest) error
 	RegisterUsageTask(context.Context, UsageTask) error
@@ -176,33 +145,16 @@ type UsageStore interface {
 	RecordUsagePullRequest(context.Context, UsagePullRequest) error
 	LoadUsage(context.Context, UsageFilter) (UsageData, error)
 	ListUsagePullRequestLinks(context.Context, string, string, time.Time, int) ([]UsagePRLink, error)
-	// ListUsageTasksInSessions returns, up to limit, the retained rows of a
-	// namespace's Tasks that continued any of the named sessions, by name
-	// without surrounding space, whatever their period. A namespace UID, when
-	// given, keeps out the rows of an earlier namespace of the same name.
-	// Rows of Tasks that started after startedBy, when it is not zero, are
-	// left out and do not count against the limit. Past the limit it returns
-	// ErrUsageSelectionTooLarge.
 	ListUsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, startedBy time.Time, limit int) ([]UsageTask, error)
 	PruneUsage(context.Context, time.Time) error
 }
 
-// TaskUsageObservationReader returns the observations Orka needs to
-// attribute token usage to one Task.
 type TaskUsageObservationReader interface {
-	// ListTaskCounterObservations returns every observation, from any Task,
-	// of each usage counter that the Task has observed, in accounting order:
-	// by observed time, then in the order the provider recorded them. Other
-	// Tasks' observations of a shared counter are the baselines that keep
-	// their usage out of this Task's share.
 	ListTaskCounterObservations(ctx context.Context, namespace, taskUID string) ([]UsageObservation, error)
 }
 
 var ErrUsageSelectionTooLarge = errors.New("usage report selection is too large")
 
-// ValidateUsageObservation applies the rules every recorded observation must
-// satisfy. Providers enforce them in RecordUsage and for observations carried
-// by execution events.
 func ValidateUsageObservation(observation UsageObservation) error {
 	if observation.ID == "" || observation.Namespace == "" || observation.CounterID == "" || observation.ObservedAt.IsZero() {
 		return ValidationErrorf("usage observation requires identity, namespace, counter and timestamp")
@@ -237,7 +189,6 @@ func ValidateUsageObservation(observation UsageObservation) error {
 	return nil
 }
 
-// MaxUsageTokenCount is the largest exactly representable JSON integer for UI clients.
 const MaxUsageTokenCount int64 = 1<<53 - 1
 
 const (
@@ -256,7 +207,6 @@ const (
 	UsagePRReview        = "review_only"
 )
 
-// UsageWorkID keeps retries and follow-up commands for one issue together.
 func UsageWorkID(namespace, monitorUID, repository, kind string, number int64) string {
 	repository = strings.ToLower(strings.TrimSpace(repository))
 	data, _ := json.Marshal([]any{namespace, monitorUID, repository, kind, number})

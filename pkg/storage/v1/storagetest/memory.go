@@ -50,8 +50,6 @@ func runMemories(t *testing.T, newProvider StateFactory) {
 		stored, err := p.GetMemory(ctx, memoryTenant, assigned.ID)
 		require.NoError(t, err)
 		require.Equal(t, storagev1.MemorySourceManual, stored.Source)
-		// mem-new was created before mem-old but updated after it: memories
-		// list by update time, not creation time.
 		for _, memory := range []struct {
 			id               string
 			created, updated time.Duration
@@ -246,8 +244,6 @@ func runMemories(t *testing.T, newProvider StateFactory) {
 		require.NoError(t, err)
 		require.Empty(t, listed, "a refused proposal is not stored")
 
-		// The skill proposal was created first but updated last: proposals
-		// list by creation time.
 		skill := &storagev1.MemoryProposal{Namespace: memoryTenant, Title: "Retry skill", SkillName: "retry",
 			Content: "Back off exponentially", CreatedAt: at, UpdatedAt: at.Add(time.Hour)}
 		require.NoError(t, p.CreateMemoryProposal(ctx, skill))

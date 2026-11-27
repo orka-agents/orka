@@ -45,8 +45,6 @@ func TestTaskSoulBindingDeletionPreservesBoundGeneration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			validator := newTestTaskExecutionAuthorityValidator(t)
 			old := soulBoundAdmissionTask()
-			// The API server advances generation when deletion begins, without
-			// changing the spec whose generation the soul binding records.
 			old.Generation = 2
 			now := metav1.Now()
 			old.DeletionTimestamp = &now

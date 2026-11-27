@@ -33,8 +33,6 @@ func WorkspaceBootstrapNonce(publicKey string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ReadSubstrateActorIdentity reads the provider's read-only SystemInfo projection.
-// Absence identifies an ordinary Kubernetes runtime; partial projections fail closed.
 func ReadSubstrateActorIdentity(directory string) (*SubstrateActorIdentity, error) {
 	info, err := os.Lstat(directory)
 	if os.IsNotExist(err) {

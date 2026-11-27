@@ -14,12 +14,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ExternalEffectReferencesTask scopes cleanup to an approval's recorded Task.
-// Continuation Tasks share a RuntimeSession aggregate, so that aggregate alone
-// cannot identify whose approval must settle. Only the immutable spec binding
-// may exclude another Task's effect. Legacy discovery labels can add candidates,
-// but cannot override the conservative aggregate check. This grants no execution
-// authority and does not make the effect subject to Task garbage collection.
 func ExternalEffectReferencesTask(effect *corev1alpha1.ExternalEffect, taskUID string, relatedAggregates map[string]struct{}) bool {
 	if approvalTaskUID := effect.Spec.ApprovalTaskUID; approvalTaskUID != "" {
 		return approvalTaskUID == taskUID
@@ -31,7 +25,6 @@ func ExternalEffectReferencesTask(effect *corev1alpha1.ExternalEffect, taskUID s
 	return related
 }
 
-// ReserveExternalEffect creates or returns the same-digest canonical effect.
 func (s *Store) ReserveExternalEffect(ctx context.Context, request store.ReserveExternalEffectRequest) (*store.ExternalEffect, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, err
@@ -98,7 +91,6 @@ func (s *Store) ReserveExternalEffect(ctx context.Context, request store.Reserve
 	return s.completeExternalEffectCreation(ctx, object, request, id, fence, snapshot)
 }
 
-// GetExternalEffect returns an effect by canonical ID within the configured watch scope.
 func (s *Store) GetExternalEffect(ctx context.Context, id string) (*store.ExternalEffect, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, err
@@ -115,9 +107,6 @@ func (s *Store) GetExternalEffect(ctx context.Context, id string) (*store.Extern
 	return &result, nil
 }
 
-// GetExternalEffectByIdentity resolves an external effect through its exact
-// deterministic Kubernetes object key. Authorization paths must not depend on
-// namespace-wide LIST visibility immediately after the effect lease CAS.
 func (s *Store) GetExternalEffectByIdentity(ctx context.Context, identity store.ExternalEffectIdentity) (*store.ExternalEffect, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, err
@@ -146,8 +135,6 @@ func (s *Store) GetExternalEffectByIdentity(ctx context.Context, identity store.
 	return &result, nil
 }
 
-// TransitionExternalEffect applies an exact version/state/lease-owner,
-// resourceVersion, request-digest, and controller-epoch CAS.
 func (s *Store) TransitionExternalEffect(ctx context.Context, transition store.ExternalEffectTransition) (*store.ExternalEffect, error) {
 	transition.ID = strings.TrimSpace(transition.ID)
 	if err := store.ValidateControlIdentifier("external effect ID", transition.ID); err != nil {
@@ -229,9 +216,6 @@ func (s *Store) completeExternalEffectCreation(ctx context.Context, object *core
 	return &result, nil
 }
 
-// Called only after checking the immutable request binding, with the reserve
-// operation's controller epoch guard held. The hint locates candidates; it is
-// never a substitute for validating their approval binding and saved receipt.
 func (s *Store) labelApprovalExternalEffect(ctx context.Context, object *corev1alpha1.ExternalEffect, taskUID string) error {
 	existing := object.Labels[corev1alpha1.ControlRecordTaskUIDLabel]
 	if existing == taskUID {

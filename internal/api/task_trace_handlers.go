@@ -23,7 +23,6 @@ const maxTaskTraceEvents = 5000
 
 var errTaskTraceTooLarge = errTaskTimelineReadLimitExceeded
 
-// GetTaskTrace handles GET /api/v1/tasks/{id}/trace.
 func (h *Handlers) GetTaskTrace(c fiber.Ctx) error {
 	taskName := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))

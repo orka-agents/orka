@@ -16,11 +16,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// TestConnectorCustodySealedByEarlierReleaseOpensUnchanged loads connector
-// custody the embedded store sealed before connector sealing moved into the
-// storage client (testdata/connector-custody.sql) and proves the client
-// authenticates, opens and judges every record unchanged, then commits over
-// it.
 func TestConnectorCustodySealedByEarlierReleaseOpensUnchanged(t *testing.T) {
 	ctx := t.Context()
 	s := setupDiskStore(t)
@@ -28,7 +23,6 @@ func TestConnectorCustodySealedByEarlierReleaseOpensUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.db.ExecContext(ctx, string(fixture))
 	require.NoError(t, err)
-	// Activation authenticates every retained connector record.
 	client := activateTestKey(t, s)
 	ref := store.ConnectorCredentialRef{ConnectionUID: "fixture-connection-uid", Namespace: "fixture", Name: "github-fixture", SubjectDigest: "fixture-subject", Provider: "github"}
 	far := time.Date(2099, 1, 2, 3, 4, 5, 600000007, time.UTC)

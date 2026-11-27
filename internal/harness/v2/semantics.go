@@ -44,9 +44,6 @@ type StopReasonMapping struct {
 	FailureCode          string        `json:"failureCode,omitempty"`
 }
 
-// MapACPStopReason converts the ACP session/prompt completion barrier into Orka
-// semantics. An unproven settlement always becomes terminal outcome_unknown;
-// no caller may infer success or automatically replay from transport loss.
 func MapACPStopReason(reason ACPStopReason, settlementProven bool) StopReasonMapping {
 	if !settlementProven {
 		return StopReasonMapping{

@@ -64,7 +64,6 @@ describe('Overview', () => {
     await waitFor(() => {
       expect(screen.getAllByText('Not authorized').length).toBeGreaterThanOrEqual(6)
     })
-    // Both task surfaces — phase distribution and recent tasks — show it.
     expect(screen.getAllByText(/Not authorized to list tasks \(scope missing\)/)).toHaveLength(2)
     expect(screen.getAllByText(/lacks/).map((el) => el.textContent)).toEqual(
       expect.arrayContaining([expect.stringContaining('agents'), expect.stringContaining('tools'), expect.stringContaining('tasks')]),
@@ -77,7 +76,6 @@ describe('Overview', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       render(<Overview />)
-      // The list walk retries a failed load before giving up.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(10_000)
       })
@@ -107,8 +105,6 @@ describe('Overview', () => {
     )
     render(<Overview />)
     const heading = await screen.findByText('Phase Distribution')
-    // Scope assertions to the distribution card (the phase labels also appear
-    // as StatusDots in the Recent Tasks list).
     const card = heading.closest('[data-slot="card"]') as HTMLElement
     expect(card).not.toBeNull()
     await waitFor(() => {

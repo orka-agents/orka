@@ -7,9 +7,6 @@ import (
 	"os"
 )
 
-// errWorkspaceIdentityUnsupported refuses workspace identity pinning on
-// platforms without Unix device and inode numbers. Callers treat it as a
-// refusal, never as "no identity required".
 var errWorkspaceIdentityUnsupported = errors.New("session workspace identity pinning is only supported on Unix platforms")
 
 func directoryIdentity(os.FileInfo) (uint64, uint64, error) {

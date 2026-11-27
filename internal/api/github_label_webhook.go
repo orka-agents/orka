@@ -524,8 +524,6 @@ func repositoryMonitorExactPullRequestAction(action string) bool {
 	}
 }
 
-// removedLabel is the label an unlabeled event removed. Removing an include
-// label is accepted so the run can retire the pull request.
 func repositoryMonitorAcceptsPullRequestEvent(monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget, removedLabel string) bool {
 	if monitor == nil || repositoryMonitorWebhookSuspended(monitor) || !monitor.Spec.Review.ExactEventEnabled || !repositoryMonitorPullRequestsEnabled(monitor.Spec) {
 		return false
@@ -533,7 +531,6 @@ func repositoryMonitorAcceptsPullRequestEvent(monitor *corev1alpha1.RepositoryMo
 	if target.BaseBranch != "" && !strings.EqualFold(target.BaseBranch, effectiveRepositoryMonitorBranch(monitor)) {
 		return false
 	}
-	// Mirrors the controller's repositoryMonitorPullRequestIncluded.
 	if include := monitor.Spec.Targets.PullRequests.IncludeLabels; len(include) > 0 {
 		scope := slices.Concat(include, monitor.Spec.Repair.IncludeLabels, monitor.Spec.Repair.CIOnlyLabels)
 		if repositoryMonitorWebhookMatchingLabel(scope, target.Labels) == "" && repositoryMonitorWebhookMatchingLabel(scope, []string{removedLabel}) == "" {

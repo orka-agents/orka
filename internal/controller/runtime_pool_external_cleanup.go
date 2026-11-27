@@ -35,7 +35,6 @@ func externalCoreResourceOwned(pool *corev1alpha1.RuntimePool, cfg runtimePoolCo
 
 func externalCoreServiceMatches(cfg runtimePoolConfig, service *corev1.Service) bool {
 	spec := service.Spec.DeepCopy()
-	// These fields are defaulted or allocated by the API, not Core permissions.
 	spec.IPFamilies, spec.IPFamilyPolicy, spec.InternalTrafficPolicy = nil, nil, nil
 	if spec.SessionAffinity == corev1.ServiceAffinityNone {
 		spec.SessionAffinity = ""

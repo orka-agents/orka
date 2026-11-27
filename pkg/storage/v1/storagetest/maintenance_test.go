@@ -18,15 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeMessages is a provider that refuses every new write while its dataset
-// is migrating. With strict set it also refuses ConsumeMessages then, which
-// the suite's case reads through here, as a provider that applies the
-// dataset-state step to every method the catalog lists as a write does:
-// ConsumeMessages is one because it marks the messages it returns as read. With leak set, a SendMessage refused while migrating
-// is visible until the dataset is ready again, as with a provider that
-// applied it to a copy the migration then replaced.
 type fakeMessages struct {
-	// The maintenance cases never bind the dataset.
 	storagev1.DatasetBindingStore
 
 	strict    bool
@@ -95,9 +87,6 @@ func (p *fakeMessages) ResolveOperation(
 
 func (p *fakeMessages) PruneOperationReceipts(context.Context, int) (int, error) { return 0, nil }
 
-// write runs apply as a write: a replay returns its receipt's outcome
-// without applying it again, and a new operation is refused while the
-// dataset is migrating, after running leak when the provider leaks.
 func (p *fakeMessages) write(ctx context.Context, method string, apply, leak func()) error {
 	envelope, ok := storagev1.WriteEnvelopeFrom(ctx)
 	if !ok {
@@ -129,9 +118,6 @@ func (p *fakeMessages) SendMessage(ctx context.Context, message *storagev1.Messa
 		func() { p.leaked = append(p.leaked, *message) })
 }
 
-// ConsumeMessages returns every message a reader sees. A strict provider
-// refuses it while the dataset is migrating, as the dataset-state step of a
-// catalog write does.
 func (p *fakeMessages) ConsumeMessages(context.Context, storagev1.ConsumeMessagesRequest) ([]storagev1.Message, error) {
 	if p.strict && p.migrating {
 		return nil, storagev1.ErrNotReady
@@ -139,7 +125,6 @@ func (p *fakeMessages) ConsumeMessages(context.Context, storagev1.ConsumeMessage
 	return p.visible(), nil
 }
 
-// visible returns every message a reader sees, as a read would.
 func (p *fakeMessages) visible() []storagev1.Message {
 	return append(slices.Clone(p.messages), p.leaked...)
 }
@@ -169,8 +154,6 @@ func observeFakeMessages(t *testing.T, p *fakeMessages) any {
 
 func observeVisibleMessages(_ *testing.T, p *fakeMessages) any { return p.visible() }
 
-// sendCase is a SendMessage write case observed through observe, which
-// calls ConsumeMessages, a catalog write, when observeWrites is set.
 func sendCase(observe, observeReads func(*testing.T, *fakeMessages) any, observeWrites bool) []writeCase[*fakeMessages] {
 	return []writeCase[*fakeMessages]{{
 		method: "SendMessage",
@@ -185,20 +168,12 @@ func sendCase(observe, observeReads func(*testing.T, *fakeMessages) any, observe
 	}}
 }
 
-// A provider that refuses ConsumeMessages while its dataset is migrating, and
-// says so in its harness, passes: a case that observes through ConsumeMessages
-// and has no read of its own is compared only once the dataset is ready.
 func TestMaintenancePassesAProviderThatRefusesReadingWrites(t *testing.T) {
 	runMaintenance(t, newFakeMessages(true, false), sendCase(observeFakeMessages, nil, true), fakeMaintenance(true))
 }
 
 const leakyMaintenanceEnv = "STORAGETEST_LEAKY_MAINTENANCE"
 
-// The maintenance cases fail a provider whose refused write is visible while
-// the dataset migrates, even though it is gone once the dataset is ready:
-// through a case that observes through reads, through a case that observes
-// through ConsumeMessages when the provider serves it while migrating, and
-// through the reads of such a case when the provider refuses it.
 func TestMaintenanceFailsAWriteVisibleWhileMigrating(t *testing.T) {
 	variants := map[string]func(t *testing.T){
 		"read observation": func(t *testing.T) {
@@ -227,9 +202,6 @@ func TestMaintenanceFailsAWriteVisibleWhileMigrating(t *testing.T) {
 	}
 }
 
-// Every write case whose observation calls a method the catalog lists as a
-// write sets observeWrites, and no other case does; a case's observeReads
-// calls no catalog write, and only a case that sets observeWrites has one.
 func TestObserveWritesMarksObservationsThroughCatalogWrites(t *testing.T) {
 	writes := catalogWritesByFunction(t)
 	calls := func(method string, observe any) []string {
@@ -261,8 +233,6 @@ func TestObserveWritesMarksObservationsThroughCatalogWrites(t *testing.T) {
 	}
 }
 
-// packageFunctionName returns the package-level function fn is, or the one
-// that returned it when fn is a closure.
 func packageFunctionName(fn any) string {
 	full := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 	_, name, _ := strings.Cut(full[strings.LastIndex(full, "/")+1:], ".")
@@ -272,9 +242,6 @@ func packageFunctionName(fn any) string {
 	return name
 }
 
-// catalogWritesByFunction returns, for every package-level function of the
-// suite, the catalog writes it calls on its provider, directly, in a closure
-// it returns or through another package function it calls.
 func catalogWritesByFunction(t *testing.T) map[string][]string {
 	t.Helper()
 	paths, err := filepath.Glob("*.go")

@@ -75,10 +75,6 @@ func (r *recordingStore) EnqueueGatewayMessage(ctx context.Context, request stor
 	return r.Store.EnqueueGatewayMessage(ctx, request)
 }
 
-// TestProviderReceivesOnlySanitizedGatewayText sends secrets through every
-// gateway write whose text Orka sanitizes. The recorder captures each request
-// before the provider runs it, so a call the provider then refuses for its
-// state still proves what it received.
 func TestProviderReceivesOnlySanitizedGatewayText(t *testing.T) {
 	secrets := protectedSecrets()
 	openAI, github, bearer := secrets["OpenAI key"], secrets["GitHub token"], secrets["bearer value"]
@@ -143,17 +139,12 @@ func TestProviderReceivesOnlySanitizedGatewayText(t *testing.T) {
 	recorder.requireReceived(t, "ProjectGatewayTerminal", "token is")
 	recorder.requireReceived(t, "EnqueueGatewayMessage", "progress: token is")
 
-	// The provider stores what it received: the admitted event and its
-	// transcript message carry only the sanitized text.
 	stored, err := client.GetGatewayEvent(ctx, "tenant", event.ID)
 	require.NoError(t, err)
 	require.Equal(t, "token is [REDACTED]", stored.SenderDisplayName)
 	require.Equal(t, "api_key=[REDACTED]", stored.Metadata["note"])
 }
 
-// TestClientRefusesInvalidGatewayMessageText requires the client to refuse
-// gateway message text the Gateway service refuses, before the provider sees
-// it, and to pass text the service already redacted through unchanged.
 func TestClientRefusesInvalidGatewayMessageText(t *testing.T) {
 	recorder := newRecordingStore(t)
 	client := storageclienttest.NewEmbedded(t, recorder)

@@ -179,7 +179,6 @@ func TestDeliveryFixtureDoesNotLogUnsolicitedResponse(t *testing.T) {
 					return
 				}
 				defer connection.Close() //nolint:errcheck
-				// Echo routing outside the declared response body, bypassing result masking.
 				_, err = fmt.Fprintf(buffer,
 					"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\nprovider diagnostic %s\r\n", delivery.ContextID)
 				if err != nil || buffer.Flush() != nil {

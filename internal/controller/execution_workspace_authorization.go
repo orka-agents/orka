@@ -10,15 +10,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// WorkspaceClassAuthorizer performs the explicit Kubernetes `use`
-// authorization check required before an admission request may select an
-// ExecutionWorkspaceClass. Callers must pass AdmissionRequest.UserInfo from the
-// live Kubernetes admission request, never identity copied from a Task spec.
 type WorkspaceClassAuthorizer struct {
 	Client client.Client
 }
 
-// Authorize submits a direct SubjectAccessReview for verb use on the class.
 func (a WorkspaceClassAuthorizer) Authorize(
 	ctx context.Context,
 	namespace string,
@@ -28,18 +23,14 @@ func (a WorkspaceClassAuthorizer) Authorize(
 	return a.authorizeResource(ctx, namespace, "executionworkspaceclasses", className, caller)
 }
 
-// AuthorizeCheckpoint checks permission to consume retained workspace data.
 func (a WorkspaceClassAuthorizer) AuthorizeCheckpoint(ctx context.Context, namespace, name string, caller authenticationv1.UserInfo) error {
 	return a.authorizeResource(ctx, namespace, "executionworkspacecheckpoints", name, caller)
 }
 
-// AuthorizeCheckpointSource checks permission to export a workspace's data.
 func (a WorkspaceClassAuthorizer) AuthorizeCheckpointSource(ctx context.Context, namespace, name string, caller authenticationv1.UserInfo) error {
 	return a.authorizeResource(ctx, namespace, "executionworkspaces", name, caller)
 }
 
-// AuthorizeSecret checks permission to get a Secret that a Tool asks the
-// Substrate egress gateway to inject.
 func (a WorkspaceClassAuthorizer) AuthorizeSecret(ctx context.Context, namespace, name string, caller authenticationv1.UserInfo) error {
 	return authorizeVerb(ctx, a.Client, "get", "", "secrets", "egress credential Secret", namespace, name, caller)
 }
@@ -48,8 +39,6 @@ func (a WorkspaceClassAuthorizer) authorizeResource(ctx context.Context, namespa
 	return authorizeUse(ctx, a.Client, "workspace.orka.ai", resource, "workspace class", namespace, className, caller)
 }
 
-// authorizeUse submits a direct SubjectAccessReview for verb use on one
-// namespaced object, as the live admission caller.
 func authorizeUse(
 	ctx context.Context,
 	c client.Client,
@@ -59,8 +48,6 @@ func authorizeUse(
 	return authorizeVerb(ctx, c, "use", group, resource, label, namespace, className, caller)
 }
 
-// authorizeVerb submits a direct SubjectAccessReview for one verb on one
-// namespaced object, as the live admission caller.
 func authorizeVerb(
 	ctx context.Context,
 	c client.Client,
@@ -84,7 +71,6 @@ func authorizeVerb(
 	for key, values := range caller.Extra {
 		extra[key] = authorizationv1.ExtraValue(append([]string(nil), values...))
 	}
-	// Orka's resources are v1alpha1; core resources such as Secrets are v1.
 	version := "v1alpha1"
 	if group == "" {
 		version = "v1"
@@ -118,13 +104,10 @@ func authorizeVerb(
 	return nil
 }
 
-// AgentHostTemplateAuthorizer checks the live admission caller's use
-// permission on an AgentHostTemplate.
 type AgentHostTemplateAuthorizer struct {
 	Client client.Client
 }
 
-// AuthorizeAgentHostTemplate submits a SubjectAccessReview for verb use on the template.
 func (a AgentHostTemplateAuthorizer) AuthorizeAgentHostTemplate(
 	ctx context.Context,
 	namespace, name string,
@@ -133,9 +116,6 @@ func (a AgentHostTemplateAuthorizer) AuthorizeAgentHostTemplate(
 	return authorizeUse(ctx, a.Client, "core.orka.ai", "agenthosttemplates", "agent host template", namespace, name, caller)
 }
 
-// AuthorizeSecretRead checks that the caller may read the Secret an AgentHost
-// names as its GitHub token source, so a host can only carry a credential its
-// creator could read.
 func (a AgentHostTemplateAuthorizer) AuthorizeSecretRead(
 	ctx context.Context,
 	namespace, name string,

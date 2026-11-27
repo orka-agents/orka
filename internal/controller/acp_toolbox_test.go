@@ -259,8 +259,6 @@ func TestPlanACPRuntimeCarriesToolboxesAndRotatesDigest(t *testing.T) {
 	if first.Profile.AgentConfigurationDigest != baseline.Profile.AgentConfigurationDigest {
 		t.Fatal("toolboxes must not change the agent configuration digest")
 	}
-	// Hold the Agent, configuration, model, and image constant: only one
-	// toolbox field changes per case.
 	variants := map[string]ACPRuntimePlan{
 		"image": plan(corev1alpha1.AgentToolbox{
 			Image: "registry.example.com/tools/yq@sha256:" + strings.Repeat("f", 64), MountPath: "/opt/yq", PathEntries: []string{"bin", "sbin"},
@@ -358,7 +356,6 @@ func TestACPToolboxPromptNote(t *testing.T) {
 		"These folders are on PATH. Run `ls <folder>` to see what is available. There is no internet access, so you can't install new packages."; got != want {
 		t.Fatalf("all-on-PATH note = %q, want %q", got, want)
 	}
-	// Mounted-only toolboxes never get a PATH claim.
 	if got, want := acpToolboxPromptNote(toolboxes[2:], true), "Extra command-line tools are installed for this task:\n- /opt/none (mounted, not on PATH)\n"+
 		"Run `ls <folder>` to see what is available. There is no internet access, so you can't install new packages."; got != want {
 		t.Fatalf("mounted-only note = %q, want %q", got, want)

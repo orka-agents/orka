@@ -1,14 +1,10 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
-/** The theme the user picked; 'system' follows the operating system's setting. */
 export type ThemePreference = 'system' | 'light' | 'dark'
 
 interface UIState {
-  // Persisted desktop preference.
   sidebarCollapsed: boolean
-  // Responsive overlay state below the md breakpoint; never persisted so a
-  // narrow viewport cannot overwrite the desktop preference.
   mobileSidebarOpen: boolean
   theme: ThemePreference
   namespace: string
@@ -18,19 +14,12 @@ interface UIState {
   setNamespace: (namespace: string) => void
 }
 
-// Only durable preferences are persisted; responsive state such as the
-// mobile sidebar overlay is session-local.
 export const persistedUIState = (state: UIState) => ({
   sidebarCollapsed: state.sidebarCollapsed,
   theme: state.theme,
   namespace: state.namespace,
 })
 
-/**
- * Version 1 added 'system' and made it the default. Before that every visitor
- * started on 'light', so a stored 'light' was almost never a choice and now
- * follows the system. index.html applies the same rule before first paint.
- */
 export function migrateUIState(persisted: unknown, version: number) {
   const state = (persisted ?? {}) as Partial<ReturnType<typeof persistedUIState>>
   if (version < 1 && state.theme === 'light') return { ...state, theme: 'system' as const }

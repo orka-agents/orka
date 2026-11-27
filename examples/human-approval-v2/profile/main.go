@@ -1,4 +1,3 @@
-// Command profile renders the immutable inputs for one approval demo runtime.
 package main
 
 import (

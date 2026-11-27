@@ -12,14 +12,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// ApplyScanTaskIngestion implements store.SecurityStore's ingestion over the
-// contract's conditional command. It resolves the receipt and the run with
-// ordinary reads, runs validate (a live Kubernetes check) and apply with no
-// provider transaction open, and commits the reads and writes apply recorded
-// together with the run update and the receipt. The commit applies only while
-// the run and every record apply read are unchanged; otherwise it returns
-// ErrPreconditionFailed and changes nothing, and the caller repeats the
-// ingestion from fresh state.
 func (c *Client) ApplyScanTaskIngestion(
 	ctx context.Context,
 	ingestion *store.ScanTaskIngestion,
@@ -79,21 +71,8 @@ func (c *Client) ApplyScanTaskIngestion(
 	return applied, err
 }
 
-// errScanIngestionUnsupported rejects a store method an ingestion callback
-// cannot use: its effect would escape the ingestion's single commit.
 var errScanIngestionUnsupported = store.ValidationErrorf("security store method is not available during scan Task ingestion")
 
-// scanIngestionRecorder is the SecurityStore an ingestion callback receives.
-// It records each read with the result the callback saw, and each write, as
-// steps of the ingestion's commit. Writes take effect only at the commit, so
-// their errors surface at a later read or at the commit. A read of records
-// that an earlier recorded write may have changed is answered by a provider
-// preview of the steps so far, which applies the provider's own write
-// semantics; other reads go to the provider directly. The callback receives
-// copies, so mutating a returned record cannot change what the commit
-// checks. A write records the finding ID default that UpsertFinding applies
-// (the fingerprint) and the threat model sanitization the client applies; it
-// does not write other provider-assigned fields back to the caller.
 type scanIngestionRecorder struct {
 	provider       storagev1.StateProvider
 	namespace      string
@@ -102,9 +81,6 @@ type scanIngestionRecorder struct {
 	steps          []store.ScanIngestionStep
 	err            error
 
-	// Which recorded writes later reads must see. Any finding write can
-	// change any finding: an upsert matches by fingerprint, and duplicate
-	// marking re-points descendants.
 	dirtyFindings    bool
 	dirtyThreatModel bool
 	dirtySlices      map[store.ReviewSliceKey]bool
@@ -142,7 +118,6 @@ func (r *scanIngestionRecorder) read(
 			result, err = store.ScanIngestionReadResult{NotFound: true}, nil
 		}
 		if err != nil {
-			// A read the commit cannot check must not be committed.
 			r.err = err
 			return store.ScanIngestionReadResult{}, err
 		}
@@ -259,8 +234,6 @@ func (r *scanIngestionRecorder) UpdateReviewSliceStatus(_ context.Context, names
 	return nil
 }
 
-// SaveThreatModel sanitizes the threat model content, as the client does for
-// any threat model write, before recording it.
 func (r *scanIngestionRecorder) SaveThreatModel(_ context.Context, model *store.ThreatModel) error {
 	if model == nil {
 		return store.ValidationErrorf("threat model is required")
@@ -318,9 +291,6 @@ func (r *scanIngestionRecorder) CreateDroppedFinding(_ context.Context, dropped 
 	recorded := *dropped
 	return r.write(store.ScanIngestionStep{CreateDroppedFinding: &recorded})
 }
-
-// The remaining SecurityStore methods are not available to an ingestion
-// callback. Each refuses and fails the ingestion.
 
 func (r *scanIngestionRecorder) unsupported() error {
 	if r.err == nil {

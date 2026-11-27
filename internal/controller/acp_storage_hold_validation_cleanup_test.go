@@ -17,9 +17,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// recoveredValidationConflictStatus is the delivery recovery records for a
-// workspace validation it could not finish before recording the outcome as
-// unknown.
 func recoveredValidationConflictStatus() *corev1alpha1.TaskDeliveryStatus {
 	return &corev1alpha1.TaskDeliveryStatus{
 		State: corev1alpha1.TaskDeliveryStateDeliveryConflict, Outcome: corev1alpha1.TaskDeliveryOutcomeDeliveryConflict,
@@ -27,9 +24,6 @@ func recoveredValidationConflictStatus() *corev1alpha1.TaskDeliveryStatus {
 	}
 }
 
-// residentValidatingSupervisor serves a runtime whose RuntimeSession is still
-// Validating: it settles the abandoned prompt, validates the workspace, and
-// deletes the session only after that, with an authenticated tombstone.
 type residentValidatingSupervisor struct {
 	t       *testing.T
 	fence   harnessv2.Fence
@@ -115,12 +109,6 @@ func (s *residentValidatingSupervisor) ServeHTTP(w http.ResponseWriter, r *http.
 	}
 }
 
-// A Task whose hold was acknowledged after workspace validation started ends
-// OutcomeUnknown with the recovered validation conflict. When its runtime
-// still holds that validation, cleanup finishes it like any abandoned
-// validation and deletes the RuntimeSession through an authenticated
-// tombstone, so Task deletion and pool rollout are not blocked, also when a
-// later controller epoch owns the cleanup.
 func TestRecoveredValidationConflictCleansUpAResidentValidatingRuntime(t *testing.T) {
 	for _, takeover := range []bool{false, true} {
 		name := "same epoch"
@@ -138,7 +126,6 @@ func testRecoveredValidationConflictCleanup(t *testing.T, takeover bool) {
 	control.attempt.DeliveryState = store.PromptDeliveryConflict
 	task.Status.Delivery = recoveredValidationConflictStatus()
 	if takeover {
-		// The runtime keeps the epoch it booted under; a successor owns cleanup.
 		d.Epochs = readyAgentRuntimeTestEpochManager(2)
 		owner, err := d.Epochs.CurrentFence(t.Context())
 		if err != nil {
@@ -180,9 +167,6 @@ func testRecoveredValidationConflictCleanup(t *testing.T, takeover bool) {
 	}
 }
 
-// Only the conflict recovery records for an unknown outcome counts as an
-// abandoned validation; other conflicts, and the same conflict on a successful
-// or failed attempt, keep their existing cleanup rules.
 func TestAbandonedValidationAcceptsOnlyTheRecoveredValidationConflict(t *testing.T) {
 	for _, change := range []string{"other conflict reason", "succeeded attempt", "failed attempt", "attempt still validating", "Task without the conflict"} {
 		t.Run(change, func(t *testing.T) {

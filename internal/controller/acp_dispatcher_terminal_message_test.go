@@ -107,8 +107,6 @@ func TestACPDispatcherSessionTerminalMessagePrecedesLifecycleEvent(t *testing.T)
 				if latest.Status.Message != test.wantMsg {
 					t.Errorf("message before projection = %q, want %q", latest.Status.Message, test.wantMsg)
 				}
-				// The Task controller can observe the terminal phase before the
-				// Session outbox runs. That event is immutable after emission.
 				reconciler := TaskReconciler{Client: kube, ExecutionEventStore: controlStore}
 				if !reconciler.recordTerminalTaskLifecycleEventIfMissing(ctx, latest) {
 					t.Fatal("record Task terminal lifecycle before outbox delivery")

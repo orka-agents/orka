@@ -72,7 +72,6 @@ func TestACPTaskOperatorTaintReadsTaskAndExactWorkspace(t *testing.T) {
 			}
 		})
 	}
-	// A Task that cannot be read fails closed instead of reporting clean.
 	if _, err := acpTaskOperatorTainted(context.Background(), operatorTaintTestClient(t), operatorTaintTestTask(nil)); err == nil {
 		t.Fatal("an unreadable Task must fail closed")
 	}
@@ -167,8 +166,6 @@ func TestTaintedWorkspaceIsNeverReusedOrResumed(t *testing.T) {
 	if err := r.Create(ctx, continuation); err != nil {
 		t.Fatal(err)
 	}
-	// A suspended (retained) incarnation that operator access tainted must
-	// not be cold-resumed for the continuation.
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
 	workspace.Annotations[operatoraccess.TaintAnnotation] = "x"
@@ -188,8 +185,6 @@ func TestTaintedWorkspaceIsNeverReusedOrResumed(t *testing.T) {
 		t.Fatalf("a tainted workspace was flipped toward cold resume: %s %q", workspace.Spec.DesiredState, workspace.Annotations[acpWorkspaceResumeRequestedAnnotation])
 	}
 
-	// While the tainting Task still holds the attachment, a continuation
-	// queues for the fresh replacement instead of reusing the workspace warm.
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
 	workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
@@ -267,9 +262,6 @@ func TestSettlementDeletesTaintedSuspendWorkspace(t *testing.T) {
 	}
 }
 
-// The attachment manager revalidates the exact object version of every
-// optimistic-lock attempt, so a taint orka-api commits after the reconciler's
-// initial read must still refuse to hand the workspace to another Task.
 func TestAttachmentAttemptRefusesAWorkspaceTaintedAfterTheInitialRead(t *testing.T) {
 	ctx := context.Background()
 	r, _, _, _ := externalACPFixture(t, true)
@@ -297,9 +289,6 @@ func TestAttachmentAttemptRefusesAWorkspaceTaintedAfterTheInitialRead(t *testing
 	}
 }
 
-// A publication refused because operator access tainted the workspace must be
-// distinguishable from a user cancellation in the delivery status and the
-// final Task message.
 func TestOperatorTaintRefusalIsVisibleInDeliveryAndTaskStatus(t *testing.T) {
 	refused := &store.Publication{State: store.PublicationCancelledBeforePublish, TerminalReason: operatorTaintedPublicationMessage}
 	status := publicationTaskDeliveryStatus(&corev1alpha1.WorkspaceConfig{}, harnessv2.WorkspaceBaseline{}, harnessv2.WorkspaceDeltaDescriptor{Artifact: &harnessv2.ArtifactReference{}}, refused, "")
@@ -319,7 +308,6 @@ func TestOperatorTaintRefusalIsVisibleInDeliveryAndTaskStatus(t *testing.T) {
 	}
 }
 
-// A user cancellation of a tainted Task stays a cancellation.
 func TestPublicationRefusalPrefersUserCancellation(t *testing.T) {
 	task := operatorTaintTestTask(map[string]string{operatoraccess.TaintAnnotation: "x"})
 	task.Status.Phase = corev1alpha1.TaskPhaseCancelled
@@ -330,11 +318,6 @@ func TestPublicationRefusalPrefersUserCancellation(t *testing.T) {
 		t.Fatalf("taskPublicationRefused = %v, %q, %v; want a plain cancellation", refused, reason, err)
 	}
 }
-
-// The cases below model an incarnation whose workspace marker was cleared (an
-// identity with broad admission rights can rewrite workspace annotations)
-// while the provenance-protected marker on a Task linked to that exact
-// incarnation remains. Every decision must still treat it as tainted.
 
 func operatorTaintedLinkedTask(name, uid string, workspace *workspacev1alpha1.ExecutionWorkspace) *corev1alpha1.Task {
 	return &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
@@ -385,8 +368,6 @@ func TestWorkspaceOperatorTaintHonoursLinkedTaskMarkers(t *testing.T) {
 	}
 }
 
-// A continuation that shares the tainted incarnation is itself refused
-// publication, while one on a fresh incarnation is not.
 func TestPublicationRefusedForContinuationSharingATaskTaintedIncarnation(t *testing.T) {
 	workspace := &workspacev1alpha1.ExecutionWorkspace{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "ws", UID: "ws-uid"}}
 	predecessor := operatorTaintedLinkedTask("predecessor", "predecessor-uid", workspace)
@@ -398,8 +379,6 @@ func TestPublicationRefusedForContinuationSharingATaskTaintedIncarnation(t *test
 		t.Fatalf("taskPublicationRefused = %v, %q, %v; want a taint refusal", refused, reason, err)
 	}
 
-	// The shared incarnation was deleted, or replaced under the same name,
-	// before a delayed publication ran: the predecessor's taint still counts.
 	for name, objects := range map[string][]client.Object{
 		"deleted":  {predecessor.DeepCopy(), continuation.DeepCopy()},
 		"replaced": {&workspacev1alpha1.ExecutionWorkspace{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "ws", UID: "replacement-ws-uid"}}, predecessor.DeepCopy(), continuation.DeepCopy()},
@@ -450,8 +429,6 @@ func TestTaskTaintedWorkspaceIsNeverReusedOrResumedWithoutWorkspaceMarker(t *tes
 		t.Fatal(err)
 	}
 
-	// A suspended incarnation without its workspace marker is still not
-	// cold-resumed for the continuation.
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
 	delete(workspace.Annotations, operatoraccess.TaintAnnotation)
@@ -471,7 +448,6 @@ func TestTaskTaintedWorkspaceIsNeverReusedOrResumedWithoutWorkspaceMarker(t *tes
 		t.Fatalf("a Task-tainted workspace was flipped toward cold resume: %s %q", workspace.Spec.DesiredState, workspace.Annotations[acpWorkspaceResumeRequestedAnnotation])
 	}
 
-	// A detached Ready incarnation is not reused warm either.
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
 	if err := r.Update(ctx, workspace); err != nil {
@@ -627,8 +603,6 @@ func TestCheckpointRoutingRefusesTaskTaintedSourceWithoutWorkspaceMarker(t *test
 	}
 }
 
-// hideFirstTaskTaintReader reports no linked Tasks on the first Task list, as
-// if the Task marker committed just after the reconciler's initial taint check.
 type hideFirstTaskTaintReader struct {
 	client.Reader
 	lists int
@@ -645,9 +619,6 @@ func (r *hideFirstTaskTaintReader) List(ctx context.Context, list client.ObjectL
 	return r.Reader.List(ctx, list, opts...)
 }
 
-// The attachment manager rechecks the linked Task markers on every
-// optimistic-lock attempt, so a Task taint that lands after the initial read
-// still refuses to hand the incarnation to a continuation.
 func TestAttachmentAttemptRechecksLinkedTaskTaint(t *testing.T) {
 	ctx := context.Background()
 	r, task, plan, workspace := externalACPSessionLifecycleFixture(t)

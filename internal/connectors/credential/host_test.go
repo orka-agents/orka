@@ -23,8 +23,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// serveHosts makes the fixture provider serve agent hosts from template, with
-// the Connection's consent covering it, as a fresh link would.
 func (h *harness) serveHosts(template string) {
 	h.t.Helper()
 	ctx := context.Background()
@@ -62,8 +60,6 @@ func TestHostCredentialReturnsTheAccessTokenAndRefreshesBeforeExpiry(t *testing.
 		t.Fatal(err)
 	}
 
-	// A token that expires within the horizon is refreshed, and the new one
-	// returned.
 	h.put(store.ConnectorCredential{AccessToken: "ghu_held", RefreshToken: "ghr_held", ExpiresAt: h.now.Add(10 * time.Minute)})
 	held, err = h.source.HostCredential(context.Background(), testNamespace, h.connection.Name, time.Minute)
 	if err != nil || held.AccessToken != "ghu_held" {
@@ -77,8 +73,6 @@ func TestHostCredentialReturnsTheAccessTokenAndRefreshesBeforeExpiry(t *testing.
 		t.Fatalf("refreshed = %+v, refreshes = %d", refreshed, h.refresher.calls.Load())
 	}
 
-	// A host keeps its template when the provider moves to another one: once
-	// the person consents to the change, their host is fed again.
 	h.serveHosts("other")
 	if _, err := h.source.HostCredential(context.Background(), testNamespace, h.connection.Name, 15*time.Minute); err != nil {
 		t.Fatalf("a host must outlive its provider's template change: %v", err)
@@ -118,8 +112,6 @@ func TestHostCredentialIsUnavailableWhenTheLinkCannotFeedAHost(t *testing.T) {
 	}
 }
 
-// A provider that stops serving hosts while a refresh is in flight releases no
-// token, refreshed or not.
 func TestHostCredentialFailsClosedWhenTheProviderOptsOutDuringARefresh(t *testing.T) {
 	h := newHarness(t)
 	h.serveHosts("copilotd")
@@ -144,9 +136,6 @@ func TestHostCredentialFailsClosedWhenTheProviderOptsOutDuringARefresh(t *testin
 	}
 }
 
-// An edit to the provider that its controller has not judged yet stops no
-// host and releases no token; once judged, a provider that no longer accepts
-// the link stops it.
 func TestHostLinkWaitsForTheProviderStatusToCatchUp(t *testing.T) {
 	h := newHarness(t)
 	h.serveHosts("copilotd")
@@ -175,7 +164,6 @@ func TestHostLinkWaitsForTheProviderStatusToCatchUp(t *testing.T) {
 		t.Fatalf("held = %q, err = %v; want no token and a retryable error", held.AccessToken, err)
 	}
 
-	// A reference check that could not complete is no verdict either.
 	setConditions(1, metav1.ConditionTrue)
 	provider := &corev1alpha1.ConnectorProvider{}
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
@@ -198,10 +186,6 @@ func TestHostLinkWaitsForTheProviderStatusToCatchUp(t *testing.T) {
 	}
 }
 
-// A Connection status that has not caught up with an edit, or that records a
-// provider read that failed, stops no host and releases no token. What the
-// status would judge is checked directly instead: a mode the grant does not
-// cover, or a provider that is gone, still stops the host.
 func TestHostLinkWaitsForTheConnectionStatusToCatchUp(t *testing.T) {
 	retryable := func(h *harness, stage string) {
 		t.Helper()
@@ -224,8 +208,6 @@ func TestHostLinkWaitsForTheConnectionStatusToCatchUp(t *testing.T) {
 		h := newHarness(t)
 		h.serveHosts("copilotd")
 		h.put(store.ConnectorCredential{AccessToken: "ghu_held", RefreshToken: "ghr_held", ExpiresAt: h.now.Add(4 * time.Hour)})
-		// The mode changes and the Connection controller has not judged it:
-		// the status still describes the previous generation.
 		connection := h.reload()
 		connection.Spec.Mode = corev1alpha1.ConnectionModeReadWrite
 		connection.Generation++
@@ -237,7 +219,6 @@ func TestHostLinkWaitsForTheConnectionStatusToCatchUp(t *testing.T) {
 		}
 		retryable(h, "status behind a covered mode")
 
-		// A mode the grant does not cover is a verdict of its own.
 		provider := &corev1alpha1.ConnectorProvider{}
 		if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
 			t.Fatal(err)
@@ -253,8 +234,6 @@ func TestHostLinkWaitsForTheConnectionStatusToCatchUp(t *testing.T) {
 		h := newHarness(t)
 		h.serveHosts("copilotd")
 		h.put(store.ConnectorCredential{AccessToken: "ghu_held", RefreshToken: "ghr_held", ExpiresAt: h.now.Add(4 * time.Hour)})
-		// What the Connection controller records when it cannot read the
-		// provider; Ready stays True.
 		connection := h.reload()
 		meta.SetStatusCondition(&connection.Status.Conditions, metav1.Condition{
 			Type: corev1alpha1.ConnectionConditionProviderResolved, Status: metav1.ConditionUnknown,
@@ -280,9 +259,6 @@ func TestHostLinkWaitsForTheConnectionStatusToCatchUp(t *testing.T) {
 	})
 }
 
-// The Connection controller can judge a provider edit before the provider
-// controller does, marking the link's provider invalid. That stops no host
-// either, until the provider's current status refuses the link.
 func TestHostLinkWaitsForTheConnectionToSeeItsProvider(t *testing.T) {
 	h := newHarness(t)
 	h.serveHosts("copilotd")
@@ -324,21 +300,16 @@ func TestHostLinkWaitsForTheConnectionToSeeItsProvider(t *testing.T) {
 		}
 	}
 
-	// The provider controller has not judged the edit.
 	setProvider(0, metav1.ConditionTrue)
 	retryable("provider status behind")
-	// It has accepted it, and the Connection controller has not caught up.
 	setProvider(1, metav1.ConditionTrue)
 	retryable("connection status behind")
-	// It has refused it: the link no longer feeds the host.
 	setProvider(1, metav1.ConditionFalse)
 	if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); !errors.Is(err, ErrHostLinkUnavailable) {
 		t.Fatalf("refused provider: check = %v, want ErrHostLinkUnavailable", err)
 	}
 }
 
-// A Connection being deleted is a disconnect, even while its finalizer holds
-// it and its provider's status lags, which would otherwise be retried.
 func TestHostLinkEndsWhenItsConnectionIsBeingDeleted(t *testing.T) {
 	h := newHarness(t)
 	h.serveHosts("copilotd")
@@ -392,9 +363,6 @@ func (c *failingHostCustody) GetConnectorCredential(context.Context, store.Conne
 	return store.ConnectorCredential{}, c.err
 }
 
-// Confirmed provider refusals end the link even when custody is unavailable.
-// Observation lag must still reach custody: missing custody ends the link,
-// while a storage outage alone remains retryable.
 func TestHostLinkProviderRefusalPrecedesCustodyFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -473,8 +441,6 @@ func TestHostLinkProviderRefusalPrecedesCustodyFailure(t *testing.T) {
 	}
 }
 
-// A provider read that fails is retried, never taken for a link that stopped
-// authorizing the host: a host is stopped only for a provider it has read.
 func TestHostLinkReadFailuresAreRetried(t *testing.T) {
 	h := newHarness(t)
 	h.serveHosts("copilotd")
@@ -496,7 +462,6 @@ func TestHostLinkReadFailuresAreRetried(t *testing.T) {
 	if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); err == nil || errors.Is(err, ErrHostLinkUnavailable) {
 		t.Fatalf("err = %v, want a retryable error", err)
 	}
-	// A link check reads its provider once, so no second read can fail it.
 	h.source.APIReader = failProvider(2)
 	if err := h.source.CheckHostLink(context.Background(), testNamespace, h.connection.Name); err != nil {
 		t.Fatalf("err = %v", err)

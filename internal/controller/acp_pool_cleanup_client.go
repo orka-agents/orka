@@ -24,13 +24,6 @@ const (
 	retainedPoolFinalizeOperation = "finalize_runtime_session_publication"
 )
 
-// runtimePoolRetainedCleanupClient grants no new execution authority. A new
-// controller owner may finish an exact, still-authenticated old native boot's
-// cleanup, even when that boot must first validate an abandoned terminal turn.
-// Every mutation revalidates the current leader, frozen Task, exact Pod/pool,
-// immutable auth material, and authenticated old runtime fence. The ordinary
-// runtimePoolClient remains current-epoch-only for admission.
-//
 //nolint:gocyclo // Revalidate the full frozen Task, pool, Pod, Session and auth identity together before cleanup.
 func (d *ACPDispatcher) runtimePoolRetainedCleanupClient(
 	ctx context.Context, task *corev1alpha1.Task, taskUID types.UID,
@@ -175,8 +168,6 @@ func (d *ACPDispatcher) runtimePoolRetainedCleanupClient(
 	if err != nil {
 		return fail(err)
 	}
-	// Retain the old supervisor's authenticated generation instead of using
-	// a newer desired Deployment generation as execution authority.
 	if status.Fence.RuntimePoolGeneration == 0 || status.Fence.RuntimePoolGeneration > uint64(pool.Generation) {
 		return fail(errors.New("retained runtime pool generation is invalid"))
 	}

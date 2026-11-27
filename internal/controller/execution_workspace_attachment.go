@@ -47,7 +47,6 @@ var (
 	errWorkspaceAttachmentRotationNotReady = errors.New("expired workspace attachment is not ready for credential rotation")
 )
 
-// WorkspaceAttachmentManager owns Lease, epoch, and attachment Secret rotation.
 type WorkspaceAttachmentManager struct {
 	Client    client.Client
 	APIReader client.Reader
@@ -55,7 +54,6 @@ type WorkspaceAttachmentManager struct {
 	Now       func() time.Time
 }
 
-// WorkspaceAttachmentResult contains references safe to pass to a worker Job.
 type WorkspaceAttachmentResult struct {
 	Epoch         int64
 	AttachmentRef workspacev1alpha1.SecretReference
@@ -122,9 +120,6 @@ func deleteWorkspaceOwnedAttachmentLeaseForEpoch(
 	wantEpoch := strconv.FormatInt(epoch, 10)
 	leaseEpoch := strings.TrimSpace(lease.Annotations[workspaceAttachmentLeaseEpochAnnotation])
 	if leaseEpoch == "" {
-		// Leases created before epoch fencing need a one-time marker. Every new
-		// publisher updates this same Lease before writing attachment intent, so
-		// its optimistic resourceVersion fence closes a concurrent handoff.
 		before := lease.DeepCopy()
 		if lease.Annotations == nil {
 			lease.Annotations = map[string]string{}
@@ -143,9 +138,6 @@ func deleteWorkspaceOwnedAttachmentLeaseForEpoch(
 		leaseEpoch = strings.TrimSpace(lease.Annotations[workspaceAttachmentLeaseEpochAnnotation])
 	}
 	if parsed, err := strconv.ParseInt(leaseEpoch, 10, 64); err == nil && parsed > epoch {
-		// A Task staged the next attachment but no workspace spec names it
-		// yet (ADR 0057). The revoked epoch's Lease is already gone; the
-		// staged one is not ours to delete.
 		current := &workspacev1alpha1.ExecutionWorkspace{}
 		if err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
 			return fmt.Errorf("re-read workspace for staged attachment Lease %s: %w", key, err)
@@ -166,9 +158,6 @@ func deleteWorkspaceOwnedAttachmentLeaseForEpoch(
 	return nil
 }
 
-// Attach rotates authority and writes attachment intent. Bearer token text
-// exists only in the created Secret and this function's short-lived buffer.
-//
 //nolint:gocyclo // Lease acquisition, epoch fencing, Secret creation, and rollback must remain ordered.
 func (m WorkspaceAttachmentManager) Attach(
 	ctx context.Context,
@@ -179,10 +168,6 @@ func (m WorkspaceAttachmentManager) Attach(
 	return m.attach(ctx, workspace, task, annotations, validateWorkspaceAttachmentAttempt)
 }
 
-// attach revalidates the caller's admission policy at every ownership fence.
-// The public Attach path always requires a reusable workspace; ACP may also
-// attach its exact materialized workspace before provider compute is started.
-//
 //nolint:gocyclo // Lease acquisition, epoch fencing, Secret creation, and rollback must remain ordered.
 func (m WorkspaceAttachmentManager) attach(
 	ctx context.Context,
@@ -237,10 +222,6 @@ func (m WorkspaceAttachmentManager) attach(
 		current.Spec.AttachmentEpoch = epoch
 		current.Spec.Attachment = attachment
 		current.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
-		// Caller-supplied metadata (the attached Task's frozen detach action)
-		// binds in the SAME optimistic update that installs the attachment,
-		// so no crash window can leave the attachment observable with a stale
-		// prior action.
 		if len(annotations) > 0 {
 			if current.Annotations == nil {
 				current.Annotations = map[string]string{}
@@ -339,15 +320,9 @@ func (m WorkspaceAttachmentManager) recoverOrphanedAttachmentSecret(
 			secretName,
 		)
 	}
-	// taskUID records the attempt that created the orphan. It can differ after
-	// an expired Lease transfers to a successor Task; the workspace owner,
-	// epoch, renewed Lease fence, and optimistic workspace patch decide which
-	// Task may publish the recovered authority.
 	return secret, sha256.Sum256(bearer), nil
 }
 
-// BeginRevocation clears attachment intent. The adapter must revoke the active
-// epoch before FinalizeRevocation removes the Secret and Lease.
 func (m WorkspaceAttachmentManager) BeginRevocation(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -379,8 +354,6 @@ func (m WorkspaceAttachmentManager) BeginRevocation(
 	})
 }
 
-// FinalizeRevocation deletes the token Secret and Lease only after provider
-// status no longer reports the epoch as attached.
 func (m WorkspaceAttachmentManager) FinalizeRevocation(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -504,10 +477,6 @@ func validateWorkspaceAttachmentCandidate(workspace *workspacev1alpha1.Execution
 	return nil
 }
 
-// validateWorkspaceAttachmentAttempt admits either a detached reusable
-// workspace or an expired, fully enforced attachment held by the same Task.
-// The latter is a new attachment attempt: Attach advances the epoch, renews
-// the Lease, and rotates the bearer without opening a detached ownership gap.
 func validateWorkspaceAttachmentAttempt(
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	task *corev1alpha1.Task,
@@ -576,10 +545,6 @@ func (m WorkspaceAttachmentManager) cleanupFailedAttachmentAttempt(
 	}
 
 	workspaceHasAttachment := workspaceErr == nil && current.UID == workspace.UID && current.Spec.Attachment != nil
-	// A handed-off orphan or staged intent can still race the original paused
-	// attempt. Once either Task attaches this exact Secret or a staged intent
-	// still names it, cleanup must preserve the bearer; the workspace's
-	// optimistic patch decides which attachment won.
 	intent, staged := parseACPWorkspaceAttachmentIntent(current)
 	secretIsStaged := workspaceErr == nil && current.UID == workspace.UID && staged && secret != nil &&
 		intent.SecretName == secret.Name
@@ -666,9 +631,6 @@ func boundedWorkspaceChildName(workspaceName, suffix string) string {
 	return workspaceName + "-" + hashSuffix + "-" + suffix
 }
 
-// stagedWorkspaceAttachment is an attachment whose Lease is claimed and whose
-// bearer Secret exists for the next epoch, but which no workspace spec names
-// yet.
 type stagedWorkspaceAttachment struct {
 	m             WorkspaceAttachmentManager
 	workspace     *workspacev1alpha1.ExecutionWorkspace
@@ -684,7 +646,6 @@ type stagedWorkspaceAttachment struct {
 	leaseClaimed  bool
 }
 
-// fail releases what the stage acquired unless preserveSecret is set.
 func (s *stagedWorkspaceAttachment) fail(cause error, preserveSecret bool) error {
 	secret := s.createdSecret
 	if preserveSecret {
@@ -696,7 +657,6 @@ func (s *stagedWorkspaceAttachment) fail(cause error, preserveSecret bool) error
 	return cause
 }
 
-// attachment is the exact spec attachment the stage authorizes.
 func (s *stagedWorkspaceAttachment) attachment() *workspacev1alpha1.ExecutionWorkspaceAttachment {
 	attachment := &workspacev1alpha1.ExecutionWorkspaceAttachment{
 		TaskRef:     workspacev1alpha1.ObjectIdentityReference{Name: s.task.Name, UID: s.task.UID},
@@ -708,8 +668,6 @@ func (s *stagedWorkspaceAttachment) attachment() *workspacev1alpha1.ExecutionWor
 	return attachment
 }
 
-// stageAttachment validates the workspace, claims the Lease, and creates (or
-// recovers) the next epoch's bearer Secret. It never writes the workspace.
 func (m WorkspaceAttachmentManager) stageAttachment(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -798,12 +756,6 @@ func (m WorkspaceAttachmentManager) stageAttachment(
 	return staged, nil
 }
 
-// prepareAttachmentIntent stages the next attachment for a Task and fences
-// the Lease to its epoch, but leaves installing it to a later workspace write
-// (ADR 0057). The returned attachment is digest-only; the bearer stays in
-// its Secret. A stage that is never installed is recovered by the Task's own
-// ordinary attach (the same Lease holder and orphaned Secret) or released by
-// its settlement.
 func (m WorkspaceAttachmentManager) prepareAttachmentIntent(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,

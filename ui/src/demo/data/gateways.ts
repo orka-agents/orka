@@ -2,17 +2,12 @@ import type { Gateway, GatewayBinding, GatewayDelivery, GatewayEvent } from '@/s
 import { ago, DEMO_NAMESPACE, NOW, digest, uid } from '../shared'
 import { AGENTS, ORG, SESSIONS } from '../world'
 
-// Northwind's external conversation plane: a Slack app in #incidents and
-// #platform-help, GitHub webhooks for pull request reviews, and a Microsoft
-// Teams support desk whose adapter is currently unreachable.
-
 const SLACK_TEAM = 'T04NWLABS2'
 const CHANNELS = { incidents: 'C05INCDNT1', platformHelp: 'C03PLATHLP' }
 const SLACK_USERS = { maya: 'U02MCHEN01', dev: 'U03DPATEL1', sam: 'U04SOKAFR1', lena: 'U05LFSCHR1', jordan: 'U06JREYES1' }
 const TEAMS_TENANT = '6f1c9a52-3d84-4b7e-9c21-0e5ad7b3f418'
 const TEAMS_CHANNEL = '19:support-desk-4c1e@thread.tacv2'
 
-/** Slack message timestamp for a moment `minutes` before page load. */
 const slackTs = (minutes: number) => ((NOW - minutes * 60_000) / 1000).toFixed(6)
 
 const conditions = (ready: boolean, at: string, reason = 'Ready', message?: string) =>
@@ -261,7 +256,6 @@ const eventInputs: EventInput[] = [
   }),
 ]
 
-/** Newest first, as the ledger lists them. */
 export const gatewayEvents: GatewayEvent[] = eventInputs.map(event)
 
 const eventByKey = (key: string) => gatewayEvents[eventInputs.findIndex((input) => input.key === key)]

@@ -50,7 +50,6 @@ var _ = Describe("Comprehensive Functionality", Ordered, func() {
 		dumpDebugInfo(containerCompTaskName, aiCompTaskName, claudeCompTaskName)
 	})
 
-	// Container task: validates execution environment, file I/O, process management, and output
 	It("should run a comprehensive container task that validates the full execution environment", func() {
 		By("creating a container task with an environment validation script")
 		taskManifest := fmt.Sprintf(`{
@@ -88,7 +87,6 @@ var _ = Describe("Comprehensive Functionality", Ordered, func() {
 		verifyResultAvailable(containerCompTaskName)
 	})
 
-	// AI task: exercises the AI worker with code_exec tool
 	It("should run a comprehensive AI task that uses built-in tools", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
 
@@ -148,7 +146,6 @@ var _ = Describe("Comprehensive Functionality", Ordered, func() {
 		}
 	})
 
-	// ACP agent task: validates shared RuntimePool planning instead of per-Task Jobs.
 	It("should plan a comprehensive Claude task on an Orka harness v2 RuntimePool", func() {
 		agentManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",

@@ -178,10 +178,6 @@ type taskScopedCreateConflictFixture struct {
 	stop       func()
 }
 
-// newTaskScopedCreateConflictFixture prepares a bound task-scoped agent Task
-// reserved against one Serving RuntimePool whose supervisor endpoint is the
-// given fake runtime server. Runtime server construction is deferred to the
-// caller through serverFactory so its hooks can observe the Kubernetes client.
 func newTaskScopedCreateConflictFixture(
 	t *testing.T,
 	ctx context.Context,
@@ -334,10 +330,6 @@ func digestConflictErrorResponse() *harnessv2.ErrorResponse {
 	}
 }
 
-// A create request rebuilt for the same attempt carries a fresh expiry and
-// workspace capability, so a supervisor that already created the session from
-// an earlier send answers digest_conflict while still hosting it. The attempt
-// must adopt that session instead of failing.
 func TestACPDispatcherAdoptsTaskScopedRuntimeSessionAfterCreateDigestConflict(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -386,11 +378,6 @@ func TestACPDispatcherAdoptsTaskScopedRuntimeSessionAfterCreateDigestConflict(t 
 	}
 }
 
-// Losing the RuntimePool capacity reservation after the RuntimeSession was
-// created retires that session at the runtime and re-admits the same attempt.
-// The runtime keeps a deletion tombstone for the retired generation, so the
-// re-admitted attempt must use a later PromptAttempt-backed generation instead
-// of rebuilding the tombstoned create identity.
 func TestACPDispatcherReadmittedTaskScopedAttemptAdvancesPromptAttemptGeneration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -398,8 +385,6 @@ func TestACPDispatcherReadmittedTaskScopedAttemptAdvancesPromptAttemptGeneration
 	fixture := newTaskScopedCreateConflictFixture(t, ctx, "readmitted-generation", types.UID("88888888-8888-8888-8888-888888888888"), recorder.server)
 	defer fixture.stop()
 
-	// Cycle 1: the session is created, the reservation is lost, the session is
-	// retired, and the attempt is re-admitted without a terminal failure.
 	reserved, target, err := fixture.dispatcher.reserveTask(ctx, fixture.task.DeepCopy())
 	if err != nil {
 		t.Fatal(err)
@@ -434,7 +419,6 @@ func TestACPDispatcherReadmittedTaskScopedAttemptAdvancesPromptAttemptGeneration
 	}
 	firstGeneration := firstGenerations[0]
 
-	// Cycle 2: the re-admitted attempt creates a later generation and completes.
 	dispatchQueuedTask(ctx, t, fixture.dispatcher, requeued)
 	completed := fixture.currentTask(t, ctx)
 	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded || completed.Status.Execution == nil ||
@@ -467,9 +451,6 @@ func TestACPDispatcherReadmittedTaskScopedAttemptAdvancesPromptAttemptGeneration
 	}
 }
 
-// readmissionRuntimeRecorder drives the fake runtime for the re-admission
-// scenario: the RuntimePool reservation vanishes while the first create is in
-// flight and records each generation selected after re-admission.
 type readmissionRuntimeRecorder struct {
 	t   *testing.T
 	ctx context.Context
@@ -503,8 +484,6 @@ func (r *readmissionRuntimeRecorder) server(profile harnessv2.RuntimeProfile, di
 		if !r.reservationDropped.CompareAndSwap(false, true) {
 			return
 		}
-		// The reservation vanishes while the create is in flight, as it does
-		// when the pool's active instance or lifecycle changes underneath it.
 		var pools corev1alpha1.RuntimePoolList
 		if err := (*kubeClient).List(r.ctx, &pools); err != nil || len(pools.Items) != 1 {
 			r.t.Errorf("list RuntimePools: %v (items=%d)", err, len(pools.Items))

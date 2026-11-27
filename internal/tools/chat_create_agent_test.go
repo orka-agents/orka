@@ -58,9 +58,6 @@ func TestChatCreateAgentTool_ParametersRuntimeTurnBounds(t *testing.T) {
 	}
 }
 
-// Exercise direct execution and the registry's numeric-string normalization.
-// The fake client does not enforce CRD validation, so rejected values must not
-// reach creation (including the optional initial Task).
 func TestChatCreateAgentTool_Execute_NumericBounds(t *testing.T) {
 	for _, field := range []string{"runtime.defaultMaxTurns", "model.temperature"} {
 		cases := []struct {
@@ -923,8 +920,6 @@ func TestParseRuntimeConfig_RejectsInvalidOpenCodeModel(t *testing.T) {
 	}
 }
 
-// A coordination restriction with the wrong JSON type used to be ignored, and an
-// empty allowedAgents lets the Agent delegate to any agent.
 func TestChatCreateAgentTool_Execute_RejectsWrongTypedCoordination(t *testing.T) {
 	run := func(coordination string) (ChatToolResult, []corev1alpha1.Agent) {
 		t.Helper()
@@ -1008,8 +1003,6 @@ func TestChatCreateAgentTool_Execute_AllowedAgentIdentities(t *testing.T) {
 				t.Run(tt.name, func(t *testing.T) {
 					wantError, want := tt.wantError, tt.want
 					if mode == "registry" {
-						// Declared null fields are omitted before Execute; a name is
-						// still required, while an omitted namespace is valid.
 						switch tt.name {
 						case "null name":
 							wantError = "coordination.allowedAgents[0].name is required"

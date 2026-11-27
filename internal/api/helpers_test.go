@@ -8,7 +8,6 @@ package api
 
 import "time"
 
-// DefaultChatConfig returns a ChatConfig with default values for testing.
 func DefaultChatConfig() ChatConfig {
 	return ChatConfig{
 		Enabled:         true,

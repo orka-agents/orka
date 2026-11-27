@@ -22,8 +22,6 @@ import (
 	"github.com/orka-agents/orka/workers/common"
 )
 
-// Exercise providers constructed by run, not a second implementation of its
-// environment-to-config mapping. Kubernetes startup is outside this regression.
 func TestAzureDeploymentWorkerRouting(t *testing.T) {
 	for _, api := range []string{"responses", "chat"} {
 		t.Run(api, func(t *testing.T) {
@@ -112,7 +110,6 @@ func TestAzureDeploymentWorkerRouting(t *testing.T) {
 				for chunk := range chunks {
 					require.NoError(t, chunk.Error)
 				}
-				// Completion goes through the worker's real agent loop.
 				content, err := executeAgentLoopWithEvents(t.Context(), provider, req.Messages, "", fixture.logical,
 					modelSettings{}, nil, nil, nil, common.NoopEventRecorder{})
 				require.NoError(t, err)

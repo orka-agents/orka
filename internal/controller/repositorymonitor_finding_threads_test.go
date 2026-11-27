@@ -18,15 +18,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// repositoryMonitorFindingThreadsGitHub fakes the GitHub API calls that mark
-// fixed findings' threads and records the comments and threads it changed.
 type repositoryMonitorFindingThreadsGitHub struct {
 	t           *testing.T
 	mu          sync.Mutex
 	currentHead string
 	patched     []string
 	resolved    []string
-	// failPatches answers that many comment updates with a server error.
 	failPatches int
 }
 
@@ -65,8 +62,6 @@ func (g *repositoryMonitorFindingThreadsGitHub) ServeHTTP(w http.ResponseWriter,
 		g.patched = append(g.patched, strings.TrimPrefix(req.URL.Path, "/repos/orka-agents/orka/pulls/comments/")+":"+update["body"])
 		_, _ = w.Write([]byte(`{}`))
 	default:
-		// Reviews Orka did not publish, such as one carrying a copied
-		// marker, are never read.
 		g.t.Errorf("unexpected request %s %s", req.Method, req.URL.Path)
 		http.NotFound(w, req)
 	}
@@ -93,7 +88,6 @@ func TestRepositoryMonitorMarksFixedFindingThreads(t *testing.T) {
 	if err := db.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{ID: "pub-old", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 1, HeadSHA: "old", Phase: repositoryMonitorPublishPhaseSucceeded, GitHubReviewID: "123", InlineCommentCount: 2}); err != nil {
 		t.Fatal(err)
 	}
-	// A summary-only publication has no inline comments to read.
 	if err := db.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{ID: "pub-summary", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 1, HeadSHA: "older", Phase: repositoryMonitorPublishPhaseSucceeded, GitHubReviewID: "124"}); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +100,6 @@ func TestRepositoryMonitorMarksFixedFindingThreads(t *testing.T) {
 	}
 	record := &store.ReviewRecord{ID: "review-new", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: "newhead1", Verdict: repositoryMonitorReviewVerdictPassed, FindingsJSON: findingsJSON}
 	item := &store.MonitorItem{Number: 1}
-	// The head moved after the review, so the fix may no longer hold.
 	if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, record); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +107,6 @@ func TestRepositoryMonitorMarksFixedFindingThreads(t *testing.T) {
 		t.Fatalf("marked threads for a head that moved: patched=%q resolved=%q", github.patched, github.resolved)
 	}
 	github.currentHead = "newhead1"
-	// A result that was not accepted never declares a finding fixed.
 	skipped := *record
 	skipped.ID, skipped.Verdict = "review-skipped", repositoryMonitorVerdictSkipped
 	if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, &skipped); err != nil {
@@ -134,8 +126,6 @@ func TestRepositoryMonitorMarksFixedFindingThreads(t *testing.T) {
 	if len(github.resolved) != 1 || github.resolved[0] != "T501" {
 		t.Fatalf("resolved threads = %q, want T501 once", github.resolved)
 	}
-	// A later review of the same head does not resolve the thread again, so a
-	// thread a maintainer reopened stays open.
 	rereview := *record
 	rereview.ID = "review-rereview"
 	if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, &rereview); err != nil {
@@ -145,8 +135,6 @@ func TestRepositoryMonitorMarksFixedFindingThreads(t *testing.T) {
 		t.Fatalf("a same-head re-review marked again: patched=%q resolved=%q", github.patched, github.resolved)
 	}
 
-	// A security-sensitive review, or a fix of a restricted finding, never
-	// links the finding to its fix.
 	restrictedJSON, err := repositoryMonitorReviewFindingsJSON([]repositoryMonitorReviewFinding{
 		{ID: "f-aaaa", Title: "Bug", Status: repositoryMonitorFindingStatusFixed, ResolvedHead: "newhead1", SecuritySensitive: true},
 	})
@@ -195,7 +183,6 @@ func TestRepositoryMonitorRetriesFailedFindingThreadMarking(t *testing.T) {
 		t.Fatal(err)
 	}
 	item := &store.MonitorItem{Number: 1, HeadSHA: "newhead1", LastReviewID: record.ID}
-	// Ingestion's attempt hits a GitHub failure.
 	r.markRepositoryMonitorFixedFindingThreadsBestEffort(ctx, monitor, item, record)
 	if len(github.patched) != 0 {
 		t.Fatalf("patched = %q, want the failed update not recorded as done", github.patched)
@@ -205,7 +192,6 @@ func TestRepositoryMonitorRetriesFailedFindingThreadMarking(t *testing.T) {
 	if err != nil || attempt.Status != repositoryMonitorRunPhaseFailed {
 		t.Fatalf("marking attempt = %+v err=%v, want a failed attempt recorded", attempt, err)
 	}
-	// A poll within the retry interval waits.
 	if err := r.retryRepositoryMonitorFindingThreadMarking(ctx, monitor, item); err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +212,6 @@ func TestRepositoryMonitorRetriesFailedFindingThreadMarking(t *testing.T) {
 	if attempt, err = db.GetGitHubMutationRecord(ctx, monitor.Namespace, attemptID); err != nil || attempt.Status != repositoryMonitorRunPhaseSucceeded {
 		t.Fatalf("marking attempt = %+v err=%v, want it settled", attempt, err)
 	}
-	// A settled attempt is not retried again.
 	if err := r.retryRepositoryMonitorFindingThreadMarking(ctx, monitor, item); err != nil || len(github.patched) != 1 {
 		t.Fatalf("retried a settled attempt: patched=%q err=%v", github.patched, err)
 	}

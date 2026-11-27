@@ -35,18 +35,10 @@ type sessionRuntimeCleanupTarget struct {
 	runtimeEpoch    uint64
 }
 
-// sessionRuntimeCleanupFence separates the current cleanup owner from the
-// immutable terminal execution's resident runtime. Cleanup may use this older
-// runtime epoch. It never grants admission. Session teardown fences permit
-// only exact deletion; a standalone terminal fence may additionally finalize
-// the evidence-bound publication that must precede that deletion.
 type sessionRuntimeCleanupFence struct {
-	controller   store.ControllerEpochFence
-	runtimeEpoch uint64
-	validateTask func(context.Context) error
-	// allowPublicationFinalization lets standalone terminal cleanup finish an
-	// evidence-bound publication before exact deletion. Session teardown
-	// never sets it; that authority remains delete-only.
+	controller                   store.ControllerEpochFence
+	runtimeEpoch                 uint64
+	validateTask                 func(context.Context) error
 	allowPublicationFinalization bool
 }
 
@@ -67,8 +59,6 @@ func (d *ACPDispatcher) externalRuntimeCleanupEpoch(ctx context.Context, cleanup
 	if !ok {
 		return 0, errors.New("session runtime cleanup requires authoritative epoch reads")
 	}
-	// Runtime retirement runs outside the epoch mutation lock. Revalidate the
-	// original cleanup owner without trusting the manager's cached fence.
 	authoritative, err := reader.GetControllerEpochFence(ctx, current.Name)
 	if err != nil {
 		return 0, err
@@ -84,10 +74,6 @@ func (d *ACPDispatcher) externalRuntimeCleanupEpoch(ctx context.Context, cleanup
 	return cleanup.runtimeEpoch, nil
 }
 
-// CleanupSessionRuntime retires resident conversation processes after the
-// durable Session cleanup intent has blocked new turns. All runtime authority
-// comes from finalized turns and verified immutable Task execution snapshots.
-// It is also used when replaying an interrupted Session deletion.
 func (d *ACPDispatcher) CleanupSessionRuntime(
 	ctx context.Context,
 	intent store.SessionCleanupIntent,
@@ -124,9 +110,6 @@ func (d *ACPDispatcher) CleanupSessionRuntime(
 			targets = append(targets, *target)
 		}
 	}
-	// A continued RuntimeSession belongs to its newest completed turn. Delete
-	// each exact runtime incarnation once, then record proof for every Task
-	// which retained the same conversation process.
 	sort.Slice(targets, func(i, j int) bool { return targets[i].leaseGeneration > targets[j].leaseGeneration })
 	cleaned := make(map[sessionRuntimeCleanupIdentity]struct{})
 	for i := range targets {
@@ -238,9 +221,6 @@ func (d *ACPDispatcher) sessionRuntimeCleanupTarget(
 		frozen.Status.Execution.RuntimeSessionCleanupDigest = task.Status.Execution.RuntimeSessionCleanupDigest
 	}
 	if frozen.Spec.Workspace != nil && frozen.Spec.Workspace.Intent == corev1alpha1.WorkspaceIntentWrite {
-		// Write sessions are Task-scoped and already pass their runtime cleanup
-		// barrier independently of conversation deletion. Their Task finalizers
-		// retain the frozen authority until this Session cleanup completes.
 		if !runtimeSessionCleanupCompleteForUID(frozen, types.UID(turn.Key.TaskUID)) {
 			return nil, fmt.Errorf("%w: write Task runtime cleanup is incomplete", store.ErrNotReady)
 		}
@@ -249,9 +229,6 @@ func (d *ACPDispatcher) sessionRuntimeCleanupTarget(
 	target := &sessionRuntimeCleanupTarget{
 		task: frozen, taskUID: types.UID(turn.Key.TaskUID), leaseGeneration: turn.Key.LeaseGeneration, identity: identity,
 	}
-	// Legacy projections may recover omitted identity from mutable Task status.
-	// They cannot authorize a prior-epoch mutation. Only a complete, explicitly
-	// frozen execution can supply the resident runtime's original epoch.
 	if payload.Execution.RuntimeSessionUID != "" && payload.Execution.ControllerEpoch > 0 {
 		target.runtimeEpoch = uint64(payload.Execution.ControllerEpoch)
 	}
@@ -308,8 +285,6 @@ func (d *ACPDispatcher) recordSessionRuntimeCleanupForTask(
 		}
 		if current.Status.Execution.Attempt != target.task.Status.Execution.Attempt ||
 			sessionRuntimeCleanupIdentityForExecution(current.Status.Execution) != target.identity {
-			// An older attempt's immutable turn remains archived independently;
-			// only the Task's current runtime incarnation receives a status receipt.
 			return nil
 		}
 		return d.markTaskScopedRuntimeSessionCleanupComplete(writeCtx, current, target.taskUID,

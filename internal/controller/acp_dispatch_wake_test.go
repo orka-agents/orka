@@ -19,7 +19,7 @@ import (
 func TestACPDispatcherWakeCoalesces(t *testing.T) {
 	d := &ACPDispatcher{}
 	d.Wake()
-	d.Wake() // never blocks while one wakeup is pending
+	d.Wake()
 	select {
 	case <-d.wakeChannel():
 	default:
@@ -36,7 +36,6 @@ func TestWaitForNextDispatchScan(t *testing.T) {
 	ctx := context.Background()
 	wake := make(chan struct{}, 1)
 
-	// A wakeup long after the last scan starts the next scan immediately.
 	wake <- struct{}{}
 	start := time.Now()
 	if !waitForNextDispatchScan(ctx, nil, wake, start.Add(-time.Second), nil) {
@@ -46,7 +45,6 @@ func TestWaitForNextDispatchScan(t *testing.T) {
 		t.Fatalf("stale-scan wakeup waited %s", elapsed)
 	}
 
-	// A wakeup right after a scan waits out the minimum interval.
 	wake <- struct{}{}
 	start = time.Now()
 	if !waitForNextDispatchScan(ctx, nil, wake, start, nil) {
@@ -56,7 +54,6 @@ func TestWaitForNextDispatchScan(t *testing.T) {
 		t.Fatalf("back-to-back wakeup scanned after %s, want at least %s", elapsed, acpDispatchWakeMinInterval)
 	}
 
-	// The periodic tick still drives scans without wakeups.
 	tick := make(chan time.Time, 1)
 	tick <- time.Now()
 	if !waitForNextDispatchScan(ctx, tick, wake, time.Now(), nil) {
@@ -74,8 +71,6 @@ func TestWaitForNextDispatchScanAdmissionWakeSkipsInterval(t *testing.T) {
 	ctx := context.Background()
 	d := &ACPDispatcher{}
 
-	// A RuntimePool that just began admitting starts the scan at once, even
-	// right after a scan.
 	d.wakeForAdmission()
 	start := time.Now()
 	if !waitForNextDispatchScan(ctx, nil, d.wakeChannel(), start, d.takeAdmissionWake) {
@@ -88,7 +83,6 @@ func TestWaitForNextDispatchScanAdmissionWakeSkipsInterval(t *testing.T) {
 		t.Fatal("admission wakeup was not consumed by the scan it started")
 	}
 
-	// An admission opening during an ordinary wakeup's interval ends the wait.
 	d.Wake()
 	start = time.Now()
 	go func() {
@@ -102,9 +96,6 @@ func TestWaitForNextDispatchScanAdmissionWakeSkipsInterval(t *testing.T) {
 		t.Fatalf("admission wakeup during the interval waited %s, want less than %s", elapsed, acpDispatchWakeMinInterval)
 	}
 
-	// An admission wakeup that arrives after the interval has elapsed is
-	// consumed by the scan it starts; it does not let the next ordinary
-	// wakeup skip the interval.
 	d.wakeForAdmission()
 	if !waitForNextDispatchScan(ctx, nil, d.wakeChannel(), time.Now().Add(-time.Second), d.takeAdmissionWake) {
 		t.Fatal("admission wakeup did not start a scan")
@@ -112,7 +103,6 @@ func TestWaitForNextDispatchScanAdmissionWakeSkipsInterval(t *testing.T) {
 	if d.takeAdmissionWake() {
 		t.Fatal("an admission wakeup outlived the scan it started")
 	}
-	// A tick that starts the scan consumes a pending admission wakeup too.
 	d.wakeForAdmission()
 	<-d.wakeChannel()
 	tick := make(chan time.Time, 1)
@@ -124,7 +114,6 @@ func TestWaitForNextDispatchScanAdmissionWakeSkipsInterval(t *testing.T) {
 		t.Fatal("an admission wakeup outlived the ticked scan")
 	}
 
-	// An ordinary wakeup during the interval still waits it out.
 	d.Wake()
 	start = time.Now()
 	go func() {
@@ -153,7 +142,6 @@ func TestACPRuntimePoolAdmissionOpened(t *testing.T) {
 	replaced.Status.ActiveInstance.RuntimeInstanceID = "instance-2"
 	released := serving.DeepCopy()
 	released.Status.Capacity.RunningPrompts = 0
-	// A full pool: Serving and Closed only because it is at capacity.
 	full := serving.DeepCopy()
 	full.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 	full.Status.Capacity = corev1alpha1.RuntimePoolCapacityStatus{
@@ -169,7 +157,6 @@ func TestACPRuntimePoolAdmissionOpened(t *testing.T) {
 		name     string
 		old, new *corev1alpha1.RuntimePool
 		want     bool
-		// dispatch: an ordinary dispatch wake without the admission fast path.
 		dispatch bool
 	}{
 		{name: "started serving", old: starting, new: serving, want: true},
@@ -232,8 +219,6 @@ func TestACPRuntimePoolOpenedForDispatch(t *testing.T) {
 	starting := serving.DeepCopy()
 	starting.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
 	starting.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
-	// A Serving pool closed to new sessions still admits a continuation's
-	// prompt-only reservation.
 	closed := serving.DeepCopy()
 	closed.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 	closedReleased := closed.DeepCopy()

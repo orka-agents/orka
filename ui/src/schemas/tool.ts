@@ -72,7 +72,6 @@ export const toolSchema = z.object({
   status: toolStatusSchema.optional(),
 })
 
-// For list endpoint which returns a simplified format
 export const toolListItemSchema = z.object({
   name: z.string(),
   namespace: z.string().optional(),

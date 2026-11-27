@@ -250,7 +250,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 is_dns_label "$namespace" || error "Invalid namespace: $namespace"
-# --name is used for both the Deployment and Service, so keep it DNS-label safe.
 is_dns_label "$name" || error "Invalid name: $name"
 [[ "$image" != *$'\n'* && "$image" != *$'\t'* && "$image" != *' '* ]] || error "Image must not contain whitespace"
 case "$image_pull_policy" in Always|IfNotPresent|Never) ;; *) error "Invalid image pull policy: $image_pull_policy" ;; esac
@@ -335,8 +334,6 @@ apply_providers_configmap() {
     --from-file="${providers_config_key}=${providers_config}" \
     --dry-run=client -o yaml | k apply -f -)"
   echo "$apply_output"
-  # Vekil reads providers config at startup, so restart pods when the
-  # ConfigMap is created or updated underneath an otherwise unchanged template.
   if [[ "$apply_output" == *" created"* || "$apply_output" == *" configured"* ]]; then
     providers_configmap_changed="true"
   fi

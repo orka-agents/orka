@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Shared test-only bootstrap for fresh-cluster E2E runs. Production deployment
-# remains fail-closed and requires callers to provision this Secret explicitly.
 
 _orka_e2e_render_admission_runtime() {
   local namespace="$1"
@@ -123,10 +121,6 @@ EOF_SERVING_CONFIG
     | "${kubectl_bin}" apply -f - >/dev/null
 )
 
-# A reused E2E cluster may still have a fail-closed webhook configuration that
-# trusts the previous run's CA. Remove that routing before rotating the
-# test-only serving certificate. The ready admission runtime is installed and
-# the webhook routing is restored by orka_e2e_deploy_admission.
 orka_e2e_remove_admission_webhooks() {
   local kubectl_bin="${1:-kubectl}"
 
@@ -134,10 +128,6 @@ orka_e2e_remove_admission_webhooks() {
     --ignore-not-found=true >/dev/null
 }
 
-# Install the checked-in admission runtime with the exact controller image
-# under test, wait for both replicas to become Service endpoints, smoke every
-# handler, then publish the checked-in fail-closed webhook configuration with
-# the E2E CA bundle.
 orka_e2e_deploy_admission() (
   set -Eeuo pipefail
 

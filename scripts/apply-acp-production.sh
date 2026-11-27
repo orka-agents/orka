@@ -295,13 +295,6 @@ validate_existing_controller_identity() {
   fi
 }
 
-# The controller Deployment uses the Recreate strategy, so its replacement Pod
-# starts only after every old Pod exits, and an old Pod's preStop upgrade drain
-# may use its whole termination grace period. Wait for the longest grace period
-# among the applied Deployment, the live Deployment captured by
-# validate_existing_controller_identity, and the existing controller Pods
-# (including any still terminating from an earlier rollout), plus a 3m startup
-# margin, and never less than 5m.
 controller_rollout_timeout() {
   local selector
   if ! selector="$(jq -er '
@@ -344,9 +337,6 @@ validate_snapshot_secret() {
     return 0
   fi
 
-  # Match the controller parser: raw input is accepted only at exactly 32
-  # bytes. Otherwise trim surrounding whitespace from base64 text, while
-  # retaining Go's allowance for embedded CR/LF line wrapping.
   encoded_key="$(<"${snapshot_key_data}")"
   while [[ -n "${encoded_key}" && "${encoded_key}" == [[:space:]]* ]]; do
     encoded_key="${encoded_key:1}"
@@ -642,22 +632,13 @@ EOF_ADMISSION_HANDLERS
   stop_admission_proxy
 }
 
-# Establish every workload prerequisite, then activate the independent
-# admission plane before rolling the static harness-v2 controller. Every retry repeats
-# these idempotent phases, so interruption after any apply still converges on the
-# desired generation without rotating an existing snapshot key.
 bash "${script_dir}/lib/ensure-static-mode-namespace.sh" "${kubectl}" orka-system harness-v2
 validate_existing_controller_identity
 controller_rollout_wait="$(controller_rollout_timeout)"
-# Preserve the immutable mode claim as an atomic precondition while converging
-# the remaining platform labels. This cannot relabel or adopt a namespace that
-# changes identity after the preflight.
 "${kubectl}" patch namespace orka-system --type=json --patch-file "${namespace_metadata_patch}" >/dev/null
 validate_admission_tls_secret
 ensure_snapshot_secret
 "${kubectl}" apply -f "${runtime_config}"
-# Activate the CEL Lease guard before the admission plane can drop the legacy
-# Lease webhook, so an interrupted run never leaves reserved Leases unguarded.
 "${kubectl}" apply -f "${lease_policy_manifest}"
 "${kubectl}" apply -f "${admission_runtime_manifest}"
 wait_for_admission_endpoints

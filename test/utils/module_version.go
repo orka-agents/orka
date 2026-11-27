@@ -16,12 +16,6 @@ import (
 
 var fullCommitSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
-// PseudoVersionNamesRevision reports whether a pinned module version is a
-// pseudo-version and, if so, verifies that it encodes the exact pinned commit.
-// No tag exists for a pseudo-version: its commit prefix is the only revision
-// claim the version makes. A release version returns false so the caller can
-// verify its tag. Malformed versions or revisions, and a pseudo-version whose
-// commit prefix differs from the revision, fail closed.
 func PseudoVersionNamesRevision(version, revision string) (bool, error) {
 	if !fullCommitSHA.MatchString(revision) {
 		return false, fmt.Errorf("pinned module revision %q is not a full lowercase commit SHA", revision)

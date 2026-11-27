@@ -11,8 +11,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/wiretest"
 )
 
-// A provider that panics while the server first describes it does not keep
-// the call's admission slot.
 func TestServerReleasesAdmissionWhenTheDescriptionPanics(t *testing.T) {
 	provider := newRecordingProvider()
 	provider.mu.Lock()
@@ -31,7 +29,6 @@ func TestServerReleasesAdmissionWhenTheDescriptionPanics(t *testing.T) {
 	require.NoError(t, client.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{}), "the slot is free after the panic")
 }
 
-// describedProvider reports a fixed description.
 type describedProvider struct {
 	*recordingProvider
 	info storagev1.ProviderInfo
@@ -41,8 +38,6 @@ func (p describedProvider) Describe(context.Context) (storagev1.ProviderInfo, er
 	return p.info, nil
 }
 
-// A server with separate state and artifacts providers describes itself as a
-// whole: both contract parts, and the artifacts provider's artifact limit.
 func TestServerDescribesSeparateProvidersAsOne(t *testing.T) {
 	stateInfo := describeDefault()
 	stateInfo.Contracts = []string{storagev1.StateContract}

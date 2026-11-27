@@ -24,9 +24,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This opt-in test uses an installed, pinned Agent Framework dependency. The
-// client, Orka Fiber handler, provider SDK and upstream fixture communicate over
-// real TCP. Neither the framework nor its tool/history management is mocked.
 func TestAgentFrameworkResponsesInterop(t *testing.T) {
 	python := os.Getenv("ORKA_RESPONSES_INTEROP_PYTHON")
 	if python == "" {
@@ -104,7 +101,6 @@ func TestAgentFrameworkResponsesInterop(t *testing.T) {
 						_ = json.NewEncoder(w).Encode(response)
 						return
 					}
-					// Emit real upstream Responses SSE, including call item identity and chunks.
 					events := []map[string]any{{"type": "response.created", "response": map[string]any{"id": "upstream-response", "status": "in_progress", "output": []any{}}}}
 					for index, raw := range response["output"].([]any) {
 						item := raw.(map[string]any)
@@ -128,7 +124,6 @@ func TestAgentFrameworkResponsesInterop(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 				defer cancel()
 				command := exec.CommandContext(ctx, python, args...)
-				// Do not forward ambient cloud/provider credentials to this deterministic test.
 				command.Env = []string{"PATH=" + os.Getenv("PATH"), "PYTHONUNBUFFERED=1", "NO_PROXY=127.0.0.1,localhost", "ORKA_API_KEY=" + token}
 				output, err := command.CombinedOutput()
 				require.NoError(t, err, string(output))

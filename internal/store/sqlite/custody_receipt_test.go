@@ -25,7 +25,6 @@ func custodyTestCredential(uid, label string) storagev1.SealedConnectorCredentia
 	}
 }
 
-// custodyReceipt reads the receipt row an operation left.
 func custodyReceipt(t *testing.T, s *Store, operationID string) (result []byte, scope string, cleared bool) {
 	t.Helper()
 	require.NoError(t, s.db.QueryRow(`SELECT result, custody_scope, result_cleared FROM operation_receipts WHERE operation_id = ?`,
@@ -33,13 +32,10 @@ func custodyReceipt(t *testing.T, s *Store, operationID string) (result []byte, 
 	return result, scope, cleared
 }
 
-// receiptCopy is how a receipt result holds sealed bytes.
 func receiptCopy(sealed []byte) []byte {
 	return []byte(base64.StdEncoding.EncodeToString(sealed))
 }
 
-// requireNoCopyInFiles checks that neither the database file nor its log
-// holds any of the given byte strings.
 func requireNoCopyInFiles(t *testing.T, s *Store, copies map[string][]byte) {
 	t.Helper()
 	for _, path := range []string{s.dbPath, s.dbPath + "-wal"} {
@@ -69,10 +65,6 @@ func putCustodyWithEnvelope(t *testing.T, s *Store, dataset, uid, label string) 
 	return putCall{ctx: ctx, envelope: envelope, request: request, stored: stored}
 }
 
-// Removing a Connection's custody clears the sealed results its receipts
-// hold, in the removal's own transaction, and its log truncation removes their
-// copies from the files. The receipts stay, so a replay never runs the write
-// again: it returns ErrConflict. Another Connection's receipts are untouched.
 func TestCustodyRemovalClearsSealedReceiptResults(t *testing.T) {
 	for name, remove := range map[string]func(ctx context.Context, s *Store, put putCall) error{
 		"shred": func(ctx context.Context, s *Store, put putCall) error {
@@ -129,8 +121,6 @@ func TestCustodyRemovalClearsSealedReceiptResults(t *testing.T) {
 	}
 }
 
-// Deleting a Connection's consents clears the sealed consent a consumed
-// consent's receipt holds.
 func TestConsentDeletionClearsConsumedConsentReceipts(t *testing.T) {
 	ctx := t.Context()
 	s := setupDiskStore(t)
@@ -162,8 +152,6 @@ func TestConsentDeletionClearsConsumedConsentReceipts(t *testing.T) {
 	requireNoCopyInFiles(t, s, map[string][]byte{"the receipt's copy of the verifier": receiptCopy(consent.VerifierCiphertext)})
 }
 
-// Writes whose results carry no custody keep no custody scope, so removing
-// custody leaves their receipts alone.
 func TestReceiptsOutsideCustodyHaveNoScope(t *testing.T) {
 	ctx := t.Context()
 	s := setupTestStore(t)
@@ -183,8 +171,6 @@ func TestReceiptsOutsideCustodyHaveNoScope(t *testing.T) {
 	require.NotErrorIs(t, err, sql.ErrNoRows)
 }
 
-// Clearing a custody scope searches the scope index rather than scanning
-// every receipt while it holds the writer.
 func TestCustodyClearingSearchesTheScopeIndex(t *testing.T) {
 	s := setupTestStore(t)
 	rows, err := s.db.Query(`EXPLAIN QUERY PLAN `+clearCustodyReceiptsSQL, "connection-a")

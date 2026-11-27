@@ -30,9 +30,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// Run against a disposable cluster with the Task, Tool and Skill CRDs installed.
-// The explicit kubeconfig is required so normal unit tests never use a current
-// Kubernetes context. All test records live in a namespace removed on cleanup.
 func TestExternalAPILiveTokenReviewAuthorization(t *testing.T) {
 	kubeconfig := os.Getenv("ORKA_AUTHORIZATION_E2E_KUBECONFIG")
 	if kubeconfig == "" {
@@ -80,8 +77,6 @@ func TestExternalAPILiveTokenReviewAuthorization(t *testing.T) {
 		require.NoError(t, err)
 		issued, err := clientset.CoreV1().ServiceAccounts(namespace).CreateToken(t.Context(), caller, &authenticationv1.TokenRequest{}, metav1.CreateOptions{})
 		require.NoError(t, err)
-		// Tokens remain in memory. Never include requests or credential values
-		// in assertion messages, fixture files or logs.
 		credentials[caller] = issued.Status.Token
 		callerConfig := rest.AnonymousClientConfig(cfg)
 		callerConfig.BearerToken = issued.Status.Token

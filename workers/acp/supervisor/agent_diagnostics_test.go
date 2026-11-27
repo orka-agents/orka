@@ -11,9 +11,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// The fixture chunks below are the exact agent_message_chunk texts GitHub
-// Copilot CLI 1.0.77 emitted in --acp mode under the supervisor's flags when
-// --excluded-tools carried the pre-fix exclusion list (issue #460).
 var copilotObservedStartupDiagnostics = []string{
 	"Info: Disabled tools: list_agents, read_agent, skill, sql, task, write_agent",
 	`Info: Unknown tool name in the tool excludedlist: "ask_user"`,
@@ -22,10 +19,6 @@ var copilotObservedStartupDiagnostics = []string{
 	`Info: Unknown tool name in the tool excludedlist: "report_intent"`,
 }
 
-// The chunks Copilot CLI 1.0.96 emitted in --acp mode under the supervisor's
-// flags for an unrestricted session and for a session limited to Read and
-// Grep. Without workspace skills, that build leaves skill out of the disabled
-// list because it registers skill only when the workspace has skills.
 var copilotPinnedStartupDiagnostics = map[bool][]string{
 	true: {"Info: Disabled tools: list_agents, read_agent, sql, task, write_agent"},
 	false: {
@@ -35,8 +28,6 @@ var copilotPinnedStartupDiagnostics = map[bool][]string{
 	},
 }
 
-// The CLI routes its inference retry notice through the same channel; it is
-// deliberately not recognized here (tracked separately in #473).
 const copilotObservedRetryNotice = "Info: Response was interrupted due to a server error. Retrying..."
 
 func TestCopilotStartupDiagnosticRecognizesPinnedCLIDiagnostics(t *testing.T) {
@@ -50,8 +41,6 @@ func TestCopilotStartupDiagnosticRecognizesPinnedCLIDiagnostics(t *testing.T) {
 		}
 	}
 	withheld := map[string]string{
-		// A restricted session's line names policy exclusions and tools the
-		// CLI disabled on its own (web_search under a BYOK provider).
 		"Info: Disabled tools: bash, list_bash, skill, web_search":     "disabled tools: bash, list_bash, skill (+1 not in the session exclusion list)",
 		"Info: Disabled tools: github-mcp-server-search_code, sql":     "disabled tools: sql (+1 not in the session exclusion list)",
 		`Info: Unknown tool name in the tool excludedlist: "ask_user"`: `unknown excluded tool "ask_user"`,
@@ -65,8 +54,6 @@ func TestCopilotStartupDiagnosticRecognizesPinnedCLIDiagnostics(t *testing.T) {
 			t.Fatalf("summary for %q = %q, want %q", text, summary, wantSummary)
 		}
 	}
-	// The chunk is child-controlled: a name-shaped entry such as the session
-	// proxy bearer must never reach the summary, only its count.
 	const credential = "c2Vzc2lvbi1wcm94eS1iZWFyZXItdG9rZW4tdmFsdWU_-x"
 	summary, ok := recognize("Info: Disabled tools: skill, " + credential)
 	if !ok || strings.Contains(summary, credential) || summary != "disabled tools: skill (+1 not in the session exclusion list)" {
@@ -118,10 +105,6 @@ func TestWithholdAgentDiagnosticKeepsModelTextIntact(t *testing.T) {
 			texts = append(texts, ready)
 		}
 	}
-	// The CLI reports exclusions before its first inference request, then
-	// the response streams a model answer that repeats the diagnostic
-	// sentence verbatim as its very first delta and also echoes the CLI's
-	// retry notice, which is not a recognized diagnostic.
 	push(copilotObservedStartupDiagnostics[0], now)
 	proxy.firstInferenceResponseStartedAt = now.Add(time.Millisecond)
 	push(copilotObservedStartupDiagnostics[0], now.Add(2*time.Millisecond))
@@ -148,16 +131,10 @@ func TestWithholdAgentDiagnosticAnchorsOnProviderProxyState(t *testing.T) {
 		Update:    []byte(`{"sessionUpdate":"tool_call","toolCallId":"t","title":"` + copilotObservedStartupDiagnostics[0] + `"}`),
 	}}
 
-	// Sessions without a projection filter forward every chunk.
 	if withholdAgentDiagnostic(&sessionState{}, testDiagnosticPromptState(), startup) {
 		t.Fatal("session without a diagnostic filter withheld a chunk")
 	}
 
-	// A startup diagnostic is withheld when it was received before the
-	// prompt's first non-error inference response began relaying, even if
-	// it is consumed only after the proxy moved on; an identical chunk
-	// received after that instant is model output. Non-text updates and
-	// unrecognized CLI text are never withheld.
 	state := &sessionState{id: "session-1", agentDiagnosticFilter: filter, providerProxy: &providerProxySession{turnPromptID: "prompt-1"}}
 	if !withholdAgentDiagnostic(state, testDiagnosticPromptState(), startup) {
 		t.Fatal("startup diagnostic was forwarded before any inference response")
@@ -176,8 +153,6 @@ func TestWithholdAgentDiagnosticAnchorsOnProviderProxyState(t *testing.T) {
 	if withholdAgentDiagnostic(state, testDiagnosticPromptState(), startup) {
 		t.Fatal("startup diagnostic text received after an inference response started was withheld")
 	}
-	// An event buffered before prompt acceptance is enqueued (and
-	// timestamped) later than it was received; the receipt time decides.
 	bufferedStartup := startup
 	bufferedStartup.ReceivedAt = now.Add(-2 * time.Millisecond)
 	if !withholdAgentDiagnostic(state, testDiagnosticPromptState(), bufferedStartup) {
@@ -256,10 +231,6 @@ func TestCopilotProjectionDeclaresDiagnosticFilterForSessionExclusions(t *testin
 	}
 }
 
-// The pinned Copilot CLI registers exactly these built-in tool names from the
-// permanent exclusion set; any other name makes it print an "Unknown tool
-// name" diagnostic for every prompt. Re-verify against the CLI in --acp mode
-// when the runtime image pin moves.
 func TestCopilotAlwaysExcludedToolIDsMatchPinnedCLICatalog(t *testing.T) {
 	want := "list_agents,read_agent,skill,sql,task,write_agent"
 	if got := strings.Join(copilotAlwaysExcludedToolIDs, ","); got != want {
@@ -267,8 +238,6 @@ func TestCopilotAlwaysExcludedToolIDsMatchPinnedCLICatalog(t *testing.T) {
 	}
 }
 
-// The supervisor log carries only the recognizer's summary: chunk text is
-// child-controlled and could smuggle a session credential.
 func TestWithholdAgentDiagnosticLogsOnlyTheSummary(t *testing.T) {
 	var logs bytes.Buffer
 	previous := slog.Default()

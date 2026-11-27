@@ -11,10 +11,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// SaveResult inserts or replaces a task result. Data larger than
-// store.MaxResultBytes is rejected with store.ErrTooLarge, and a write whose
-// order stamp is not greater than the stored result's succeeds without
-// changing it.
 func (s *Store) SaveResult(ctx context.Context, namespace, taskName string, data []byte) error {
 	return writeOperationErr(ctx, s, "SaveResult", func(ctx context.Context) error {
 		return s.saveResultWrite(ctx, namespace, taskName, data)
@@ -47,7 +43,6 @@ func (s *Store) saveResultUnfenced(ctx context.Context, namespace, taskName stri
 	return err
 }
 
-// GetResult retrieves a task result. Returns store.ErrNotFound if no result exists.
 func (s *Store) GetResult(ctx context.Context, namespace, taskName string) ([]byte, error) {
 	var data []byte
 	err := s.db.QueryRowContext(ctx,
@@ -60,7 +55,6 @@ func (s *Store) GetResult(ctx context.Context, namespace, taskName string) ([]by
 	return data, err
 }
 
-// DeleteResult removes a task result.
 func (s *Store) DeleteResult(ctx context.Context, namespace, taskName string) error {
 	return writeOperationErr(ctx, s, "DeleteResult", func(ctx context.Context) error {
 		return s.deleteResultWrite(ctx, namespace, taskName)
@@ -91,7 +85,6 @@ func (s *Store) deleteResultWrite(ctx context.Context, namespace, taskName strin
 	return tx.Commit()
 }
 
-// SavePromptResultReceipt inserts one immutable attempt-bound result receipt.
 func (s *Store) SavePromptResultReceipt(ctx context.Context, receipt store.PromptResultReceipt) error {
 	return writeOperationErr(ctx, s, "SavePromptResultReceipt", func(ctx context.Context) error {
 		return s.savePromptResultReceiptWrite(ctx, receipt)
@@ -121,8 +114,6 @@ func (s *Store) savePromptResultReceiptWrite(ctx context.Context, receipt store.
 	if len(receipt.Data) > store.MaxResultBytes {
 		return store.TooLargeError{What: "prompt result receipt data", Size: int64(len(receipt.Data)), Limit: store.MaxResultBytes}
 	}
-	// The insert and the comparison share one transaction, so the receipt
-	// compared is the one stored when this call committed.
 	return s.writeTransaction(ctx, func(q taskDataExecutor) error {
 		if _, err := q.ExecContext(ctx,
 			`INSERT INTO prompt_result_receipts
@@ -147,7 +138,6 @@ func (s *Store) savePromptResultReceiptWrite(ctx context.Context, receipt store.
 	})
 }
 
-// GetPromptResultReceipt returns the immutable receipt for one PromptAttempt.
 func (s *Store) GetPromptResultReceipt(ctx context.Context, attemptID string) (*store.PromptResultReceipt, error) {
 	attemptID = strings.TrimSpace(attemptID)
 	if err := store.ValidateControlIdentifier("prompt result receipt attempt ID", attemptID); err != nil {

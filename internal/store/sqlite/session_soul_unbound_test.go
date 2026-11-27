@@ -145,8 +145,6 @@ func TestGatewayRetentionDoesNotPinUnboundSoulFailure(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.ExpireGatewayEvent(ctx, event.Namespace, event.ID, "", "expired", old))
 	attachDeliveredExpiryDelivery(t, s, ctx, event, old)
-	// Replace the expiry fixture's metadata with the exact canonical pre-Job
-	// error evidence emitted by Gateway terminal projection.
 	metadata, err := json.Marshal(map[string]string{
 		store.SessionSoulUnboundMetadata: "true", "eventId": event.ID, "taskName": event.TaskName,
 	})

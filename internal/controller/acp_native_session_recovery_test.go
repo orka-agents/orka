@@ -24,9 +24,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// The transaction succeeds, but its caller never receives the commit receipt.
-// Returning an error here leaves the live dispatcher unable to authorize DELETE.
-// A fresh dispatcher must recover solely from the SQLite SessionTurn receipt.
 type nativeRecoveryCommitResponseLossStore struct {
 	store.DurableControlStore
 	loseResponse atomic.Bool
@@ -240,7 +237,6 @@ func TestACPDispatcherNativeRecoveryLostCaptureResponse(t *testing.T) {
 				}
 				receiptMu.Lock()
 				defer receiptMu.Unlock()
-				// Read the actual request without changing what the fixture sees.
 				var request harnessv2.CaptureNativeSessionRequest
 				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 					t.Errorf("decode capture request: %v", err)
@@ -271,8 +267,6 @@ func TestACPDispatcherNativeRecoveryLostCaptureResponse(t *testing.T) {
 					w.WriteHeader(http.StatusConflict)
 					return
 				}
-				// Keep the receipt unavailable through the live dispatcher's own
-				// finalization retries. Only the fresh dispatcher may retrieve it.
 				if !allowReceipt.Load() {
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = w.Write([]byte(`{"protocol":`))
@@ -333,8 +327,6 @@ func TestACPDispatcherNativeRecoveryLostCaptureResponse(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, control.Lease)
 	require.Equal(t, store.SessionTurnFinalized, nativeRecoveryTurn(t, ctx, persistence, fixture.attemptID).State)
-	// A second recovery must not resubmit the prompt, retrieve another capture,
-	// duplicate transcript messages, or delete a later runtime generation.
 	require.NoError(t, restarted.recoverStaleTask(ctx, completed, fence))
 	require.Equal(t, checkpoint, nativeRecoveryCheckpoint(t, ctx, persistence, control.SessionName, 2))
 	receiptMu.Lock()
@@ -459,8 +451,6 @@ func TestACPDispatcherNativeRecoveryCancellationResumesOriginalCheckpoint(t *tes
 	require.Equal(t, *carried, observed.deletedNative[1])
 	observed.mu.Unlock()
 
-	// No live binding survives this dispatcher restart. The next real Task must
-	// restore the old native bytes at the marker's new canonical boundary.
 	restarted := newNativeRecoveryDispatcher(t, fixture, persistence)
 	fence, err := restarted.Epochs.CurrentFence(ctx)
 	require.NoError(t, err)

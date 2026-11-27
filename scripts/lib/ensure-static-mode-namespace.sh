@@ -92,8 +92,6 @@ if "${kubectl_bin}" create -f "${namespace_manifest}" >/dev/null 2>&1; then
   exit 0
 fi
 
-# A concurrent installer may have won the create race. Accept only the exact
-# static identity it created; every other create failure remains fail-closed.
 read_namespace || exit 1
 if [[ -s "${namespace_json}" ]] && has_exact_identity; then
   exit 0

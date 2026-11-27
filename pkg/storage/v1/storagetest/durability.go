@@ -11,53 +11,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// DurabilityHarness restarts a provider, and forces each automatic database
-// switch it declares, over the same dataset. A provider supplies it through
-// WithDurability; the suite then checks that every committed write and its
-// operation receipt survive.
 type DurabilityHarness struct {
-	// Restart stops the provider and starts it again over the same dataset,
-	// and returns the provider that now serves it, of the same kind as the
-	// one it was given: the provider the factory returned, or one a previous
-	// switch returned. An embedded provider closes and reopens its dataset;
-	// an adapter restarts its own process. Restart releases what it opens
-	// with t.Cleanup.
-	Restart func(t *testing.T, provider storagev1.ProviderDescriber) storagev1.ProviderDescriber
-	// Failovers forces, by name, each automatic database switch the provider
-	// declares, such as promoting a synchronous standby, and returns the
-	// provider that serves the dataset afterwards. A provider whose
-	// durability class is local-fsync or local-buffered declares none; one
-	// that declares synchronous-replicated supplies at least one. An
-	// async-replicated provider declares none either: its switch may lose
-	// acknowledged writes, which these cases do not allow, and Orka holds the
-	// installation after one instead.
-	Failovers map[string]func(t *testing.T, provider storagev1.ProviderDescriber) storagev1.ProviderDescriber
-	// HoldWrites makes the provider's next writes to the dataset wait inside
-	// the database that serves it, as writes wait behind a row lock another
-	// session holds, and returns a function that returns once n of them are
-	// waiting there. A provider that declares failovers supplies it, so the
-	// suite starts each failover while writes are in flight. The failover
-	// ends the wait, for example by stopping the database that holds the
-	// lock; the writes it holds must have returned by the time the failover
-	// returns.
+	Restart    func(t *testing.T, provider storagev1.ProviderDescriber) storagev1.ProviderDescriber
+	Failovers  map[string]func(t *testing.T, provider storagev1.ProviderDescriber) storagev1.ProviderDescriber
 	HoldWrites func(t *testing.T, provider storagev1.ProviderDescriber) (waiting func(n int))
 }
 
-// WithDurability enables the durability cases: after a restart, and after
-// each declared failover, every write in the write catalog is still present
-// with its operation receipt, a replay returns its original outcome without
-// a second change, and the dataset keeps its identity, controller epoch,
-// installation and write watermark. Each failover also changes the reported
-// incarnation, and the writes HoldWrites keeps in flight while it happens
-// settle through ResolveOperation as their errors said: one that returned nil
-// survives, one refused as unavailable or not ready committed nothing, and
-// only one whose outcome is unknown may settle either way.
 func WithDurability(harness DurabilityHarness) Option {
 	return func(options *suiteOptions) { options.durability = &harness }
 }
 
-// failoverWriters is how many watermark writes are in flight while a
-// failover happens.
 const failoverWriters = 8
 
 func runDurability[P suiteProvider](t *testing.T, newProvider func(t *testing.T) P, cases []writeCase[P], harness DurabilityHarness) {
@@ -117,8 +80,6 @@ func runDurability[P suiteProvider](t *testing.T, newProvider func(t *testing.T)
 	}
 }
 
-// durableState is what a dataset holds apart from the records a write
-// changes.
 type durableState struct {
 	datasetID string
 	mirror    storagev1.ControllerEpochMirrorState
@@ -136,10 +97,6 @@ func readDurableState[P suiteProvider](t *testing.T, provider P) (durableState, 
 	return durableState{datasetID: info.DatasetID, mirror: mirror, watermark: watermark}, info.Incarnation
 }
 
-// runDurableWrite commits one write, restarts or fails over the provider, and
-// checks that the change, its receipt and the dataset's ownership survive.
-// The receipt is resolved before the write is replayed, so a receipt the
-// switch lost fails the case before a replay can record it again.
 func runDurableWrite[P suiteProvider](t *testing.T, provider P, c writeCase[P], reopen func(*testing.T, P) P, failover bool) {
 	dataset, _ := prepareWriteCase(t, provider, c)
 	ctx := t.Context()
@@ -177,15 +134,6 @@ func runDurableWrite[P suiteProvider](t *testing.T, provider P, c writeCase[P], 
 	requireFenced(t, callWrite(ctx, t, provider, c, stale, suiteFence).err)
 }
 
-// runWritesDuringFailover holds watermark writes in the database and fails
-// the provider over while they are in flight. Every write that returned nil
-// survives with its receipt. Every write refused as unavailable or not ready
-// settles through ResolveOperation as aborted, because those errors promise
-// that nothing committed and a caller may repeat the action as a new
-// operation; a write the provider cannot rule out returns ErrOutcomeUnknown
-// instead. A write whose outcome is unknown settles as committed and
-// present, or as aborted. An aborted write is absent and refused if it
-// arrives late.
 func runWritesDuringFailover[P suiteProvider](
 	t *testing.T, provider P, reopen func(*testing.T, P) P, holdWrites func(*testing.T, P) func(int),
 ) {
@@ -198,8 +146,6 @@ func runWritesDuringFailover[P suiteProvider](
 	}
 	waiting := holdWrites(t, provider)
 	errs := make([]error, failoverWriters)
-	// late marks a write that began after the failover began, and early one
-	// that returned before it; neither was in flight across the switch.
 	late := make([]bool, failoverWriters)
 	early := make([]bool, failoverWriters)
 	var switching atomic.Bool

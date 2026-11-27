@@ -29,8 +29,6 @@ func TestRuntimePoolTelemetryProjection(t *testing.T) {
 		t.Fatal("disabled runtime received telemetry")
 	}
 	got := runtimePoolTelemetryEnv(true, getenv)
-	// The metrics URL is the generic base URL's, so both signals share one
-	// endpoint, and the protocol they share is projected once.
 	if len(got) != 3 {
 		t.Fatalf("projected variable count = %d: %v", len(got), got)
 	}
@@ -106,9 +104,6 @@ func TestRuntimePoolTelemetryMetricsProjection(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_PROTOCOL":        "http/protobuf",
 	}
 	getenv := func(name string) string { return values[name] }
-	// Different OTLP/HTTP collectors per signal need an endpoint each plus the
-	// protocol. A Pod-backed runtime has no environment limit, so both signals
-	// are projected; only a native runtime's fit may drop metrics.
 	env := runtimePoolLiteralEnvironment(runtimePoolTelemetryEnv(true, getenv))
 	if want := map[string]string{
 		"ORKA_ENABLE_TELEMETRY":               "true",
@@ -118,8 +113,6 @@ func TestRuntimePoolTelemetryMetricsProjection(t *testing.T) {
 	}; !maps.Equal(env, want) {
 		t.Fatalf("separate-collector metrics projection = %v, want %v", env, want)
 	}
-	// Over gRPC the generic URL is the metrics endpoint, projected under the
-	// metrics name; trace-specific settings keep precedence for traces.
 	grpc := map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": values["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"], "OTEL_EXPORTER_OTLP_ENDPOINT": values["OTEL_EXPORTER_OTLP_ENDPOINT"]}
 	env = runtimePoolLiteralEnvironment(runtimePoolTelemetryEnv(true, func(name string) string { return grpc[name] }))
 	if len(env) != 3 || env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] != "http://traces.otel.svc:4318/v1/traces" || env["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"] != "http://collector.otel.svc:4318" {
@@ -135,12 +128,9 @@ func TestRuntimePoolTelemetryMetricsProjection(t *testing.T) {
 	if env["ORKA_ENABLE_TELEMETRY"] != "true" {
 		t.Fatal("unreachable metrics endpoint disabled traces")
 	}
-	// No generic endpoint is projected, so the supervisor resolves no metrics
-	// collector and needs no explicit disable.
 	if _, disabled := env["OTEL_METRICS_EXPORTER"]; disabled || len(env) != 3 {
 		t.Fatalf("dropped metrics without a generic endpoint projected %v", env)
 	}
-	// A metrics setting the supervisor would reject drops metrics, never traces.
 	for name, value := range map[string]string{
 		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "metrics.otel.svc:4317",
 		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/json",
@@ -156,10 +146,6 @@ func TestRuntimePoolTelemetryMetricsProjection(t *testing.T) {
 			}
 		}
 	}
-	// Dropped metrics must not fall back to a generic collector projected for
-	// traces, so that endpoint moves to the trace-specific name: gRPC keeps it
-	// as is, and OTLP/HTTP gets the trace path the SDK appends to a base URL.
-	// No disable entry is spent from the native environment budget.
 	for _, protocol := range []string{"", "grpc", "http/protobuf"} {
 		want := "http://collector.otel.svc:4318/base"
 		if protocol == "http/protobuf" {
@@ -184,7 +170,6 @@ func TestRuntimePoolTelemetryMetricsProjection(t *testing.T) {
 			}
 		}
 	}
-	// The trace path joins a root or empty base path the way the SDK does.
 	for base, want := range map[string]string{
 		"http://collector.otel.svc:4318":  "http://collector.otel.svc:4318/v1/traces",
 		"http://collector.otel.svc:4318/": "http://collector.otel.svc:4318/v1/traces",
@@ -197,21 +182,16 @@ func TestRuntimePoolTelemetryMetricsProjection(t *testing.T) {
 			t.Fatalf("base %q projected %v", base, got)
 		}
 	}
-	// A generic endpoint that serves both signals leaves metrics enabled.
 	generic := map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.otel.svc:4318"}
 	if env := runtimePoolLiteralEnvironment(runtimePoolTelemetryEnv(true, func(key string) string { return generic[key] })); env["OTEL_METRICS_EXPORTER"] != "" {
 		t.Fatalf("generic endpoint disabled metrics: %v", env)
 	}
-	// Metrics alone enable nothing.
 	metricsOnly := map[string]string{"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://metrics.otel.svc:4318/v1/metrics"}
 	if got := runtimePoolTelemetryEnv(true, func(name string) string { return metricsOnly[name] }); len(got) != 0 {
 		t.Fatalf("metrics-only configuration enabled supervisor telemetry: %v", got)
 	}
 }
 
-// The native backend caps a container at 32 environment entries, so a setting
-// traces and metrics share costs one entry, and one they disagree on keeps
-// both signal-specific entries.
 func TestRuntimePoolTelemetrySharesScalarsBothSignalsAgreeOn(t *testing.T) {
 	scalars := map[string]string{"PROTOCOL": "http/protobuf", "INSECURE": "true", "COMPRESSION": "gzip"}
 	for mask := range 1 << len(runtimePoolTelemetryScalarSuffixes) {
@@ -228,7 +208,6 @@ func TestRuntimePoolTelemetrySharesScalarsBothSignalsAgreeOn(t *testing.T) {
 			t.Fatalf("shared settings %v projected %v, want %v", values, got, want)
 		}
 	}
-	// The same value set per signal is still one shared setting.
 	perSignal := map[string]string{
 		"OTEL_EXPORTER_OTLP_ENDPOINT":         "http://collector.otel.svc:4318",
 		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL":  "http/protobuf",
@@ -238,9 +217,6 @@ func TestRuntimePoolTelemetrySharesScalarsBothSignalsAgreeOn(t *testing.T) {
 	if len(env) != 3 || env["OTEL_EXPORTER_OTLP_PROTOCOL"] != "http/protobuf" {
 		t.Fatalf("equal per-signal protocols projected %v", env)
 	}
-	// Signals that disagree, or a setting only one signal has, stay specific:
-	// the generic name would change the other signal. gRPC is the
-	// supervisor's default, so an explicit grpc costs no entry.
 	for _, test := range []struct{ values, want map[string]string }{
 		{
 			map[string]string{"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "grpc"},
@@ -298,10 +274,6 @@ func TestValidateRuntimeTelemetryCollectorEgress(t *testing.T) {
 	}
 }
 
-// The opt-in admits collectors only for gateway-enforced runtimes, whose
-// admission refuses a short Service name and whose egress rule follows the
-// endpoint scheme. Startup refuses what every such runtime would fail on: a
-// short name, and an OTLP INSECURE setting that contradicts the scheme.
 func TestValidateRuntimeTelemetryCollectorEgressRefusesWhatNativeRuntimesCannotUse(t *testing.T) {
 	const qualified = "collector.otel.svc.cluster.local"
 	for name, test := range map[string]struct {
@@ -330,24 +302,16 @@ func TestValidateRuntimeTelemetryCollectorEgressRefusesWhatNativeRuntimesCannotU
 			}
 		})
 	}
-	// Without the opt-in the operator owns collector egress.
 	if err := ValidateRuntimeTelemetryCollectorEgress(true, false, func(string) string { return "http://collector.otel.svc:4317" }); err != nil {
 		t.Fatalf("configuration refused without the opt-in: %v", err)
 	}
 }
 
-// runtimePoolTelemetryCombination is one controller OTLP configuration.
 type runtimePoolTelemetryCombination struct {
-	values map[string]string
-	// metrics reports that the configuration fits the native budget with
-	// metrics, so they must stay enabled.
+	values  map[string]string
 	metrics bool
 }
 
-// runtimePoolTelemetryCombinations covers generic, trace and metrics
-// endpoints, equivalent or different, with gRPC, OTLP/HTTP and mixed
-// protocols. Configurations without a trace endpoint enable nothing and are
-// left out.
 func runtimePoolTelemetryCombinations() map[string]runtimePoolTelemetryCombination {
 	const generic = "http://collector.otel.svc.cluster.local:4318"
 	protocols := map[string]map[string]string{
@@ -357,7 +321,6 @@ func runtimePoolTelemetryCombinations() map[string]runtimePoolTelemetryCombinati
 		"http traces, grpc metrics": {"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "grpc"},
 		"grpc traces, http metrics": {"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "grpc", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/protobuf"},
 	}
-	// equivalent is the signal URL the generic endpoint resolves to.
 	equivalent := func(protocol map[string]string, signal, signalPath string) string {
 		value := protocol["OTEL_EXPORTER_OTLP_"+signal+"_PROTOCOL"]
 		if value == "" {
@@ -396,8 +359,6 @@ func runtimePoolTelemetryCombinations() map[string]runtimePoolTelemetryCombinati
 						values["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"] = "http://localhost:4318/v1/metrics"
 					}
 					configured := withGeneric || metricsEndpoint != "no"
-					// One shared endpoint leaves room for a protocol entry; an
-					// endpoint per signal leaves room only over gRPC.
 					shared := traces != "different" && metricsEndpoint != "different"
 					name := fmt.Sprintf("%s, generic endpoint %t, %s trace endpoint, %s metrics endpoint", protocolName, withGeneric, traces, metricsEndpoint)
 					combinations[name] = runtimePoolTelemetryCombination{
@@ -411,9 +372,6 @@ func runtimePoolTelemetryCombinations() map[string]runtimePoolTelemetryCombinati
 	return combinations
 }
 
-// resolveOTLPSignal resolves a signal's exporter URL and protocol the way the
-// supervisor and the OTel SDK read the environment. ok is false when the
-// signal has no endpoint.
 func resolveOTLPSignal(t *testing.T, getenv func(string) string, signal, signalPath string) (string, string, bool) {
 	t.Helper()
 	protocol := getenv("OTEL_EXPORTER_OTLP_" + signal + "_PROTOCOL")
@@ -445,15 +403,8 @@ func resolveOTLPSignal(t *testing.T, getenv func(string) string, signal, signalP
 	return parsed.String(), protocol, true
 }
 
-// runtimePoolNativeTelemetryRoom is the room a native supervisor that cannot
-// suspend leaves for telemetry: it already needs 29 of the 32 entries.
 const runtimePoolNativeTelemetryRoom = 3
 
-// Every endpoint and protocol combination keeps each exported signal's SDK URL
-// and protocol and never lets a dropped signal fall back to another collector.
-// A Pod-backed runtime, which has no environment limit, exports every
-// configured signal. A native runtime with three free entries fits within
-// them, dropping metrics only when they do not fit.
 func TestRuntimePoolTelemetryFitsNativeBudget(t *testing.T) {
 	base := make([]corev1.EnvVar, nativeRuntimeEnvironmentLimit-runtimePoolNativeTelemetryRoom)
 	for i := range base {
@@ -497,9 +448,6 @@ func TestRuntimePoolTelemetryFitsNativeBudget(t *testing.T) {
 	}
 }
 
-// The standard OTEL_METRICS_EXPORTER=none opt-out keeps runtime metrics off
-// even when a generic endpoint would otherwise give the supervisor a metrics
-// collector; traces still export.
 func TestRuntimePoolTelemetryHonorsMetricsOptOut(t *testing.T) {
 	for _, protocol := range []string{"", "http/protobuf"} {
 		values := map[string]string{

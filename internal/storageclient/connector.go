@@ -15,40 +15,12 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// Connector custody is sealed here, under the snapshot key, in the formats
-// the embedded store wrote before, so existing datasets open unchanged:
-//
-//   - Current and retired custody seal the token material as JSON under a
-//     fresh 32-byte data key with AES-256-GCM, with associated data binding
-//     the Connection UID, namespace, name, subject digest and provider. The
-//     data key is sealed under the snapshot key with associated data binding
-//     the Connection UID.
-//   - A pending consent seals its PKCE verifier under the snapshot key, with
-//     associated data binding every plain field, including the expiry in Unix
-//     nanoseconds and the consent sequence.
-//   - A parked completion seals its tokens, the consent authority and the
-//     committed marker as JSON under the snapshot key, with associated data
-//     binding every plain field.
-//
-// Decisions that need the plaintext are made here: whether a parked
-// completion is committed, whether replaced material still needs revoking,
-// and which grant and consent sequence the sealed bodies carry. The client
-// reads the Connection's custody, decides and seals, then sends a conditional
-// command; when the provider reports that what it read changed, it reads
-// again, up to connectorCommitAttempts times.
-
 const (
-	connectorDataKeyBytes = 32
-	// connectorCommitAttempts bounds the re-reads of one connector write
-	// whose conditional commit found custody changed by a concurrent writer.
-	connectorCommitAttempts = 8
-	// connectorVerificationPageSize pages retained connector records during
-	// key activation; each record is small.
+	connectorDataKeyBytes         = 32
+	connectorCommitAttempts       = 8
 	connectorVerificationPageSize = storagev1.MaxSealedRecordPageSize
 )
 
-// newConnectorDataKey generates a per-record data key. Tests replace it to
-// observe the keys the client generates.
 var newConnectorDataKey = func() ([]byte, error) {
 	key := make([]byte, connectorDataKeyBytes)
 	if _, err := rand.Read(key); err != nil {
@@ -57,8 +29,6 @@ var newConnectorDataKey = func() ([]byte, error) {
 	return key, nil
 }
 
-// sealedConnectorCredential is the JSON body sealed under a record's data
-// key. Field names are part of the stored format.
 type sealedConnectorCredential struct {
 	AccessToken      string   `json:"accessToken"`
 	RefreshToken     string   `json:"refreshToken,omitempty"`
@@ -67,15 +37,9 @@ type sealedConnectorCredential struct {
 	Scopes           []string `json:"scopes,omitempty"`
 	AuthorityDigest  string   `json:"authorityDigest,omitempty"`
 	RevocationDigest string   `json:"revocationDigest,omitempty"`
-	// GrantSequence is also a plain field of current custody, which must
-	// agree with it; sealed here so a committed completion carries its grant.
-	GrantSequence int64 `json:"grantSequence,omitempty"`
+	GrantSequence    int64    `json:"grantSequence,omitempty"`
 }
 
-// sealedConnectorCompletionPayload is a parked completion's sealed body: the
-// credential plus the consent authority and the committed marker, which the
-// seal authenticates so no plain field can flip a commit back into a fresh
-// write.
 type sealedConnectorCompletionPayload struct {
 	sealedConnectorCredential
 	ConsentAuthorityDigest string `json:"consentAuthorityDigest,omitempty"`
@@ -91,9 +55,6 @@ func connectorCredentialAdditionalData(ref store.ConnectorCredentialRef) []byte 
 		ref.ConnectionUID, ref.Namespace, ref.Name, ref.SubjectDigest, ref.Provider)
 }
 
-// connectorConsentAdditionalData binds the sealed verifier to every plain
-// field the callback fence reads, including the OAuth-authority digest, so an
-// altered record cannot steer the code exchange to a different endpoint.
 func connectorConsentAdditionalData(consent storagev1.SealedConnectorConsent) []byte {
 	return fmt.Appendf(nil, "orka.connector-consent\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d",
 		consent.Nonce, consent.ConnectionUID, consent.Namespace, consent.Name, consent.SubjectDigest,
@@ -101,9 +62,6 @@ func connectorConsentAdditionalData(consent storagev1.SealedConnectorConsent) []
 		consent.ExpiresAt.UTC().UnixNano(), consent.Sequence)
 }
 
-// connectorCompletionAdditionalData binds the sealed payload to every plain
-// field the completion fence reads, so a record whose mode, name, provider,
-// expiry or consent sequence was altered no longer opens.
 func connectorCompletionAdditionalData(completion storagev1.SealedConnectorCompletion) []byte {
 	return fmt.Appendf(nil, "orka.connector-completion\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d",
 		completion.Nonce, completion.ConnectionUID, completion.SubjectDigest,
@@ -141,8 +99,6 @@ func fromSealedConnectorCredential(sealed sealedConnectorCredential) (store.Conn
 	}, nil
 }
 
-// connectorCompletionFields are the non-credential facts sealed with a
-// parked completion.
 type connectorCompletionFields struct {
 	ConsentAuthorityDigest string
 	Committed              bool
@@ -202,8 +158,6 @@ func newConnectorDataKeyAEAD(key []byte) (cipher.AEAD, error) {
 	return aead, nil
 }
 
-// sealConnectorCredential seals credential for ref under a fresh data key and
-// seals that key under the snapshot key.
 func sealConnectorCredential(keys *keyCustody, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) (storagev1.SealedConnectorCredential, error) {
 	body, err := json.Marshal(toSealedConnectorCredential(credential))
 	if err != nil {
@@ -239,8 +193,6 @@ func sealConnectorCredential(keys *keyCustody, ref store.ConnectorCredentialRef,
 	return sealed, nil
 }
 
-// openConnectorCredential unwraps a record's data key and opens its body, both
-// bound to ref. Errors never carry plaintext.
 func openConnectorCredential(keys *keyCustody, ref store.ConnectorCredentialRef, dataKeyNonce, dataKeyCiphertext, nonce, ciphertext []byte) (store.ConnectorCredential, error) {
 	dataKey, err := keys.open(dataKeyNonce, dataKeyCiphertext, connectorDataKeyAdditionalData(ref.ConnectionUID))
 	if err != nil {
@@ -268,8 +220,6 @@ func openConnectorCredential(keys *keyCustody, ref store.ConnectorCredentialRef,
 	return fromSealedConnectorCredential(sealed)
 }
 
-// openStoredConnectorCredential opens a Connection's current custody and
-// checks the plain facts the provider decides from against it.
 func openStoredConnectorCredential(keys *keyCustody, ref store.ConnectorCredentialRef, sealed *storagev1.SealedConnectorCredential) (store.ConnectorCredential, error) {
 	if sealed == nil || sealed.ConnectionUID != ref.ConnectionUID {
 		return store.ConnectorCredential{}, fmt.Errorf("connector custody provider returned another record for connection %s", ref.ConnectionUID)
@@ -278,8 +228,6 @@ func openStoredConnectorCredential(keys *keyCustody, ref store.ConnectorCredenti
 	if err != nil {
 		return store.ConnectorCredential{}, err
 	}
-	// The plain grant sequence lets the provider order grants; the grant
-	// identity that counts is the sealed one, and the two must agree.
 	if credential.GrantSequence != sealed.GrantSequence {
 		return store.ConnectorCredential{}, fmt.Errorf("connector credential for connection %s: grant sequence column does not match the sealed grant", ref.ConnectionUID)
 	}
@@ -288,7 +236,6 @@ func openStoredConnectorCredential(keys *keyCustody, ref store.ConnectorCredenti
 	return credential, nil
 }
 
-// openConnectorCompletion opens a parked completion's payload.
 func openConnectorCompletion(keys *keyCustody, sealed storagev1.SealedConnectorCompletion) (store.ConnectorCompletion, error) {
 	body, err := keys.open(sealed.PayloadNonce, sealed.Payload, connectorCompletionAdditionalData(sealed))
 	if err != nil {
@@ -307,10 +254,6 @@ func openConnectorCompletion(keys *keyCustody, sealed storagev1.SealedConnectorC
 	}, nil
 }
 
-// judgeConnectorCompletions names every parked completion as read and
-// returns the ones not committed. A completion that cannot be opened is
-// counted as not committed: it can never be committed, so it is only ever
-// replaced or dropped.
 func judgeConnectorCompletions(keys *keyCustody, parked []storagev1.SealedConnectorCompletion) ([]storagev1.SealedConnectorCompletionRef, []storagev1.SealedConnectorCompletion) {
 	refs := make([]storagev1.SealedConnectorCompletionRef, 0, len(parked))
 	var uncommitted []storagev1.SealedConnectorCompletion
@@ -324,25 +267,12 @@ func judgeConnectorCompletions(keys *keyCustody, parked []storagev1.SealedConnec
 	return refs, uncommitted
 }
 
-// connectorRetirementFor decides whether the custody a write replaces stays
-// sealed for revocation: only Orka held a copy, and neither a refresh nor a
-// re-consent makes the provider forget the previous material. It returns nil
-// when nothing is left to revoke.
 func connectorRetirementFor(previous, replacement store.ConnectorCredential, now time.Time, consentGrant bool) *storagev1.ConnectorRetirement {
-	// A replacement that carries the very same tokens under the same
-	// revocation identity (a provider that re-issues long-lived material on
-	// every re-consent) retires nothing: the current record will be revoked,
-	// and duplicates would only multiply the provider calls at disconnect.
 	if previous.AccessToken == replacement.AccessToken && previous.RefreshToken == replacement.RefreshToken &&
 		previous.RevocationDigest == replacement.RevocationDigest {
 		return nil
 	}
 	revocableUntil := previous.ExpiresAt
-	// A record whose refresh token the replacement does not carry is a grant
-	// the provider may still honor (rotation does not promise immediate
-	// invalidation), and a re-consent replaces a whole grant: it is kept until
-	// disconnect. Only a replacement that keeps the same refresh token leaves
-	// nothing but the old access token to revoke.
 	if previous.RefreshToken != "" && (consentGrant || previous.RefreshToken != replacement.RefreshToken) {
 		revocableUntil = time.Time{}
 	}
@@ -352,9 +282,6 @@ func connectorRetirementFor(previous, replacement store.ConnectorCredential, now
 	return &storagev1.ConnectorRetirement{RevocableUntil: revocableUntil.UTC()}
 }
 
-// readConnectorCustody reads a Connection's custody and refuses records the
-// provider returned for another Connection, so a decision never counts or
-// commits another Connection's material.
 func (c *Client) readConnectorCustody(ctx context.Context, connectionUID string) (*storagev1.ConnectorCustody, error) {
 	custody, err := c.ReadConnectorCustody(ctx, connectionUID)
 	if err != nil {
@@ -385,8 +312,6 @@ func requireConnectorAccessToken(credential store.ConnectorCredential) error {
 	return nil
 }
 
-// PutConnectorCredential implements store.ConnectorCredentialStore. It seals
-// the material as a new grant under a fresh data key.
 func (c *Client) PutConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
 	keys, err := c.activeCustody()
 	if err != nil {
@@ -406,8 +331,6 @@ func (c *Client) PutConnectorCredential(ctx context.Context, ref store.Connector
 		if custody.Tombstoned {
 			return store.ErrConnectorCustodyTombstoned
 		}
-		// Grants are numbered from a per-Connection counter that outlives
-		// the record, so a grant after a shred never repeats a number.
 		credential.GrantSequence = custody.LastGrantSequence + 1
 		sealed, err := sealConnectorCredential(keys, ref, credential)
 		if err != nil {
@@ -421,7 +344,6 @@ func (c *Client) PutConnectorCredential(ctx context.Context, ref store.Connector
 	return errConnectorCommitContended("store connector credential")
 }
 
-// GetConnectorCredential implements store.ConnectorCredentialStore.
 func (c *Client) GetConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
 	keys, err := c.activeCustody()
 	if err != nil {
@@ -437,10 +359,6 @@ func (c *Client) GetConnectorCredential(ctx context.Context, ref store.Connector
 	return openStoredConnectorCredential(keys, ref, sealed)
 }
 
-// GetConnectorCredentialGrant implements store.ConnectorGrantReader. The
-// provider's grant sequence column is not authenticated, so the grant and its
-// scopes come from the sealed record, which is opened, checked against the
-// column, and then dropped.
 func (c *Client) GetConnectorCredentialGrant(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorGrant, error) {
 	keys, err := c.activeCustody()
 	if err != nil {
@@ -459,9 +377,6 @@ func (c *Client) GetConnectorCredentialGrant(ctx context.Context, ref store.Conn
 	if custody.Credential == nil {
 		return store.ConnectorGrant{}, store.ErrNotFound
 	}
-	// The grant comes from the record this read returned: a second read
-	// could return material from before a disconnect that committed after
-	// the tombstone check.
 	credential, err := openStoredConnectorCredential(keys, ref, custody.Credential)
 	if err != nil {
 		return store.ConnectorGrant{}, err
@@ -469,7 +384,6 @@ func (c *Client) GetConnectorCredentialGrant(ctx context.Context, ref store.Conn
 	return store.ConnectorGrant{Sequence: credential.GrantSequence, Scopes: credential.Scopes}, nil
 }
 
-// ListRetiredConnectorCredentials implements store.ConnectorCredentialStore.
 func (c *Client) ListRetiredConnectorCredentials(ctx context.Context, ref store.ConnectorCredentialRef) ([]store.ConnectorCredential, error) {
 	keys, err := c.activeCustody()
 	if err != nil {
@@ -494,9 +408,6 @@ func (c *Client) ListRetiredConnectorCredentials(ctx context.Context, ref store.
 	return result, nil
 }
 
-// ReplaceConnectorCredential implements store.ConnectorCredentialStore. The
-// replacement carries the stored grant forward whatever the caller supplied:
-// only a consent starts a new grant.
 func (c *Client) ReplaceConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential, expectedVersion int64) error {
 	keys, err := c.activeCustody()
 	if err != nil {
@@ -512,10 +423,6 @@ func (c *Client) ReplaceConnectorCredential(ctx context.Context, ref store.Conne
 	if err != nil {
 		return err
 	}
-	// A disconnect fences custody before it reads the material to revoke; a
-	// refresh that lands afterwards must not add a rotated credential outside
-	// that revocation set. The version fence is checked next so a stale
-	// writer retires nothing.
 	switch {
 	case custody.Tombstoned:
 		return store.ErrConnectorCustodyTombstoned
@@ -534,9 +441,6 @@ func (c *Client) ReplaceConnectorCredential(ctx context.Context, ref store.Conne
 		return err
 	}
 	now := time.Now().UTC()
-	// A refresh rotates the access token only: the previous refresh token is
-	// either the same one (no rotation) or already invalid (rotation), so the
-	// replaced record matters until its access token expires.
 	_, err = c.ReplaceSealedConnectorCredential(ctx, storagev1.ReplaceSealedConnectorCredentialRequest{
 		Credential: sealed, ExpectedVersion: expectedVersion,
 		Retire: connectorRetirementFor(previous, credential, now, false), Now: now,
@@ -544,7 +448,6 @@ func (c *Client) ReplaceConnectorCredential(ctx context.Context, ref store.Conne
 	return err
 }
 
-// RetireConnectorCredential implements store.ConnectorCredentialStore.
 func (c *Client) RetireConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
 	keys, err := c.activeCustody()
 	if err != nil {
@@ -557,8 +460,6 @@ func (c *Client) RetireConnectorCredential(ctx context.Context, ref store.Connec
 		return err
 	}
 	now := time.Now().UTC()
-	// A refresh token keeps the record until disconnect; without one it
-	// lives until the access token expires, and an expired one is dropped.
 	var revocableUntil time.Time
 	if credential.RefreshToken == "" && !credential.ExpiresAt.IsZero() {
 		if !credential.ExpiresAt.After(now) {
@@ -576,9 +477,6 @@ func (c *Client) RetireConnectorCredential(ctx context.Context, ref store.Connec
 	})
 }
 
-// CreateConnectorConsent implements store.ConnectorConsentStore. Each consent
-// takes the Connection's next consent sequence, sealed with its verifier;
-// commits follow this order, not callback arrival.
 func (c *Client) CreateConnectorConsent(ctx context.Context, consent store.ConnectorConsent) error {
 	keys, err := c.activeCustody()
 	if err != nil {
@@ -618,7 +516,6 @@ func (c *Client) CreateConnectorConsent(ctx context.Context, consent store.Conne
 	return errConnectorCommitContended("store connector consent")
 }
 
-// ConsumeConnectorConsent implements store.ConnectorConsentStore.
 func (c *Client) ConsumeConnectorConsent(ctx context.Context, nonce string) (store.ConnectorConsent, error) {
 	keys, err := c.activeCustody()
 	if err != nil {
@@ -650,11 +547,6 @@ func (c *Client) ConsumeConnectorConsent(ctx context.Context, nonce string) (sto
 	}, nil
 }
 
-// CreateConnectorCompletion implements store.ConnectorConsentStore. Consent
-// order, not callback order, decides: a completion from a consent older than
-// the committed grant, or than one already parked, is refused, and older
-// uncommitted completions are replaced, so a Connection parks at most one
-// uncommitted completion at a time.
 func (c *Client) CreateConnectorCompletion(ctx context.Context, completion store.ConnectorCompletion) error {
 	keys, err := c.activeCustody()
 	if err != nil {
@@ -689,8 +581,6 @@ func (c *Client) CreateConnectorCompletion(ctx context.Context, completion store
 		if err != nil {
 			return err
 		}
-		// A callback that was mid-exchange while the Connection was
-		// disconnected must not park tokens for the tombstoned UID.
 		if custody.Tombstoned {
 			return store.ErrConnectorCustodyTombstoned
 		}
@@ -715,7 +605,6 @@ func (c *Client) CreateConnectorCompletion(ctx context.Context, completion store
 	return errConnectorCommitContended("park connector completion")
 }
 
-// ConsumeConnectorCompletion implements store.ConnectorConsentStore.
 func (c *Client) ConsumeConnectorCompletion(ctx context.Context, nonce string) (store.ConnectorCompletion, error) {
 	keys, err := c.activeCustody()
 	if err != nil {
@@ -741,8 +630,6 @@ func (c *Client) ConsumeConnectorCompletion(ctx context.Context, nonce string) (
 	return completion, nil
 }
 
-// PeekConnectorCompletion implements store.ConnectorConsentStore. A
-// completion that cannot be opened is reported as not found.
 func (c *Client) PeekConnectorCompletion(ctx context.Context, nonce string) (store.ConnectorCompletion, error) {
 	keys, err := c.activeCustody()
 	if err != nil {
@@ -765,10 +652,6 @@ func (c *Client) PeekConnectorCompletion(ctx context.Context, nonce string) (sto
 	return completion, nil
 }
 
-// ListConnectorCompletionsForConnection implements
-// store.ConnectorConsentStore. Expired completions are included: their
-// tokens may still be live upstream. Completions that cannot be opened are
-// skipped.
 func (c *Client) ListConnectorCompletionsForConnection(ctx context.Context, connectionUID string) ([]store.ConnectorCompletion, error) {
 	keys, err := c.activeCustody()
 	if err != nil {
@@ -792,13 +675,6 @@ func (c *Client) ListConnectorCompletionsForConnection(ctx context.Context, conn
 	return result, nil
 }
 
-// CommitConnectorCompletion implements store.ConnectorConsentStore. The
-// client reads the Connection's custody, judges the parked completion,
-// decides whether the replaced custody is retired, seals the new grant and
-// the committed completion, and commits them in one conditional command. A
-// completion another API replica committed meanwhile is never committed
-// twice, which would take another grant and replay material a newer consent
-// may have replaced.
 func (c *Client) CommitConnectorCompletion(ctx context.Context, nonce string, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) (store.ConnectorCredential, error) {
 	if strings.TrimSpace(nonce) == "" {
 		return store.ConnectorCredential{}, errors.New("connector completion nonce is required")
@@ -818,17 +694,12 @@ func (c *Client) CommitConnectorCompletion(ctx context.Context, nonce string, re
 		if err != nil {
 			return store.ConnectorCredential{}, err
 		}
-		// The provider judges the completion's expiry when it commits, so a
-		// commit that stalled after the read redeems nothing.
 		request.command.Now = time.Now().UTC()
 		stored, err := c.CommitSealedConnectorCompletion(ctx, request.command)
 		switch {
 		case errors.Is(err, store.ErrConflict):
 			continue
 		case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrConnectorConsentSuperseded):
-			// The token's lifetime and consent order are judged at the
-			// commit too: a completion that can never be committed is
-			// dropped, best effort.
 			_ = c.DeleteConnectorCompletion(ctx, nonce)
 			return store.ConnectorCredential{}, err
 		case err != nil:
@@ -850,7 +721,6 @@ type preparedConnectorCommit struct {
 	committed store.ConnectorCredential
 }
 
-// prepareConnectorCommit reads the custody and decides one commit attempt.
 func (c *Client) prepareConnectorCommit(
 	ctx context.Context, keys *keyCustody, nonce string, ref store.ConnectorCredentialRef, credential store.ConnectorCredential,
 ) (preparedConnectorCommit, error) {
@@ -869,8 +739,6 @@ func (c *Client) prepareConnectorCommit(
 	if parked == nil {
 		return preparedConnectorCommit{}, store.ErrNotFound
 	}
-	// The token's lifetime is judged here, not only at the peek: a commit
-	// that stalled past the deadline redeems nothing.
 	if !parked.ExpiresAt.After(now) {
 		_ = c.DeleteConnectorCompletion(ctx, nonce)
 		return preparedConnectorCommit{}, store.ErrNotFound
@@ -886,15 +754,11 @@ func (c *Client) prepareConnectorCommit(
 	if fields.Committed {
 		return preparedConnectorCommit{}, store.ErrConnectorCompletionCommitted
 	}
-	// A newer consent's grant is custody already: this older consent's
-	// tokens never replace it, and its completion is dropped.
 	if parked.ConsentSequence <= custody.CommittedConsentSequence {
 		_ = c.DeleteConnectorCompletion(ctx, nonce)
 		return preparedConnectorCommit{}, store.ErrConnectorConsentSuperseded
 	}
 	command := storagev1.CommitSealedConnectorCompletionRequest{Nonce: nonce, Now: now}
-	// A re-consent replaces a whole grant: its refresh token outlives its
-	// access token, so the replaced custody is kept until disconnect.
 	if current := custody.Credential; current != nil {
 		previous, err := openStoredConnectorCredential(keys, ref, current)
 		if err != nil {
@@ -907,9 +771,6 @@ func (c *Client) prepareConnectorCommit(
 	if command.Credential, err = sealConnectorCredential(keys, ref, credential); err != nil {
 		return preparedConnectorCommit{}, err
 	}
-	// The parked completion is re-sealed with the committed marker and the
-	// grant inside its body, bound to the same plain fields, so only a holder
-	// of the snapshot key can flip it.
 	fields.Committed = true
 	committedBody, err := encodeConnectorCompletionPayload(credential, fields)
 	if err != nil {
@@ -918,9 +779,6 @@ func (c *Client) prepareConnectorCommit(
 	if command.PayloadNonce, command.Payload, err = keys.seal(connectorCompletionAdditionalData(*parked), committedBody); err != nil {
 		return preparedConnectorCommit{}, fmt.Errorf("seal connector completion: %w", err)
 	}
-	// Uncommitted completions from older consents can never be committed
-	// after this grant; committed ones stay as recovery records until their
-	// status lands.
 	expected, uncommitted := judgeConnectorCompletions(keys, custody.Completions)
 	command.ExpectedCompletions = expected
 	for _, other := range uncommitted {
@@ -931,10 +789,6 @@ func (c *Client) prepareConnectorCommit(
 	return preparedConnectorCommit{command: command, committed: credential}, nil
 }
 
-// verifyRetainedConnectorCustody authenticates every retained connector
-// record with a candidate key: the data keys of current and retired custody,
-// the verifiers of unexpired pending consents and the payloads of parked
-// completions. Linked accounts must remain usable and revocable.
 func (c *Client) verifyRetainedConnectorCustody(ctx context.Context, keys *keyCustody) error {
 	if err := pageConnectorRecords(func(cursor string) (string, error) {
 		page, err := c.ListSealedConnectorCredentials(ctx, cursor, connectorVerificationPageSize)
@@ -964,8 +818,6 @@ func (c *Client) verifyRetainedConnectorCustody(ctx context.Context, keys *keyCu
 	}); err != nil {
 		return err
 	}
-	// An expired consent holds no token and can never be used, so it does
-	// not block activating a key that cannot open it.
 	now := time.Now()
 	if err := pageConnectorRecords(func(cursor string) (string, error) {
 		page, err := c.ListSealedConnectorConsents(ctx, cursor, connectorVerificationPageSize)
@@ -1008,8 +860,6 @@ func verifyConnectorDataKey(keys *keyCustody, connectionUID string, nonce, ciphe
 	return nil
 }
 
-// pageConnectorRecords calls visit with each page cursor until a page reports
-// no next cursor.
 func pageConnectorRecords(visit func(cursor string) (string, error)) error {
 	cursor := ""
 	for {

@@ -9,11 +9,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// sealedTestStore is a SQLite store whose execution snapshots, native session
-// state and turn finalizations go through the storage client, which seals
-// them with the snapshot key as production does. Every other method,
-// including SQLite's duplicate SQL control implementation, is the store's
-// own; that path seals native state through the same client.
 type sealedTestStore struct {
 	*sqlite.Store
 	client *storageclient.Client
@@ -24,8 +19,6 @@ func sealedStore(t storageclienttest.TB, s *sqlite.Store) *sealedTestStore {
 	return &sealedTestStore{Store: s, client: storageclienttest.Client(t, s)}
 }
 
-// newSealedTestStore is sealedStore for code that reports errors instead of
-// failing a test.
 func newSealedTestStore(s *sqlite.Store) (*sealedTestStore, error) {
 	client, err := storageclienttest.New(s)
 	if err != nil {

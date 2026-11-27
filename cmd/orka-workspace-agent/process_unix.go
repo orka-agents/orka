@@ -31,10 +31,6 @@ func configureCommandCancellation(cmd *exec.Cmd, isolate bool, uid, gid uint32) 
 	}
 }
 
-// childProcessReaper owns wait responsibility for descendants adopted by the
-// workspace-agent while preserving exec.Cmd.Wait ownership of direct commands.
-// The mutex closes the Start/register race: the reaper cannot inspect a newly
-// started direct child until that child is registered.
 type childProcessReaper struct {
 	enabled bool
 
@@ -131,9 +127,6 @@ func (r *childProcessReaper) waitCommand(cmd *exec.Cmd) error {
 	return err
 }
 
-// reapAdoptedChildren reaps only unregistered direct children of the agent.
-// Registered children remain exclusively owned by exec.Cmd.Wait. The returned
-// count is the number of adopted children that were still running when scanned.
 func (r *childProcessReaper) reapAdoptedChildren() (int, error) {
 	if !r.enabled {
 		return 0, nil

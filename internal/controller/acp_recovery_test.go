@@ -181,10 +181,6 @@ func TestACPDispatcherMakesAcceptedOldEpochAttemptOutcomeUnknown(t *testing.T) {
 	}
 }
 
-// A cancel request recorded just before the controller restarted does not
-// prove the in-flight prompt stopped: recovery keeps the outcome unknown and
-// carries the request in the terminal message, whether or not the controller
-// already wrote the Cancelled phase.
 func TestACPDispatcherRecoveryKeepsACancelRequestedBeforeRestart(t *testing.T) {
 	const request = "cancelled by alice: wrong repository"
 	const wantMessage = request + "; controller leadership changed after the prompt request-write boundary; outcome is unknown and was not replayed"
@@ -574,8 +570,6 @@ func TestACPDispatcherPatchRecoveredTerminalExecutionClassifiesDeliveryPhase(t *
 			ctx := context.Background()
 			storeValue, _, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "recovered-delivery-phase.db"))
 			defer closeStore()
-			// A session-bound Task skips the standalone projection, and without a
-			// durable publication the recovered delivery status comes from the Task.
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "recovered-delivery-phase", UID: types.UID("recovered-delivery-phase-uid")},
 				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent,
@@ -836,11 +830,6 @@ func TestACPDispatcherRetriesResultReferenceForSucceededAttempt(t *testing.T) {
 	}
 }
 
-// TestACPDispatcherRecoveryPreservesCompletionTimeThroughOutboxProjection is the
-// acceptance test for the completionTime rewrite bug: same-incarnation durable
-// recovery re-settlement must not replace an already authoritative historical
-// Task.status.completionTime with a fresh value, and the queued harness-v2
-// terminal outbox projection delivered afterward must not undo that either.
 func TestACPDispatcherRecoveryPreservesCompletionTimeThroughOutboxProjection(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionSucceeded)
 	defer fixture.close(t)
@@ -880,9 +869,6 @@ func TestACPDispatcherRecoveryPreservesCompletionTimeThroughOutboxProjection(t *
 		t.Fatalf("recovery rewrote completion time: got %v, want %v", afterRecovery.Status.CompletionTime, historical)
 	}
 
-	// Deliver the queued harness-v2 terminal projection through the real
-	// outbox projector; it is a later status writer and must not compete with
-	// the preserved historical completion time either.
 	projector := &ACPOutboxProjector{
 		Client: fixture.kubeClient, Store: fixture.controlStore, Epochs: fixture.dispatcher.Epochs, WorkerID: "worker",
 	}
@@ -1015,8 +1001,6 @@ func TestACPDispatcherRecoversJournaledFailureClassification(t *testing.T) {
 	if attempt.ExecutionState != store.PromptExecutionFailed {
 		t.Fatalf("recovered attempt state = %s, want %s", attempt.ExecutionState, store.PromptExecutionFailed)
 	}
-	// Recovery retains the failure classification without copying journal
-	// diagnostics into another durable or public message.
 	if attempt.TerminalReason != string(acpPromptFailedReason) {
 		t.Fatalf("recovered terminal reason = %q, want %q", attempt.TerminalReason, acpPromptFailedReason)
 	}
@@ -1708,11 +1692,6 @@ func TestACPDispatcherRestoredTerminalExecutionSettlesNonterminalDeliveryAndPubl
 	}
 }
 
-// TestDeletingRestoredACPTaskReclaimsSourcePromptAttemptAndRemovesFinalizer
-// isolates the Kubernetes-backed PromptAttempt reclamation/finalizer boundary.
-// The recovery matrix above separately proves source-UID Publication settlement
-// and projection continuity for write workspaces.
-//
 //nolint:gocyclo // The matrix keeps each crash-tail step and its exactly-once assertions visible together.
 func TestDeletingRestoredACPTaskReclaimsSourcePromptAttemptAndRemovesFinalizer(t *testing.T) {
 	tests := []struct {
@@ -2585,9 +2564,6 @@ func testRecoveredTaskScopedRuntimeSessionCleanupRetriesBeforeEpochAdvance(t *te
 			ProtocolVersion: corev1alpha1.RuntimePoolProtocolHarnessV2, ProfileDigest: string(profileDigest), ProfileDigestSchemaVersion: strconv.FormatUint(uint64(harnessv2.ProfileDigestSchemaVersion), 10),
 		}},
 	}
-	// The stale-epoch cleanup runs while the active instance is at fence.Epoch-1
-	// and then again after the test advances it to fence.Epoch; both Secrets
-	// coexist during that overlap, exactly as during a graceful replacement.
 	newSecret := func(epoch int64) *corev1.Secret {
 		return &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: fmt.Sprintf("pool-auth-e%d", epoch), Labels: map[string]string{
@@ -3628,8 +3604,6 @@ func newACPRecoveryFixture(t *testing.T, target store.PromptExecutionState) *rec
 	return newACPRecoveryFixtureWithBinding(t, target, nil)
 }
 
-// newACPRecoveryFixtureWithBinding binds the old-epoch attempt to binding when
-// it enters Planned, as standalone dispatch does before RuntimeSession creation.
 func newACPRecoveryFixtureWithBinding(t *testing.T, target store.PromptExecutionState, binding *attemptRuntimeBinding) *recoveryFixture {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -20,11 +20,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// cleanupBeforeReplayProvider commits the first ConsumeMessages and the first
-// SendMessage it receives, runs another Task's cleanup in the namespace, and
-// then loses the response. The storage client's replay of the committed
-// operation therefore finds the namespace's Task data fence moved. It records
-// the operation ID of every attempt.
 type cleanupBeforeReplayProvider struct {
 	*sqlite.Store
 	afterCommit func(method string) error
@@ -71,8 +66,6 @@ func (p *cleanupBeforeReplayProvider) SendMessage(ctx context.Context, msg *stor
 	})
 }
 
-// requireOneOperation requires every attempt of method to carry the same
-// operation ID: the route never ran the write again as a new operation.
 func (p *cleanupBeforeReplayProvider) requireOneOperation(t *testing.T, method string) {
 	t.Helper()
 	p.mu.Lock()
@@ -90,10 +83,6 @@ type reauthorizationFixture struct {
 	backend  *sqlite.Store
 }
 
-// newReauthorizationFixture serves the worker message routes, with the
-// server's error handler and live caller authorization, over a storage
-// client whose provider loses the first committed response after a sibling
-// Task's cleanup. extra runs in that window too.
 func newReauthorizationFixture(t *testing.T, extra func(storeClient store.MessageStore) error) *reauthorizationFixture {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
@@ -109,8 +98,6 @@ func newReauthorizationFixture(t *testing.T, extra func(storeClient store.Messag
 					return err
 				}
 			}
-			// Another Task's cleanup advances the namespace's cleanup
-			// generation, which fences the worker message routes.
 			return sibling.DeleteResult(context.Background(), "default", "worker-c")
 		},
 	}
@@ -165,11 +152,6 @@ func unreadContents(t *testing.T, backend *sqlite.Store, reader string) []string
 	return contents
 }
 
-// A consuming inbox read whose ConsumeMessages committed, lost its response,
-// and could not be replayed because another Task's cleanup moved the
-// namespace's Task data fence in between answers 409 without a retry hint.
-// The route does not authorize again and consume a second batch: a message
-// sent in that window stays unread for the next read.
 func TestConsumingInboxKeepsAnUnreadableReplayUnknownAcrossCleanup(t *testing.T) {
 	f := newReauthorizationFixture(t, func(sibling store.MessageStore) error {
 		return sibling.SendMessage(context.Background(), &store.Message{
@@ -194,9 +176,6 @@ func TestConsumingInboxKeepsAnUnreadableReplayUnknownAcrossCleanup(t *testing.T)
 	requireInboxContents(t, body, "sent during the replay window")
 }
 
-// A send whose SendMessage committed, lost its response, and could not be
-// replayed because another Task's cleanup moved the namespace's fence answers
-// 409 without a retry hint and stores the message once.
 func TestSendKeepsAnUnreadableReplayUnknownAcrossCleanup(t *testing.T) {
 	f := newReauthorizationFixture(t, nil)
 	resp, body := f.do(t, http.MethodPost, "/internal/v1/messages/default", map[string]string{

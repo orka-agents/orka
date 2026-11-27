@@ -35,8 +35,6 @@ func preRequestDeletionFixture(t *testing.T) (*externalRuntimePoolFixture, *core
 	if err := f.r.Update(ctx, &pool); err != nil {
 		t.Fatal(err)
 	}
-	// Core can create its private credentials and stop before publishing the
-	// first public workload request. No provider allocation has existed yet.
 	cfg, err := f.r.runtimePoolConfig(&pool)
 	if err != nil {
 		t.Fatal(err)
@@ -236,8 +234,6 @@ func TestWorkspaceMaxLifetimePoolFirstReconcileDeletesAndFinalizesWorkspace(t *t
 func TestDeletedDesiredStateDeletesAndFinalizesWorkspace(t *testing.T) {
 	ctx := context.Background()
 	f, secret, lease := preRequestDeletionFixture(t)
-	// Deleting a linked RuntimePool retires the workspace this way without
-	// deleting the object.
 	w := f.currentWorkspace(t)
 	w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
 	w.Spec.Attachment = nil

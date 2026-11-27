@@ -211,7 +211,6 @@ func (w lostGatewayJobStatusWriter) Update(ctx context.Context, object client.Ob
 }
 
 func TestAIGatewaySoulDoesNotIgnoreJobAfterLostStartStatus(t *testing.T) {
-	// A valid soul must not bind either: the existing Job ran without it.
 	for _, soul := range []string{"invalid\x00", "valid persona"} {
 		t.Run(strings.ToValidUTF8(soul, "?"), func(t *testing.T) {
 			ctx := context.Background()

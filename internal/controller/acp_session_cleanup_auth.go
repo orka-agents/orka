@@ -12,9 +12,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// sessionRuntimeCleanupAuthSnapshot proves a restored credential version was
-// conformed before takeover. The admission Ready bit cannot prove this once
-// the surviving supervisor's startup epoch is older than the controller's.
 func (d *ACPDispatcher) sessionRuntimeCleanupAuthSnapshot(
 	ctx context.Context,
 	current, frozenRuntime *corev1alpha1.AgentRuntime,

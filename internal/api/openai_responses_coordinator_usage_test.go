@@ -115,8 +115,6 @@ func TestResponsesCoordinatorUsageCounts(t *testing.T) {
 	} {
 		for _, responsesInput := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/responses=%t", test.name, responsesInput), func(t *testing.T) {
-				// The first successful completion is a billable coordinator
-				// re-prompt, unlike a rejected provider attempt or API probe.
 				first, final := test.rounds[0], test.rounds[1]
 				first.Content, first.StopReason = "Still working.", "end_turn"
 				final.Content, final.StopReason = goalStateSentinel+"\nDone.", "end_turn"
@@ -192,7 +190,6 @@ func TestResponsesCoordinatorUsageTerminalPaths(t *testing.T) {
 					provider.errors[len(provider.errors)-1] = fmt.Errorf("streaming is required")
 					provider.streamChunks = []llm.StreamChunk{
 						{Content: final.Content, Model: final.Model, Provider: final.Provider},
-						// These are snapshots of one call, not additive chunks.
 						{InputTokens: 21, OutputTokens: 1, CachedInputTokens: new(int64(2)), CacheWriteInputTokens: new(int64(1)), UsageReported: true},
 						{InputTokens: final.InputTokens, OutputTokens: final.OutputTokens, CachedInputTokens: final.CachedInputTokens, CacheWriteInputTokens: final.CacheWriteInputTokens, UsageReported: true},
 						{Done: true, StopReason: final.StopReason},

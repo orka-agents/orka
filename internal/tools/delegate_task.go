@@ -39,13 +39,8 @@ const (
 	delegateRequestParentTaskField = "parentTask"
 )
 
-// DelegateTaskSubjectTokenResolver resolves the exact subject token authorized
-// for one authenticated parent Task. Implementations must not fall back to
-// process-global worker credentials for brokered requests.
 type DelegateTaskSubjectTokenResolver func(context.Context, *corev1alpha1.Task, string) (string, error)
 
-// BrokeredDelegateTaskTransactionExchangeConfig carries controller-parsed TTS
-// settings and request-scoped dependencies for brokered child-token exchange.
 type BrokeredDelegateTaskTransactionExchangeConfig struct {
 	TTS                 contexttoken.TTSConfig
 	Exchanger           contexttoken.Exchanger
@@ -54,13 +49,11 @@ type BrokeredDelegateTaskTransactionExchangeConfig struct {
 	ResolveSubjectToken DelegateTaskSubjectTokenResolver
 }
 
-// DelegateTaskTool implements multi-agent task delegation.
 type DelegateTaskTool struct {
 	k8sClient                   client.Client
 	brokeredTransactionExchange *BrokeredDelegateTaskTransactionExchangeConfig
 }
 
-// WorkspaceArgs specifies a git workspace for agent runtime tasks
 type WorkspaceArgs struct {
 	Intent                       string `json:"intent,omitempty"`
 	GitRepo                      string `json:"gitRepo,omitempty"`
@@ -78,8 +71,6 @@ type WorkspaceArgs struct {
 	CreatePR                     bool   `json:"createPR,omitempty"`
 }
 
-// UnmarshalJSON rejects invalid PR text types before encoding/json can treat
-// an explicit null string as an omitted field and silently select the fallback.
 func (w *WorkspaceArgs) UnmarshalJSON(data []byte) error {
 	var wsMap map[string]any
 	if err := json.Unmarshal(data, &wsMap); err != nil {
@@ -92,7 +83,6 @@ func (w *WorkspaceArgs) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(data, (*workspaceArgs)(w))
 }
 
-// DelegateTaskArgs are the arguments for the delegate_task tool
 type DelegateTaskArgs struct {
 	Agent          string         `json:"agent"`
 	Prompt         string         `json:"prompt"`
@@ -105,26 +95,15 @@ type DelegateTaskArgs struct {
 	MaxTurns       *int32         `json:"maxTurns,omitempty"`
 	AllowBash      *bool          `json:"allowBash,omitempty"`
 
-	// PriorTask references a previously completed task whose diff should be
-	// applied to the workspace before this task begins. Optional.
 	PriorTask string `json:"prior_task,omitempty"`
 
-	// Feedback provides review feedback to include in the task prompt.
-	// Used with prior_task for iterative code review workflows. Optional.
 	Feedback string `json:"feedback,omitempty"`
 
-	// AutoRetry marks this task for structured failure reporting.
-	// When enabled, wait_for_tasks includes retry metadata (attempt count,
-	// max retries, error message) in the failure result so the coordinator
-	// can make informed retry decisions. Does NOT automatically re-create tasks.
 	AutoRetry bool `json:"auto_retry,omitempty"`
 
-	// MaxRetries is the maximum retry budget for coordinator reference (default: 2).
-	// Only used when auto_retry is true.
 	MaxRetries *int `json:"max_retries,omitempty"`
 }
 
-// DelegateTaskResult represents the delegation result
 type DelegateTaskResult struct {
 	TaskName      string `json:"taskName"`
 	TaskUID       string `json:"taskUID,omitempty"`
@@ -132,17 +111,12 @@ type DelegateTaskResult struct {
 	Status        string `json:"status"`
 }
 
-// NewDelegateTaskTool creates a new delegate task tool
 func NewDelegateTaskTool(k8sClient client.Client) *DelegateTaskTool {
 	return &DelegateTaskTool{
 		k8sClient: k8sClient,
 	}
 }
 
-// NewBrokeredDelegateTaskTool creates a delegate_task implementation that uses
-// controller-parsed TTS settings and request-scoped subject-token resolution.
-// The configuration is copied so later caller mutation cannot change the live
-// broker policy.
 func NewBrokeredDelegateTaskTool(
 	k8sClient client.Client,
 	config BrokeredDelegateTaskTransactionExchangeConfig,
@@ -165,8 +139,6 @@ func NewBrokeredDelegateTaskTool(
 	}, nil
 }
 
-// RegisterBrokeredDelegateTaskTool replaces the generic delegate_task
-// registration with the controller-configured broker implementation.
 func RegisterBrokeredDelegateTaskTool(
 	registry *Registry,
 	k8sClient client.Client,
@@ -183,17 +155,14 @@ func RegisterBrokeredDelegateTaskTool(
 	return nil
 }
 
-// Name returns the tool name
 func (t *DelegateTaskTool) Name() string {
 	return delegateTaskToolName
 }
 
-// Description returns the tool description
 func (t *DelegateTaskTool) Description() string {
 	return "Delegate a task to another agent. Creates a child Task CR that will be picked up by the specified agent. Supports iterative workflows via prior_task (applies previous diff) and feedback (prepends review feedback to prompt)."
 }
 
-// Parameters returns the JSON Schema for parameters
 func (t *DelegateTaskTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -320,7 +289,6 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 	}`)
 }
 
-// delegationContext holds validated delegation parameters.
 type delegationContext struct {
 	args         DelegateTaskArgs
 	parentName   string
@@ -381,9 +349,6 @@ func validateDelegateNamespaceScope(toolCtx *ToolContext, resourceKind, namespac
 	return nil
 }
 
-// parseDelegateArgs parses and validates delegation arguments against either
-// worker environment or an authenticated broker request context.
-//
 //nolint:gocyclo // Delegation keeps worker and authenticated broker policy checks auditable in one path.
 func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawMessage) (*delegationContext, error) {
 	parentName := os.Getenv(envOrkaTaskName)
@@ -417,11 +382,6 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 		return nil, fmt.Errorf("prompt is required")
 	}
 
-	// Determine child task and target agent namespaces. The legacy namespace
-	// field remains compatible: when no split fields are supplied it targets both
-	// the child task and agent. New callers should prefer taskNamespace and
-	// agentNamespace so cross-namespace agent catalogs do not move child tasks out
-	// of the parent namespace by accident.
 	taskNS := strings.TrimSpace(delegateArgs.TaskNamespace)
 	agentNS := strings.TrimSpace(delegateArgs.AgentNamespace)
 	legacyNS := strings.TrimSpace(delegateArgs.Namespace)
@@ -443,9 +403,6 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 		}
 	}
 
-	// Enforce the authenticated request's namespace boundary before any target
-	// Agent lookup or child creation. This keeps brokered execution at least as
-	// narrow as the controller's watch and namespace-isolation configuration.
 	if err := validateDelegateNamespaceScope(toolCtx, "child Task", taskNS); err != nil {
 		return nil, err
 	}
@@ -453,8 +410,6 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 		return nil, err
 	}
 
-	// Fetch parent Task for owner reference. Brokered calls always require the
-	// exact authenticated Task; worker calls retain the legacy empty-parent path.
 	parentTask := &corev1alpha1.Task{}
 	if parentName != "" {
 		parentLookupNS := parentNamespace
@@ -510,7 +465,6 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 		allowedAgents = strings.Join(allowed, ",")
 	}
 
-	// Validate depth.
 	currentDepth := 0
 	if depthStr != "" {
 		var err error
@@ -533,13 +487,10 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 		return nil, fmt.Errorf("coordination depth exceeded: current depth %d, max depth %d", currentDepth, maxDepth)
 	}
 
-	// Validate agent is allowed, including namespace when the allowlist entry is
-	// namespaced as namespace/name. Bare names retain existing same-name behavior.
 	if (brokered || allowedAgents != "") && !delegatedAgentAllowed(delegateArgs.Agent, agentNS, taskNS, allowedAgents) {
 		return nil, fmt.Errorf("agent %q is not in the allowed agents list", namespacedDelegateAgent(agentNS, delegateArgs.Agent))
 	}
 
-	// Determine priority.
 	var priority *int32
 	if delegateArgs.Priority != nil {
 		priority = delegateArgs.Priority
@@ -547,7 +498,6 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 		priority = parentTask.Spec.Priority
 	}
 
-	// Look up the target Agent to determine task type.
 	targetAgent := &corev1alpha1.Agent{}
 	if err := policyReader.Get(ctx, types.NamespacedName{
 		Name: delegateArgs.Agent, Namespace: agentNS,
@@ -567,9 +517,7 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 	}, nil
 }
 
-// buildDelegatedTask creates the child Task object from a validated delegation context.
 func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegationContext) (*corev1alpha1.Task, error) {
-	// Auto-detect task type based on agent configuration
 	taskType := corev1alpha1.TaskTypeAI
 	if dc.targetAgent.Spec.Runtime != nil {
 		taskType = corev1alpha1.TaskTypeAgent
@@ -612,7 +560,6 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 		}
 	}
 
-	// Store auto-retry config as annotations
 	if dc.args.AutoRetry {
 		childTask.Annotations[labels.AnnotationAutoRetry] = trueStr
 		maxRetries := 2
@@ -624,25 +571,19 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 		childTask.Annotations[labels.AnnotationOriginalPrompt] = dc.args.Prompt
 	}
 
-	// Set agent runtime config for agent-type tasks
 	if taskType == corev1alpha1.TaskTypeAgent {
 		if err := t.applyAgentRuntimeConfig(ctx, childTask, dc); err != nil {
 			return nil, err
 		}
 	}
 
-	// Prepend feedback to prompt if provided
 	if dc.args.Feedback != "" {
 		childTask.Spec.Prompt = fmt.Sprintf("FEEDBACK FROM REVIEW:\n%s\n\nTASK:\n%s", dc.args.Feedback, childTask.Spec.Prompt)
 	}
 	if taskType == corev1alpha1.TaskTypeAI {
-		// Native AI admission requires spec.ai. Keep Agent-owned provider,
-		// model, prompt defaults, skills, and tools authoritative; the child
-		// contributes only its task-specific prompt.
 		childTask.Spec.AI = &corev1alpha1.AISpec{Prompt: childTask.Spec.Prompt}
 	}
 
-	// Handle prior task reference for iterative workflows
 	if dc.args.PriorTask != "" {
 		t.applyPriorTaskConfig(ctx, childTask, dc)
 	}
@@ -665,11 +606,6 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 		}
 	}
 
-	// Set owner reference only for same-namespace children. Kubernetes treats
-	// cross-namespace owner references for namespaced objects as invalid and may
-	// garbage-collect the child; labels/annotations still preserve lineage. Do
-	// not request foreground-deletion blocking: workers can create Tasks but do
-	// not have permission to update the parent Task's finalizers.
 	if dc.parentTask.UID != "" && dc.parentTask.Namespace == dc.namespace {
 		isController := true
 		childTask.OwnerReferences = []metav1.OwnerReference{
@@ -686,7 +622,6 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 	return childTask, nil
 }
 
-// applyAgentRuntimeConfig sets agent runtime configuration on the child task.
 func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTask *corev1alpha1.Task, dc *delegationContext) error {
 	childTask.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
 
@@ -725,14 +660,9 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTas
 		publicationReadCredential := strings.TrimSpace(dc.args.Workspace.PublicationReadCredentialRef)
 		publicationCredential := strings.TrimSpace(dc.args.Workspace.PublicationCredentialRef)
 		forgeCredential := strings.TrimSpace(dc.args.Workspace.ForgeCredentialRef)
-		// Mirror the controller's workspace preflight before creating the child
-		// Task so a doomed configuration fails here instead of after creation.
 		if wsErr := agentWorkspaceArgError(workspace, readCredential, publicationReadCredential, publicationCredential, forgeCredential); wsErr != nil {
 			return fmt.Errorf("%s (%s)", wsErr.Message, wsErr.Suggestion)
 		}
-		// Only attach read credentials alongside a gitRepo: the controller
-		// workspace preflight rejects readCredentialRef without gitRepo, so
-		// auto-discovery must not doom a repository-free workspace.
 		if strings.TrimSpace(workspace.GitRepo) != "" {
 			readRef, err := resolveWorkspaceCredentialRef(ctx, t.k8sClient, dc.namespace, dc.targetAgent, readCredential)
 			if err != nil {
@@ -768,7 +698,6 @@ func (t *DelegateTaskTool) applyAgentRuntimeConfig(ctx context.Context, childTas
 	return nil
 }
 
-// applyPriorTaskConfig sets prior task reference and copies workspace config from the prior task.
 func (t *DelegateTaskTool) applyPriorTaskConfig(ctx context.Context, childTask *corev1alpha1.Task, dc *delegationContext) {
 	childTask.Spec.PriorTaskRef = &corev1alpha1.PriorTaskReference{
 		Name:      dc.args.PriorTask,
@@ -777,14 +706,12 @@ func (t *DelegateTaskTool) applyPriorTaskConfig(ctx context.Context, childTask *
 
 	priorTask := &corev1alpha1.Task{}
 	if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: dc.args.PriorTask, Namespace: dc.namespace}, priorTask); err == nil {
-		// Copy workspace from prior task if not explicitly provided
 		if dc.args.Workspace == nil {
 			if priorWorkspace := taskWorkspace(priorTask); priorWorkspace != nil {
 				childTask.Spec.Workspace = priorWorkspace.DeepCopy()
 			}
 		}
 
-		// Increment iteration count
 		iteration := 1
 		if iterStr, ok := priorTask.Labels[labels.LabelIteration]; ok {
 			if iter, err := strconv.Atoi(iterStr); err == nil {
@@ -793,7 +720,6 @@ func (t *DelegateTaskTool) applyPriorTaskConfig(ctx context.Context, childTask *
 		}
 		childTask.Labels[labels.LabelIteration] = strconv.Itoa(iteration)
 
-		// Copy or generate iteration group
 		if group, ok := priorTask.Labels[labels.LabelIterationGroup]; ok {
 			childTask.Labels[labels.LabelIterationGroup] = group
 		} else {
@@ -933,7 +859,6 @@ func (t *DelegateTaskTool) prepareBrokeredChildTransactionToken(
 	return nil
 }
 
-// Execute delegates a task to another agent
 func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	dc, err := t.parseDelegateArgs(ctx, args)
 	if err != nil {
@@ -976,10 +901,6 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		if childTokenExchangeEnabled {
 			cleanupChildTransactionTokenSecret(ctx, t.k8sClient, childTask)
 		}
-		// A Create cut short, by the caller's cancellation for example, may
-		// still have committed a child whose name this call never learned.
-		// The parent's cascade misses it when it listed first, and a child
-		// in another namespace never wakes the parent, so look for it.
 		if childCreateOutcomeUnknown(err) {
 			go func() {
 				_ = cancelChildrenAfterUnknownCreate(ctx, parentReader, t.k8sClient, dc.parentTask, childTask)
@@ -1001,11 +922,6 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		}
 	}
 
-	// The parent can be cancelled while the child is created, after its
-	// cascade listed its children. Reading it again closes the gap: either
-	// the cascade's list saw this child, or this read sees the cancel. It
-	// runs once the child's credentials are adopted, so a failure here
-	// leaves a complete child for the parent's next cascade.
 	if err := ensureLateChildCancelled(ctx, parentReader, t.k8sClient, dc.parentTask, childTask); err != nil {
 		logf.FromContext(ctx).Error(err, "failed to cancel the child of a cancelled parent task", "child", childTask.Name)
 	}
@@ -1078,21 +994,12 @@ func patchPreparedChildTransactionToken(ctx context.Context, k8sClient client.Cl
 	return nil
 }
 
-// Ensure DelegateTaskTool implements Tool
 var _ Tool = (*DelegateTaskTool)(nil)
 
-// lateChildCheckTimeout bounds the post-create parent check, which outlives
-// the caller: the broker cancels the call's context when the caller's
-// authority ends, which is when this check matters most.
 const lateChildCheckTimeout = 30 * time.Second
 
-// unknownCreateBackoff paces the search for a child whose Create outcome is
-// unknown. It keeps looking for its whole span, since the commit can land
-// after any one list.
 var unknownCreateBackoff = wait.Backoff{Steps: 6, Duration: 250 * time.Millisecond, Factor: 2, Cap: 5 * time.Second}
 
-// childCreateOutcomeUnknown reports whether a failed Create may still have
-// committed the child: anything but a definitive answer from the API server.
 func childCreateOutcomeUnknown(err error) bool {
 	var status apierrors.APIStatus
 	if !errors.As(err, &status) {
@@ -1101,15 +1008,6 @@ func childCreateOutcomeUnknown(err error) bool {
 	return apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err)
 }
 
-// cancelChildrenAfterUnknownCreate requests cancellation of the child a Create
-// with an unknown outcome may have committed, while its parent is cancelled.
-// The child's name was generated by the API server, so it is found by the
-// parent that delegated it: its parent label and UID, and its delegation
-// effect when the delegation was brokered, which names this child alone. It
-// runs on a context the caller cannot cancel, for its whole bounded window
-// even while the parent is live: the parent can be cancelled, and its
-// cascade list, before the commit lands, and a child in another namespace
-// would never wake it.
 func cancelChildrenAfterUnknownCreate(ctx context.Context, reader client.Reader, writer client.Client, parent, child *corev1alpha1.Task) error {
 	if parent == nil || parent.UID == "" {
 		return nil
@@ -1146,8 +1044,6 @@ func cancelChildrenAfterUnknownCreate(ctx context.Context, reader client.Reader,
 			}
 			found = found || effect != ""
 		}
-		// Only a brokered delegation's effect names this child; without one
-		// a found sibling says nothing about it, so the search goes on.
 		return found, nil
 	})
 	if err != nil && last != nil {
@@ -1156,9 +1052,6 @@ func cancelChildrenAfterUnknownCreate(ctx context.Context, reader client.Reader,
 	return nil
 }
 
-// ensureLateChildCancelled runs cancelChildOfCancelledParent on a context the
-// caller's cancellation cannot end, retrying transient failures, since no
-// later cascade is guaranteed to reach a child in another namespace.
 func ensureLateChildCancelled(ctx context.Context, reader client.Reader, writer client.Client, parent, child *corev1alpha1.Task) error {
 	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lateChildCheckTimeout)
 	defer cancel()
@@ -1168,8 +1061,6 @@ func ensureLateChildCancelled(ctx context.Context, reader client.Reader, writer 
 	})
 }
 
-// delegationParentCancelled reports whether a delegating Task was asked to
-// stop, or is gone or replaced, as the API server sees it now.
 func delegationParentCancelled(ctx context.Context, reader client.Reader, parent *corev1alpha1.Task) (bool, error) {
 	if parent == nil || parent.Name == "" || parent.UID == "" {
 		return false, nil
@@ -1188,10 +1079,6 @@ func delegationParentCancelled(ctx context.Context, reader client.Reader, parent
 	return requested, nil
 }
 
-// cancelChildOfCancelledParent asks a just-created child to cancel when its
-// parent was cancelled meanwhile. It re-reads the child, so a replacement
-// under its name, a finished child, or a cancel already requested by someone
-// else is left as it is, and it patches under an optimistic lock.
 func cancelChildOfCancelledParent(ctx context.Context, reader client.Reader, writer client.Client, parent, child *corev1alpha1.Task) error {
 	cancelled, err := delegationParentCancelled(ctx, reader, parent)
 	if err != nil || !cancelled {

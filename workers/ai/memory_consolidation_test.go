@@ -21,7 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/memoryconsolidation"
 )
 
-// recordingProvider returns responses in order and records each request.
 type recordingProvider struct {
 	sequenceProvider
 	requests []*llm.CompletionRequest
@@ -115,8 +114,6 @@ func TestRunMemoryConsolidationReturnsAFinishedRunsReport(t *testing.T) {
 	require.True(t, strings.Contains(result, "2 Sessions changed"))
 }
 
-// A consolidation Task needs no prompt: startup passes validation and reaches
-// the provider credentials, where an ordinary Task without a prompt stops.
 func TestRunAcceptsAConsolidationTaskWithoutAPrompt(t *testing.T) {
 	t.Setenv("ORKA_AI_PROVIDER", "nonexistent-provider")
 	t.Setenv("ORKA_AI_MODEL", "test-model")
@@ -131,8 +128,6 @@ func TestRunAcceptsAConsolidationTaskWithoutAPrompt(t *testing.T) {
 	require.Contains(t, err.Error(), "API key", "startup goes on to the provider")
 }
 
-// The controller answers 503 until it has published a worker's Job; a run
-// waits for it instead of failing.
 func TestMemoryConsolidationClientRetriesWhileTheControllerIsUnavailable(t *testing.T) {
 	previous := memoryConsolidationRetryDelay
 	memoryConsolidationRetryDelay = time.Millisecond

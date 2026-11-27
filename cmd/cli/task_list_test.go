@@ -79,7 +79,6 @@ func TestTaskListShowsAgentColumnAndOrdersByCreation(t *testing.T) {
 	if err := json.Unmarshal([]byte(jsonOut), &summaries); err != nil {
 		t.Fatalf("json output: %v\n%s", err, jsonOut)
 	}
-	// JSON keeps the API order and carries the agent reference and image.
 	if summaries[0].Name != "proxy-newest" || summaries[0].Agent != "coder" {
 		t.Fatalf("json summaries = %+v", summaries)
 	}
@@ -120,8 +119,6 @@ func TestTaskListSinceFiltersByCreationTime(t *testing.T) {
 	if _, err := runCLI(t, srv.URL, "task", "list", "--since", "later"); err == nil {
 		t.Fatal("invalid --since accepted")
 	}
-	// The cutoff is exclusive: a Task created exactly at --since is not
-	// "after" it.
 	exact := items[0]["metadata"].(map[string]any)["creationTimestamp"].(string)
 	out, err = runCLI(t, srv.URL, "task", "list", "-l", "orka.ai/source=anthropic-proxy", "--since", exact)
 	if err != nil {
@@ -212,7 +209,6 @@ func TestWatchLoopDropsAFrameRenderedAfterTheContextEnds(t *testing.T) {
 	defer cancel()
 	var out strings.Builder
 	done, err := watchLoop(ctx, &out, time.Millisecond, outputTable, func(context.Context) (watchFrame, error) {
-		// A response can finish decoding after its deadline expires.
 		cancel()
 		return watchFrame{Key: "final", Text: "final\n", Done: true}, nil
 	})

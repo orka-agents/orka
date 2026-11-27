@@ -31,10 +31,7 @@ import (
 )
 
 const (
-	// ahpFileReadMax bounds a file read from a workspace.
-	ahpFileReadMax = 1 << 20
-	// ahpListMax bounds a directory listing, and ahpWatchFilesMax the files a
-	// watch follows.
+	ahpFileReadMax   = 1 << 20
 	ahpListMax       = 5000
 	ahpWatchFilesMax = 5000
 	ahpWatchInterval = 5 * time.Second
@@ -42,10 +39,8 @@ const (
 	ahpEntryDir      = "directory"
 )
 
-// errAHPOutputTooLarge reports output past a read's bound.
 var errAHPOutputTooLarge = errors.New("the output is too large")
 
-// ahpWorkspacePath turns a file URI into a clean path inside the workspace.
 func ahpWorkspacePath(uri string) (string, bool) {
 	raw, ok := ahpURIPath(uri)
 	if !ok {
@@ -58,8 +53,6 @@ func ahpWorkspacePath(uri string) (string, bool) {
 	return clean, true
 }
 
-// output runs a program in the workspace and returns its standard output, up
-// to limit bytes.
 func (w *ahpWorkspaces) output(ctx context.Context, pod *corev1.Pod, limit int, argv ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, ahpWorkspaceExecTimeout)
 	defer cancel()
@@ -76,22 +69,16 @@ func (w *ahpWorkspaces) output(ctx context.Context, pod *corev1.Pod, limit int, 
 	return out.buf.Bytes(), nil
 }
 
-// ahpInWorkspace resolves $1 with every symlink followed into $p, and stops
-// the script as not found unless $p is still under the workspace. A path that
-// is inside the workspace by its text alone can still be a link out of it,
-// such as one a cloned repository carries to the workspace's git token.
 var ahpInWorkspace = ahpInWorkspaceUnder(ahpWorkspaceRoot)
 
 func ahpInWorkspaceUnder(root string) string {
 	return `p=$(readlink -f "$1") || exit 3; case "$p" in ` + root + `|` + root + `/*) ;; *) exit 3 ;; esac; `
 }
 
-// readFile reads a regular file from the workspace.
 func (w *ahpWorkspaces) readFile(ctx context.Context, pod *corev1.Pod, file string) ([]byte, error) {
 	return w.output(ctx, pod, ahpFileReadMax, ahpShell, "-c", ahpInWorkspace+`[ -f "$p" ] || exit 3; exec cat -- "$p"`, "sh", file)
 }
 
-// list lists a directory in the workspace, directories marked with a slash.
 func (w *ahpWorkspaces) list(ctx context.Context, pod *corev1.Pod, dir string) ([]ahptypes.DirectoryEntry, error) {
 	raw, err := w.output(ctx, pod, 1<<20, ahpShell, "-c", ahpInWorkspace+`[ -d "$p" ] || exit 3; cd "$p" && ls -1Ap`, "sh", dir)
 	if err != nil {
@@ -111,9 +98,6 @@ func (w *ahpWorkspaces) list(ctx context.Context, pod *corev1.Pod, dir string) (
 	return entries, nil
 }
 
-// stamps reports each file's modification time and size under root, below
-// .git directories excluded, at most ahpWatchFilesMax of them. A root that is
-// a symlink is followed, and its files keep their names under root.
 func (w *ahpWorkspaces) stamps(ctx context.Context, pod *corev1.Pod, root string, recursive bool) (map[string]string, error) {
 	depth := "1"
 	if recursive {
@@ -127,21 +111,10 @@ func (w *ahpWorkspaces) stamps(ctx context.Context, pod *corev1.Pod, root string
 	return ahpParseStamps(raw), nil
 }
 
-// ahpStampsScript prints stat's "size/mtime/name" for at most $3 files under
-// $1, to depth $2, once ahpInWorkspace has checked $1. -H follows $1 itself
-// when it is a symlink, to the target checked, and no symlink below it. A
-// scan find could not finish, such as one below an unreadable directory,
-// fails: its files would otherwise read as deleted. find stopped by head at
-// the limit exits on a signal, above 128, and is not a failure.
 const ahpStampsScript = `[ -e "$p" ] || exit 3; t=$(mktemp) || exit 1; trap 'rm -f "$t"' EXIT; ` +
 	`{ find -H "$1" -maxdepth "$2" -name .git -prune -o -type f -print; echo "$?" >"$t"; } | head -n "$3" | ` +
 	`while IFS= read -r f; do stat -c '%s/%y/%n' -- "$f"; done; s=$(cat "$t"); [ "$s" = 0 ] || [ "$s" -gt 128 ] || exit 4`
 
-// ahpParseStamps reads stat's "size/mtime/name" lines into each file's stamp.
-// The modification time is stat's %y, with fractional seconds where the
-// filesystem keeps them, so a file rewritten at the same size within a
-// second still changes its stamp. Neither the size nor the time holds a
-// slash, and the name, last, keeps its own.
 func ahpParseStamps(raw []byte) map[string]string {
 	stamps := map[string]string{}
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
@@ -160,7 +133,6 @@ func ahpParseStamps(raw []byte) map[string]string {
 	return stamps
 }
 
-// ahpLimitedBuffer keeps at most limit bytes and notes when more arrived.
 type ahpLimitedBuffer struct {
 	buf   bytes.Buffer
 	limit int
@@ -177,23 +149,17 @@ func (b *ahpLimitedBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// workspaceFor returns the user's running workspace when they may use it.
-// Reads never start a workspace.
 func (b *ahpBackend) workspaceFor(ctx context.Context, principal ahphost.Principal) (*corev1.Pod, bool) {
 	if !b.workspaces.enabled() {
 		return nil, false
 	}
 	pod, ok := b.workspaces.running(ctx, principal)
-	// A workspace whose token cannot be known is not read: its files could
-	// carry that token unredacted.
 	if !ok || b.workspaces.recoverToken(ctx, principal, pod) != nil {
 		return nil, false
 	}
 	return pod, true
 }
 
-// readWorkspaceFile serves a file from the user's running workspace. running
-// is false when no workspace runs or the URI names nothing in one.
 func (b *ahpBackend) readWorkspaceFile(ctx context.Context, principal ahphost.Principal, uri string) (ahptypes.ResourceReadResult, bool, error) {
 	file, ok := ahpWorkspacePath(uri)
 	if !ok {
@@ -210,8 +176,6 @@ func (b *ahpBackend) readWorkspaceFile(ctx context.Context, principal ahphost.Pr
 	if err != nil {
 		return ahptypes.ResourceReadResult{}, true, ahphost.ErrResourceNotFound
 	}
-	// A file is redacted for the person's git tokens as terminal output is:
-	// otherwise a shell could copy a token into one and read it from here.
 	data = ahpRedactWholeTokens(data, b.workspaces.tokensFor(principal.UserKey))
 	if utf8.Valid(data) {
 		return ahptypes.ResourceReadResult{Data: string(data), Encoding: ahptypes.ContentEncodingUtf8}, true, nil
@@ -219,10 +183,6 @@ func (b *ahpBackend) readWorkspaceFile(ctx context.Context, principal ahphost.Pr
 	return ahptypes.ResourceReadResult{Data: base64.StdEncoding.EncodeToString(data), Encoding: ahptypes.ContentEncodingBase64}, true, nil
 }
 
-// ahpRedactWholeTokens redacts tokens from data that ends where it is. A
-// token's start at the end, which output still arriving would hold back, is
-// redacted too when it is as long as a run redacted anywhere else: a file
-// that merely ends like a token's first few bytes stays as it is.
 func ahpRedactWholeTokens(data []byte, tokens []string) []byte {
 	if len(tokens) == 0 {
 		return data
@@ -234,7 +194,6 @@ func ahpRedactWholeTokens(data []byte, tokens []string) []byte {
 	return data
 }
 
-// ahpRedactGitChanges redacts tokens from both sides of each changed file.
 func ahpRedactGitChanges(changed map[string]ahpGitChange, tokens []string) {
 	if len(tokens) == 0 {
 		return
@@ -251,7 +210,6 @@ func ahpRedactGitChanges(changed map[string]ahpGitChange, tokens []string) {
 	}
 }
 
-// ListResource lists a directory in the user's workspace.
 func (b *ahpBackend) ListResource(ctx context.Context, principal ahphost.Principal, uri string) ([]ahptypes.DirectoryEntry, error) {
 	dir, ok := ahpWorkspacePath(uri)
 	if !ok {
@@ -268,15 +226,12 @@ func (b *ahpBackend) ListResource(ctx context.Context, principal ahphost.Princip
 	return entries, nil
 }
 
-// WatchResources polls the user's workspace for changes under a file or
-// directory, filtered by the watch's include and exclude patterns.
 func (b *ahpBackend) WatchResources(ctx context.Context, principal ahphost.Principal, params ahptypes.CreateResourceWatchParams, changed func([]ahptypes.ResourceChange) error) error {
 	root, ok := ahpWorkspacePath(params.Uri)
 	if !ok || !b.workspaces.enabled() {
 		return ahphost.ErrResourceNotFound
 	}
 	includes, excludes := ahpWatchPatterns(params.Includes), ahpWatchPatterns(params.Excludes)
-	// Every poll matches each file against every pattern, so they are bounded.
 	patterns := slices.Concat(includes, excludes)
 	if len(patterns) > ahpWatchPatternsMax || slices.ContainsFunc(patterns, func(p string) bool { return len(p) > ahpWatchPatternMax }) {
 		return &ahphost.Rejection{Reason: fmt.Sprintf("a watch takes at most %d patterns of up to %d bytes", ahpWatchPatternsMax, ahpWatchPatternMax)}
@@ -294,9 +249,6 @@ func (b *ahpBackend) WatchResources(ctx context.Context, principal ahphost.Princ
 		if !ok {
 			return nil
 		}
-		// A client watching the files uses the workspace: removed as idle
-		// under the watch, its files would show as they were until it is
-		// rebuilt.
 		b.workspaces.touch(principal, pod)
 		stamps, err := b.workspaces.stamps(ctx, pod, root, recursive)
 		if err != nil {
@@ -321,7 +273,6 @@ func (b *ahpBackend) WatchResources(ctx context.Context, principal ahphost.Princ
 		}
 		current := poll()
 		if current == nil {
-			// The workspace is not running; nothing can change.
 			continue
 		}
 		var changes []ahptypes.ResourceChange
@@ -339,21 +290,17 @@ func (b *ahpBackend) WatchResources(ctx context.Context, principal ahphost.Princ
 				changes = append(changes, ahptypes.ResourceChange{Uri: ahpDirectoryURI(file), Type: ahptypes.ResourceChangeTypeDeleted})
 			}
 		}
-		// Changes that could not be recorded are compared again next time.
 		if changed(changes) == nil {
 			last = current
 		}
 	}
 }
 
-// ahpWatchPatternsMax and ahpWatchPatternMax bound a watch's include and
-// exclude patterns: their number and each one's length in bytes.
 const (
 	ahpWatchPatternsMax = 64
 	ahpWatchPatternMax  = 256
 )
 
-// ahpWatchPatterns reads a watch's { items } pattern list.
 func ahpWatchPatterns(raw *json.RawMessage) []string {
 	if raw == nil {
 		return nil
@@ -367,9 +314,6 @@ func ahpWatchPatterns(raw *json.RawMessage) []string {
 	return wrapped.Items
 }
 
-// ahpMatchAny matches a relative path against glob patterns. A ** segment
-// matches any number of directories, anywhere in the pattern, and a bare path
-// matches the path and anything under it.
 func ahpMatchAny(patterns []string, rel string) bool {
 	for _, pattern := range patterns {
 		pattern = strings.TrimPrefix(pattern, "./")
@@ -383,14 +327,8 @@ func ahpMatchAny(patterns []string, rel string) bool {
 	return false
 }
 
-// ahpGlobMatch matches a path against a pattern one segment at a time, as
-// path.Match does within a segment, with a ** segment matching zero or more
-// whole segments. It looks at each pair of positions once, so a pattern of
-// many ** costs no more than one of a single **.
 func ahpGlobMatch(pattern, rel string) bool {
 	patterns, segments := strings.Split(pattern, "/"), strings.Split(rel, "/")
-	// rest[j] reports whether the patterns after the current one match
-	// segments[j:].
 	rest := make([]bool, len(segments)+1)
 	rest[len(segments)] = true
 	for _, pattern := range slices.Backward(patterns) {
@@ -410,26 +348,15 @@ func ahpGlobMatch(pattern, rel string) bool {
 }
 
 const (
-	// ahpChangesMax bounds the files a branch's changeset lists, and
-	// ahpChangeContentMax the content shown for one side of a file.
-	ahpChangesMax       = 300
-	ahpChangeContentMax = 1 << 20
-	// ahpChangesContentTotal bounds the content read for one changeset, well
-	// within the read's own bound, which also carries a header per object.
+	ahpChangesMax          = 300
+	ahpChangeContentMax    = 1 << 20
 	ahpChangesContentTotal = 48 << 20
 	ahpChangeTooLarge      = "This file is too large to show.\n"
 	ahpChangeBinary        = "This file is binary.\n"
 	ahpGitProgram          = "git"
-	// ahpShell runs the workspace's commands.
-	ahpShell = "/bin/sh"
+	ahpShell               = "/bin/sh"
 )
 
-// branchChanges reads every file a worktree's branch changed since it forked
-// from base, with both sides' contents, keyed by full path.
-// ahpBranchForkScript prints where a worktree's branch left its base, then the
-// files changed since, NUL-separated. With no base, as for a repository off
-// github.com whose default branch was not looked up, it uses the default
-// branch the clone found on the remote.
 const ahpBranchForkScript = `set -e
 cd "$1"
 upstream="origin/$2"
@@ -451,8 +378,6 @@ func (w *ahpWorkspaces) branchChanges(ctx context.Context, pod *corev1.Pod, work
 	type entry struct{ status, file string }
 	var entries []entry
 	for i := 1; i+1 < len(fields) && len(entries) < ahpChangesMax; i += 2 {
-		// git cat-file reads one object name per line, so a file whose name
-		// holds a line break cannot be read safely; leave it out.
 		if strings.ContainsAny(fields[i+1], "\n\r") {
 			continue
 		}
@@ -485,8 +410,6 @@ func (w *ahpWorkspaces) branchChanges(ctx context.Context, pod *corev1.Pod, work
 	return changed, nil
 }
 
-// blobs reads objects with git cat-file. Large or binary contents are
-// replaced by a note; a missing object has no entry.
 func (w *ahpWorkspaces) blobs(ctx context.Context, pod *corev1.Pod, worktree string, objects []string) (map[string]*string, error) {
 	contents := map[string]*string{}
 	if len(objects) == 0 {
@@ -530,8 +453,6 @@ func (w *ahpWorkspaces) blobs(ctx context.Context, pod *corev1.Pod, worktree str
 			return nil, err
 		}
 		if size < 0 || size > ahpChangeContentMax {
-			// Each object was checked to be small; anything else means the
-			// answers do not match the questions.
 			return nil, errors.New("git returned an object larger than it reported")
 		}
 		data := make([]byte, size+1)
@@ -547,8 +468,6 @@ func (w *ahpWorkspaces) blobs(ctx context.Context, pod *corev1.Pod, worktree str
 	return contents, nil
 }
 
-// ahpSelectBlobs splits the objects that are blobs into those read in full
-// and those shown as too large: alone, or past what one read returns in all.
 func ahpSelectBlobs(objects []string, sizes map[string]int) (small, large []string) {
 	budget := ahpChangesContentTotal
 	for _, object := range objects {
@@ -565,7 +484,6 @@ func ahpSelectBlobs(objects []string, sizes map[string]int) (small, large []stri
 	return small, large
 }
 
-// blobSizes returns the size of each object that is a blob.
 func (w *ahpWorkspaces) blobSizes(ctx context.Context, pod *corev1.Pod, worktree string, objects []string) (map[string]int, error) {
 	ctx, cancel := context.WithTimeout(ctx, ahpWorkspaceExecTimeout)
 	defer cancel()

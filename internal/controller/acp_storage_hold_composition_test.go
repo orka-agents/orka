@@ -16,12 +16,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/storagetest"
 )
 
-// These tests show how the Task record hold composes with the storage rules
-// below it: an unknown write outcome is never retried blindly or taken for
-// success, a replay answered from an operation receipt alone does not stand
-// in for the record the hold checks, and an installation hold takes
-// precedence over every record hold.
-
 func requireNoTaskStorageHold(t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task) {
 	t.Helper()
 	updated := &corev1alpha1.Task{}
@@ -46,10 +40,6 @@ func requireAttemptState(t *testing.T, fixture *recoveryFixture, want store.Prom
 	return attempt
 }
 
-// A receipt write whose outcome is unknown leaves the attempt Running. The
-// dispatcher does not write it again, and recovery after a takeover records
-// the outcome as unknown: it neither holds the Task, because the settling
-// transition never acknowledged a receipt, nor reports success.
 func TestUnknownReceiptOutcomeIsRecoveredAsUnknownWithoutAHold(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -81,8 +71,6 @@ func TestUnknownReceiptOutcomeIsRecoveredAsUnknownWithoutAHold(t *testing.T) {
 	}
 }
 
-// lostResponseResultStore commits a Task result and then reports its outcome
-// unknown, the first lose times.
 type lostResponseResultStore struct {
 	*sqlite.Store
 	lose  int
@@ -101,10 +89,6 @@ func (s *lostResponseResultStore) SaveResult(ctx context.Context, namespace, tas
 	return nil
 }
 
-// When recovery repairs the result from the receipt and that write's outcome
-// is unknown, the pass ends without success or a hold. The next pass runs the
-// write again as a new operation, which replaces the result with the same
-// bytes, and settles the Task.
 func TestReceiptRepairWithUnknownResultOutcomeSettlesOnTheNextPass(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -132,9 +116,6 @@ func TestReceiptRepairWithUnknownResultOutcomeSettlesOnTheNextPass(t *testing.T)
 	}
 }
 
-// A receipt write replayed from its operation receipt reports success
-// without reading the record again. Recovery checks the record itself, so a
-// receipt lost after it was acknowledged still holds the Task.
 func TestReplayedReceiptWriteDoesNotMaskALostReceipt(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -164,10 +145,6 @@ func TestReplayedReceiptWriteDoesNotMaskALostReceipt(t *testing.T) {
 	})
 }
 
-// While the installation is held, recovery acts on no Task: it neither
-// places nor releases a record hold, even one the Task's annotation already
-// acknowledges. Once the installation hold clears, the acknowledged record
-// hold is released and the outcome recorded as unknown.
 func TestInstallationHoldPrecedesTaskRecordHolds(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -203,8 +180,6 @@ func TestInstallationHoldPrecedesTaskRecordHolds(t *testing.T) {
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryAcknowledgedReason)
 }
 
-// holdingReceiptStore raises an installation hold while recovery reads a
-// result receipt, after the recovery pass started.
 type holdingReceiptStore struct {
 	*sqlite.Store
 	epochs *ControllerEpochManager
@@ -217,10 +192,6 @@ func (s *holdingReceiptStore) GetPromptResultReceipt(ctx context.Context, attemp
 	return s.Store.GetPromptResultReceipt(ctx, attemptID)
 }
 
-// An installation hold raised while a recovery pass is under way also keeps
-// that pass from placing or releasing a Task record hold: the condition write
-// is admitted only while storage is not held, also under the epoch mutation
-// interlock of a control store that has one.
 func TestInstallationHoldRaisedDuringRecoveryWritesNoTaskRecordHold(t *testing.T) {
 	for _, test := range []struct {
 		name         string

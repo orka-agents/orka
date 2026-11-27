@@ -38,8 +38,6 @@ def optional(cluster, kind, name):
 
 
 def secret_metadata(cluster):
-    # kubectl renders only metadata. No token or retained-auth bytes enter the
-    # test process, logs, or report when discovering cleanup authority.
     raw = cluster.call("get", "secrets", "-o",
                        'jsonpath={range .items[*]}{.metadata}{"\\n"}{end}')
     return [{"kind": "Secret", "metadata": json.loads(line)} for line in raw.splitlines() if line.strip()]
@@ -264,7 +262,6 @@ def delete_exact(cluster, kind, resource):
         return
     meta = live["metadata"]
     path = f"/apis/core.orka.ai/v1alpha1/namespaces/{meta['namespace']}/{kind}/{meta['name']}"
-    # A failed transport is not permission to replay the mutation.
     cluster.call("delete", "--raw", path, "-f", "-", body={"apiVersion": "v1", "kind": "DeleteOptions",
         "preconditions": {"uid": meta["uid"]}, "propagationPolicy": "Background"})
 
@@ -279,8 +276,6 @@ def task_artifacts(cluster, task):
     for value in values:
         meta, spec = value["metadata"], value.get("spec", {})
         owner = spec.get("owner", {})
-        # A Session aggregate may be shared by continuation Tasks. The exact
-        # approval Task discovery label takes precedence over that aggregate.
         label = meta.get("labels", {}).get("core.orka.ai/task-uid")
         if value["kind"] == "ExternalEffect" and label and label != uid:
             continue
@@ -359,8 +354,6 @@ def task_identity_evidence(task):
 
 def _approval_evidence(approval):
     binding = copy.deepcopy(approval.get("binding", {}))
-    # The old run predates public binding digests. Normalize those archived
-    # identities, without rewriting the original report or retaining raw IDs.
     for raw, hashed in (("operationID", "operationIDDigest"), ("runtimeInstanceID", "runtimeInstanceIDDigest"),
                         ("supervisorBootID", "supervisorBootIDDigest")):
         if raw in binding:
@@ -426,7 +419,6 @@ def _validate_approval(task, effect, approval):
                      response.get("requestDigest") == spec["requestDigest"] and response.get("code") == "approval_stale")
         denial = (status.get("attempts", 0) in {0, 1} and (exact or abandoned) and
                   response.get("code") in {"approval_declined", "approval_expired", "approval_cancelled", "approval_stale"})
-        # An approved call the tool proved had no effect ran exactly once.
         no_effect = (status.get("attempts") == 1 and exact and response.get("code") == "tool_failed_without_effect" and
                      isinstance(response.get("error"), str) and response["error"].strip())
         require(response.get("isError") is True and (denial or no_effect),
@@ -441,8 +433,6 @@ def _execution_changed(terminal, admission):
             terminal["status"]["agentExecutionBinding"] == admission["status"]["agentExecutionBinding"],
             "Task spec or immutable binding changed after admission")
     before, after = admission["status"]["execution"], terminal["status"]["execution"]
-    # Successor controllers update the mutable controllerEpoch even when the
-    # original session still owns cleanup. The exposure keeps its old epoch.
     fields = ("attempt", "promptID", "requestDigest", "agentRuntimeUID", "runtimeInstanceID",
               "runtimeSessionSupervisorBootID", "runtimeSessionUID", "runtimeSessionGeneration")
     return any(before.get(key) != after.get(key) for key in fields)

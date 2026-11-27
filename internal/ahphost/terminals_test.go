@@ -26,23 +26,16 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// terminalBackend is a fake backend that runs terminals and records input.
 type terminalBackend struct {
 	*fakeBackend
-	mu       sync.Mutex
-	inputs   []string
-	running  map[string]bool
-	disposed []string
-	reaped   []string
-	// reapFails fails that many reaps first.
-	reapFails int
-	// exitAtOnce makes a terminal's shell exit with this code before
-	// CreateTerminal returns.
-	exitAtOnce *int64
-	// onReap runs while terminals are being reaped.
-	onReap func(channels []string)
-	// onTerminals runs, holding mu, each time the running terminals are
-	// listed.
+	mu          sync.Mutex
+	inputs      []string
+	running     map[string]bool
+	disposed    []string
+	reaped      []string
+	reapFails   int
+	exitAtOnce  *int64
+	onReap      func(channels []string)
 	onTerminals func()
 }
 
@@ -50,7 +43,6 @@ func (b *terminalBackend) CreateTerminal(ctx context.Context, _ Principal, param
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.exitAtOnce != nil {
-		// Like a real backend, it does not wait to learn whether the exit landed.
 		_ = emit.Emit(ctx, params.Channel, ahptypes.StateAction{Value: &ahptypes.TerminalExitedAction{
 			Type: ahptypes.ActionTypeTerminalExited, ExitCode: b.exitAtOnce,
 		}})
@@ -104,15 +96,13 @@ func (b *terminalBackend) AuthorizeClientAction(context.Context, Principal, stri
 
 func (b *terminalBackend) HandleClientAction(_ context.Context, _ Principal, _ string, action ahptypes.StateAction, _ Emitter) {
 	if input, ok := action.Value.(*ahptypes.TerminalInputAction); ok {
-		time.Sleep(time.Millisecond) // a slow handler must not reorder input
+		time.Sleep(time.Millisecond)
 		b.mu.Lock()
 		b.inputs = append(b.inputs, input.Data)
 		b.mu.Unlock()
 	}
 }
 
-// A shell that exits before the host has stored its terminal still ends it:
-// the exit waits for the channel and applies once it is stored.
 func TestATerminalWhoseShellExitsAtOnceIsStoredAsExited(t *testing.T) {
 	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	require.NoError(t, err)
@@ -143,9 +133,6 @@ func TestATerminalWhoseShellExitsAtOnceIsStoredAsExited(t *testing.T) {
 	require.Empty(t, result.Snapshot.State.Root.Terminals, "an exited shell is not listed as running")
 }
 
-// Ended terminals nothing follows go when another terminal is created, so a
-// client that never disposes of them cannot grow what is stored; one a
-// connection still follows stays.
 func TestEndedTerminalsNothingFollowsGoWithTheNextTerminal(t *testing.T) {
 	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	require.NoError(t, err)
@@ -184,15 +171,12 @@ func TestEndedTerminalsNothingFollowsGoWithTheNextTerminal(t *testing.T) {
 	require.Equal(t, []string{"ahp-terminal:/one"}, backend.reaped, "its shell is stopped first")
 	backend.mu.Unlock()
 
-	// One a connection starts following while it is being dropped stays.
 	require.NoError(t, client.Unsubscribe(ctx, "ahp-terminal:/two"))
 	other := env.connect(env.mint("alice").Token)
 	_, err = other.Initialize(ctx, "client-b", ahptypes.SupportedProtocolVersions(), nil)
 	require.NoError(t, err)
 	var subscribeErr error
 	backend.onReap = func([]string) {
-		// The client library decodes no terminal snapshot; the raw request
-		// subscribes all the same.
 		var raw json.RawMessage
 		subscribeErr = other.Request(ctx, "subscribe", ahptypes.SubscribeParams{Channel: "ahp-terminal:/two"}, &raw)
 	}
@@ -200,13 +184,9 @@ func TestEndedTerminalsNothingFollowsGoWithTheNextTerminal(t *testing.T) {
 	require.NoError(t, subscribeErr)
 	require.Contains(t, stored(), "ahp-terminal:/two", "a terminal followed meanwhile is kept")
 
-	// One whose URI runs a shell again by the time it is claimed is not
-	// reaped: the second look finds it running.
 	backend.onReap = nil
 	require.NoError(t, client.Unsubscribe(ctx, "ahp-terminal:/three"))
 	require.NoError(t, other.Unsubscribe(ctx, "ahp-terminal:/two"))
-	// Unsubscribing is a notification, and the terminal is created on the
-	// other connection: a reply on this one shows the host has handled it.
 	require.NoError(t, other.Request(ctx, "ping", map[string]any{}, nil))
 	looks := 0
 	backend.onTerminals = func() {
@@ -225,8 +205,6 @@ func TestEndedTerminalsNothingFollowsGoWithTheNextTerminal(t *testing.T) {
 	require.Contains(t, stored(), "ahp-terminal:/three")
 }
 
-// A terminal whose early output or exit cannot be stored is taken back: its
-// shell is disposed of and no channel is left showing it running.
 func TestATerminalThatCannotBeFinishedIsTakenBack(t *testing.T) {
 	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	require.NoError(t, err)
@@ -246,7 +224,6 @@ func TestATerminalThatCannotBeFinishedIsTakenBack(t *testing.T) {
 	_, err = client.Initialize(ctx, "client-a", ahptypes.SupportedProtocolVersions(), nil)
 	require.NoError(t, err)
 
-	// The shell's exit is journaled after the channel is stored; that fails.
 	failing.failActions.Store(true)
 	claim := ahptypes.TerminalClaim{Value: &ahptypes.TerminalClientClaim{Kind: ahptypes.TerminalClaimKindClient, ClientId: "client-a"}}
 	require.Error(t, client.Request(ctx, "createTerminal", ahptypes.CreateTerminalParams{Channel: "ahp-terminal:/one", Claim: claim}, nil))
@@ -257,9 +234,6 @@ func TestATerminalThatCannotBeFinishedIsTakenBack(t *testing.T) {
 	require.Equal(t, []string{"ahp-terminal:/one"}, backend.disposed, "the shell is disposed of")
 }
 
-// Creating or disposing of a terminal succeeds once done, even when the
-// terminal list cannot be updated after it: the client could not repeat it.
-// The list is built whole again on its next change.
 func TestATerminalChangeOutlivesAFailedTerminalListUpdate(t *testing.T) {
 	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	require.NoError(t, err)
@@ -280,7 +254,6 @@ func TestATerminalChangeOutlivesAFailedTerminalListUpdate(t *testing.T) {
 	alice := UserKey("https://issuer.example", "alice")
 	claim := ahptypes.TerminalClaim{Value: &ahptypes.TerminalClientClaim{Kind: ahptypes.TerminalClaimKindClient, ClientId: "client-a"}}
 
-	// Only the terminal list's update journals an action; it fails.
 	failing.failActions.Store(true)
 	require.NoError(t, client.Request(ctx, "createTerminal", ahptypes.CreateTerminalParams{Channel: "ahp-terminal:/one", Claim: claim}, nil))
 	_, err = s.GetAHPChannelState(ctx, alice, "ahp-terminal:/one")
@@ -300,8 +273,6 @@ func TestATerminalChangeOutlivesAFailedTerminalListUpdate(t *testing.T) {
 	require.Equal(t, []string{"ahp-terminal:/two"}, listed)
 }
 
-// A terminal an earlier process left behind has what it still runs stopped
-// before its channel is swept; a running terminal is left alone.
 func TestALeftoverTerminalIsReapedBeforeItsChannelGoes(t *testing.T) {
 	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	require.NoError(t, err)
@@ -334,8 +305,6 @@ func TestALeftoverTerminalIsReapedBeforeItsChannelGoes(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// A leftover terminal whose shell could not be stopped keeps its channel, and
-// the next sweep tries again.
 func TestALeftoverTerminalStaysUntilItIsReaped(t *testing.T) {
 	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	require.NoError(t, err)
@@ -393,8 +362,6 @@ func TestTerminalsRouteToTheirBackendInOrder(t *testing.T) {
 	require.NoError(t, client.Request(ctx, "createTerminal", ahptypes.CreateTerminalParams{Channel: "ahp-terminal:/one", Claim: claim}, nil))
 	err = client.Request(ctx, "createTerminal", ahptypes.CreateTerminalParams{Channel: "ahp-terminal:/one", Claim: claim}, nil)
 	require.Equal(t, ahptypes.ErrorCodeAlreadyExists, rpcCode(t, err))
-	// A session cannot take over the terminal's channel: its scheme is the
-	// terminals' own.
 	err = client.Request(ctx, "createSession", ahptypes.CreateSessionParams{Channel: "ahp-terminal:/one"}, nil)
 	require.Equal(t, ahptypes.ErrorCodeInvalidParams, rpcCode(t, err))
 	stored, _, err := host.readChannel(ctx, UserKey("https://issuer.example", "alice"), "ahp-terminal:/one")
@@ -423,8 +390,6 @@ func TestTerminalsRouteToTheirBackendInOrder(t *testing.T) {
 	require.Equal(t, want.String(), strings.Join(backend.inputs, ""), "input reaches the backend in order")
 	backend.mu.Unlock()
 
-	// What a person types, such as a password at a prompt that does not echo
-	// it, reaches the shell but is never kept in the durable journal.
 	secret := "not-a-real-password"
 	_, err = client.Dispatch(ctx, "ahp-terminal:/one", ahptypes.StateAction{Value: &ahptypes.TerminalInputAction{
 		Type: ahptypes.ActionTypeTerminalInput, Data: secret + "\n"}})
@@ -446,7 +411,6 @@ func TestTerminalsRouteToTheirBackendInOrder(t *testing.T) {
 	}
 	require.Equal(t, 51, inputs, "each input keeps its place in the journal")
 
-	// Another user cannot use the terminal.
 	other := env.connect(env.mint("bob").Token)
 	_, err = other.Initialize(ctx, "client-b", ahptypes.SupportedProtocolVersions(), nil)
 	require.NoError(t, err)

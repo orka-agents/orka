@@ -26,8 +26,6 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-// useSubstrateMCPTestRouter points an executor's in-process router at a test
-// server standing in for atenet-router.
 func useSubstrateMCPTestRouter(t *testing.T, executor *ToolExecutor, serverURL string) {
 	t.Helper()
 	router, err := NewSubstrateMCPRouter(serverURL, executor.client)
@@ -131,15 +129,11 @@ func TestToolExecutorSubstrateMCPUsesAuthenticatedOrkaProxy(t *testing.T) {
 		if got := request.header.Get(SubstrateMCPToolTxnTokenHeader); got != "task-txn-token" {
 			t.Fatalf("request %d %s = %q", i, SubstrateMCPToolTxnTokenHeader, got)
 		}
-		// Every request, including session termination, names the Tool revision
-		// whose credential authority the worker validated.
 		tool := substrateMCPTestTool()
 		if !SubstrateMCPToolBindingMatches(tool, request.header.Get(SubstrateMCPToolUIDHeader),
 			request.header.Get(SubstrateMCPToolGenerationHeader), request.header.Get(SubstrateMCPToolActorHeader)) {
 			t.Fatalf("request %d does not bind the validated Tool revision", i)
 		}
-		// The proxy resolves Tool credentials and routing; the worker never
-		// sends them, and Txn-Token stays reserved for Orka API auth.
 		for _, header := range []string{transactiontoken.HeaderName, "ate-target-actor", "X-Static"} {
 			if value := request.header.Get(header); value != "" {
 				t.Fatalf("request %d sent %s = %q", i, header, value)
@@ -169,8 +163,6 @@ func TestToolExecutorSubstrateMCPProxyKeepsTaskCredentialAuthority(t *testing.T)
 	}
 }
 
-// substrateMCPEgressCredentialTestTool has no Orka-injected credential; the
-// Substrate egress gateway injects its Secret into the actor's requests.
 func substrateMCPEgressCredentialTestTool() *corev1alpha1.Tool {
 	tool := substrateMCPTestTool()
 	tool.Spec.HTTP.AuthSecretRef = nil
@@ -373,7 +365,6 @@ func TestSubstrateMCPRequiresReadinessForCurrentToolGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, mutate := range map[string]func(*corev1alpha1.Tool){
-		// A spec update keeps the previous Actor in status until reconciliation.
 		"stale generation": func(tool *corev1alpha1.Tool) { tool.Generation++ },
 		"not available":    func(tool *corev1alpha1.Tool) { tool.Status.Conditions[0].Status = metav1.ConditionFalse },
 		"no condition":     func(tool *corev1alpha1.Tool) { tool.Status.Conditions = nil },
@@ -392,9 +383,6 @@ func TestSubstrateMCPRequiresReadinessForCurrentToolGeneration(t *testing.T) {
 	}
 }
 
-// The manager's router client is shared and has no timeout. A call through it
-// must still be bounded: by the Tool's timeout when it sets one, otherwise by
-// the executor's default.
 func TestToolExecutorSubstrateMCPRouterCallsHaveATimeout(t *testing.T) {
 	for name, tc := range map[string]struct {
 		timeout *metav1.Duration

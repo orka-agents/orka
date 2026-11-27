@@ -27,14 +27,12 @@ describe('attention lanes', () => {
     expect(isAgentWorking(task('t', { phase: 'Failed', conditions: [{ type: 'WaitingForCapacity', status: 'True' }] }))).toBe(true)
     expect(isAgentWorking(task('t', { phase: 'Succeeded', wait: { kind: 'Tasks', state: 'Waiting' } }))).toBe(true)
     expect(isAgentWorking(task('t', { phase: 'Succeeded', wait: { kind: 'Timer', state: 'Requested' } }))).toBe(true)
-    // A requested wait after a failed or cancelled turn is never armed.
     for (const phase of ['Failed', 'Cancelled']) {
       expect(isAgentWorking(task('t', { phase, wait: { kind: 'Timer', state: 'Requested' } }))).toBe(false)
       expect(isAgentWorking(task('t', { phase, wait: { kind: 'Tasks', state: 'Requested' } }))).toBe(false)
     }
     expect(isAgentWorking(task('t', { phase: 'Succeeded', wait: { kind: 'Timer', state: 'Resuming' } }))).toBe(true)
     expect(isAgentWorking(task('t', { phase: 'Succeeded', wait: { kind: 'Timer', state: 'Resumed' } }))).toBe(false)
-    // A parked approval is the person's move, never the agent's.
     expect(isAgentWorking(task('t', { phase: 'Succeeded', wait: { kind: 'Approval', state: 'Waiting' } }))).toBe(false)
     expect(isAgentWorking(task('t', { phase: 'Cancelled' }))).toBe(false)
   })
@@ -67,7 +65,6 @@ describe('attention lanes', () => {
       task('worker', { phase: 'Running', message: 'waiting for approval of write' }),
       task('parked', { phase: 'Succeeded', wait: { kind: 'Approval', state: 'Waiting', references: ['ap-1'] } }),
       task('requested', { phase: 'Succeeded', wait: { kind: 'Approval', state: 'Requested', references: ['ap-2'] } }),
-      // A requested wait after a failed turn is abandoned and takes no decision.
       task('abandoned', { phase: 'Failed', wait: { kind: 'Approval', state: 'Requested', references: ['ap-3'] } }),
       task('decided', { phase: 'Succeeded', wait: { kind: 'Approval', state: 'Resumed', references: ['ap-4'] } }),
       { ...task('deleting', { phase: 'Running', conditions: [{ type: 'WaitingForApproval', status: 'True' }] }),
@@ -75,7 +72,6 @@ describe('attention lanes', () => {
       task('busy', { phase: 'Running' }),
     ], items)
     const names = (list: AttentionItem[]) => list.map((item) => item.task?.name)
-    // Ranked after the server's approvals and before lower-ranked kinds.
     expect(names(grouped.needsYou)).toEqual(['ranked', 'condition', 'worker', 'parked', 'requested', 'broken'])
     for (const item of grouped.needsYou.slice(1, 5)) {
       expect(isTaskDerivedItem(item)).toBe(true)
@@ -88,7 +84,6 @@ describe('attention lanes', () => {
     expect(grouped.needsYou[1].task).toEqual({ namespace: 'default', name: 'condition', uid: 'uid-condition', phase: 'Running' })
     expect(grouped.working.map((t) => t.metadata.name)).toEqual(['deleting', 'busy'])
     expect(grouped.done.map((t) => t.metadata.name)).toEqual(['abandoned', 'decided'])
-    // Without any derived card the server items are returned as they are.
     expect(groupByAttention([task('busy', { phase: 'Running' })], items).needsYou).toBe(items)
   })
 
@@ -137,7 +132,6 @@ describe('attention lanes', () => {
     })
     expect(attentionSourceNotes({ approvals: 'included', monitors: 'forbidden' }).monitorsNote).toMatch(/cannot list repository monitors/)
     expect(attentionSourceNotes({ approvals: 'included', monitors: 'unavailable' }).monitorsNote).toMatch(/monitor storage is not enabled/)
-    // A response without a source state never reads as approvals checked.
     expect(attentionSourceNotes(undefined).approvalsUnread).toBe(true)
     expect(attentionSourceNotes(undefined).approvalsNote).toBe('Approvals could not be checked.')
   })

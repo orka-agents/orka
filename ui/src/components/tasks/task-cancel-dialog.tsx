@@ -15,15 +15,11 @@ import { ApiError } from '@/lib/api-client'
 
 export interface TaskCancelDialogProps {
   taskName: string
-  // The UID of the task the person is confirming; sent so a task recreated
-  // under the same name is not cancelled instead.
   taskUID?: string
   open: boolean
   onOpenChange: (open: boolean) => void
 }
 
-// TaskCancelDialog confirms stopping a running task. Unlike delete, cancel
-// keeps everything the task produced.
 export function TaskCancelDialog({ taskName, taskUID, open, onOpenChange }: TaskCancelDialogProps) {
   const cancel = useCancelTask()
   const [reason, setReason] = useState('')

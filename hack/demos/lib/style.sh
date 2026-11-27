@@ -1,31 +1,10 @@
 #!/usr/bin/env bash
-# Visual style kit for hack/demos scripts.
-#
-# Provides:
-#   banner, chapter, narrate, log_info/success/warning/error
-#   demo_profile, demo_profile_is, demo_pe, demo_show
-#
-# Pure bash + ANSI — no gum/glow/bat. Designed to be sourced from
-# lib/common.sh so every script picks it up without explicit sourcing.
-#
-# Recording profiles (DEMO_RECORD_PROFILE):
-#   presenter (default) — full transparency, typewriter on, all chapters
-#   docs                — typewriter off, narration cues printed, all chapters
-#   social              — typewriter off, only chapters 1..3
-#   hero                — typewriter off, no chapters at all (≤60s cuts)
-#
-# This file is sourced — do not `set -euo pipefail` here.
 
-# Idempotent: don't re-source if already loaded.
 if [[ "${__ORKA_DEMO_STYLE_LOADED:-0}" == "1" ]]; then
   return 0 2>/dev/null || true
 fi
 __ORKA_DEMO_STYLE_LOADED=1
 
-# ---------------------------------------------------------------------------
-# Color palette — extends demo-magic.sh's GREEN/CYAN/BOLD/COLOR_RESET.
-# tput-based with NO_COLOR + non-tty fallbacks identical to demo-magic.sh.
-# ---------------------------------------------------------------------------
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   COLOR_RESET="${COLOR_RESET:-$(tput sgr0 2>/dev/null || printf '')}"
   GREEN="${GREEN:-$(tput setaf 2 2>/dev/null || printf '')}"
@@ -48,10 +27,6 @@ else
   DIM="${DIM:-}"
 fi
 
-# ---------------------------------------------------------------------------
-# Profile dispatcher.
-# ---------------------------------------------------------------------------
-
 demo_profile() {
   local profile="${DEMO_RECORD_PROFILE:-presenter}"
   case "${profile}" in
@@ -64,9 +39,6 @@ demo_profile_is() {
   [[ "$(demo_profile)" == "$1" ]]
 }
 
-# Wraps demo-magic's pe(). In presenter, behaves like pe (typewriter on).
-# In docs/social/hero, runs the command with TYPE_SPEED=0 so the prompt
-# renders instantly. Legacy `pe` calls keep working unchanged.
 demo_pe() {
   local cmd="$*"
   if demo_profile_is presenter; then
@@ -79,12 +51,6 @@ demo_pe() {
   fi
 }
 
-# demo_show_cmd <cmd> — print a command at the demo prompt WITHOUT running
-# it. Use when the real invocation has to happen via a different code path
-# (e.g. claude-code with a sidecar --settings file to neutralize the
-# user's ~/.claude/settings.json env block) but the cast should still
-# show viewers the command they could type at a shell. Honors TYPE_SPEED
-# the same way demo_pe does so the prompt looks identical.
 demo_show_cmd() {
   local cmd="$*"
   printf '\n'
@@ -101,11 +67,6 @@ demo_show_cmd() {
   fi
 }
 
-# demo_show <path> — render a file with profile-appropriate verbosity.
-#   presenter: full file via cat (audit transparency)
-#   docs:      first 20 lines + truncation marker
-#   social:    first 8 lines + truncation marker
-#   hero:      truncation marker only (no body)
 demo_show() {
   local path="$1"
   if [[ ! -f "${path}" ]]; then
@@ -122,9 +83,6 @@ demo_show() {
   esac
 }
 
-# demo_show_full renders the WHOLE file regardless of recording profile.
-# Use this for story files / scenario explanations where the content IS the
-# teaching, not for yaml/code where head + truncation is appropriate.
 demo_show_full() {
   local path="$1"
   if [[ ! -f "${path}" ]]; then
@@ -134,22 +92,12 @@ demo_show_full() {
   cat "${path}"
 }
 
-# ---------------------------------------------------------------------------
-# Banner — `╔══╗ ║ 🤖 Orka — <title> ║ ╚══╝` (68 cols wide, cyan border).
-# Call once per script, after `clear`. Idempotent within a single shell
-# (does not refuse a second call — scripts may print multiple banners
-# intentionally during long pre-warm sequences).
-# ---------------------------------------------------------------------------
 banner() {
   local title="${1:-Orka demo}"
   local inner_width=66
   local label="🤖 Orka — ${title}"
-  # Account for the emoji glyph rendering as 2 cells in most terminals.
-  # ${#label} counts codepoints; emoji adds +1 cell over its codepoint count.
   local visible_len
   visible_len=$(( ${#label} + 1 ))
-  # Title row layout inside the box: "  <label><spaces>  " — 4 fixed cells
-  # of padding plus the variable spaces, must total inner_width.
   local pad=$(( inner_width - visible_len - 4 ))
   (( pad < 0 )) && pad=0
   local spaces
@@ -166,15 +114,6 @@ banner() {
   printf '\n'
 }
 
-# ---------------------------------------------------------------------------
-# Chapters + narrate.
-#
-# Auto-numbered via __DEMO_CHAPTER_INDEX (1-based). Total comes from
-# DEMO_CHAPTER_TOTAL set by the script; if unset, just shows "Chapter <n>".
-#
-# narrate() records a one-line cue for the *next* chapter call. The cue is
-# printed under the chapter title in docs profile, silent in others.
-# ---------------------------------------------------------------------------
 __DEMO_CHAPTER_INDEX=0
 __DEMO_NARRATE_PENDING=""
 
@@ -191,12 +130,10 @@ chapter() {
   local profile
   profile="$(demo_profile)"
 
-  # hero: suppress all chapters.
   if [[ "${profile}" == "hero" ]]; then
     __DEMO_NARRATE_PENDING=""
     return 0
   fi
-  # social: suppress chapters past index 3.
   if [[ "${profile}" == "social" ]] && (( idx > 3 )); then
     __DEMO_NARRATE_PENDING=""
     return 0
@@ -222,13 +159,6 @@ chapter() {
   printf '%b%s%b\n\n' "${CYAN}" "${bar}" "${COLOR_RESET}"
   __DEMO_NARRATE_PENDING=""
 }
-
-# ---------------------------------------------------------------------------
-# log_info / success / warning / error.
-# Format: [HH:MM:SS] <emoji>  <msg>
-# info/success → stdout (so asciinema captures them in the cast).
-# warning/error → stderr.
-# ---------------------------------------------------------------------------
 
 __demo_log_ts() {
   date +'%H:%M:%S'
@@ -258,53 +188,6 @@ log_error() {
     "${RED}" "${COLOR_RESET}" "$*" >&2
 }
 
-# ---------------------------------------------------------------------------
-# Live-narration helpers — inspired by the airline reference demo
-# (https://gist.github.com/sozercan/a8b878ab9acfd515d2e459c77346c34d).
-#
-# Use these to keep viewers oriented during long Kubernetes waits where the
-# real action is happening on the cluster (the controller building a threat
-# model, agents fanning out across child Tasks, a PR being opened, etc).
-#
-#   demo_event "<emoji>" "<msg>"     — persistent timestamped activity line.
-#                                       Use for state transitions you want
-#                                       the viewer to remember (✅ ⚠ 🧠 🔍
-#                                       🛠 🔄 🧪 📊). Stays on screen — does
-#                                       NOT get \r-overwritten.
-#
-#   demo_phase "<emoji>" "<title>" "<one-line description>"
-#                                     — chunky horizontal-rule sub-phase
-#                                       divider. Use INSIDE a chapter to
-#                                       mark a major state transition
-#                                       (e.g. "Threat model phase" →
-#                                       "Discovery phase").
-#
-#   demo_announce_once "<key>" "<emoji>" "<msg>"
-#                                     — emit a demo_event the FIRST time
-#                                       this key is seen; no-op on
-#                                       subsequent calls. Lets a status
-#                                       hook called every tick announce
-#                                       stage transitions exactly once.
-#                                       Auto-flushes any in-progress
-#                                       \r-heartbeat first so the persistent
-#                                       line lands cleanly.
-#
-#   demo_state "<key>" "<value>"      — compact "🔄 key: value" status
-#                                       snapshot for one-shot state probes
-#                                       (e.g. "Workers: prefill=2 decode=4").
-#
-#   demo_scenario "<title>" "<paragraph...>"
-#                                     — opening card. Use ONCE at the very
-#                                       top of a demo to orient the viewer
-#                                       before any cluster work happens.
-#                                       Replaces the old clear+banner+chapter-1
-#                                       intro pattern.
-# ---------------------------------------------------------------------------
-
-# Opening scenario card — printed at the very top of a demo so viewers
-# immediately know what they're about to see. Subsequent pre-warm output
-# stays visible underneath (no `clear`) so the cast shows what the cluster
-# is doing as it happens.
 demo_scenario() {
   local title="${1:-Demo scenario}"
   shift || true
@@ -316,7 +199,6 @@ demo_scenario() {
   printf '%b🎬  Scenario — %s%b\n' "${BOLD}" "${title}" "${COLOR_RESET}"
   printf '%b%s%b\n' "${CYAN}" "${bar}" "${COLOR_RESET}"
   if [[ -n "${body}" ]]; then
-    # Wrap body to ~72 cols, indent with 4 spaces for readability.
     if command -v fold >/dev/null 2>&1; then
       printf '%s\n' "${body}" | fold -s -w 72 | sed 's/^/    /'
     else
@@ -326,8 +208,6 @@ demo_scenario() {
   printf '%b%s%b\n\n' "${CYAN}" "${bar}" "${COLOR_RESET}"
 }
 
-# Persistent activity event — timestamped, emoji-prefixed.
-# Goes to STDOUT so asciinema captures it in the cast.
 demo_event() {
   local emoji="${1:-▸}"
   shift || true
@@ -336,9 +216,6 @@ demo_event() {
     "${emoji}" "$*"
 }
 
-# Chunky sub-phase divider (heavier visual weight than a log line, lighter
-# than a chapter). Skipped in hero profile. In social, only emits when
-# the current chapter is ≤3 (chapters past 3 are suppressed in social).
 demo_phase() {
   local emoji="${1:-▸}"
   local title="${2:-}"
@@ -360,8 +237,6 @@ demo_phase() {
   printf '%b%s%b\n\n' "${DIM}" "${bar}" "${COLOR_RESET}"
 }
 
-# Compact state snapshot. Use for one-shot "here is the cluster right now"
-# lines from inside a status hook or after a demo_pe.
 demo_state() {
   local key="$1"
   shift || true
@@ -372,13 +247,6 @@ demo_state() {
     "$*"
 }
 
-# Once-only announcement. Used by per-demo status hooks to print a
-# persistent transition line exactly the first time a condition is true.
-# Auto-flushes any \r-heartbeat in progress so the persistent line is
-# not eaten by the next overwrite.
-#
-# State is held in a single space-separated key list to stay compatible
-# with the macOS-shipped bash 3.2 (no associative arrays).
 __DEMO_ANNOUNCED_KEYS=""
 demo_announce_once() {
   local key="$1"
@@ -387,7 +255,6 @@ demo_announce_once() {
   case " ${__DEMO_ANNOUNCED_KEYS} " in
     *" ${key} "*) return 0 ;;
   esac
-  # Flush any \r-overwrite heartbeat before the persistent line.
   if [[ -t 2 ]] && ! demo_profile_is hero; then
     printf '\r\033[2K' >&2
   fi
@@ -395,9 +262,6 @@ demo_announce_once() {
   __DEMO_ANNOUNCED_KEYS="${__DEMO_ANNOUNCED_KEYS} ${key}"
 }
 
-# Reset the announce-once memory. Useful between independent waits in
-# the same demo (e.g. demo 60 re-uses the same scan-wait infrastructure
-# across three turns and wants each turn's announcements to fire fresh).
 demo_announce_reset() {
   if (( $# == 0 )); then
     __DEMO_ANNOUNCED_KEYS=""
@@ -414,11 +278,6 @@ demo_announce_reset() {
   __DEMO_ANNOUNCED_KEYS="${new}"
 }
 
-# Shared \r-overwrite heartbeat renderer. Used by wait helpers in
-# lib/common.sh and by per-demo DEMO_WAIT_STATUS_HOOK callbacks to keep
-# all in-place updates visually consistent.
-#
-# Usage:  __demo_heartbeat "task=%s elapsed=%ss" "${name}" "${elapsed}"
 __demo_heartbeat() {
   local fmt="$1"
   shift || true
@@ -435,17 +294,6 @@ __demo_heartbeat() {
   fi
 }
 
-# ---------------------------------------------------------------------------
-# Payoff card primitives.
-#
-# Cards are 62 inner cols wide (64 outer with the box edges). Hand-drawn
-# with `╭ ╮ ╰ ╯ │ ─` and `printf '│ %-58s │'` for body lines.
-# ---------------------------------------------------------------------------
-
-# Internal: print a single card body line with proper padding. Truncates
-# overlong lines to fit. Color codes inside `$content` are NOT counted
-# toward width, so callers should keep content plain. Use __card_line_styled
-# for already-padded styled text.
 __CARD_INNER=58
 __CARD_BAR_WIDTH=60
 
@@ -456,8 +304,6 @@ __card_top() {
   local right="─╮"
   if [[ -n "${title}" ]]; then
     local label=" ${title} "
-    # Layout: ╭─<label><fill>─╮ where each corner contributes 1 ─.
-    # Total ─ characters between ╭ and ╮ is bar_width.
     local rest=$(( bar_width - ${#label} - 2 ))
     (( rest < 2 )) && rest=2
     local fill
@@ -483,8 +329,6 @@ __card_blank() {
   printf '%b│%b %s %b│%b\n' "${CYAN}" "${COLOR_RESET}" "${pad}" "${CYAN}" "${COLOR_RESET}"
 }
 
-# __card_line "<plain text>"
-# Pads to inner width; truncates with ellipsis if too long.
 __card_line() {
   local text="$1"
   local max="${__CARD_INNER}"
@@ -497,7 +341,6 @@ __card_line() {
     "${CYAN}" "${COLOR_RESET}"
 }
 
-# __card_kv "<key>" "<value>"
 __card_kv() {
   local key="$1"
   local val="$2"
@@ -507,13 +350,6 @@ __card_kv() {
   __card_line "${combined}"
 }
 
-# ---------------------------------------------------------------------------
-# payoff_card_pr <task-name>
-#
-# Reads summarize_task_run JSON, extracts task name, agent, child count,
-# and the PR URL from the result text. Exits 1 (returns non-zero) if no
-# PR URL is present so callers can fail loudly.
-# ---------------------------------------------------------------------------
 payoff_card_pr() {
   local task_name="$1"
   if ! command -v jq >/dev/null 2>&1; then
@@ -547,9 +383,6 @@ payoff_card_pr() {
   __card_bottom
 }
 
-# ---------------------------------------------------------------------------
-# payoff_card_security <finding-id> <pr-json-file>
-# ---------------------------------------------------------------------------
 payoff_card_security() {
   local finding_id="$1"
   local pr_file="${2:-}"
@@ -581,12 +414,6 @@ payoff_card_security() {
   __card_bottom
 }
 
-# ---------------------------------------------------------------------------
-# payoff_card_cron <child-task-name>
-#
-# Pulls the cron schedule from DEMO_CRON_SCHEDULE, computes a rough
-# "next run in Xs" hint, prints the last child task name + phase.
-# ---------------------------------------------------------------------------
 payoff_card_cron() {
   local child_task="$1"
   local schedule="${DEMO_CRON_SCHEDULE:-*/2 * * * *}"
@@ -597,7 +424,6 @@ payoff_card_cron() {
     [[ -z "${phase}" ]] && phase="Unknown"
   fi
 
-  # Best-effort "next run" hint from a `*/N * * * *` schedule.
   local next_hint=""
   local minute_field
   minute_field="$(printf '%s' "${schedule}" | awk '{print $1}')"
@@ -606,7 +432,6 @@ payoff_card_cron() {
     local now_min secs_now next_min secs_to_next
     now_min="$(date +%M)"
     secs_now="$(date +%S)"
-    # strip leading zeros
     now_min="$(( 10#${now_min} ))"
     secs_now="$(( 10#${secs_now} ))"
     next_min=$(( (now_min / interval + 1) * interval ))
@@ -625,13 +450,6 @@ payoff_card_cron() {
   __card_bottom
 }
 
-# payoff_card_substrate <cold-task> <warm-task> [pr-url]
-# Reads status.executionWorkspace from the two agentic Tasks and asserts:
-# both ran on provider=substrate, and the warm Task reattached the retained
-# workspace (reused=true). Shows the real PR URL when provided. Fails loudly
-# if an invariant breaks. Card bodies are ASCII-only (byte-width alignment):
-# use -> and != , never multi-byte glyphs. The PR URL is shown via __card_line
-# (truncates if longer than the inner width) so it cannot break the border.
 payoff_card_substrate() {
   local cold_task="$1"
   local warm_task="$2"

@@ -28,8 +28,6 @@ func TestSubstrateExecCollectsCommandTimeout(t *testing.T) {
 				t.Errorf("command timeout=%d detach=%t, want 1/true", req.TimeoutSeconds, req.Detach)
 			}
 			starts.Add(1)
-			// A detached daemon can only publish its timeout result after its
-			// own command timer expires and command cleanup completes.
 			finishedAt.Store(time.Now().Add(time.Duration(req.TimeoutSeconds)*time.Second + 25*time.Millisecond).UnixNano())
 			_ = json.NewEncoder(w).Encode(substrateExecResponse{ExecID: "timeout-1", Running: true})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/exec/timeout-1":

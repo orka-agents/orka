@@ -18,8 +18,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// Delay only the courtesy cancel so the regression deterministically exercises
-// the interval after authority revocation and before the real child sees it.
 type delayedProviderPromptCancellation struct {
 	promptMutationExecutor
 	entered chan struct{}

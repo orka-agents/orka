@@ -12,8 +12,6 @@ func TestListSessionsPageCursorsInSQL(t *testing.T) {
 	s := newAgentExecutionTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC)
-	// Created oldest first; "c-chat" and "d-chat" share a creation time, and
-	// "e-chat" is written in another zone to check UTC normalization.
 	for _, session := range []struct {
 		name      string
 		createdAt time.Time

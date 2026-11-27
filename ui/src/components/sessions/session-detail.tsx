@@ -16,8 +16,6 @@ import { toast } from 'sonner'
 
 const SESSION_TABS = new Set(['overview', 'timeline'])
 
-// A missing or unreadable session keeps the page heading (and so the tab
-// title) and a way back to the list.
 function SessionUnavailable({ title, icon, headline, hint, alert = false }: {
   title: string
   icon: LucideIcon
@@ -53,9 +51,6 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
   const deleteSession = useDeleteSession()
   const navigate = useNavigate()
   const search = useSearch({ from: '/sessions/$sessionId' })
-  // Like the task detail: a local override answers a tab click instantly and
-  // is dropped whenever the URL's tab changes, so the URL stays the source of
-  // truth (deep links, Back from a linked task).
   const [tabState, setTabState] = useState<{ override: string | null; seen?: string }>({ override: null })
   if (tabState.seen !== search.tab) setTabState({ override: null, seen: search.tab })
   const requestedTab = tabState.override ?? search.tab ?? 'overview'
@@ -85,10 +80,6 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
     )
   }
 
-  // A 403 or 404 wins over cached data (React Query keeps the last
-  // successful `data` when a refetch fails); any other failure only replaces
-  // the page when nothing was loaded. The timeline's own queries render only
-  // with a loaded session.
   const missing = isNotFoundError(error)
   const forbidden = isForbiddenError(error)
   if (forbidden || (error && !missing && !session)) {
@@ -132,8 +123,6 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
               variant="destructive"
               size="sm"
               onClick={() => handleDelete(session.name)}
-              // aria-disabled, not disabled: disabling the focused button would drop
-              // keyboard focus to <body> when the delete fails.
               aria-disabled={deleteSession.isPending || undefined}
               className="aria-disabled:opacity-50"
             >

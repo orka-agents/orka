@@ -9,10 +9,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// ACPMCPTaskDataGuard retains an authenticated prompt's immutable identity and
-// serializes short data access with authoritative prompt/session transitions.
-// The callback must finish Kubernetes reads before opening its data transaction
-// and must not invoke a control-store mutation or a remote tool.
 type ACPMCPTaskDataGuard func(context.Context, func(context.Context) error) error
 
 type acpMCPTaskDataGuardContextKey struct{}
@@ -22,8 +18,6 @@ func ACPMCPTaskDataGuardFromContext(ctx context.Context) (ACPMCPTaskDataGuard, b
 	return guard, ok && guard != nil
 }
 
-// Terminal Task projections must use the same interlock as brokered data access,
-// including cancellation that precedes the durable PromptAttempt's settlement.
 func withACPTaskStatusGuard(ctx context.Context, controls store.DurableControlStore, epochs *ControllerEpochManager, write func(context.Context) error) error {
 	guard, ok := controls.(store.ControllerEpochMutationStore)
 	if !ok || epochs == nil {
@@ -44,9 +38,6 @@ func (b *ACPMCPBroker) taskDataGuard(request harnessv2.MCPBrokerCallRequest, exp
 		entered := false
 		err := b.EpochMutations.WithControllerEpochMutation(ctx, expected.ControllerFence, func(guardCtx context.Context) error {
 			entered = true
-			// Prompt cancellation, settlement, and Session generation changes use
-			// this same durable interlock. Refresh authority after acquiring it,
-			// then retain it until the short SQLite transaction has completed.
 			current, err := b.Credentials.ResolveACPMCPBrokerCredentials(guardCtx, request)
 			if err != nil {
 				return fmt.Errorf("refresh MCP task data authority: %w", err)
@@ -67,8 +58,6 @@ func (b *ACPMCPBroker) taskDataGuard(request harnessv2.MCPBrokerCallRequest, exp
 			return access(guardCtx)
 		})
 		if err != nil && !entered {
-			// Only acquisition contention and unreadable authority can recover.
-			// A confirmed stale fence must keep its definitive classification.
 			if errors.Is(err, store.ErrControllerEpochMutationContention) {
 				return fmt.Errorf("%w: %w", errACPMCPAuthorityUnavailable, err)
 			}

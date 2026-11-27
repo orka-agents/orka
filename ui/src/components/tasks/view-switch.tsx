@@ -7,7 +7,6 @@ interface ViewSwitchProps<T extends string> {
   onChange: (value: T) => void
 }
 
-/** Two or three ways to look at the same thing, as pressed toggle buttons. */
 export function ViewSwitch<T extends string>({ label, value, options, onChange }: ViewSwitchProps<T>) {
   return (
     <div role="group" aria-label={label} className="inline-flex gap-1 rounded-md border p-0.5">

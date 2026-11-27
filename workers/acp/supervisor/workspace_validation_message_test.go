@@ -15,9 +15,6 @@ import (
 	"github.com/orka-agents/orka/internal/workspacedelta"
 )
 
-// The validation message is forwarded into controller structured logs, so an
-// agent-controlled path - which can be named after a credential - must never
-// appear in it; only the operation and safety category may.
 func TestBoundedWorkspaceValidationMessageRedactsPaths(t *testing.T) {
 	t.Parallel()
 	secretPath := "config/ghp_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX.token"

@@ -141,21 +141,13 @@ func validateMatchingTaskTerminalProjection(existing *store.OutboxProjection, ex
 }
 
 const (
-	defaultACPOutboxInterval = time.Second
-	defaultACPOutboxLease    = 30 * time.Second
-	defaultACPOutboxLimit    = 32
-	defaultACPOutboxAttempts = 10
-	// defaultACPOutboxIdleClaimInterval bounds how long an idle projector
-	// goes without claiming. Each claim takes the controller-epoch mutation
-	// interlock that every fenced control-store write shares, so an idle
-	// projector claims only on this cadence, when a projection is enqueued,
-	// or when a retry it scheduled falls due.
+	defaultACPOutboxInterval          = time.Second
+	defaultACPOutboxLease             = 30 * time.Second
+	defaultACPOutboxLimit             = 32
+	defaultACPOutboxAttempts          = 10
 	defaultACPOutboxIdleClaimInterval = 10 * time.Second
 )
 
-// acpOutboxWakeups fans an enqueue out to every running projector. Every
-// terminal projection is enqueued through enqueueDurableTaskTerminalProjectionForUID
-// under the controller-epoch fence, so only this process's leader enqueues.
 var acpOutboxWakeups = struct {
 	sync.Mutex
 	subscribers map[chan struct{}]struct{}
@@ -184,31 +176,16 @@ func wakeACPOutboxProjectors() {
 	}
 }
 
-// acpOutboxPass is what one projection pass claimed and scheduled.
 type acpOutboxPass struct {
-	// claimedAt is the time the pass claimed at; claimed holds the claimed
-	// projection IDs.
 	claimedAt time.Time
 	claimed   []string
-	// retries maps each projection the pass returned to Pending to the time
-	// it becomes claimable again.
-	retries map[string]time.Time
+	retries   map[string]time.Time
 }
 
-// acpOutboxSchedule remembers, across passes, when each retry the projector
-// scheduled falls due, so a pass that claims nothing, such as one an enqueue
-// woke early, or one where the earliest retry succeeds, never forgets a later
-// deadline.
 type acpOutboxSchedule struct {
 	retries map[string]time.Time
 }
 
-// observe folds a pass into the schedule. A claimed projection's earlier
-// deadline is settled by that claim; a deadline at or before a pass that
-// claimed fewer than its limit, yet did not return it, belongs to a
-// projection no longer pending. A failed pass may still have committed
-// retries for projections it completed before failing: those are added, and
-// nothing is settled or pruned.
 func (s *acpOutboxSchedule) observe(pass acpOutboxPass, err error) {
 	if s.retries == nil {
 		s.retries = map[string]time.Time{}
@@ -230,10 +207,6 @@ func (s *acpOutboxSchedule) observe(pass acpOutboxPass, err error) {
 	maps.Copy(s.retries, pass.retries)
 }
 
-// next returns when the projector should claim after a pass at now. A failed
-// pass, or one that filled its claim limit, claims again on the next tick;
-// otherwise the projector waits for an enqueue wakeup, the earliest
-// outstanding retry, or the idle interval, whichever comes first.
 func (s *acpOutboxSchedule) next(now time.Time, pass acpOutboxPass, err error, idle time.Duration) time.Time {
 	if err != nil || len(pass.claimed) >= defaultACPOutboxLimit {
 		return now
@@ -248,14 +221,12 @@ func (s *acpOutboxSchedule) next(now time.Time, pass acpOutboxPass, err error, i
 }
 
 type ACPOutboxProjector struct {
-	Client      client.Client
-	Store       store.OutboxProjectionStore
-	Epochs      *ControllerEpochManager
-	WorkerID    string
-	Interval    time.Duration
-	MaxAttempts int64
-	// IdleClaimInterval is the longest an idle projector goes without a
-	// claim; zero selects defaultACPOutboxIdleClaimInterval.
+	Client            client.Client
+	Store             store.OutboxProjectionStore
+	Epochs            *ControllerEpochManager
+	WorkerID          string
+	Interval          time.Duration
+	MaxAttempts       int64
 	IdleClaimInterval time.Duration
 }
 
@@ -284,7 +255,7 @@ func (p *ACPOutboxProjector) Start(ctx context.Context) error {
 	ticker := time.NewTicker(p.Interval)
 	defer ticker.Stop()
 	var schedule acpOutboxSchedule
-	var nextClaim time.Time // claim at once: projections may predate this process
+	var nextClaim time.Time
 	for {
 		if now := time.Now(); !now.Before(nextClaim) {
 			pass, err := p.projectPass(ctx)
@@ -335,11 +306,6 @@ func (p *ACPOutboxProjector) projectPass(ctx context.Context) (acpOutboxPass, er
 			if isPermanentOutboxDeliveryError(projectErr) && projection.Attempts >= p.MaxAttempts {
 				state = store.OutboxProjectionDeadLetter
 			} else {
-				// Infrastructure failures (for example a Kubernetes control-plane
-				// outage) must stay retryable: recovery treats any existing
-				// projection as authoritative and Task deletion requires the
-				// projection to reach Delivered, so dead-lettering a transient
-				// failure would leave the Task nonterminal and undeletable.
 				state = store.OutboxProjectionPending
 				availableAt = now.Add(outboxBackoff(projection.Attempts))
 			}
@@ -361,8 +327,6 @@ func (p *ACPOutboxProjector) projectPass(ctx context.Context) (acpOutboxPass, er
 			return pass, err
 		}
 		if state == store.OutboxProjectionPending {
-			// Recorded only once the retry is committed, so a pass that fails
-			// later still reports every retry it made.
 			if pass.retries == nil {
 				pass.retries = map[string]time.Time{}
 			}
@@ -374,10 +338,6 @@ func (p *ACPOutboxProjector) projectPass(ctx context.Context) (acpOutboxPass, er
 
 type taskTerminalProjection = taskterminal.Projection
 
-// permanentOutboxDeliveryError marks delivery failures that can never succeed
-// on retry (payload corruption or identity mismatches). Only these may be
-// dead-lettered; every other failure is treated as transient infrastructure
-// trouble and stays pending so the terminal projection remains deliverable.
 type permanentOutboxDeliveryError struct{ err error }
 
 func (e *permanentOutboxDeliveryError) Error() string { return e.err.Error() }
@@ -444,15 +404,8 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 			binding := executionBinding(task)
 			if binding == nil || string(binding.Task.UID) != payload.TaskUID || !acpTaskUsesRestoredSourceIdentity(task) ||
 				task.Status.Execution == nil || task.Status.Execution.Attempt != payload.Attempt {
-				// Permanent so MaxAttempts applies: the bounded retries cover an
-				// in-progress restore settlement, while a Task name recreated
-				// with a different UID can never deliver and must not be
-				// claimed and retried forever.
 				return permanentOutboxDelivery(fmt.Errorf("task UID does not match outbox projection"))
 			}
-			// Clean-cluster restore settlement already patched the new Task
-			// incarnation directly. This projection remains immutable source
-			// history, so delivery is an exact no-op against the restored UID.
 			deliveredResourceVersion = task.ResourceVersion
 			return nil
 		}
@@ -474,7 +427,6 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 			delivery.LastTransitionTime = &now
 			task.Status.Delivery = &delivery
 		}
-		// A terminal Task no longer waits on any approval it was parked on.
 		if waiting := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeWaitingForApproval); waiting != nil &&
 			waiting.Status == metav1.ConditionTrue && payload.Phase.IsTerminal() {
 			meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
@@ -512,8 +464,6 @@ func sanitizeOutboxError(err error) string {
 	if err == nil {
 		return ""
 	}
-	// The outbox store rejects invalid UTF-8, so repair invalid sequences and
-	// truncate on a rune boundary or the projection could never settle.
 	message := strings.ToValidUTF8(strings.TrimSpace(err.Error()), "�")
 	return truncateUTF8(message, 1024)
 }

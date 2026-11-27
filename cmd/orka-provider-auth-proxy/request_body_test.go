@@ -14,8 +14,6 @@ func TestProviderAuthProxyPreservesEOFAfterResponseHeaders(t *testing.T) {
 	proxy := newTestProxy(t, "http://upstream.example", testSharedProviderToken)
 	observed := make(chan [2]error, 1)
 	proxy.client.Transport = requestBodyRoundTripFunc(func(request *http.Request) (*http.Response, error) {
-		// Like net/http's transport, send exactly Content-Length bytes before
-		// checking for excess data with one final read from the request body.
 		if _, err := io.CopyN(io.Discard, request.Body, request.ContentLength); err != nil {
 			return nil, err
 		}
@@ -29,9 +27,6 @@ func TestProviderAuthProxyPreservesEOFAfterResponseHeaders(t *testing.T) {
 			Body: io.NopCloser(requestBodyReadFunc(func(buffer []byte) (int, error) {
 				if !checked {
 					checked = true
-					// ServeHTTP flushes response headers before reading this
-					// response body. The real HTTP/1 server has now closed the
-					// incoming body, before the transport's final EOF check.
 					var extra [1]byte
 					_, closedErr := body.ReadCloser.Read(extra[:])
 					_, finalErr := body.Read(extra[:])

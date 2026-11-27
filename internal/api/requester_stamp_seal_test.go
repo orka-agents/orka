@@ -17,9 +17,6 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-// The post-create seal is the only thing that lets the controller trust an
-// API-created Task's requester; a transient write failure is retried before
-// the Task is left unverified.
 func TestSealRequesterStampRetriesTransientWriteFailures(t *testing.T) {
 	key := []byte("0123456789abcdef0123456789abcdef")
 	SetRequesterStampKey(key)
@@ -50,8 +47,6 @@ func TestSealRequesterStampRetriesTransientWriteFailures(t *testing.T) {
 	if patches.Load() != 3 || !connectors.RequesterStampValid(key, sealed) {
 		t.Fatalf("patches = %d valid = %t, want two failures then a valid seal", patches.Load(), connectors.RequesterStampValid(key, sealed))
 	}
-	// A write that keeps failing is given up after the bound; the Task is
-	// left intact and unverified.
 	patches.Store(-1000)
 	fresh := task.DeepCopy()
 	fresh.Name, fresh.UID, fresh.ResourceVersion = "unsealed", "unsealed-uid", ""

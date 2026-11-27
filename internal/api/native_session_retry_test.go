@@ -44,8 +44,6 @@ func (loss *nativeRetryResponseLoss) handle(c fiber.Ctx) error {
 	if !matches || c.Response().StatusCode() != loss.status || !loss.dropped.CompareAndSwap(false, true) {
 		return nil
 	}
-	// The real handler has returned success, so SQLite has committed. Keep
-	// the would-be response as an oracle, then close TCP before sending it.
 	response := nativeRetryLostResponse{status: c.Response().StatusCode(), body: bytes.Clone(c.Response().Body())}
 	response.err = c.Drop()
 	loss.response <- response
@@ -139,7 +137,6 @@ func TestNativeSessionRetryHTTPImportLostResponseAfterCommit(t *testing.T) {
 	require.Equal(t, providerID.String(), receipt.ProviderSessionID)
 	require.False(t, receipt.CreatedAt.IsZero())
 
-	// Prove the first request committed without relying on the retry to create it.
 	sessions, err := s.ListSessions(t.Context(), receipt.Namespace)
 	require.NoError(t, err)
 	require.Len(t, sessions, 1)
@@ -158,7 +155,6 @@ func TestNativeSessionRetryHTTPImportLostResponseAfterCommit(t *testing.T) {
 	require.Empty(t, staged.Snapshot.RuntimeSessionUID)
 	require.Zero(t, staged.RuntimeSessionGeneration)
 
-	// A delayed import retry must not unbind an owner or overwrite a later checkpoint.
 	const ownerUID = "11111111-1111-4111-8111-111111111111"
 	require.NoError(t, s.BindSessionCleanupIdentity(t.Context(), receipt.Namespace, receipt.SessionName, ownerUID))
 	continued := storetest.NativeSessionSnapshot(t, "offline checkpoint after import")
@@ -323,9 +319,6 @@ func TestNativeSessionRetryHTTPDeletedNameAndUIDIsolation(t *testing.T) {
 				require.ErrorIs(t, err, store.ErrNotFound)
 			}
 
-			// Native deletion permanently reserves the name. Recreating a new
-			// owner through the public store is rejected, rather than bypassing
-			// the tombstone with SQL and testing an unreachable ownership state.
 			require.ErrorIs(t, s.CreateSession(t.Context(), &store.SessionRecord{
 				Namespace: "default", Name: sessionName, SessionType: "task",
 			}), store.ErrConflict)
@@ -355,8 +348,6 @@ func TestNativeSessionRetryHTTPAcceptsExactEncodedBundleLimit(t *testing.T) {
 	s := nativeAPIStore(t)
 	base, client := nativeRetryStartHTTP(t, nativeAPIApp(t, HandlersConfig{SessionStore: s}, nil))
 	snapshot := storetest.NativeSessionSnapshot(t, "offline transport boundary")
-	// JSON whitespace preserves the verified manifest and rollout while
-	// making the actual encoded bundle exactly the advertised transport cap.
 	data := append(bytes.Clone(snapshot.Data), bytes.Repeat([]byte{' '}, maxNativeSessionBundleBytes-len(snapshot.Data))...)
 	require.Len(t, data, maxNativeSessionBundleBytes)
 	summary, err := codexstate.Inspect(t.Context(), data)

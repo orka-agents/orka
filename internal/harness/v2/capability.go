@@ -138,30 +138,10 @@ func VerifyOperationCapability(secret []byte, token string, expected MutationMet
 	return nil
 }
 
-// StatusCapabilityAudience distinguishes status-read capabilities from
-// mutation operation capabilities signed with the same secret.
 const StatusCapabilityAudience = "orka.harness.v2/status"
 
-// DefaultStatusCapabilityTTL bounds how long a signed status capability
-// remains presentable.
 const DefaultStatusCapabilityTTL = time.Minute
 
-// StatusCapabilityClaims prove possession of the per-runtime operation
-// capability secret for the status read. Status discloses Task, prompt,
-// permission, and fence identifiers, so the controller bearer alone must not
-// authorize it. The claims deliberately carry no fence: status is the channel
-// through which the controller first learns the supervisor-generated fence
-// components (boot ID, instance ID), so exact per-operation fences remain a
-// mutation-only requirement, and the capability secret is already scoped to
-// exactly one pool or external runtime by construction.
-// StatusCapabilityBinding is the subset of fence identity a status caller
-// knows before contact. The capability secret is already per-pool and
-// per-epoch (auth-e<epoch>), so registration and epoch are bound by the
-// signing key itself; the profile digest is always bound here. The runtime
-// instance ID is bound whenever the caller knows the exact target — external
-// registrations and post-discovery dispatch — so a captured token cannot be
-// replayed against a different replica sharing the registration secret; it is
-// left empty only for the initial pool probe, which is the discovery channel.
 type StatusCapabilityBinding struct {
 	RuntimeProfileDigest ProfileDigest     `json:"runtimeProfileDigest"`
 	RuntimeInstanceID    RuntimeInstanceID `json:"runtimeInstanceID,omitempty"`
@@ -175,8 +155,6 @@ type StatusCapabilityClaims struct {
 	ExpiresAt time.Time               `json:"expiresAt"`
 }
 
-// NewCapabilityNonce returns a fresh random nonce that scopes a status
-// capability to a single request, defeating replay of a captured token.
 func NewCapabilityNonce() (string, error) {
 	buffer := make([]byte, 16)
 	if _, err := rand.Read(buffer); err != nil {
@@ -221,9 +199,6 @@ func SignStatusCapability(secret []byte, claims StatusCapabilityClaims) (string,
 	return signCapabilityClaims(secret, claims)
 }
 
-// VerifyStatusCapability verifies the token, checks the profile binding against
-// the supervisor's own fence, and returns the single-use nonce so the caller
-// can reject replays.
 func VerifyStatusCapability(secret []byte, token string, expected StatusCapabilityBinding, now time.Time) (string, error) {
 	payload, err := verifyCapabilityToken(secret, token)
 	if err != nil {
@@ -241,9 +216,6 @@ func VerifyStatusCapability(secret []byte, token string, expected StatusCapabili
 	if claims.Binding.RuntimeProfileDigest != expected.RuntimeProfileDigest {
 		return "", fmt.Errorf("status capability profile binding does not match this runtime")
 	}
-	// The instance binding is optional (empty for the discovery probe), but
-	// when the caller committed to an exact instance it must be this one, so a
-	// token minted for one replica cannot be replayed against another.
 	if claims.Binding.RuntimeInstanceID != "" && claims.Binding.RuntimeInstanceID != expected.RuntimeInstanceID {
 		return "", fmt.Errorf("status capability instance binding does not match this runtime")
 	}

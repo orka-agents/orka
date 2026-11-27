@@ -45,10 +45,8 @@ var _ = Describe("Task Lifecycle Advanced", Ordered, func() {
 			cmd := exec.Command("kubectl", "delete", "task", name, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 		}
-		// Clean up provider
 		cmd := exec.Command("kubectl", "delete", "provider", serialProviderName, "-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
-		// Clean up sessions
 		for _, name := range []string{serialSessionRef, lockSessionRef} {
 			cmd := exec.Command("kubectl", "delete", "configmap", "session-"+name, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)

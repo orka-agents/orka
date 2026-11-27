@@ -121,10 +121,6 @@ func TestACPMCPApprovalLeaseEndsBeforePromptCleanup(t *testing.T) {
 			registerApprovalLease(t, registry, leaseCtx, f.request)
 			done := startFiberMCPApproval(t, f)
 			pending := f.pending()
-			// Keep the production attempt Running and its registration present,
-			// as while output flushing or remote cancellation has not returned.
-			// The epoch guard makes the decision race deterministic without
-			// replacing the production control-store interlock with a fake mutex.
 			require.NoError(t, control.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error {
 				if end == "cancelled" {
 					cancelLease()
@@ -210,9 +206,6 @@ func TestACPMCPApprovalRechecksLeaseAfterFinalToolRead(t *testing.T) {
 				return err
 			}
 			if effect.State == store.ExternalEffectInFlight {
-				// The broker has already authorized this start. End the prompt
-				// lease during its final Kubernetes Tool read, before the
-				// asynchronous authority watcher can observe cancellation.
 				finalRead.Store(true)
 				cancelLease()
 			}
@@ -326,8 +319,6 @@ func TestRenewPromptLeaseLoopDoesNotCancelCompletedStreamDuringRenewal(t *testin
 		var cancelled atomic.Bool
 		done := startApprovalLeaseRenewalLoop(t, leaseCtx, func() { cancelled.Store(true) }, runtimeClient, request, entry)
 		<-entered
-		// StreamPrompt received its terminal result while the renewal RPC was
-		// still pending. stopLease must only end renewal and broker authority.
 		stopLease()
 		synctest.Wait()
 		<-done

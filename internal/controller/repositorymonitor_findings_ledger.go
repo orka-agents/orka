@@ -17,55 +17,31 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// A review record's findings are the pull request's record of findings at
-// that review: every finding Orka has tracked, open or fixed. A follow-up
-// review starts from the latest accepted record, so findings keep their IDs
-// and threads across heads instead of being rediscovered and reworded.
-
 const (
 	repositoryMonitorFindingStatusOpen  = "open"
 	repositoryMonitorFindingStatusFixed = "fixed"
 
-	// repositoryMonitorReviewModeFull reviews the whole pull request with no
-	// earlier findings: a first review, or a head that rewrote history.
-	repositoryMonitorReviewModeFull = "full"
-	// repositoryMonitorReviewModeIncremental reviews the changes since the
-	// last reviewed head, which the new head builds on, and the open findings.
+	repositoryMonitorReviewModeFull        = "full"
 	repositoryMonitorReviewModeIncremental = "incremental"
-	// repositoryMonitorReviewModeSameHead reviews an already reviewed head
-	// again. Nothing changed, so it can add findings but fix none.
-	repositoryMonitorReviewModeSameHead = "same_head"
+	repositoryMonitorReviewModeSameHead    = "same_head"
 
 	repositoryMonitorAnnotationReviewMode = "orka.ai/monitor-review-mode"
 	repositoryMonitorAnnotationReviewBase = "orka.ai/monitor-review-base"
 
-	repositoryMonitorReviewTriggerOpen = "open"
-	repositoryMonitorReviewTriggerPush = "push"
-	// repositoryMonitorSkipReasonTriggerOpen skips a later head of a pull
-	// request that the open trigger already reviewed.
+	repositoryMonitorReviewTriggerOpen     = "open"
+	repositoryMonitorReviewTriggerPush     = "push"
 	repositoryMonitorSkipReasonTriggerOpen = "review_trigger_open"
 
-	// repositoryMonitorGitHubCompareAhead is the compare status for a head
-	// that builds on the base commit.
-	repositoryMonitorGitHubCompareAhead = "ahead"
-	// repositoryMonitorExhaustiveMaxPasses bounds the review passes an
-	// exhaustive review runs on one head.
-	repositoryMonitorExhaustiveMaxPasses = 3
-	// repositoryMonitorPublishSkipExhaustivePassPending skips publishing a
-	// pass that another pass will extend; the last pass publishes them all.
+	repositoryMonitorGitHubCompareAhead               = "ahead"
+	repositoryMonitorExhaustiveMaxPasses              = 3
 	repositoryMonitorPublishSkipExhaustivePassPending = "exhaustive_pass_pending"
 )
 
-// repositoryMonitorReviewPlan is how a review Task reviews its head.
 type repositoryMonitorReviewPlan struct {
-	Mode string
-	// Base is the review the plan builds on, and Ledger its findings. Both
-	// are empty for a full review.
+	Mode   string
 	Base   *store.ReviewRecord
 	Ledger []repositoryMonitorReviewFinding
-	// Delta is the pull request's changes since Base's head, for an
-	// incremental review.
-	Delta []repositoryMonitorPullRequestFileResponse
+	Delta  []repositoryMonitorPullRequestFileResponse
 }
 
 func (p repositoryMonitorReviewPlan) baseID() string {
@@ -75,10 +51,6 @@ func (p repositoryMonitorReviewPlan) baseID() string {
 	return p.Base.ID
 }
 
-// planRepositoryMonitorReview picks the review mode for pr's head from the
-// latest accepted review of the pull request. prFiles are the paths the pull
-// request changes, or nil when unknown; an incremental review covers only
-// those, so changes merged in from the base branch are not reviewed again.
 func (r *RepositoryMonitorReconciler) planRepositoryMonitorReview(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, owner, repository, token string, pr repositoryMonitorPullRequest, prFiles map[string]struct{}) (repositoryMonitorReviewPlan, error) {
 	full := repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeFull}
 	base, err := r.latestRepositoryMonitorAcceptedReview(ctx, monitor, pr.Number)
@@ -87,21 +59,16 @@ func (r *RepositoryMonitorReconciler) planRepositoryMonitorReview(ctx context.Co
 	}
 	ledger, err := repositoryMonitorLedgerFromRecord(base)
 	if err != nil {
-		// An unreadable record cannot be built on; review from scratch.
 		return full, nil //nolint:nilerr // A corrupt earlier record only costs a full review.
 	}
 	if base.HeadSHA == pr.HeadSHA {
 		return repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeSameHead, Base: base, Ledger: ledger}, nil
 	}
-	// A follow-up review checks only the changes since base, so base must
-	// have seen every change it covers; otherwise the gap is never reviewed.
 	if covered, err := r.repositoryMonitorReviewSawEveryChange(ctx, base); err != nil || !covered {
 		return full, err
 	}
 	compare, err := r.fetchRepositoryMonitorCompare(ctx, owner, repository, token, base.HeadSHA, pr.HeadSHA, 1)
 	if err != nil || compare.Status != repositoryMonitorGitHubCompareAhead || len(compare.Files) >= repositoryMonitorGitHubCompareMaxFiles {
-		// A rebase, force-push, or unreachable base gets a full review, and
-		// so does a comparison GitHub may have cut off at its file limit.
 		return full, nil //nolint:nilerr // Without a provable, complete delta, a full review is the safe plan.
 	}
 	delta := compare.Files
@@ -116,10 +83,6 @@ func (r *RepositoryMonitorReconciler) planRepositoryMonitorReview(ctx context.Co
 	return repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeIncremental, Base: base, Ledger: ledger, Delta: delta}, nil
 }
 
-// repositoryMonitorReviewSawEveryChange reports whether record's review Task
-// showed the reviewer the whole pull request and, for a follow-up review,
-// every change since its own base. A review whose Task is gone cannot show
-// that and is not built on.
 func (r *RepositoryMonitorReconciler) repositoryMonitorReviewSawEveryChange(ctx context.Context, record *store.ReviewRecord) (bool, error) {
 	if r.Client == nil || strings.TrimSpace(record.TaskName) == "" {
 		return false, nil
@@ -135,8 +98,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewSawEveryChange(ctx 
 	return repositoryMonitorReviewContextGap(task.Spec.Prompt) == "", nil
 }
 
-// latestRepositoryMonitorAcceptedReview returns the pull request's newest
-// review record whose verdict was accepted, or nil.
 func (r *RepositoryMonitorReconciler) latestRepositoryMonitorAcceptedReview(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64) (*store.ReviewRecord, error) {
 	cursor := ""
 	for {
@@ -158,8 +119,6 @@ func (r *RepositoryMonitorReconciler) latestRepositoryMonitorAcceptedReview(ctx 
 	}
 }
 
-// repositoryMonitorHeadExhaustivePassPending reports whether pr's head is in
-// the middle of an exhaustive review.
 func (r *RepositoryMonitorReconciler) repositoryMonitorHeadExhaustivePassPending(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest) (bool, error) {
 	if !monitor.Spec.Review.Exhaustive || r.Store == nil {
 		return false, nil
@@ -171,9 +130,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorHeadExhaustivePassPending
 	return r.repositoryMonitorExhaustivePassPending(ctx, monitor, latest)
 }
 
-// repositoryMonitorReviewPlanForTask restores the plan a review Task was
-// created with. A missing or mismatched base falls back to a full review, so
-// a review never resolves findings it was not shown.
 func (r *RepositoryMonitorReconciler) repositoryMonitorReviewPlanForTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task) (repositoryMonitorReviewPlan, error) {
 	full := repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeFull}
 	mode := strings.TrimSpace(task.Annotations[repositoryMonitorAnnotationReviewMode])
@@ -213,16 +169,9 @@ func repositoryMonitorOpenFindings(findings []repositoryMonitorReviewFinding) []
 	return open
 }
 
-// repositoryMonitorMergeFindingLedger builds a review's record of findings.
-// An incremental review may mark the base's open findings fixed; any other
-// mode carries them unchanged. New findings that repeat an open finding are
-// dropped. changed lists the lines the review covered; nil means the whole
-// pull request, so no finding is outside the changes.
 func repositoryMonitorMergeFindingLedger(plan repositoryMonitorReviewPlan, review *repositoryMonitorReviewResult, headSHA, recordID string, changed repositoryMonitorChangedLines) []repositoryMonitorReviewFinding {
 	fixed := map[string]bool{}
 	if plan.Mode == repositoryMonitorReviewModeIncremental {
-		// Only a finding the Task was shown can be marked fixed; one left out
-		// of the prompt for size stays open.
 		shown, _ := repositoryMonitorListOpenFindings(plan.Ledger)
 		listed := make(map[string]bool, len(shown))
 		for _, finding := range shown {
@@ -252,14 +201,10 @@ func repositoryMonitorMergeFindingLedger(plan repositoryMonitorReviewPlan, revie
 			ledger = append(ledger, finding)
 		}
 	}
-	// A review may report adjacent defects of its own; only a restatement of
-	// an earlier open finding is a repeat.
 	for i, finding := range review.Findings {
 		finding.ID, finding.Status, finding.FirstHead, finding.FirstReview, finding.ResolvedHead, finding.OutsideChanges = "", "", "", "", "", false
 		finding.SecuritySensitive = sensitive
 		if id, repeats := repositoryMonitorRepeatedFindingID(finding, open); repeats {
-			// A repeat reported inside the reviewed changes brings the open
-			// finding into them, where it may now block.
 			if changed == nil || changed.covers(finding.File, finding.Line) {
 				for j := range ledger {
 					if ledger[j].ID == id {
@@ -277,9 +222,6 @@ func repositoryMonitorMergeFindingLedger(plan repositoryMonitorReviewPlan, revie
 		ledger = append(ledger, finding)
 	}
 	if sensitive {
-		// A security-sensitive verdict may be about an open finding the
-		// review did not repeat, or one it marked fixed; which one is unknown,
-		// so all stay restricted.
 		for i := range ledger {
 			if repositoryMonitorFindingRestrictedBySensitiveReview(ledger[i], headSHA) {
 				ledger[i].SecuritySensitive = true
@@ -289,9 +231,6 @@ func repositoryMonitorMergeFindingLedger(plan repositoryMonitorReviewPlan, revie
 	return ledger
 }
 
-// repositoryMonitorFindingRestrictedBySensitiveReview reports whether a
-// security-sensitive review at headSHA restricts finding: every finding it
-// leaves open or that is fixed at its head.
 func repositoryMonitorFindingRestrictedBySensitiveReview(finding repositoryMonitorReviewFinding, headSHA string) bool {
 	return repositoryMonitorFindingOpen(finding) || (headSHA != "" && finding.ResolvedHead == headSHA)
 }
@@ -301,19 +240,11 @@ func repositoryMonitorFindingID(recordID string, index int, finding repositoryMo
 	return "f-" + hex.EncodeToString(sum[:6])
 }
 
-// repositoryMonitorFindingRepeats reports whether finding restates an open
-// finding: the same file and the same title. Nearness alone does not count,
-// because unrelated defects can sit a few lines apart and lines move between
-// heads; rewordings are left to the reviewer's instructions. A finding more
-// severe than the open one is never a repeat, so a new blocker is not dropped
-// in favor of an earlier minor finding.
 func repositoryMonitorFindingRepeats(finding repositoryMonitorReviewFinding, open []repositoryMonitorReviewFinding) bool {
 	_, repeats := repositoryMonitorRepeatedFindingID(finding, open)
 	return repeats
 }
 
-// repositoryMonitorRepeatedFindingID returns the ID of the open finding that
-// finding restates, by the rule repositoryMonitorFindingRepeats describes.
 func repositoryMonitorRepeatedFindingID(finding repositoryMonitorReviewFinding, open []repositoryMonitorReviewFinding) (string, bool) {
 	file := strings.TrimSpace(finding.File)
 	title := repositoryMonitorNormalizedFindingText(finding.Title)
@@ -329,8 +260,6 @@ func repositoryMonitorRepeatedFindingID(finding repositoryMonitorReviewFinding, 
 	return "", false
 }
 
-// repositoryMonitorFindingRank orders findings by priority, P0 first; an
-// unrecognized priority ranks as P1.
 func repositoryMonitorFindingRank(finding repositoryMonitorReviewFinding) int {
 	if rank, ok := repositoryMonitorPriorityRank(finding.Priority); ok {
 		return rank
@@ -338,10 +267,6 @@ func repositoryMonitorFindingRank(finding repositoryMonitorReviewFinding) int {
 	return 1
 }
 
-// repositoryMonitorLedgerFromRecord reads a review's record of findings. A
-// record written before findings had IDs gets deterministic ones, derived
-// from the record, so planning and ingestion agree and a follow-up review can
-// report each finding separately.
 func repositoryMonitorLedgerFromRecord(record *store.ReviewRecord) ([]repositoryMonitorReviewFinding, error) {
 	findings, err := repositoryMonitorReviewFindingsFromRecord(record)
 	if err != nil {
@@ -355,8 +280,6 @@ func repositoryMonitorLedgerFromRecord(record *store.ReviewRecord) ([]repository
 			findings[i].FirstHead = firstNonEmptyString(findings[i].FirstHead, record.HeadSHA)
 			findings[i].FirstReview = firstNonEmptyString(findings[i].FirstReview, record.ID)
 		}
-		// A security-sensitive review restricts what
-		// repositoryMonitorMergeFindingLedger restricts.
 		if sensitive && repositoryMonitorFindingRestrictedBySensitiveReview(findings[i], record.HeadSHA) {
 			findings[i].SecuritySensitive = true
 		}
@@ -370,10 +293,6 @@ func repositoryMonitorNormalizedFindingText(text string) string {
 	}), " ")
 }
 
-// repositoryMonitorFindingBlocks reports whether an open finding keeps the
-// pull request at needs_changes. A finding outside the changes a follow-up
-// review covered blocks only at P1 or above; an unrecognized priority counts
-// as P1.
 func repositoryMonitorFindingBlocks(spec corev1alpha1.RepositoryMonitorSpec, finding repositoryMonitorReviewFinding) bool {
 	if !repositoryMonitorFindingOpen(finding) {
 		return false
@@ -386,10 +305,6 @@ func repositoryMonitorFindingBlocks(spec corev1alpha1.RepositoryMonitorSpec, fin
 	return rank <= blocking && (!finding.OutsideChanges || rank <= 1)
 }
 
-// repositoryMonitorDerivedReviewVerdict decides passed or needs_changes from
-// the open findings. An open security-sensitive finding keeps the review
-// security_sensitive; otherwise the reviewer's needs_human,
-// security_sensitive, and skipped verdicts stand.
 func repositoryMonitorDerivedReviewVerdict(spec corev1alpha1.RepositoryMonitorSpec, reviewerVerdict string, ledger []repositoryMonitorReviewFinding) string {
 	if reviewerVerdict != repositoryMonitorVerdictSkipped && repositoryMonitorLedgerSecuritySensitive(ledger) {
 		return repositoryMonitorReviewVerdictSecuritySensitive
@@ -407,8 +322,6 @@ func repositoryMonitorDerivedReviewVerdict(spec corev1alpha1.RepositoryMonitorSp
 	return repositoryMonitorReviewVerdictPassed
 }
 
-// repositoryMonitorChangedLines maps a path to the head-side line ranges a
-// review covered. A path with no ranges is covered in full.
 type repositoryMonitorChangedLines map[string][][2]int64
 
 func (c repositoryMonitorChangedLines) covers(path string, line int64) bool {
@@ -427,9 +340,6 @@ func (c repositoryMonitorChangedLines) covers(path string, line int64) bool {
 	return false
 }
 
-// repositoryMonitorChangedLinesFromFiles reads the head-side hunk ranges of
-// compare files. A file without a patch, such as a large or binary one,
-// counts as covered in full.
 func repositoryMonitorChangedLinesFromFiles(files []repositoryMonitorPullRequestFileResponse) repositoryMonitorChangedLines {
 	changed := repositoryMonitorChangedLines{}
 	for _, file := range files {
@@ -444,7 +354,6 @@ func repositoryMonitorChangedLinesFromFiles(files []repositoryMonitorPullRequest
 	return changed
 }
 
-// repositoryMonitorHunkHeadRange parses "@@ -a,b +c,d @@" into [c, c+d-1].
 func repositoryMonitorHunkHeadRange(line string) ([2]int64, bool) {
 	if !strings.HasPrefix(line, "@@ ") {
 		return [2]int64{}, false
@@ -470,12 +379,8 @@ func repositoryMonitorHunkHeadRange(line string) ([2]int64, bool) {
 	return [2]int64{first, first + length - 1}, true
 }
 
-// repositoryMonitorOpenFindingsMaxBytes bounds the open findings a follow-up
-// prompt lists.
 const repositoryMonitorOpenFindingsMaxBytes = 64 << 10
 
-// repositoryMonitorListedFinding is an open finding as a follow-up prompt
-// lists it.
 type repositoryMonitorListedFinding struct {
 	ID       string `json:"id"`
 	Priority string `json:"priority"`
@@ -485,12 +390,6 @@ type repositoryMonitorListedFinding struct {
 	Body     string `json:"body"`
 }
 
-// repositoryMonitorListOpenFindings returns the ledger's open findings that a
-// follow-up prompt lists within repositoryMonitorOpenFindingsMaxBytes, and how
-// many did not fit. Finding text is model output about untrusted code and Task
-// readers see the prompt, so it is sanitized like a published review. The
-// result depends only on the ledger, so ingestion can recompute what a Task
-// was shown.
 func repositoryMonitorListOpenFindings(ledger []repositoryMonitorReviewFinding) ([]repositoryMonitorListedFinding, int) {
 	open := repositoryMonitorOpenFindings(ledger)
 	listed := make([]repositoryMonitorListedFinding, 0, len(open))
@@ -508,17 +407,12 @@ func repositoryMonitorListOpenFindings(ledger []repositoryMonitorReviewFinding) 
 	return listed, 0
 }
 
-// renderRepositoryMonitorOpenFindings renders the listed open findings and
-// returns how many were left out. They stay open because the reviewer cannot
-// mark them fixed.
 func renderRepositoryMonitorOpenFindings(ledger []repositoryMonitorReviewFinding) (string, int) {
 	listed, omitted := repositoryMonitorListOpenFindings(ledger)
 	encoded, _ := json.MarshalIndent(listed, "", "  ")
 	return string(encoded), omitted
 }
 
-// renderRepositoryMonitorFollowUpInstructions tells the reviewer what an
-// earlier review already established. It returns "" for a full review.
 func renderRepositoryMonitorFollowUpInstructions(plan repositoryMonitorReviewPlan, deltaContext string) string {
 	if plan.Mode == repositoryMonitorReviewModeFull || plan.Base == nil {
 		return ""
@@ -543,8 +437,6 @@ func renderRepositoryMonitorFollowUpInstructions(plan repositoryMonitorReviewPla
 	return b.String()
 }
 
-// repositoryMonitorReviewContextPaths returns the paths a complete review
-// context lists, or nil when the context is incomplete.
 func repositoryMonitorReviewContextPaths(reviewContext repositoryMonitorReviewContext) map[string]struct{} {
 	if reviewContext.ContextUnavailable != "" || reviewContext.Truncated.Files {
 		return nil
@@ -556,11 +448,6 @@ func repositoryMonitorReviewContextPaths(reviewContext repositoryMonitorReviewCo
 	return paths
 }
 
-// repositoryMonitorReviewChangedLines returns the lines an incremental review
-// covered, read from the delta embedded in its prompt so coverage matches the
-// changes the reviewer was shown. It returns nil, so every finding counts as
-// inside the changes, for any other review or an incomplete delta. A file
-// whose patch was omitted counts as covered in full.
 func repositoryMonitorReviewChangedLines(plan repositoryMonitorReviewPlan, prompt string) repositoryMonitorChangedLines {
 	if plan.Mode != repositoryMonitorReviewModeIncremental || plan.Base == nil {
 		return nil
@@ -580,8 +467,6 @@ func repositoryMonitorReviewChangedLines(plan repositoryMonitorReviewPlan, promp
 	return repositoryMonitorChangedLinesFromFiles(files)
 }
 
-// repositoryMonitorDerivedVerdictNote explains a verdict Orka derived from
-// the open findings instead of taking the reviewer's.
 func repositoryMonitorDerivedVerdictNote(spec corev1alpha1.RepositoryMonitorSpec, verdict string) string {
 	threshold := strings.TrimSpace(spec.Review.BlockingPriority)
 	if _, ok := repositoryMonitorPriorityRank(threshold); !ok {
@@ -596,9 +481,6 @@ func repositoryMonitorDerivedVerdictNote(spec corev1alpha1.RepositoryMonitorSpec
 	return fmt.Sprintf("Orka set the verdict to passed: no finding at %s or above is open.", threshold)
 }
 
-// repositoryMonitorReviewsEveryPush reports whether a new head of pr is
-// reviewed automatically. The open trigger reviews a pull request once,
-// except one automatic repair may fix: its pushed fixes must be reviewed.
 func repositoryMonitorReviewsEveryPush(spec corev1alpha1.RepositoryMonitorSpec, pr repositoryMonitorPullRequest) bool {
 	if strings.TrimSpace(spec.Review.Trigger) != repositoryMonitorReviewTriggerOpen {
 		return true
@@ -607,11 +489,6 @@ func repositoryMonitorReviewsEveryPush(spec corev1alpha1.RepositoryMonitorSpec, 
 	return spec.Repair.Enabled && full
 }
 
-// repositoryMonitorExhaustivePassPending reports whether another pass is due
-// on record's head: exhaustive review is on, record is the head's latest
-// accepted review, the head's first accepted review was a full review, record
-// added a finding, and fewer than repositoryMonitorExhaustiveMaxPasses passes
-// ran. A review whose Task is gone cannot be placed in a pass chain and ends it.
 func (r *RepositoryMonitorReconciler) repositoryMonitorExhaustivePassPending(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.ReviewRecord) (bool, error) {
 	if !monitor.Spec.Review.Exhaustive || record == nil || !repositoryMonitorReviewVerdictMarksHeadFresh(record.Verdict) {
 		return false, nil
@@ -642,7 +519,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorExhaustivePassPending(ctx
 			accepted = append(accepted, candidate)
 		}
 	}
-	// Records are newest first.
 	if len(accepted) == 0 || accepted[0].ID != record.ID || len(accepted) >= repositoryMonitorExhaustiveMaxPasses {
 		return false, nil
 	}
@@ -655,8 +531,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorExhaustivePassPending(ctx
 	return mode == "" || mode == repositoryMonitorReviewModeFull, nil
 }
 
-// repositoryMonitorLedgerSecuritySensitive reports whether an open finding
-// came from a security-sensitive review.
 func repositoryMonitorLedgerSecuritySensitive(ledger []repositoryMonitorReviewFinding) bool {
 	for _, finding := range ledger {
 		if finding.SecuritySensitive && repositoryMonitorFindingOpen(finding) {

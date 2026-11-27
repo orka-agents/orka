@@ -105,8 +105,6 @@ func TestExternalACPProfilePolicyValidatesSuspendAfterDetach(t *testing.T) {
 	}
 }
 
-// resolveWarmTestBinding resolves the frozen workspace binding for one
-// suspendable Substrate fixture whose profile sets window (empty = unset).
 func resolveWarmTestBinding(t *testing.T, window string) (*TaskReconciler, *corev1alpha1.Task, *ACPRuntimeWorkspaceBinding) {
 	t.Helper()
 	fixture := suspendableSubstrateFixture(t)
@@ -141,7 +139,6 @@ func TestACPWorkspaceBindingFreezesSuspendAfterDetachOnlyWhenSet(t *testing.T) {
 		t.Fatalf("frozen window binding invalid: %v", err)
 	}
 
-	// An unset window adds no digest field and no snapshot field.
 	withoutField := *unset
 	class := *unset.Class
 	withoutField.Class = &class
@@ -164,7 +161,6 @@ func TestACPWorkspaceBindingFreezesSuspendAfterDetachOnlyWhenSet(t *testing.T) {
 		t.Fatalf("unset window is not omitted from the snapshot: %s", encoded)
 	}
 
-	// A set window changes the digest and round-trips through the snapshot.
 	class.SuspendAfterDetach = set.Class.SuspendAfterDetach
 	withField, err := acpWorkspaceBindingDigest(&withoutField)
 	if err != nil {
@@ -237,8 +233,6 @@ func TestEnsureACPClassWorkspaceFreezesSuspendAfterDetach(t *testing.T) {
 	}
 }
 
-// warmSettlementFixture is one attached, committed session workspace whose
-// Task executed a turn and is ready to settle.
 type warmSettlementFixture struct {
 	r       *TaskReconciler
 	task    *corev1alpha1.Task
@@ -279,7 +273,6 @@ func newWarmSettlementFixture(t *testing.T, window string) *warmSettlementFixtur
 	}
 	workspace = f.workspace(t)
 	base := workspace.DeepCopy()
-	// The core controller installs the cleanup finalizer retention waits for.
 	workspace.Finalizers = append(workspace.Finalizers, executionWorkspaceFinalizer)
 	workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
 	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
@@ -312,7 +305,6 @@ func (f *warmSettlementFixture) reloadTask(t *testing.T, task *corev1alpha1.Task
 	return current
 }
 
-// settle drives settlement through revocation and the adapter's epoch release.
 func (f *warmSettlementFixture) settle(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
@@ -328,8 +320,6 @@ func (f *warmSettlementFixture) settle(t *testing.T) {
 	f.task = f.reloadTask(t, f.task)
 }
 
-// releaseEpoch stands in for the adapter: it stops enforcing the revoked
-// epoch and reports the detached workspace Ready again.
 func (f *warmSettlementFixture) releaseEpoch(t *testing.T) {
 	t.Helper()
 	workspace := f.workspace(t)
@@ -392,8 +382,6 @@ func TestSettleACPClassWorkspaceKeepsEligibleDetachWarm(t *testing.T) {
 		t.Fatal("warm workspace does not hold its RuntimePool")
 	}
 
-	// Restart safety: a lost Task marker completes from the receipt and
-	// never moves the deadline.
 	task := f.reloadTask(t, f.task)
 	base2 := task.DeepCopy()
 	delete(task.Annotations, acpTaskWorkspaceSettledAnnotation)
@@ -511,7 +499,6 @@ func TestSettleACPClassWorkspaceEndsElapsedWarmWindowWhenQuotaIsExhausted(t *tes
 	if done, err := r.settleACPClassWorkspace(ctx, f.task); err != nil || done {
 		t.Fatalf("settle while attached = (%v, %v)", done, err)
 	}
-	// Revocation outlasted the window, and another workspace took the cap.
 	f.patchWorkspace(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Annotations[acpWorkspaceSuspendAtAnnotation] = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
 	})
@@ -591,8 +578,6 @@ func TestWarmDetachAttachAndExpiryResolveToOneOutcome(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	// Retention reads the expired window, then the continuation's attachment
-	// lands before retention's optimistic suspension write.
 	f := newWarmSettlementFixture(t, warmTestWindow)
 	f.settle(t)
 	continuation := f.task.DeepCopy()
@@ -630,8 +615,6 @@ func TestWarmDetachAttachAndExpiryResolveToOneOutcome(t *testing.T) {
 		t.Fatalf("attach-first race: attachment=%#v desired=%s, want the attachment only", won.Spec.Attachment, won.Spec.DesiredState)
 	}
 
-	// The suspension lands first: the continuation can no longer attach the
-	// workspace directly and takes today's cold-resume path.
 	g := newWarmSettlementFixture(t, warmTestWindow)
 	g.settle(t)
 	expiry := &ACPWorkspaceRetentionReconciler{Client: g.r.Client, APIReader: g.r.APIReader, Now: func() time.Time { return later }}
@@ -656,7 +639,6 @@ func TestWarmDetachAttachAndExpiryResolveToOneOutcome(t *testing.T) {
 		t.Fatal("late continuation attached the suspended workspace instead of requesting cold resume")
 	}
 
-	// An attach retry that rereads a just-suspended workspace refuses it.
 	if err := validateACPClassWorkspaceAttachmentAttempt(suspended, late, g.binding, g.plan.PoolName, time.Now()); err == nil ||
 		!strings.Contains(err.Error(), "not reusable") {
 		t.Fatalf("direct attach of a Suspended workspace error = %v", err)
@@ -688,7 +670,6 @@ func TestACPWorkspaceRetentionSuspendsWarmWorkspaceAtDeadline(t *testing.T) {
 	deadline := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 	workspace := warmRetentionWorkspace(t, "acp-ws-warm-deadline", deadline, func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.CreationTimestamp = metav1.NewTime(deadline.Add(-time.Hour))
-		// The window is independent of idle retention.
 		w.Spec.Lifecycle.IdleTimeout = nil
 	})
 	c := acpAdapterTestClient(t, workspace)
@@ -758,7 +739,6 @@ func TestACPWorkspaceRetentionEndsWarmWindowOnQuotaExhaustion(t *testing.T) {
 		t.Fatal("quota exhaustion dropped the pending frozen Suspend")
 	}
 
-	// Still exhausted: the Suspend stays pending without holding the runtime.
 	reconcileRetention(t, c, workspace)
 	if err := c.Get(ctx, client.ObjectKeyFromObject(workspace), current); err != nil {
 		t.Fatal(err)
@@ -767,8 +747,6 @@ func TestACPWorkspaceRetentionEndsWarmWindowOnQuotaExhaustion(t *testing.T) {
 		t.Fatalf("desired state = %s while the cap is exhausted", current.Spec.DesiredState)
 	}
 
-	// Capacity opens: retention retries and applies the frozen Suspend, even
-	// for a class without idle retention.
 	base := current.DeepCopy()
 	current.Spec.Lifecycle.IdleTimeout = nil
 	if err := c.Patch(ctx, current, client.MergeFrom(base)); err != nil {
@@ -805,11 +783,6 @@ func TestACPWorkspaceRetentionExpiresTaintedWarmWorkspaceImmediately(t *testing.
 	}
 }
 
-// A fenced warm-window expiry that a queued Session continuation vetoes
-// deletes nothing. Retention watches only workspaces, so it must keep its
-// bounded lifetime requeue instead of leaving idle and maxLifetime
-// enforcement unscheduled if that continuation dies without touching the
-// workspace.
 func TestACPWorkspaceRetentionWarmExpiryVetoedByContinuationKeepsRequeue(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -828,7 +801,6 @@ func TestACPWorkspaceRetentionWarmExpiryVetoedByContinuationKeepsRequeue(t *test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			name := "acp-ws-warm-veto-" + test.name
-			// Expire past the grace that live continuation demand earns (ADR 0057).
 			deadline := now.Add(-acpWorkspaceWarmExpiryGrace - time.Minute)
 			workspace := warmRetentionWorkspace(t, name, deadline, test.mutate)
 			sessionUID := string(workspace.Spec.SessionRef.UID)

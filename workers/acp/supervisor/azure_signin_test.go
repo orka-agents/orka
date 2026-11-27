@@ -13,8 +13,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// subscriptionsResponder answers Subscriptions - List with two pages, the
-// first subscription disabled, and anything else with a 404.
 func subscriptionsResponder(t *testing.T, listed *atomic.Int32) func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
 	return func(request harnessv2.MCPBrokerCallRequest) json.RawMessage {
 		forwarded, err := harnessv2.DecodeMCPForwardRequest(request.Call.Arguments)
@@ -73,7 +71,6 @@ func TestAzureGatewaySignsAzInWhenThePromptStarts(t *testing.T) {
 			account.HomeTenantID == nil || *account.HomeTenantID != "22222222-2222-2222-2222-222222222222" {
 			t.Fatalf("account %d = %+v", index, account)
 		}
-		// The first enabled subscription is the default, as az picks it.
 		if account.IsDefault != (account.ID == "33333333-3333-3333-3333-333333333333") {
 			t.Fatalf("account %d default = %v", index, account.IsDefault)
 		}
@@ -91,8 +88,6 @@ func TestAzureGatewaySignsAzInWhenThePromptStarts(t *testing.T) {
 			t.Fatalf("sign-in call = %s on %s", call.Call.CallID, call.Call.ToolName)
 		}
 	}
-	// A later prompt start does not sign in again, so it keeps the agent's
-	// own choices, such as az account set.
 	fixture.gateway.signInAtPromptStart()
 	fixture.waitForSignIn(t)
 	if listed.Load() != 1 {
@@ -111,8 +106,6 @@ func TestAzureGatewayStartsWithThePlaceholderAccount(t *testing.T) {
 		profile.Subscriptions[0].Name != azureSignInPendingName || !profile.Subscriptions[0].IsDefault {
 		t.Fatalf("placeholder profile = %+v", profile.Subscriptions)
 	}
-	// A command az sends under the placeholder tries again, and says why it
-	// cannot sign in, instead of az's "Please run 'az login'".
 	token := fixture.token(t)
 	response, body := fixture.do(t, http.MethodGet, "/subscriptions/"+azureZeroTenant+"/resourcegroups?api-version=2024-11-01",
 		http.Header{"Authorization": {"Bearer " + token}})
@@ -126,8 +119,6 @@ func TestAzureGatewayStartsWithThePlaceholderAccount(t *testing.T) {
 	}
 }
 
-// waitForAttempt waits for the prompt start's sign-in attempt, which may
-// fail, to end.
 func waitForAttempt(t *testing.T, fixture *azureGatewayFixture) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -152,17 +143,13 @@ func waitForAttempt(t *testing.T, fixture *azureGatewayFixture) {
 func TestAzureGatewaySignsInAgainForACommandUnderThePlaceholder(t *testing.T) {
 	fixture := newAzureGatewayFixture(t)
 	token := fixture.token(t)
-	// The identity had no subscription when the prompt started.
 	response, body := fixture.do(t, http.MethodGet, "/subscriptions/"+azureZeroTenant+"/resourcegroups", http.Header{"Authorization": {"Bearer " + token}})
 	if response.StatusCode != http.StatusForbidden || !strings.Contains(body, "OrkaNoSubscription") {
 		t.Fatalf("status = %d: %s", response.StatusCode, body)
 	}
-	// Signed in, the account has az's own tenant-level name, not the
-	// still-signing-in one.
 	if profile := readAzureProfile(t, fixture); len(profile.Subscriptions) != 1 || profile.Subscriptions[0].Name != azureTenantLevelAccountName {
 		t.Fatalf("profile = %+v", profile.Subscriptions)
 	}
-	// Now it has one: the command signs az in again and asks to be rerun.
 	var listed atomic.Int32
 	fixture.mu.Lock()
 	fixture.respond = subscriptionsResponder(t, &listed)
@@ -178,16 +165,12 @@ func TestAzureGatewaySignsInAgainForACommandUnderThePlaceholder(t *testing.T) {
 	if listed.Load() != 1 {
 		t.Fatalf("subscription lists = %d", listed.Load())
 	}
-	// A path that only starts like the placeholder is an ordinary request.
 	response, _ = fixture.do(t, http.MethodGet, "/subscriptions/"+azureZeroTenant+"0/resourcegroups", http.Header{"Authorization": {"Bearer " + token}})
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d", response.StatusCode)
 	}
 }
 
-// A prompt-start sign-in that failed is not tried again at the next prompt:
-// the agent may have signed in itself and chosen a subscription meanwhile,
-// which a second discovery would overwrite.
 func TestAzureGatewayTriesThePromptStartSignInOnce(t *testing.T) {
 	refused := func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
 		raw, _ := json.Marshal(harnessv2.MCPForwardResponse{Status: http.StatusForbidden, Headers: map[string]string{"Content-Type": "application/json"},
@@ -237,7 +220,6 @@ func TestAzureGatewayPassesASignInRefusalThrough(t *testing.T) {
 	if response.StatusCode != http.StatusForbidden || !strings.Contains(body, "AuthorizationFailed") {
 		t.Fatalf("status = %d: %s", response.StatusCode, body)
 	}
-	// A throttled discovery keeps Azure's pace for az's retry.
 	fixture.mu.Lock()
 	fixture.respond = func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
 		raw, _ := json.Marshal(harnessv2.MCPForwardResponse{Status: http.StatusTooManyRequests,
@@ -252,8 +234,6 @@ func TestAzureGatewayPassesASignInRefusalThrough(t *testing.T) {
 	}
 }
 
-// When reads of the Tool need approval, starting a prompt asks for none: the
-// placeholder stays until az itself sends a command.
 func TestAzureGatewayDoesNotSignInAtPromptStartWhenReadsNeedApproval(t *testing.T) {
 	fixture := newAzureGatewayFixtureSigningIn(t, false, nil, func(t *testing.T, authorization *harnessv2.PromptMCPAuthorization) {
 		authorization.ApprovalPolicy.RequiredTools = []string{testForwardTool}
@@ -266,8 +246,6 @@ func TestAzureGatewayDoesNotSignInAtPromptStartWhenReadsNeedApproval(t *testing.
 	if !fixture.session.approvalRequired(testForwardTool) {
 		t.Fatal("the prompt does not require approval for the forwarding Tool")
 	}
-	// The answer holds between prompts too, when no prompt's authorization
-	// is held: a sign-in that starts late reads the session's own policy.
 	fixture.session.mu.Lock()
 	held := fixture.session.authorization
 	fixture.session.authorization = nil
@@ -278,7 +256,6 @@ func TestAzureGatewayDoesNotSignInAtPromptStartWhenReadsNeedApproval(t *testing.
 	fixture.session.mu.Lock()
 	fixture.session.authorization = held
 	fixture.session.mu.Unlock()
-	// Give a wrongly started background sign-in time to reach the broker.
 	time.Sleep(200 * time.Millisecond)
 	fixture.gateway.signInMu.Lock()
 	attempt, signedIn := fixture.gateway.signInAttempt, fixture.gateway.signedIn
@@ -290,15 +267,12 @@ func TestAzureGatewayDoesNotSignInAtPromptStartWhenReadsNeedApproval(t *testing.
 	if len(profile.Subscriptions) != 1 || profile.Subscriptions[0].ID != azureZeroTenant {
 		t.Fatalf("profile = %+v", profile.Subscriptions)
 	}
-	// A command under the placeholder signs in, as the agent's own request.
 	response, body := fixture.do(t, http.MethodGet, "/subscriptions/"+azureZeroTenant+"/resourcegroups", http.Header{"Authorization": {"Bearer " + fixture.token(t)}})
 	if response.StatusCode != http.StatusForbidden || !strings.Contains(body, "OrkaNoSubscription") || len(fixture.brokerCalls()) != 1 {
 		t.Fatalf("status = %d, %d broker calls: %s", response.StatusCode, len(fixture.brokerCalls()), body)
 	}
 }
 
-// A prompt-start sign-in that runs after another sign-in succeeded does
-// nothing, so it cannot overwrite a profile the agent changed since.
 func TestAzureGatewayLatePromptStartSignInKeepsTheProfile(t *testing.T) {
 	fixture := newAzureGatewayFixture(t)
 	if _, err := fixture.gateway.signIn(t.Context(), true, false); err != nil {
@@ -325,8 +299,6 @@ func TestAzureGatewaySignInOutsideAPromptIsRefused(t *testing.T) {
 	}
 }
 
-// The child owns ~/.azure while the session runs, and the supervisor is
-// root, so a link the child plants must not redirect the profile write.
 func TestAzureGatewayProfileWritesDoNotFollowLinks(t *testing.T) {
 	fixture := newAzureGatewayFixture(t)
 	dir := filepath.Join(fixture.home, ".azure")
@@ -351,8 +323,6 @@ func TestAzureGatewayProfileWritesDoNotFollowLinks(t *testing.T) {
 	}
 	readAzureProfile(t, fixture)
 
-	// Swapping the whole directory for a link leaves the write in the
-	// directory the session started with.
 	if err := os.Rename(dir, filepath.Join(fixture.home, ".azure-moved")); err != nil {
 		t.Fatal(err)
 	}
@@ -371,16 +341,12 @@ func TestAzureGatewayProfileWritesDoNotFollowLinks(t *testing.T) {
 	}
 }
 
-// A sign-in runs under one prompt: when its prompt ends between subscription
-// pages and another starts, the next page is not read and no profile mixing
-// the two prompts' answers is written.
 func TestAzureSignInStopsWhenItsPromptEnds(t *testing.T) {
 	fixture := newAzureGatewayFixture(t)
 	var listed atomic.Int32
 	pages := subscriptionsResponder(t, &listed)
 	fixture.mu.Lock()
 	fixture.respond = func(request harnessv2.MCPBrokerCallRequest) json.RawMessage {
-		// The prompt changes while the first page is in flight.
 		fixture.session.mu.Lock()
 		fixture.session.authorization.PromptID = "prompt-later"
 		fixture.session.mu.Unlock()
@@ -399,9 +365,6 @@ func TestAzureSignInStopsWhenItsPromptEnds(t *testing.T) {
 	}
 }
 
-// A command under the placeholder holds a runtime-wide slot like any request:
-// with the runtime full it is refused before any sign-in, and its own slot
-// covers the sign-in it starts, which is released afterwards.
 func TestAzurePlaceholderRequestsShareTheRuntimeWideCallLimit(t *testing.T) {
 	fixture := newAzureGatewayFixture(t)
 	token := fixture.token(t)
@@ -417,7 +380,6 @@ func TestAzurePlaceholderRequestsShareTheRuntimeWideCallLimit(t *testing.T) {
 	for range cap(slots) - 1 {
 		<-slots
 	}
-	// One slot is free: the command takes it and its sign-in runs under it.
 	response, body = fixture.do(t, http.MethodGet, path, http.Header{"Authorization": {"Bearer " + token}})
 	if response.StatusCode != http.StatusForbidden || !strings.Contains(body, "OrkaNoSubscription") {
 		t.Fatalf("one free slot: status %d: %s", response.StatusCode, body)

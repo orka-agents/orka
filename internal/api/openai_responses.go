@@ -33,8 +33,6 @@ const (
 	responsesObject                    = "response"
 )
 
-// ResponsesResponse contains a transient response, never a saved server object.
-// Item IDs identify SSE items; function call IDs remain the provider's call IDs.
 type ResponsesResponse struct {
 	ID                string                `json:"id"`
 	Object            string                `json:"object"`
@@ -109,8 +107,6 @@ func newResponsesFunction(call llm.ToolCall) (responsesOutputItem, error) {
 	return responsesOutputItem{ID: "fc_" + generateChatID(), Type: finishReasonFunctionCall, Status: completionStatusCompleted, CallID: call.ID, Name: call.Name, Arguments: &args}, nil
 }
 
-// HandleResponses implements POST /openai/v1/responses independently of the
-// Chat Completions wire format, sharing provider policy and coordinator tools.
 func (h *OpenAICompatHandler) HandleResponses(c fiber.Ctx) error {
 	req, comp, invalid := parseResponsesRequest(c.Body())
 	if invalid != nil {
@@ -148,7 +144,6 @@ func (h *OpenAICompatHandler) HandleResponses(c fiber.Ctx) error {
 	}
 	response := newResponsesResponse(req, model)
 	if coordinator {
-		// Report the exposed tool set, not the discarded client function definitions.
 		response.Tools = make([]responsesFunction, 0, len(comp.Tools))
 		for _, tool := range comp.Tools {
 			response.Tools = append(response.Tools, responsesFunction{Type: responsesFunctionToolType, Name: tool.Name, Description: tool.Description, Parameters: tool.Parameters, Strict: tool.Strict})
@@ -192,15 +187,11 @@ func (h *OpenAICompatHandler) responsesToolContext(c fiber.Ctx, namespace string
 		GenerateTaskName:  func() string { return fmt.Sprintf("proxy-%s", generateChatID()) },
 		Profile:           openAICompatProxyToolContextProfile, AuthContext: token,
 		AuthorizationConfig: h.contextTokenAuthorization, UserInfo: user,
-		// Linked accounts are wired as on the other compatibility endpoints,
-		// so a GitHub call under a person's link meets the same rules here.
 		LinkedAccounts: h.config.LinkedAccounts, ConnectorsEnabled: h.config.ConnectorsEnabled,
 		DashboardEnabled: h.config.DashboardEnabled,
 	})
 }
 
-// responsesCoordinatorSetup is the coordinator tool setup for the Responses
-// endpoint, with the same connector settings as Chat Completions.
 func (h *OpenAICompatHandler) responsesCoordinatorSetup(namespace string) compatCoordinatorSetup {
 	return compatCoordinatorSetup{
 		Namespace: namespace, ToolUseAction: "openAITools", AuthorizationConfig: h.contextTokenAuthorization,
@@ -213,7 +204,6 @@ func responsesProviderError(c fiber.Ctx, err error) error {
 		code := responsesUnsupportedOutcome
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(OAIError{Error: OAIErrorDetail{Type: OAIErrorTypeInvalidRequest, Code: &code, Message: responsesUnsupportedRefusalMessage}})
 	}
-	// Provider errors may contain upstream request details; expose a stable message.
 	return c.Status(fiber.StatusBadGateway).JSON(OAIError{Error: OAIErrorDetail{Type: responsesServerError, Message: "provider failed to produce a valid Responses completion"}})
 }
 
@@ -298,7 +288,6 @@ func (r *ResponsesResponse) setCompletion(completion *llm.CompletionResponse) er
 	return nil
 }
 
-// Providers without ordered output retain the compat text-then-calls shape.
 func responsesCompletionItems(completion *llm.CompletionResponse) []llm.AssistantOutputItem {
 	if completion.OutputItems != nil {
 		return completion.OutputItems
@@ -318,8 +307,6 @@ func validJSONObject(data []byte) bool {
 	return json.Unmarshal(data, &obj) == nil && obj != nil
 }
 
-// Retain only the classification needed by the Responses transport; raw
-// provider/coordinator diagnostics must not enter the public stream.
 func responsesCompletionError(err error) error {
 	if errors.Is(err, errCompletionRefused) {
 		return errCompletionRefused

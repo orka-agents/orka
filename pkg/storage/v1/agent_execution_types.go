@@ -6,28 +6,20 @@ import (
 	"time"
 )
 
-// SessionLineage durably records the execution protocol and runtime identity
-// of one conversation Session. LineageGeneration is independent of the Session
-// mutation-lease generation and any v2 RuntimeSession generation.
 type SessionLineage struct {
-	Namespace    string
-	SessionName  string
-	NamespaceUID string
-	SessionUID   string
-	// ContractVersion is orka.harness.v2.
+	Namespace         string
+	SessionName       string
+	NamespaceUID      string
+	SessionUID        string
 	ContractVersion   string
 	LineageGeneration int64
-	// RuntimeIdentity is the built-in runtime type or the AgentRuntime UID.
-	RuntimeIdentity string
-	// ConfigDigest is the configuration/snapshot digest recorded when the
-	// lineage was established.
-	ConfigDigest string
-	Version      int64
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	RuntimeIdentity   string
+	ConfigDigest      string
+	Version           int64
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
-// Validate rejects an incomplete authoritative Session lineage.
 func (l SessionLineage) Validate() error {
 	claim := ClaimSessionLineageRequest{
 		Namespace: l.Namespace, SessionName: l.SessionName, NamespaceUID: l.NamespaceUID,
@@ -49,29 +41,19 @@ func (l SessionLineage) Validate() error {
 	return nil
 }
 
-// ClaimSessionLineageRequest atomically establishes or verifies a Session
-// lineage. Callers must invoke it under the same serialization that acquires
-// the Session mutation lease so two concurrent first-use Tasks cannot
-// establish different runtime identities.
 type ClaimSessionLineageRequest struct {
-	Namespace       string
-	SessionName     string
-	NamespaceUID    string
-	SessionUID      string
-	ContractVersion string
-	// LineageGeneration is independent of mutation-lease and runtime-session
-	// generations. Ordinary first use establishes generation 1.
+	Namespace         string
+	SessionName       string
+	NamespaceUID      string
+	SessionUID        string
+	ContractVersion   string
 	LineageGeneration int64
 	RuntimeIdentity   string
 	ConfigDigest      string
 
-	// EstablishIfAbsent permits creating the lineage row. It must be true only
-	// when the caller has proven the Session is fresh or is a controller-owned
-	// Gateway Session whose first message was admitted atomically.
 	EstablishIfAbsent bool
 }
 
-// Validate rejects incomplete lineage claims.
 func (r ClaimSessionLineageRequest) Validate() error {
 	switch {
 	case strings.TrimSpace(r.Namespace) == "":
@@ -95,15 +77,8 @@ func (r ClaimSessionLineageRequest) Validate() error {
 	return nil
 }
 
-// SessionLineageStore persists a payload projection of Kubernetes-authoritative
-// Session protocol/runtime lineage. Projection failure may block dispatch but
-// never changes or releases the Kubernetes lineage/Lease authority.
 type SessionLineageStore interface {
-	// ProjectSessionLineage idempotently stores the exact authoritative record.
-	// Any mismatch returns ErrConflict and must be repaired explicitly; SQLite
-	// never adjudicates which lineage owns a Session.
 	ProjectSessionLineage(ctx context.Context, lineage SessionLineage) (*SessionLineage, error)
 
-	// GetSessionLineage returns the lineage for one Session, or ErrNotFound.
 	GetSessionLineage(ctx context.Context, namespace, sessionName string) (*SessionLineage, error)
 }

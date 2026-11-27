@@ -39,7 +39,6 @@ import (
 
 const testAgentIdentityID = "33333333-3333-3333-3333-33333333aaaa"
 
-// testIdentityInstance is the issuer instance testIdentityConfig configures.
 const testIdentityInstance = "entra:11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222"
 
 func testIdentityConfig() agentidentity.Config {
@@ -88,7 +87,6 @@ func TestAgentReconcileReportsDeclaredIdentity(t *testing.T) {
 	}
 }
 
-// testClaimGrantedAt is when test claims were granted, before any test Task.
 var testClaimGrantedAt = metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
 
 func claimedAgent(agent *corev1alpha1.Agent) *corev1alpha1.Agent {
@@ -97,8 +95,6 @@ func claimedAgent(agent *corev1alpha1.Agent) *corev1alpha1.Agent {
 	return agent
 }
 
-// identityAgentReconciler is an AgentReconciler with Agent use authorization
-// enforced, so it grants identity claims.
 func identityAgentReconciler(objs ...runtime.Object) *AgentReconciler {
 	r := setupAgentReconciler(objs...)
 	r.Identity = testIdentityConfig()
@@ -141,8 +137,6 @@ func TestIdentityClaimIsFirstComeAndExclusive(t *testing.T) {
 	requireGrantTimePending(t, "an unheld identity is claimed", claim, err)
 }
 
-// requireGrantTimePending fails unless the claim was granted and waits for the
-// grant time the API server records.
 func requireGrantTimePending(t *testing.T, name string, claim *corev1alpha1.AgentIdentityClaim, err error) {
 	t.Helper()
 	if claim == nil || claim.ID != testAgentIdentityID || claim.Releasing || claim.GrantedAt != nil ||
@@ -228,8 +222,6 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	parentRecreated.Status.AgentExecutionBinding.Agent.Identity.Instance = instance
 	parentOtherInstance := boundTask("parent-other-instance", agent, corev1alpha1.TaskPhaseRunning)
 	parentOtherInstance.Status.AgentExecutionBinding.Agent.Identity.Instance = "entra:99999999-9999-9999-9999-999999999999/22222222-2222-2222-2222-222222222222"
-	// A parent bound under an earlier grant of the same identity: it no
-	// longer gets the identity itself, so a child cannot borrow it.
 	parentEarlierGrant := boundTask("parent-earlier-grant", agent, corev1alpha1.TaskPhaseRunning)
 	parentEarlierGrant.Status.AgentExecutionBinding.Agent.Identity.Instance = instance
 	parentEarlierGrant.CreationTimestamp = testClaimGrantedAt
@@ -242,13 +234,9 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Schedule: "0 2 * * *",
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
 	}
-	// A scheduled Task created before the grant was never checked for the
-	// identity, though its runs are new.
 	unchecked := scheduled.DeepCopy()
 	unchecked.Name = "nightly-unchecked"
 	unchecked.CreationTimestamp = testClaimGrantedAt
-	// Scheduled Tasks a worker delegated: their runs may use the identity
-	// only when the Task that delegated them owns it.
 	delegatedSchedule := func(name, delegator string) *corev1alpha1.Task {
 		delegated := scheduled.DeepCopy()
 		delegated.Name = name
@@ -263,13 +251,9 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	ownedSchedule := delegatedSchedule("nightly-owned", "parent-own")
 	borrowedSchedule := delegatedSchedule("nightly-borrowed", "parent-unbound")
 	staleSchedule := delegatedSchedule("nightly-stale", "parent-earlier-grant")
-	// A native Task a worker gave a schedule and an agentRef: its creator was
-	// never checked for the Agent, so it is no scheduled Task here.
 	nativeSchedule := scheduled.DeepCopy()
 	nativeSchedule.Name = "nightly-native"
 	nativeSchedule.Spec.Type = corev1alpha1.TaskTypeAI
-	// Unbound Tasks a GatewayBinding or a monitor created, later given a
-	// schedule: their runs are judged by that source too.
 	gatewaySchedule := scheduled.DeepCopy()
 	gatewaySchedule.Name = "nightly-gateway"
 	gatewaySchedule.Labels = map[string]string{gateway.TaskGatewayBindingLabel: "support"}
@@ -284,8 +268,6 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	}
 	r := &TaskReconciler{Client: builder.Build(), Identity: testIdentityConfig()}
 
-	// task returns a child controlled by the named parent, as delegate_task
-	// and scheduled runs create them.
 	task := func(parent string) *corev1alpha1.Task {
 		task := &corev1alpha1.Task{
 			ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: testNS, Labels: map[string]string{}, CreationTimestamp: metav1.Now()},
@@ -356,8 +338,6 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	requirePermanentIdentityRefusal(t, "use authorization off", err, "agent-use-authorization-enabled")
 }
 
-// requirePermanentIdentityRefusal fails unless err permanently refuses a
-// binding with a message containing want.
 func requirePermanentIdentityRefusal(t *testing.T, name string, err error, want string) {
 	t.Helper()
 	if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), want) {
@@ -376,7 +356,6 @@ func TestAgentExecutionIdentityRequiresCheckedTaskSources(t *testing.T) {
 	r := &TaskReconciler{Client: kube, Identity: testIdentityConfig()}
 	ctx := context.Background()
 
-	// producedBy returns a fresh Task controlled by the named source object.
 	producedBy := func(kind, name, uid string) *corev1alpha1.Task {
 		controller := true
 		return &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
@@ -398,8 +377,6 @@ func TestAgentExecutionIdentityRequiresCheckedTaskSources(t *testing.T) {
 		Name: "from-gateway", Namespace: testNS, CreationTimestamp: metav1.Now(),
 		Labels: map[string]string{gateway.TaskGatewayBindingLabel: "support"},
 	}}
-	// An orphaned monitor Task whose editor attached another Orka owner keeps
-	// its monitor markers.
 	reowned := producedBy("Agent", agent.Name, string(agent.UID))
 	reowned.Labels = map[string]string{labels.LabelRepositoryMonitor: "old-monitor"}
 	for _, tc := range []struct {
@@ -419,8 +396,6 @@ func TestAgentExecutionIdentityRequiresCheckedTaskSources(t *testing.T) {
 	}
 }
 
-// An API fork names its source as parent but is not controlled by it, so it
-// never binds the source's Agent identity: the requester creates a new Task.
 func TestAgentExecutionIdentityRefusesAFork(t *testing.T) {
 	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	source := boundTask("source", agent, corev1alpha1.TaskPhaseSucceeded)
@@ -446,8 +421,6 @@ func TestAgentExecutionIdentityRefusesAFork(t *testing.T) {
 	}
 }
 
-// A parked turn's continuation is created by the controller, so its creation
-// was never checked for an identity its Agent gained while the turn waited.
 func TestAgentExecutionIdentityRefusesAContinuation(t *testing.T) {
 	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	r := &TaskReconciler{
@@ -486,9 +459,6 @@ func TestAgentReconcileVerifiesIdentityWithTheIssuer(t *testing.T) {
 			r.IdentityVerifier = verifier
 			r.Client = apiServerClockClient(fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(agent).WithStatusSubresource(agent).Build())
 			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(agent)}
-			// The first pass records the claim; its grant time comes from the
-			// API server's record of that write on the next pass. The issuer
-			// is asked only once the claim is granted.
 			if _, err := r.Reconcile(context.Background(), request); err != nil {
 				t.Fatal(err)
 			}
@@ -513,13 +483,9 @@ func TestAgentReconcileVerifiesIdentityWithTheIssuer(t *testing.T) {
 			if condition == nil || condition.Status != tc.wantStatus || condition.Reason != tc.wantReason {
 				t.Fatalf("IdentityVerified = %+v", condition)
 			}
-			// The runtime config here is minimal, so readiness is judged only
-			// by whether verification turned it false.
 			if !tc.wantReady && stored.Status.Ready {
 				t.Fatal("a refused identity must make the Agent not Ready")
 			}
-			// The Agent's own status writes requeue it; those passes reuse
-			// the issuer's answer instead of asking again.
 			for range 3 {
 				if _, err := r.Reconcile(context.Background(), request); err != nil {
 					t.Fatal(err)
@@ -528,8 +494,6 @@ func TestAgentReconcileVerifiesIdentityWithTheIssuer(t *testing.T) {
 			if verifier.calls != 1 {
 				t.Fatalf("Verify() called %d times across repeated passes, want the answer reused", verifier.calls)
 			}
-			// A reused answer requeues the Agent for when it expires, so a
-			// late pass cannot push verification past the interval.
 			r.verifications.Lock()
 			entry := r.verifications.byAgent[request.NamespacedName]
 			entry.until = time.Now().Add(10 * time.Minute)
@@ -542,7 +506,6 @@ func TestAgentReconcileVerifiesIdentityWithTheIssuer(t *testing.T) {
 			if reused.RequeueAfter <= 0 || reused.RequeueAfter > 10*time.Minute {
 				t.Fatalf("RequeueAfter = %v, want at most the 10m the answer has left", reused.RequeueAfter)
 			}
-			// An edit asks the issuer again at once.
 			if err := r.Get(context.Background(), client.ObjectKeyFromObject(agent), stored); err != nil {
 				t.Fatal(err)
 			}
@@ -570,8 +533,6 @@ func (v *countingIdentityVerifier) Verify(context.Context, *corev1alpha1.Agent) 
 	return v.err
 }
 
-// apiServerClockClient stamps every Agent it reads with a managedFields write
-// time, as the API server records one for each write.
 func apiServerClockClient(base client.WithWatch) client.WithWatch {
 	written := metav1.NewTime(time.Now().Truncate(time.Second))
 	return interceptor.NewClient(base, interceptor.Funcs{
@@ -596,12 +557,10 @@ func (f identityVerifierFunc) Verify(ctx context.Context, agent *corev1alpha1.Ag
 }
 
 func TestAgentReconcileNeverRecordsAVerificationOnAnEditedAgent(t *testing.T) {
-	// The claim is already granted, so this pass asks the issuer.
 	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	r := setupAgentReconciler()
 	r.Identity = testIdentityConfig()
 	r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(agent).WithStatusSubresource(agent).Build()
-	// While the issuer proves the original identity, an editor names another.
 	r.IdentityVerifier = identityVerifierFunc(func(ctx context.Context, _ *corev1alpha1.Agent) error {
 		edited := &corev1alpha1.Agent{}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(agent), edited); err != nil {
@@ -631,7 +590,7 @@ func TestAgentReconcileNeverRecordsAVerificationOnAnEditedAgent(t *testing.T) {
 
 func TestIdentityClaimWaitsForADeletedHoldersTasks(t *testing.T) {
 	now := time.Now()
-	deleted := claimedAgent(identityBoundTestAgent("deleted", now)) // only its Tasks remain
+	deleted := claimedAgent(identityBoundTestAgent("deleted", now))
 	claimant := identityBoundTestAgent("claimant", now)
 	r := identityAgentReconciler(claimant, boundTask("still-running", deleted, corev1alpha1.TaskPhaseRunning))
 	claim, err := r.reconcileIdentityClaim(context.Background(), claimant)
@@ -710,9 +669,9 @@ func TestRequireBoundIdentityClaimFailsATaskWhoseAgentLostTheIdentity(t *testing
 func TestIdentityClaimIsDecidedFromTheLiveAgentNotTheCache(t *testing.T) {
 	now := time.Now()
 	released := identityBoundTestAgent("released", now)
-	released.Spec.Identity = nil // live: no identity and no claim
+	released.Spec.Identity = nil
 	newHolder := claimedAgent(identityBoundTestAgent("new-holder", now))
-	staleCopy := claimedAgent(released.DeepCopy()) // the cache still shows the old claim
+	staleCopy := claimedAgent(released.DeepCopy())
 	inFlight := boundTask("in-flight", released, corev1alpha1.TaskPhaseRunning)
 	r := setupAgentReconciler(released, newHolder, inFlight)
 	claim, err := r.reconcileIdentityClaim(context.Background(), staleCopy)
@@ -735,8 +694,6 @@ func TestAgentIdentityBindingCarriesDelegationStartAndEgress(t *testing.T) {
 	child.CreationTimestamp = metav1.Now()
 	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(root, child).Build()
 
-	// A Self-mode binding never needs the delegation start, so it reads no
-	// ancestor.
 	reads := 0
 	counting := interceptor.NewClient(fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(root, child).Build(), interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -774,8 +731,6 @@ func TestAgentIdentityBindingCarriesDelegationStartAndEgress(t *testing.T) {
 	}
 }
 
-// delegationTestTask is a Task the requester's chain is built from: stamped
-// for alice, and created at created.
 func delegationTestTask(name string, created time.Time, mutate func(*corev1alpha1.Task)) *corev1alpha1.Task {
 	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
 	task := &corev1alpha1.Task{
@@ -891,8 +846,6 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// The requester deleted these Sessions; their records stay until
-	// runtime cleanup finishes, but delegated calls must stop at once.
 	for _, name := range []string{"deleting", "chat-deleting"} {
 		digest := sha256.Sum256([]byte("delete-" + name))
 		if _, err := sessions.PrepareSessionCleanup(context.Background(), store.SessionCleanupIntent{
@@ -912,8 +865,6 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	epoch := func(name string) string { return epochIn(testNS, name) }
 	elsewhereEpoch := epochIn("chat-ns", "chat-elsewhere")
 	openEpoch, deletedEpoch, deletingEpoch := epoch("chat-open"), epoch("chat-reused"), epoch("chat-deleting")
-	// The chat is deleted and a new one created under its name: Tasks of
-	// the first must not act for the requester through the second.
 	if err := sessions.DeleteSession(context.Background(), testNS, "chat-reused", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
@@ -981,8 +932,6 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		task("in-recreated-chat", inChat("chat-reused", deletedEpoch)),
 		task("in-unpinned-chat", inChat("chat-open", "")),
 		task("in-deleting-session", withSession("deleting")),
-		// A chat in another namespace created this Task; its Session is
-		// found in the chat's namespace the chat API recorded.
 		task("in-chat-elsewhere", func(t *corev1alpha1.Task) {
 			inChat("chat-elsewhere", elsewhereEpoch)(t)
 			t.Labels[labels.LabelChatSessionNamespace] = "chat-ns"
@@ -1081,8 +1030,6 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	}
 }
 
-// metadataOnlySessions refuses to load a Session with its transcript, so the
-// liveness check that runs before every Delegated call must read metadata only.
 type metadataOnlySessions struct{ *sqlite.Store }
 
 func (metadataOnlySessions) GetSession(context.Context, string, string) (*store.SessionRecord, error) {
@@ -1092,8 +1039,6 @@ func (metadataOnlySessions) GetSession(context.Context, string, string) (*store.
 func TestIdentityClaimListsOnlyWithinTheAgentNamespace(t *testing.T) {
 	agent := identityBoundTestAgent("reviewer", time.Now())
 	base := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent).Build()
-	// The Helm install grants the controller Agent and Task RBAC only in its
-	// watch namespace, so a cluster-scoped list is forbidden there.
 	namespaced := interceptor.NewClient(base, interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			listOpts := &client.ListOptions{}
@@ -1128,20 +1073,13 @@ func TestIdentityClaimListsOnlyWithinTheAgentNamespace(t *testing.T) {
 }
 
 func TestACPDispatcherFailsQueuedPoolTaskThatLostItsIdentity(t *testing.T) {
-	// No Task reconcile runs between the claim loss and the dispatcher scan.
 	runACPDispatcherIdentityLossTest(t, false)
 }
 
 func TestACPDispatcherFailsReservedExternalTaskThatLostItsIdentity(t *testing.T) {
-	// An external Reserved attempt holds no RuntimePool reservation, so it
-	// settles without one.
 	runACPDispatcherIdentityLossTest(t, true)
 }
 
-// runACPDispatcherIdentityLossTest queues (or, for external, reserves) a
-// Task bound to an identity whose Agent is gone, runs one dispatcher scan with
-// no Task reconcile in between, and requires the Task and its durable attempt
-// to fail with IdentityUnavailable before any runtime admission.
 func runACPDispatcherIdentityLossTest(t *testing.T, external bool) {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -1229,7 +1167,7 @@ func runACPDispatcherIdentityLossTest(t *testing.T, external bool) {
 
 func TestIdentityClaimsAreGrantedOnlyWhileAgentUseIsEnforced(t *testing.T) {
 	declared := identityBoundTestAgent("reviewer", time.Now())
-	r := setupAgentReconciler(declared) // --agent-use-authorization-enabled is off
+	r := setupAgentReconciler(declared)
 	if claim, err := r.reconcileIdentityClaim(context.Background(), declared); err != nil || claim != nil {
 		t.Fatalf("no claim is granted without the use check: claim=%+v err=%v", claim, err)
 	}
@@ -1245,8 +1183,6 @@ func TestIdentityClaimsAreGrantedOnlyWhileAgentUseIsEnforced(t *testing.T) {
 }
 
 func TestIdentityClaimGrantTimeComesFromTheAPIServer(t *testing.T) {
-	// The API server's clock runs an hour ahead of the controller's here, and
-	// its latest recorded write is the one that granted the claim.
 	serverWrite := metav1.NewTime(time.Now().Add(time.Hour).Truncate(time.Second))
 	earlier := metav1.NewTime(serverWrite.Add(-time.Minute))
 	pending := identityBoundTestAgent("reviewer", time.Now())
@@ -1255,8 +1191,6 @@ func TestIdentityClaimGrantTimeComesFromTheAPIServer(t *testing.T) {
 		{Manager: "kubectl", Operation: metav1.ManagedFieldsOperationUpdate, Time: &earlier},
 		{Manager: "manager", Operation: metav1.ManagedFieldsOperationUpdate, Subresource: "status", Time: &serverWrite},
 	}
-	// serverReader returns the Agent with the managedFields the API server
-	// recorded.
 	serverReader := func(entries []metav1.ManagedFieldsEntry) client.Reader {
 		base := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(pending).Build()
 		return interceptor.NewClient(base, interceptor.Funcs{
@@ -1274,7 +1208,6 @@ func TestIdentityClaimGrantTimeComesFromTheAPIServer(t *testing.T) {
 		t.Fatalf("claim=%+v err=%v, want the grant time the API server recorded (%s), not the controller's clock", claim, err, serverWrite)
 	}
 
-	// With no recorded write time the claim stays pending, so nothing binds.
 	r.APIReader = serverReader(nil)
 	claim, err = r.reconcileIdentityClaim(context.Background(), pending)
 	requireGrantTimePending(t, "no server write time", claim, err)
@@ -1305,8 +1238,6 @@ func TestOnlyTasksCreatedAfterTheGrantBindTheIdentity(t *testing.T) {
 	if _, err := r.agentExecutionIdentity(context.Background(), task(testClaimGrantedAt.Add(time.Second)), agent); err != nil {
 		t.Fatalf("Task created the second after the grant: %v", err)
 	}
-	// Times have one-second precision, so a Task recorded in the grant's own
-	// second may predate it.
 	for name, created := range map[string]time.Time{
 		"in the grant's second": testClaimGrantedAt.Time, "before the grant": testClaimGrantedAt.Add(-time.Second),
 	} {
@@ -1316,8 +1247,6 @@ func TestOnlyTasksCreatedAfterTheGrantBindTheIdentity(t *testing.T) {
 		}
 	}
 
-	// A claim released and granted again after a bound Task was created no
-	// longer covers that Task.
 	regranted := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	later := metav1.NewTime(time.Now().Add(time.Hour).Truncate(time.Second))
 	regranted.Status.IdentityClaim.GrantedAt = &later
@@ -1345,9 +1274,6 @@ func TestAgentIdentityBindingFromTaskCarriesTheTaskCreationTime(t *testing.T) {
 	}
 }
 
-// The issuer instance names a non-default authority, so a parent bound before
-// the controller moved to another authority cannot hand its identity to a
-// child bound after.
 func TestAgentExecutionIdentityRefusesAChildAfterAnAuthorityChange(t *testing.T) {
 	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	instance, _ := testIdentityConfig().Instance("entra")
@@ -1384,9 +1310,6 @@ func TestAgentExecutionIdentityRefusesAChildAfterAnAuthorityChange(t *testing.T)
 	}
 }
 
-// With the issuer down, the first Agent's verification starts a shared
-// back-off: the rest of the queue is not each held for a timeout, and every
-// Agent reports the issuer unavailable rather than its identity refused.
 func TestAgentReconcileBacksOffAnUnavailableIssuer(t *testing.T) {
 	agents := make([]client.Object, 0, 5)
 	for i := range 5 {
@@ -1433,7 +1356,6 @@ func TestAgentReconcileBacksOffAnUnavailableIssuer(t *testing.T) {
 		t.Fatalf("issuer asked %d times, want once for the whole queue", calls)
 	}
 
-	// A definitive refusal is the identity's own answer and starts no back-off.
 	r.issuerBackoff.until = time.Time{}
 	calls = 0
 	r.IdentityVerifier = identityVerifierFunc(func(context.Context, *corev1alpha1.Agent) error {
@@ -1450,11 +1372,6 @@ func TestAgentReconcileBacksOffAnUnavailableIssuer(t *testing.T) {
 	}
 }
 
-// TestACPDispatcherRechecksIdentityBeforeSubmittingAPrompt covers the time
-// between admission and a prompt's submission, the RuntimeSession start or a
-// wait for capacity: the Agent can lose the identity meanwhile, so the
-// dispatcher checks the claim again before every submission and settles the
-// Task as IdentityUnavailable instead.
 func TestACPDispatcherRechecksIdentityBeforeSubmittingAPrompt(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -1537,9 +1454,6 @@ func TestACPDispatcherRechecksIdentityBeforeSubmittingAPrompt(t *testing.T) {
 	}
 }
 
-// TestHeldIdentityClaimIsReleasedOnceItsIssuerIsUnconfigured covers a
-// restart without the Entra issuer while Agent use is still enforced: the
-// claim is released, as it is when enforcement is off.
 func TestHeldIdentityClaimIsReleasedOnceItsIssuerIsUnconfigured(t *testing.T) {
 	held := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	r := identityAgentReconciler(held)
@@ -1549,9 +1463,6 @@ func TestHeldIdentityClaimIsReleasedOnceItsIssuerIsUnconfigured(t *testing.T) {
 	}
 }
 
-// TestBoundIdentityRequiresTheIssuerConfiguredAsBound covers a controller
-// restarted after a Task bound to an identity: the Task may start only while
-// Agent use is enforced and the issuer instance it froze is still configured.
 func TestBoundIdentityRequiresTheIssuerConfiguredAsBound(t *testing.T) {
 	agent := identityBoundTestAgent("reviewer", time.Now())
 	task := boundTask("work", agent, corev1alpha1.TaskPhasePending)
@@ -1573,10 +1484,6 @@ func TestBoundIdentityRequiresTheIssuerConfiguredAsBound(t *testing.T) {
 	}
 }
 
-// TestIdentityClaimDoesNotCoverWorkFromBeforeTheEnforcementPeriod covers a
-// controller run with Agent use authorization off that never reconciled an
-// identity-bound Agent: its claim kept the old grant time, but a Task created
-// during that run predates the current enforcement period and cannot bind.
 func TestIdentityClaimDoesNotCoverWorkFromBeforeTheEnforcementPeriod(t *testing.T) {
 	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	reenabled := testClaimGrantedAt.Add(time.Hour)
@@ -1603,9 +1510,6 @@ func TestIdentityClaimDoesNotCoverWorkFromBeforeTheEnforcementPeriod(t *testing.
 	}
 }
 
-// TestIdentityDecisionsWaitForTheEnforcementPeriod covers a controller that
-// has not yet led long enough to start its period of Agent use enforcement:
-// a binding and a pre-start check both wait and retry rather than decide.
 func TestIdentityDecisionsWaitForTheEnforcementPeriod(t *testing.T) {
 	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	config := testIdentityConfig()
@@ -1629,10 +1533,6 @@ func TestIdentityDecisionsWaitForTheEnforcementPeriod(t *testing.T) {
 	}
 }
 
-// TestIssuerRefusalStandsUntilTheIdentityIsVerified covers an Agent the
-// issuer refused that is then edited into an invalid configuration, or
-// re-checked while the issuer cannot answer: neither turns the refusal back
-// into a merely declared identity. Only a later verification clears it.
 func TestIssuerRefusalStandsUntilTheIdentityIsVerified(t *testing.T) {
 	agent := identityBoundTestAgent("reviewer", time.Now())
 	agent.UID, agent.Generation = "reviewer-uid", 1
@@ -1667,11 +1567,6 @@ func TestIssuerRefusalStandsUntilTheIdentityIsVerified(t *testing.T) {
 	}
 }
 
-// TestIssuerRefusalSurvivesAControllerRestart covers a controller that
-// restarts, or loses leadership, after the issuer refused an Agent's
-// identity: the refusal its status records stands while the issuer cannot
-// answer or the Agent fails validation, and only a fresh verification clears
-// it. A refusal recorded for another identity does not carry over.
 func TestIssuerRefusalSurvivesAControllerRestart(t *testing.T) {
 	agent := identityBoundTestAgent("reviewer", time.Now())
 	agent.UID, agent.Generation = "reviewer-uid", 1
@@ -1682,7 +1577,6 @@ func TestIssuerRefusalSurvivesAControllerRestart(t *testing.T) {
 	refused := first.verifyAgentIdentity(ctx, agent, nil)
 	setAgentIdentityCondition(agent, metav1.Now(), refused)
 
-	// A new controller starts with no answers of its own.
 	restarted := setupAgentReconciler()
 	restarted.Identity = testIdentityConfig()
 	verifier := &countingIdentityVerifier{err: fmt.Errorf("token endpoint down: %w", agentidentity.ErrIssuerUnavailable)}
@@ -1713,10 +1607,6 @@ func TestIssuerRefusalSurvivesAControllerRestart(t *testing.T) {
 	}
 }
 
-// TestIdentityCheckBeforeSubmissionRetriesWhatItCannotConfirm covers a claim
-// the dispatcher cannot read, and an enforcement period not yet recorded:
-// both are errors the prompt is retried on, never a reason to fail the
-// Task as IdentityUnavailable.
 func TestIdentityCheckBeforeSubmissionRetriesWhatItCannotConfirm(t *testing.T) {
 	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	task := boundTask("work", agent, corev1alpha1.TaskPhaseRunning)
@@ -1744,10 +1634,6 @@ func TestIdentityCheckBeforeSubmissionRetriesWhatItCannotConfirm(t *testing.T) {
 	}
 }
 
-// TestUnreadableIdentityRequeuesAPlannedPrompt covers a transient failure to
-// read the Agent's identity claim once the prompt is Planned: the attempt,
-// which was provably never sent, returns to Reserved and the Task stays
-// nonterminal, so dispatch submits it once the claim can be read.
 func TestUnreadableIdentityRequeuesAPlannedPrompt(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -1829,10 +1715,6 @@ func TestUnreadableIdentityRequeuesAPlannedPrompt(t *testing.T) {
 	}
 }
 
-// TestUnreadableIdentityRequeuesARejectedResubmission covers a resubmission
-// after a rate-limited admission whose identity claim stays unreadable: the
-// rejection proves the prompt was not accepted, so the attempt returns to
-// Reserved instead of failing the Task as IdentityUnavailable.
 func TestUnreadableIdentityRequeuesARejectedResubmission(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {

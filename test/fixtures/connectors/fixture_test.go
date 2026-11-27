@@ -30,8 +30,6 @@ func newTestFixture(t *testing.T, now *time.Time) (*Fixture, *httptest.Server, *
 	return f, plain, secure
 }
 
-// linkedTokens runs authorize and code exchange with PKCE and returns the
-// issued pair plus the helpers the lifecycle tests share.
 type linkedTokens struct {
 	f               *Fixture
 	plain, secure   *httptest.Server
@@ -93,7 +91,6 @@ func link(t *testing.T, now *time.Time, scopes ...string) linkedTokens {
 		t.Fatalf("location query keys = %v", queryKeys(location))
 	}
 	code := location.Query().Get("code")
-	// A wrong verifier is refused; the right one issues a token pair.
 	if _, status := exchange(url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {"http://localhost:1/cb"}, "code_verifier": {"wrong"}}); status != http.StatusBadRequest {
 		t.Fatalf("wrong verifier status = %d", status)
 	}
@@ -112,7 +109,6 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 	f, plain, client, access, refresh, exchange, call := l.f, l.plain, l.client, l.access, l.refresh, l.exchange, l.call
 	secure := l.secure
 
-	// The resource API honours the token until it expires.
 	if call(http.MethodGet, access, "") != http.StatusOK || call(http.MethodPost, access, "hello") != http.StatusCreated || call(http.MethodGet, "nope", "") != http.StatusUnauthorized {
 		t.Fatal("resource API must honour only issued tokens")
 	}
@@ -120,7 +116,6 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 	if call(http.MethodGet, access, "") != http.StatusUnauthorized {
 		t.Fatal("an expired token must be rejected")
 	}
-	// Refresh rotates the pair; the old access token stays dead.
 	body, status := exchange(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}})
 	if status != http.StatusOK || body["access_token"] == access {
 		t.Fatalf("refresh = %d keys=%v rotated=%t", status, bodyKeys(body), body["access_token"] != access)
@@ -132,7 +127,6 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 	if _, status := exchange(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}}); status != http.StatusBadRequest {
 		t.Fatal("a spent refresh token must be refused")
 	}
-	// Revocation kills the pair.
 	req, _ := http.NewRequest(http.MethodPost, secure.URL+"/oauth/revoke", strings.NewReader(url.Values{"token": {body["refresh_token"].(string)}}.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth("client", "secret")
@@ -150,7 +144,6 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 		counters.Reads != 2 || counters.Writes != 1 || counters.LastWriteTitle != "hello" || counters.DistinctBearers != 2 || counters.Rejected < 3 {
 		t.Fatalf("counters = %+v", counters)
 	}
-	// State is readable over plain HTTP and never carries tokens.
 	resp, _ := http.Get(plain.URL + "/fixture/state")
 	raw, _ := json.Marshal(counters)
 	if resp.StatusCode != http.StatusOK || strings.Contains(string(raw), "fx-access") {
@@ -158,9 +151,6 @@ func TestFixtureOAuthLifecycle(t *testing.T) {
 	}
 }
 
-// TestFixtureRefusesUnknownScopes covers a consent that asks for more
-// than the fixture provider offers: no code is issued, so a lane whose
-// consent over-asks fails instead of passing with the extra privilege.
 func TestFixtureRefusesUnknownScopes(t *testing.T) {
 	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
 	f, _, secure := newTestFixture(t, &now)
@@ -188,8 +178,6 @@ func TestFixtureResourceAPIEnforcesGrantedScopes(t *testing.T) {
 	if status := readOnly.call(http.MethodGet, readOnly.access, ""); status != http.StatusOK {
 		t.Fatalf("read with items:read status = %d", status)
 	}
-	// A consent that granted only reads cannot write, so a lane whose
-	// consent stopped asking for items:write fails at the write.
 	if status := readOnly.call(http.MethodPost, readOnly.access, "nope"); status != http.StatusForbidden {
 		t.Fatalf("write with items:read only status = %d", status)
 	}
@@ -234,7 +222,6 @@ func TestFixtureOIDCAndModelScript(t *testing.T) {
 		t.Fatalf("jwks = %v", jwks)
 	}
 
-	// The model script: read, write (parks); after approval write, read, plan, done.
 	turn := func(messages []map[string]any, instructions string) (string, string) {
 		body, _ := json.Marshal(map[string]any{"model": "fixture", "messages": messages, "tools": []any{map[string]any{"type": "function"}}})
 		req, _ := http.NewRequest(http.MethodPost, plain.URL+"/v1/chat/completions", strings.NewReader(string(body)))
@@ -305,8 +292,6 @@ func mustQuery(t *testing.T, raw, key string) string {
 	return parsed.Query().Get(key)
 }
 
-// queryKeys and bodyKeys describe a response without its values, so a
-// failing assertion never prints a code, state, or token.
 func queryKeys(location *url.URL) []string {
 	keys := make([]string, 0, len(location.Query()))
 	for key := range location.Query() {
@@ -325,8 +310,6 @@ func bodyKeys(body map[string]any) []string {
 	return keys
 }
 
-// statusOf reports only a response's status: a redirect's Location would
-// carry a live authorization code and state into test output.
 func statusOf(resp *http.Response) int {
 	if resp == nil {
 		return 0

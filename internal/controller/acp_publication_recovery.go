@@ -31,9 +31,6 @@ type persistedPublicationRecoveryContext struct {
 	artifact             harnessv2.ArtifactReference
 }
 
-// reconcilePersistedPublication resumes only the immutable Publication already
-// attached to a successfully settled prompt. It never allocates a new prompt or
-// Publication identity.
 func (d *ACPDispatcher) reconcilePersistedPublication(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -112,8 +109,6 @@ func (d *ACPDispatcher) loadPersistedPublicationRecovery(
 		continuation = control.VerifiedBaseline != nil && publication.SourceRepositoryID == target.ID
 	}
 	if continuation {
-		// Continuation preparation reads from the independently verified
-		// publication target rather than the original upstream/PR base.
 		source = target
 		sourceCredential = publisherCredentialReference(workspace.PublicationReadCredentialRef, publisherservice.CredentialRoleTargetRead)
 	}
@@ -434,8 +429,6 @@ func (d *ACPDispatcher) recoverPublicationPullRequest(
 	if err != nil {
 		return nil, nil, "", err
 	}
-	// An exact completed effect is already durable evidence. Replaying it
-	// must not depend on the publisher still being available or upgraded.
 	if effect == nil || effect.State != store.ExternalEffectSucceeded {
 		supported, err := d.pullRequestPresentationCapability(ctx, recovery.task)
 		if err != nil {
@@ -528,9 +521,6 @@ func (d *ACPDispatcher) loadPersistedPullRequestRequest(
 	if effect == nil || effect.ID != id || effect.Identity != identity {
 		return request, nil, store.ConflictErrorf("pull request effect does not match its immutable identity")
 	}
-	// Older controllers omitted Task presentation and, before that, sessionUid.
-	// Preserve only the exact request shape proved by the original digest.
-	// A same-branch PR never establishes legacy ownership.
 	withoutMetadata := request
 	withoutMetadata.Intent = withoutTaskPullRequestMetadata(withoutMetadata.Intent)
 	legacy := withoutMetadata
@@ -549,8 +539,6 @@ func (d *ACPDispatcher) loadPersistedPullRequestRequest(
 	return request, nil, store.ConflictErrorf("pull request effect does not match its immutable request digest")
 }
 
-// loadPersistedPrepareRequest preserves replay of unsigned default-identity
-// preparations recorded before CommitAuthorName/CommitAuthorEmail were added.
 func (d *ACPDispatcher) loadPersistedPrepareRequest(
 	ctx context.Context,
 	identity store.ExternalEffectIdentity,

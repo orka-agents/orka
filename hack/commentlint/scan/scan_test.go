@@ -535,3 +535,17 @@ func TestPlainTrapsAllowDeletion(t *testing.T) {
 		}
 	}
 }
+
+func TestNoticesAcceptNestedSPDXGroups(t *testing.T) {
+	for _, text := range []string{
+		"SPDX-License-Identifier: MIT OR (Apache-2.0 AND (GPL-2.0-only OR BSD-3-Clause))",
+		"Copyright 2026 Orka SPDX-License-Identifier: ((MIT))",
+	} {
+		if !onlyNotices(text) {
+			t.Errorf("%q is a notice", text)
+		}
+	}
+	if onlyNotices("SPDX-License-Identifier: MIT because we said so") {
+		t.Error("prose after an SPDX identifier is not a notice")
+	}
+}

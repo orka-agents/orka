@@ -66,9 +66,6 @@ func (s *nativeFinalizationFailureStore) FinalizeSessionTurn(ctx context.Context
 	return s.DurableControlStore.FinalizeSessionTurn(ctx, request)
 }
 
-// This executes normal Task admission and prompt settlement. The runtime's
-// deletion hook observes the private store, proving persistence precedes any
-// cleanup through the production controller path.
 func TestACPDispatcherCapturesNativeSessionBeforeDeletion(t *testing.T) {
 	for _, failSave := range []bool{false, true} {
 		name := "saved"
@@ -152,8 +149,6 @@ func TestACPDispatcherCapturesNativeSessionBeforeDeletion(t *testing.T) {
 				require.NoError(t, restarted.recoverStaleTask(ctx, current, recoveryFence), "the committed native settlement receipt must resume without an in-memory capture")
 				require.Equal(t, 1, captureCalls, "committed native settlement must not recapture")
 				require.Equal(t, 1, deleteCalls)
-				// A subsequent real Task receives native continuation only once,
-				// with no canonical conversation replay in its prompt.
 				continued := fixture.task.DeepCopy()
 				continued.Name = "native-continued"
 				continued.UID = "88888888-8888-8888-8888-888888888888"
@@ -202,8 +197,6 @@ func TestACPDispatcherCapturesNativeSessionBeforeDeletion(t *testing.T) {
 			require.NotEmpty(t, current.Annotations[nativeCaptureIntentAnnotation])
 			_, err = persistence.GetNativeSession(ctx, "default", "native-session", control.SessionUID)
 			require.ErrorIs(t, err, store.ErrNotFound)
-			// Retry terminal recovery using the durable capture identity. No
-			// accepted prompt is submitted again.
 			failing.fail = false
 			attempt, err := persistence.GetPromptAttempt(ctx, fixture.attemptID)
 			require.NoError(t, err)

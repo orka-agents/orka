@@ -58,15 +58,10 @@ const (
 	repositoryMonitorCommandIntentResearch     = "research"
 	repositoryMonitorCommandIntentPlan         = "plan"
 
-	repositoryMonitorRunningRunTimeout = 30 * time.Minute
-	repositoryMonitorValidationRetry   = time.Minute
-	repositoryMonitorStaleRunError     = "[retry_scheduled] repository monitor run did not complete within "
-	// repositoryMonitorInterruptedRunError prefixes the error of a run whose
-	// execution ended, or whose owning controller epoch was replaced, before it
-	// recorded completion.
-	repositoryMonitorInterruptedRunError = "[retry_scheduled] repository monitor run was interrupted before it recorded completion"
-	// repositoryMonitorInterruptedRunRecordTimeout bounds the detached write that
-	// records an interrupted run's terminal state after its context ended.
+	repositoryMonitorRunningRunTimeout           = 30 * time.Minute
+	repositoryMonitorValidationRetry             = time.Minute
+	repositoryMonitorStaleRunError               = "[retry_scheduled] repository monitor run did not complete within "
+	repositoryMonitorInterruptedRunError         = "[retry_scheduled] repository monitor run was interrupted before it recorded completion"
 	repositoryMonitorInterruptedRunRecordTimeout = 10 * time.Second
 
 	repositoryMonitorReasonReviewerCredentialsInvalid = "ReviewerCredentialsInvalid"
@@ -77,7 +72,6 @@ const (
 	repositoryMonitorReasonRunFailed                  = "RunFailed"
 )
 
-// RepositoryMonitorReconciler reconciles RepositoryMonitor resources.
 type RepositoryMonitorReconciler struct {
 	client.Client
 	APIReader                 client.Reader
@@ -90,16 +84,8 @@ type RepositoryMonitorReconciler struct {
 	HTTPClient                *http.Client
 	GitHubAPIBaseURL          string
 	EnforceNamespaceIsolation bool
-	// BranchRebaser optionally executes clean-room rebases when a monitor
-	// configures spec.repair.updateBranchStrategy: rebase.
-	BranchRebaser RepositoryMonitorBranchRebaser
+	BranchRebaser             RepositoryMonitorBranchRebaser
 
-	// activeRunsMu guards activeRuns, the monitor runs this process is
-	// executing right now, keyed by repositoryMonitorRunKey. A running run
-	// that is absent while this process holds the current controller epoch
-	// has no live executor: its claimant was an earlier epoch, which the
-	// storage write fence now rejects, or an execution in this process that
-	// returned before it recorded completion.
 	activeRunsMu sync.Mutex
 	activeRuns   map[string]struct{}
 }
@@ -108,11 +94,8 @@ type RepositoryMonitorReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create
-// Secret write/list verbs are already present in generated and Helm RBAC for Task reconciliation;
-// keep this marker explicit because RepositoryMonitor also manages per-task runtime auth snapshots.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;create;delete
 
-// Reconcile keeps monitor metadata durable and publishes basic status.
 func (r *RepositoryMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("repositorymonitor")
 
@@ -219,8 +202,6 @@ func repositoryMonitorSuspended(monitor *corev1alpha1.RepositoryMonitor) bool {
 	return monitor.Spec.Suspend != nil && *monitor.Spec.Suspend
 }
 
-// ParseRepositoryMonitorSchedule parses spec.schedule in spec.timeZone the way
-// background monitor runs use it; an empty schedule yields a nil schedule.
 func ParseRepositoryMonitorSchedule(monitor *corev1alpha1.RepositoryMonitor) (cron.Schedule, error) {
 	schedule := repositoryMonitorSchedule(monitor)
 	if schedule == "" {
@@ -335,9 +316,6 @@ func validateRepositoryMonitorCommandLabels(spec corev1alpha1.RepositoryMonitorS
 	return nil
 }
 
-// resolveRepositoryMonitorAgent resolves a spec.agents.<role> reference to its
-// Agent, enforcing namespace isolation. A non-empty reason reports a condition
-// the caller should surface; a non-nil error is a transient read failure.
 func (r *RepositoryMonitorReconciler) resolveRepositoryMonitorAgent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, role string, ref *corev1alpha1.AgentReference) (*corev1alpha1.Agent, string, string, error) {
 	field := "spec.agents." + role
 	reasonPrefix := strings.ToUpper(role[:1]) + role[1:]
@@ -553,7 +531,6 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 
 	var queuedRun *store.MonitorRun
 	requeueAfter := time.Duration(0)
-	// Completed reviews still need publication retries while scheduled runs are suspended.
 	if pendingReviews || publishedReviews {
 		requeueAfter = repositoryMonitorValidationRetry
 	}
@@ -643,10 +620,6 @@ func minimumRepositoryMonitorRequeueAfter(requeueAfter time.Duration) time.Durat
 	return requeueAfter
 }
 
-// RepositoryMonitorRunsBlockedCondition returns the current Ready condition
-// when it reports an Error that stops reconciliation before queued runs are
-// processed, so a new manual run would stay queued until the monitor is fixed.
-// A failed run or an invalid schedule still lets queued runs proceed.
 func RepositoryMonitorRunsBlockedCondition(monitor *corev1alpha1.RepositoryMonitor) *metav1.Condition {
 	if monitor == nil || monitor.Status.Phase != repositoryMonitorPhaseError {
 		return nil
@@ -804,16 +777,11 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 	if requeueAfter := time.Until(run.StartedAt); requeueAfter > 0 {
 		return nil, requeueAfter, nil
 	}
-	// Register the run as executing here before claiming it, so a reconcile of
-	// this process never mistakes its own claim for an abandoned run.
 	runKey := repositoryMonitorRunKey(monitor.Namespace, monitor.Name, run.ID)
 	r.markMonitorRunActive(runKey)
 	defer r.markMonitorRunInactive(runKey)
 	processed, requeueAfter, err := r.executeClaimedMonitorRun(ctx, monitor, run, owner, repository)
 	if err != nil && ctx.Err() != nil {
-		// The call ended before the run recorded completion, for example on
-		// controller shutdown. Record a terminal state now where it is safe;
-		// otherwise the next reconcile of the epoch holder reclaims it.
 		if interrupted := r.recordInterruptedMonitorRun(ctx, monitor, run.ID, err); interrupted != nil {
 			return interrupted, 0, nil
 		}
@@ -821,8 +789,6 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 	return processed, requeueAfter, err
 }
 
-// executeClaimedMonitorRun marks run running and executes it. It returns a
-// nil error only after the run's resulting state has been recorded.
 func (r *RepositoryMonitorReconciler) executeClaimedMonitorRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run store.MonitorRun, owner, repository string) (*store.MonitorRun, time.Duration, error) {
 	run.Phase = repositoryMonitorRunPhaseRunning
 	if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
@@ -896,10 +862,6 @@ func (r *RepositoryMonitorReconciler) executeClaimedMonitorRun(ctx context.Conte
 }
 
 func (r *RepositoryMonitorReconciler) failStaleRunningMonitorRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (*store.MonitorRun, time.Duration, error) {
-	// Read the controller epoch before the runs. Once this process holds the
-	// current epoch, the state write fence rejects writes from every earlier
-	// epoch, so a running run read afterwards can no longer be completed by a
-	// claimant from an earlier epoch.
 	epoch, holdsEpoch := r.ControllerEpochManager.Current()
 	runs, _, err := r.Store.ListMonitorRuns(ctx, store.MonitorRunFilter{
 		Namespace:   monitor.Namespace,
@@ -923,7 +885,6 @@ func (r *RepositoryMonitorReconciler) failStaleRunningMonitorRun(ctx context.Con
 		return &run, 0, nil
 	}
 
-	// Backstop for a run this process reports as executing.
 	now := time.Now()
 	runningFor := now.Sub(run.StartedAt)
 	if runningFor < repositoryMonitorRunningRunTimeout {
@@ -945,13 +906,6 @@ func (r *RepositoryMonitorReconciler) failStaleRunningMonitorRun(ctx context.Con
 	return &run, 0, nil
 }
 
-// recordInterruptedMonitorRun records a terminal state for a run whose
-// execution context ended before the run recorded completion. It writes with
-// a detached, bounded context; the write still carries this process's
-// controller epoch fence, so it cannot land once a newer epoch owns storage.
-// It returns the recorded run, or nil when the run is no longer running here
-// or the record could not be written, leaving the run to be reclaimed by the
-// controller epoch holder.
 func (r *RepositoryMonitorReconciler) recordInterruptedMonitorRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, runID string, cause error) *store.MonitorRun {
 	logger := log.FromContext(ctx).WithName("repositorymonitor")
 	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), repositoryMonitorInterruptedRunRecordTimeout)
@@ -974,8 +928,6 @@ func (r *RepositoryMonitorReconciler) recordInterruptedMonitorRun(ctx context.Co
 	return run
 }
 
-// finalizeInterruptedMonitorRun marks a running run failed with runError and
-// records a run_failed event so the next run of the monitor can start.
 func (r *RepositoryMonitorReconciler) finalizeInterruptedMonitorRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, runError string, details map[string]any) error {
 	now := time.Now()
 	run.Phase = repositoryMonitorRunPhaseFailed
@@ -990,8 +942,6 @@ func (r *RepositoryMonitorReconciler) finalizeInterruptedMonitorRun(ctx context.
 	return nil
 }
 
-// repositoryMonitorRunErrorNeedsOutcomeVerification reports whether a failed
-// run ended without observing the outcome of the work it may have submitted.
 func repositoryMonitorRunErrorNeedsOutcomeVerification(runError string) bool {
 	return strings.HasPrefix(runError, repositoryMonitorStaleRunError) || strings.HasPrefix(runError, repositoryMonitorInterruptedRunError)
 }
@@ -1029,7 +979,6 @@ func repositoryMonitorRunFailureState(err error) string {
 	if _, ok := errors.AsType[*repositoryMonitorPendingMutationProjectionError](err); ok {
 		return repositoryMonitorRunRetryScheduled
 	}
-	// Partial CI results settle on their own; retry rather than terminalize.
 	if errors.Is(err, errRepositoryMonitorCIIncomplete) {
 		return repositoryMonitorRunRetryScheduled
 	}
@@ -1215,7 +1164,6 @@ func (r *RepositoryMonitorReconciler) updateStatusWithRetry(ctx context.Context,
 	})
 }
 
-// SetupWithManager sets up the controller with the manager.
 func (r *RepositoryMonitorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()

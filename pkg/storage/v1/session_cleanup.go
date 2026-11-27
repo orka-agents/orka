@@ -5,9 +5,6 @@ import (
 	"time"
 )
 
-// SessionCleanupPersistenceStore is the SQLite half of the cross-store Session
-// cleanup protocol. The durable intent closes the crash window between deleting
-// Kubernetes control records and deleting the transcript.
 type SessionCleanupPersistenceStore interface {
 	SessionTurnCleanupReceiptStore
 	GetSessionCleanupIntent(ctx context.Context, namespace, sessionName string) (*SessionCleanupIntent, error)
@@ -22,13 +19,10 @@ type SessionCleanupPersistenceStore interface {
 	CompleteSessionCleanup(ctx context.Context, request CompleteSessionCleanupRequest) error
 }
 
-// SessionTurnCleanupReceiptStore reads Task-owned finalization evidence after
-// Session deletion. Ordinary turn and outbox reads never consult these receipts.
 type SessionTurnCleanupReceiptStore interface {
 	GetSessionTurnCleanupReceipt(ctx context.Context, namespace, sessionName, promptAttemptID string) (*SessionTurnCleanupReceipt, error)
 }
 
-// SessionCleanupBranchClaim freezes one exact Session-owned BranchClaim.
 type SessionCleanupBranchClaim struct {
 	ID                    string                  `json:"id"`
 	ObjectUID             string                  `json:"objectUid"`
@@ -44,9 +38,6 @@ type SessionCleanupBranchClaim struct {
 	ExpectedRequestDigest string                  `json:"expectedRequestDigest"`
 }
 
-// SessionCleanupIntent is the durable cross-store deletion plan. An empty
-// SessionUID denotes a transcript-only, non-ACP Session; SQLite refuses that
-// form when ACP SessionTurns exist.
 type SessionCleanupIntent struct {
 	Namespace                      string                      `json:"namespace"`
 	SessionName                    string                      `json:"sessionName"`
@@ -67,8 +58,6 @@ type SessionCleanupIntent struct {
 	Gateway                        *GatewaySessionCleanupProof `json:"gateway,omitempty"`
 }
 
-// CompleteSessionCleanupRequest deletes SQLite-owned state only after the
-// authoritative Kubernetes plan has been reclaimed.
 type CompleteSessionCleanupRequest struct {
 	Namespace       string `json:"namespace"`
 	SessionName     string `json:"sessionName"`
@@ -76,10 +65,6 @@ type CompleteSessionCleanupRequest struct {
 	OperationDigest string `json:"operationDigest"`
 }
 
-// SessionCleanupCompletion is the durable deletion tombstone retained after
-// the Session row and cleanup intent are atomically removed. Session names are
-// not reusable because stale DELETE retries cannot otherwise distinguish a new
-// Session instance from the deleted one.
 type SessionCleanupCompletion struct {
 	Namespace       string    `json:"namespace"`
 	SessionName     string    `json:"sessionName"`

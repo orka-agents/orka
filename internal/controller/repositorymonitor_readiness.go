@@ -35,44 +35,28 @@ func repositoryMonitorReadinessContext(monitor *corev1alpha1.RepositoryMonitor) 
 }
 
 type repositoryMonitorCIResult struct {
-	passed bool
-	reason string
-	// failed names the failing check runs or status contexts when reason is
-	// repositoryMonitorCINotGreen.
-	failed []repositoryMonitorCIFailure
-	// pending lists the check runs that had not completed when failed was
-	// read; it is set only alongside failed.
-	pending []repositoryMonitorCIFailure
-	// incomplete marks a failing result read from partial check runs or
-	// statuses: the commit is not green, but failed may not list every failure.
+	passed     bool
+	reason     string
+	failed     []repositoryMonitorCIFailure
+	pending    []repositoryMonitorCIFailure
 	incomplete bool
 }
 
-// repositoryMonitorCIFailureSourceStatus marks a failing commit status context.
 const repositoryMonitorCIFailureSourceStatus = "commit_status"
 
-// repositoryMonitorCIFailure is one failing check run or status context.
-// source tells a check run (with its app) from a status context, since the
-// two can share a name. The remaining fields are the raw, unsanitized GitHub
-// details repair evidence is built from; only name and source classify a
-// failure.
 type repositoryMonitorCIFailure struct {
-	name   string
-	source string
-	// id is the check run or commit status ID.
-	id int64
-	// appSlug names the GitHub App behind a check run.
-	appSlug    string
-	headSHA    string
-	status     string
-	conclusion string
-	// url is a check run's html_url or a commit status's target_url.
+	name            string
+	source          string
+	id              int64
+	appSlug         string
+	headSHA         string
+	status          string
+	conclusion      string
 	url             string
 	title           string
 	summary         string
 	annotationCount int
-	// description is a commit status's description.
-	description string
+	description     string
 }
 
 func (f repositoryMonitorCIFailure) key() string {
@@ -95,10 +79,6 @@ func repositoryMonitorPauseLabels(spec corev1alpha1.RepositoryMonitorSpec) []str
 	return spec.Policy.PauseLabels
 }
 
-// Only IDs returned by GitHub and persisted in our audit can be excluded from CI.
-// Include peer monitors, even across namespaces, to avoid cyclic dependencies.
-// The caller intersects these IDs with GitHub's statuses for the exact repo/head;
-// context names alone never establish ownership.
 func (r *RepositoryMonitorReconciler) repositoryMonitorOwnedReadinessStatuses(ctx context.Context, sha string) (map[int64]struct{}, error) {
 	ids := map[int64]struct{}{}
 	if r.Store == nil {
@@ -124,8 +104,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorOwnedReadinessStatuses(ct
 	}
 }
 
-// repositoryMonitorReadinessCIAwaitingApproval describes a head whose CI
-// workflow runs GitHub holds for maintainer approval.
 const repositoryMonitorReadinessCIAwaitingApproval = "Waiting for a maintainer to approve the CI workflow runs for this commit."
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem) (string, string, error) {
@@ -135,8 +113,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 	if pr.Draft {
 		return repositoryMonitorStatusFailure, "The pull request is a draft.", nil
 	}
-	// Accepted current-head commands must revoke earlier success before their
-	// Tasks start. LastVerdict still describes the prior review at that point.
 	for _, phase := range store.RepositoryMonitorWorkActionActiveStatuses() {
 		actions, _, err := r.Store.ListWorkActions(ctx, store.WorkActionFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: pr.Number, TargetSHA: pr.HeadSHA, Status: phase, Limit: 1})
 		if err != nil {
@@ -201,9 +177,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 	return repositoryMonitorStatusSuccess, repositoryMonitorReadinessSuccess, nil
 }
 
-// repositoryMonitorAwaitingReviewDescription describes a head waiting for a
-// clean review. requireGreenCI holds the review until CI runs, so held
-// workflow runs are what an unreviewed head waits on.
 func (r *RepositoryMonitorReconciler) repositoryMonitorAwaitingReviewDescription(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem) (string, error) {
 	if monitor.Spec.Review.RequireGreenCI && item.LastReviewedHeadSHA != pr.HeadSHA {
 		ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
@@ -218,8 +191,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorAwaitingReviewDescription
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorNeedsChangesRepairEligible(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem) (bool, error) {
-	// Only a full repair fixes findings; a review-only or CI-only pull request
-	// keeps its findings until a person changes it.
 	if full, _, _ := repositoryMonitorPullRequestRepairScope(monitor.Spec, pr); !full {
 		return false, nil
 	}
@@ -238,9 +209,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorNeedsChangesRepairEligibl
 	if intent == repositoryMonitorCommandIntentUpdateBranch {
 		return true, nil
 	}
-	// Automatic selection prefers CI the pull request broke, even if review
-	// findings cannot be repaired; failures inherited from the base are left
-	// alone. Both intents share the same repair policy and budget.
 	broke, err := r.repositoryMonitorPullRequestBrokeCI(ctx, monitor, pr)
 	if err != nil {
 		return false, err
@@ -258,16 +226,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorNeedsChangesRepairEligibl
 	return review.HeadSHA == pr.HeadSHA && review.Repairable, nil
 }
 
-// repositoryMonitorPullRequestInScope reports whether pr is an open, reviewed
-// pull request on the monitor's base branch. CI-only pull requests get no
-// readiness status because no review vouches for them.
 func repositoryMonitorPullRequestInScope(monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest) bool {
 	return pr.State == repositoryMonitorItemStateOpen && pr.BaseBranch == effectiveRepositoryMonitorBranch(monitor) && repositoryMonitorPullRequestReviewed(monitor.Spec, pr)
 }
 
-// GitHub statuses belong to commits, not PRs. Aggregate every outcome across
-// open PRs sharing the head, so peers neither overwrite a blocker with success
-// nor alternate persistent blocking descriptions on every inventory poll.
 func (r *RepositoryMonitorReconciler) repositoryMonitorSharedHeadReadiness(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, currentItem *store.MonitorItem, peers []repositoryMonitorPullRequest, endpoint, token string) (string, string, error) {
 	result, resultDescription, err := r.repositoryMonitorReadyOutcome(ctx, monitor, pr, currentItem)
 	if err != nil {
@@ -292,8 +254,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorSharedHeadReadiness(ctx c
 		if err != nil {
 			return "", "", err
 		}
-		// Failure takes precedence over pending, then success. Sort equal-state
-		// descriptions to make the aggregate independent of inventory order.
 		if (state == repositoryMonitorStatusFailure && result != repositoryMonitorStatusFailure) ||
 			(result == repositoryMonitorStatusSuccess && state != repositoryMonitorStatusSuccess) ||
 			(state == result && description < resultDescription) {
@@ -303,8 +263,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorSharedHeadReadiness(ctx c
 	return result, resultDescription, nil
 }
 
-// List responses omit mergeable_state. Refresh every evaluated peer so a known
-// conflict cannot be treated as ready when another PR sharing its commit moves.
 func (r *RepositoryMonitorReconciler) refreshRepositoryMonitorReadinessPullRequest(ctx context.Context, pr repositoryMonitorPullRequest, endpoint, token string) (repositoryMonitorPullRequest, error) {
 	var current repositoryMonitorPullRequestResponse
 	if err := r.fetchRepositoryMonitorAuthorizedJSON(ctx, fmt.Sprintf("%s/pulls/%d", endpoint, pr.Number), token, &current); err != nil {
@@ -312,9 +270,6 @@ func (r *RepositoryMonitorReconciler) refreshRepositoryMonitorReadinessPullReque
 	}
 	pr.State, pr.HeadSHA, pr.BaseBranch = current.State, current.Head.SHA, current.Base.Ref
 	pr.MergeableState, pr.Draft = current.MergeableState, current.Draft
-	// The maintainer-edit permission describes this head repository, so take
-	// the push target from the same response; a fork can be renamed or
-	// transferred without its head SHA changing.
 	pr.MaintainerCanModify = current.MaintainerCanModify
 	pr.HeadBranch, pr.HeadRepo, pr.HeadRepoURL = current.Head.Ref, current.Head.Repo.FullName, current.Head.Repo.CloneURL
 	pr.Labels = nil
@@ -336,9 +291,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorSharedHeadItem(ctx contex
 	return item, err
 }
 
-// Readiness is a commit status, so existing repository credentials can publish
-// it without a GitHub App. GitHub alone controls approvals and merging.
-// Inventory callers can supply the complete open-PR list to reuse it for peers.
 func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr *repositoryMonitorPullRequest, item *store.MonitorItem, inventory ...[]repositoryMonitorPullRequest) error {
 	if !monitor.Spec.Review.Publish.Enabled || !repositoryMonitorManagedWorkflow(monitor) || r.Store == nil {
 		return nil
@@ -347,8 +299,6 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 	if err != nil {
 		return err
 	}
-	// Return the observed snapshot to inventory selection. A refresh that blocks
-	// readiness must also block subsequent repair/review stages in this poll.
 	expectedHead := pr.HeadSHA
 	*pr, err = r.refreshRepositoryMonitorReadinessPullRequest(ctx, *pr, endpoint, token)
 	if err != nil {
@@ -359,8 +309,6 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	// A retry's list can already contain the new head. Keep the persisted prior
-	// head authoritative for cleanup until the replacement item can be saved.
 	if previous != nil && previous.HeadSHA != "" && previous.HeadSHA != expectedHead && (previous.HeadSHA != pr.HeadSHA || outOfScope) {
 		if err := r.reconcileRepositoryMonitorDepartedHead(ctx, monitor, pr.Number, previous.HeadSHA, endpoint, token); err != nil {
 			return err
@@ -373,8 +321,6 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 		if err := r.reconcileRepositoryMonitorDepartedHead(ctx, monitor, pr.Number, expectedHead, endpoint, token); err != nil {
 			return err
 		}
-		// Stop applies across head changes without using positive review evidence
-		// from the previous head. Other outcomes need the next inventory snapshot.
 		if item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
 			return nil
 		}
@@ -424,9 +370,6 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 }
 
 func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorDepartedHead(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, departingNumber int64, sha, endpoint, token string) error {
-	// A head that never got a readiness status shows nothing stale, and an
-	// in-scope peer publishes its own status when it is processed; skip the
-	// inventory listing, which CI-only pull requests would repeat every poll.
 	if r.Store != nil {
 		if _, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, repositoryMonitorReadinessMutationID(monitor, sha)); errors.Is(err, store.ErrNotFound) {
 			return nil
@@ -434,7 +377,6 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorDepartedHead(ctx
 			return err
 		}
 	}
-	// The old inventory can still contain the departed PR. Use a fresh list.
 	peers, err := r.listRepositoryMonitorReadinessPeers(ctx, monitor, token)
 	if err != nil {
 		return err
@@ -450,9 +392,6 @@ func (r *RepositoryMonitorReconciler) listRepositoryMonitorReadinessPeers(ctx co
 	return r.listRepositoryMonitorPullRequests(ctx, owner, repo, token, effectiveRepositoryMonitorBranch(monitor))
 }
 
-// reconcileRepositoryMonitorDepartedHeadWithPeers excludes the exact PR whose
-// detail response established it left scope, and refreshes any in-scope peer
-// still on the head before publishing for it.
 func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorDepartedHeadWithPeers(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, departingNumber int64, sha, endpoint, token string, peers []repositoryMonitorPullRequest) error {
 	peers = slices.DeleteFunc(slices.Clone(peers), func(peer repositoryMonitorPullRequest) bool { return peer.Number == departingNumber })
 	var err error
@@ -505,9 +444,6 @@ func repositoryMonitorReadinessMutationID(monitor *corev1alpha1.RepositoryMonito
 	return "ghmut-" + repositoryMonitorShortHash(identity)
 }
 
-// A PR can leave the base-filtered inventory without changing its commit. Revoke
-// any status we already published before retiring it, including retained items
-// from an earlier controller version. Do not create statuses for untracked heads.
 func (r *RepositoryMonitorReconciler) revokeRepositoryMonitorReadiness(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, sha string) error {
 	if !monitor.Spec.Review.Publish.Enabled || !repositoryMonitorManagedWorkflow(monitor) || r.Store == nil || sha == "" {
 		return nil
@@ -544,9 +480,6 @@ func (r *RepositoryMonitorReconciler) ensureRepositoryMonitorReadinessStatus(ctx
 		return nil, fmt.Errorf("readiness audit identity does not match the commit")
 	}
 	if mutation.ExternalID == "" || mutation.Status == repositoryMonitorStatusSubmitting {
-		// Statuses are append-only. An uncertain POST is safely retried with pending,
-		// never by trusting a matching context or replaying stale success. Persist
-		// the returned ID before evaluating CI so our own pending status is excluded.
 		if err := r.publishRepositoryMonitorReadinessStatus(ctx, monitor, mutation, endpoint, token, repositoryMonitorStatusPending, "Waiting for verified workflow completion."); err != nil {
 			return nil, err
 		}
@@ -559,8 +492,6 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReadinessStatus(ct
 	if mutation.Status == repositoryMonitorRunPhaseSucceeded && mutation.RequestDigest == digest {
 		return nil
 	}
-	// Record uncertainty before writing. A crash or failed audit update must
-	// recover through pending rather than leaving a stale successful status.
 	mutation.Status = repositoryMonitorStatusSubmitting
 	if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
 		return err
@@ -605,7 +536,6 @@ func (r *RepositoryMonitorReconciler) writeRepositoryMonitorCommitStatus(ctx con
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		detail := ""
 		if repositoryMonitorGitHubErrorLooksRateLimited(string(data)) {
-			// Preserve retry classification using safe diagnostic metadata.
 			detail = "rate limit"
 		}
 		return result, &repositoryMonitorGitHubAPIError{Operation: "readiness status", StatusCode: resp.StatusCode, Body: detail}

@@ -33,8 +33,6 @@ type approvalRegistryPreparationExecutor struct {
 }
 
 func (e approvalRegistryPreparationExecutor) prepareACPMCPTool(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) (acpMCPPreparedToolCall, error) {
-	// Distinguish the real Registry's preparation reads from descriptor
-	// validation, which also reads the Tool before and after preparation.
 	ctx = context.WithValue(ctx, approvalRegistryPreparationContextKey{}, true)
 	return e.RegistryACPMCPToolExecutor.prepareACPMCPTool(ctx, request, descriptor)
 }
@@ -120,8 +118,6 @@ func TestMCPApprovalRegistryPreparationPreservesHTTPExecutionBudget(t *testing.T
 				if err != nil {
 					return err
 				}
-				// Delay the actual Registry read after its claim. The public
-				// HTTP deadline must not include this preparation time.
 				timer := time.NewTimer(300 * time.Millisecond)
 				defer timer.Stop()
 				select {
@@ -165,7 +161,6 @@ func TestMCPApprovalRegistryPreparationPreservesHTTPExecutionBudget(t *testing.T
 			require.NotNil(t, execution.effect.LeaseExpiresAt)
 			require.False(t, execution.effect.LeaseExpiresAt.Before(execution.deadline.Add(externalEffectLeaseSettlementMargin)))
 
-			// Verify a durable receipt, then replay from a reopened store.
 			f.reopen()
 			receipt, err := f.events.GetExternalEffect(t.Context(), effectID)
 			require.NoError(t, err)

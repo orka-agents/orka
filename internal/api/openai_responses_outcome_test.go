@@ -47,7 +47,6 @@ func TestResponsesProductionEmptyOutcomes(t *testing.T) {
 							require.NoError(t, json.NewEncoder(w).Encode(response))
 						}
 					})
-					// Budget exhaustion is terminal even without a goal-state sentinel.
 					server.openaiHandler.config.MaxPrematureEndRetries = 2
 					url := listenResponsesApp(t, server.app)
 					body := fmt.Sprintf(`{"model":"fixture/test-model","store":false,"stream":%t,"max_output_tokens":3,"input":"hello"}`, stream)
@@ -201,8 +200,6 @@ func TestResponsesProductionCoordinatorHistoryTruncation(t *testing.T) {
 					var request map[string]any
 					require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 					items := request["input"].([]any)
-					// Production coordinator normalization runs before either truncation path.
-					// Client calls/results must never reach the coordinator or become orphans.
 					for _, raw := range items {
 						item := raw.(map[string]any)
 						require.NotEqual(t, "function_call", item["type"])

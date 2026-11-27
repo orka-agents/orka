@@ -12,7 +12,6 @@ import (
 	"testing"
 )
 
-// stubDashboardProbe reports a served dashboard without the network.
 func stubDashboardProbe(t *testing.T) {
 	t.Helper()
 	orig := dashboardAbsentFunc
@@ -44,8 +43,6 @@ func TestDashboardAbsent(t *testing.T) {
 			}
 		})
 	}
-	// A gateway that sends /login to its own sign-in is judged by that
-	// redirect, even when the page it leads to is missing.
 	gateway := http.NewServeMux()
 	gateway.Handle("/login", http.RedirectHandler("/sso/start", http.StatusFound))
 	gateway.Handle("/sso/start", http.NotFoundHandler())
@@ -54,7 +51,6 @@ func TestDashboardAbsent(t *testing.T) {
 	if dashboardAbsent(sso.URL) {
 		t.Fatal("a redirecting sign-in gateway must not count as a server without a dashboard")
 	}
-	// An unreachable server says nothing either way.
 	if dashboardAbsent("http://127.0.0.1:1") {
 		t.Fatal("an unreachable server must not count as one without a dashboard")
 	}
@@ -127,18 +123,15 @@ func TestNewDashboardCmd_WithTokenFlag(t *testing.T) {
 	t.Setenv("HOME", tmp)
 	stubDashboardProbe(t)
 
-	// Stub out the browser opener so we never launch a real browser.
 	orig := openBrowserFunc
 	openBrowserFunc = func(string) error { return nil }
 	t.Cleanup(func() { openBrowserFunc = orig })
 
 	cmd := newDashboardCmd()
 
-	// Create a root command to provide persistent flags
 	root := newRootCmd()
 	root.AddCommand(cmd)
 
-	// With --token provided, it should try to construct URL and open browser.
 	root.SetArgs([]string{"dashboard", "--server", "http://test-server:8080", "--token", "opaque-login-value-123"})
 
 	err := root.Execute()
@@ -156,8 +149,6 @@ func TestNewDashboardCmd_WithoutToken(t *testing.T) {
 	root := newRootCmd()
 	root.AddCommand(cmd)
 
-	// Without --token the command mints a ServiceAccount token with kubectl.
-	// Fail that step here instead of reaching whatever cluster kubectl uses.
 	tokenErr := errors.New("kubectl create token failed")
 	origCreate := serviceAccountTokenFunc
 	serviceAccountTokenFunc = func(string, string) (string, error) { return "", tokenErr }
@@ -174,12 +165,10 @@ func TestNewDashboardCmd_DefaultServerFromConfig(t *testing.T) {
 	t.Setenv("HOME", tmp)
 	stubDashboardProbe(t)
 
-	// Stub out the browser opener so we never launch a real browser.
 	orig := openBrowserFunc
 	openBrowserFunc = func(string) error { return nil }
 	t.Cleanup(func() { openBrowserFunc = orig })
 
-	// Save a config with server
 	cfg := orkaConfig{Server: "http://configured-server:9090"}
 	if err := saveConfig(cfg); err != nil {
 		t.Fatalf("saveConfig error: %v", err)
@@ -233,7 +222,6 @@ func TestNewDashboardCmd_UsesConfiguredNamespaceForCreatedToken(t *testing.T) {
 	}
 }
 
-// ORKA_SERVER and ORKA_NAMESPACE stand in for --server and --namespace.
 func TestNewDashboardCmd_UsesServerAndNamespaceFromEnvironment(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(envServer, "http://env-server:9090")

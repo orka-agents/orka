@@ -4,7 +4,6 @@ import { server } from '@/test/mocks/server'
 
 const API = '/api/v1'
 
-// Mock useAuthStore to avoid zustand persist localStorage issues
 const mockGetState = vi.fn()
 vi.mock('@/stores/auth', () => ({
   useAuthStore: {
@@ -24,7 +23,6 @@ beforeEach(() => {
   }))
 })
 
-// Import after mock setup
 const { api, ApiError } = await import('./api-client')
 
 describe('api.get', () => {
@@ -135,7 +133,6 @@ describe('error handling', () => {
   })
 
   it('keeps a token that replaced the one a late 401 answers', async () => {
-    // Signing in while the previous page's requests are still in flight.
     tokenValue = 'stale-token'
     server.use(
       http.get(`${API}/tasks`, () => {
@@ -332,11 +329,6 @@ describe('custom headers', () => {
       })
     )
 
-    // Use the lower-level request function via api.get workaround:
-    // api.get doesn't expose custom headers, so we test via post with custom headers
-    // Actually, the request function supports custom headers through options.headers
-    // but the api.get/post/etc helpers don't expose it. Let's test through the exported api
-    // by verifying Content-Type default is set (as custom header merge is internal).
     await api.get('/tasks')
     expect(capturedContentType).toBe('application/json')
   })

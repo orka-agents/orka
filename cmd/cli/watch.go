@@ -17,25 +17,14 @@ import (
 	"time"
 )
 
-// watchFrame is one rendering of a watched view. Key is a stable
-// description of the state that matters (names and phases, stage counts),
-// so a frame is reprinted only when that state changes and not when a
-// relative age such as "12s" ticks over. A frame with no Text that is not
-// Done means there is nothing to show yet; the loop keeps polling without
-// printing anything.
 type watchFrame struct {
 	Key  string
 	Text string
 	Done bool
 }
 
-// watchRender produces one frame of a watched view.
 type watchRender func(ctx context.Context) (watchFrame, error)
 
-// watchSeparator returns what is printed between two frames. Table output
-// gets a timestamp line for people; json frames are concatenated documents
-// a streaming decoder reads one after another, and yaml frames are
-// separated by a bare document marker.
 func watchSeparator(format string) func() string {
 	switch format {
 	case outputJSON:
@@ -47,13 +36,6 @@ func watchSeparator(format string) func() string {
 	}
 }
 
-// watchLoop reprints a view whenever its state key changes, with a
-// format-aware separator between frames, until the view reports it is done
-// or the user interrupts with Ctrl-C. It reports whether the view finished
-// on its own; an interrupt or an ended context is not an error. A frame
-// rendered after the context ended is dropped, the way orka task wait
-// rejects a success that lands after its deadline, so done means the final
-// frame was printed.
 func watchLoop(ctx context.Context, out io.Writer, interval time.Duration, format string, render watchRender) (bool, error) {
 	separator := watchSeparator(format)
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)

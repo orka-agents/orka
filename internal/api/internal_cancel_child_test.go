@@ -32,10 +32,6 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
-// setupCancelChildHandlers serves the cancel endpoint to my-task's worker Pod.
-// my-task has a running child with a worker Job, a finished child, an agent
-// child, a child with ACP execution, and a child whose parent label lacks the
-// controller owner reference; worker-a is its sibling.
 func setupCancelChildHandlers(t *testing.T) (*InternalHandlers, func(path string, body any) *http.Response) {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -85,7 +81,6 @@ func cancelChildTask(t *testing.T, h *InternalHandlers, name string) *corev1alph
 	return task
 }
 
-// requireNoCancelRequest checks that the endpoint left the Task untouched.
 func requireNoCancelRequest(t *testing.T, h *InternalHandlers, name string, phase corev1alpha1.TaskPhase) {
 	t.Helper()
 	task := cancelChildTask(t, h, name)
@@ -108,10 +103,8 @@ func TestCancelChildTaskRecordsTheRequestForTheController(t *testing.T) {
 	require.Equal(t, tools.CancelTaskResult{TaskName: "my-child", Status: "cancellation requested"}, decodeCancelResult(t, resp))
 	child := cancelChildTask(t, h, "my-child")
 	require.Equal(t, "cancelled by parent task: wrong approach", child.Annotations[labels.AnnotationCancelRequested])
-	// The Task controller, not the API, writes the terminal status.
 	require.Equal(t, corev1alpha1.TaskPhaseRunning, child.Status.Phase)
 
-	// A repeated request keeps the first message.
 	resp = post("/internal/v1/tasks/default/my-task/children/my-child/cancel", map[string]string{"reason": "again"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "cancellation requested", decodeCancelResult(t, resp).Status)
@@ -178,7 +171,6 @@ func TestCancelChildTaskRejectsTasksOutsideCallerScope(t *testing.T) {
 		{name: "sibling", path: "/internal/v1/tasks/default/my-task/children/worker-a/cancel", unchanged: "worker-a"},
 		{name: "forged parent label", path: "/internal/v1/tasks/default/my-task/children/forged-child/cancel", unchanged: "forged-child"},
 		{name: "missing", path: "/internal/v1/tasks/default/my-task/children/no-such-task/cancel"},
-		// The caller is my-task's Pod, so it cannot act as worker-a.
 		{name: "impersonated parent", path: "/internal/v1/tasks/default/worker-a/children/my-child/cancel", unchanged: "my-child"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -241,8 +233,6 @@ func TestCancelChildTaskRejectsRevocationBeforeIntentCommit(t *testing.T) {
 			if err := c.Get(ctx, key, object, opts...); err != nil {
 				return err
 			}
-			// This child read is inside access, after the initial fence check,
-			// immediately before cancellation commits its durable intent.
 			if _, fenced := store.TaskDataFenceFrom(ctx); !fenced || key.Name != "my-child" || revoked {
 				return nil
 			}
@@ -264,8 +254,6 @@ func TestCancelChildTaskPublishesIntentCommittedBeforeRevocation(t *testing.T) {
 	patched := false
 	h.k8sClient = interceptor.NewClient(h.k8sClient.(client.WithWatch), interceptor.Funcs{
 		Patch: func(ctx context.Context, c client.WithWatch, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
-			// The intent is durable before the external effect. Revocation can
-			// commit here because no provider transaction spans this patch.
 			require.Len(t, cancellationIntents(t, h), 1)
 			require.NoError(t, h.resultStore.(store.TaskJobAuthorityStore).RevokeTaskJob(ctx, store.TaskJobIdentity{
 				Namespace: "default", TaskUID: "my-task-uid", JobUID: "my-task-job-uid",

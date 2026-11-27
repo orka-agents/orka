@@ -118,7 +118,6 @@ func TestCopyOutNeverClobbersOnFailure(t *testing.T) {
 		n, err := w.Write([]byte("fresh"))
 		return int64(n), err
 	}
-	// A directory destination receives the workspace file's base name.
 	if err := copyOutOfWorkspace(context.Background(), cmd, succeeding, "t", "src/new.go", dir, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +158,7 @@ func TestOperatorExecTimeoutSeconds(t *testing.T) {
 		want    int64
 		ok      bool
 	}{
-		{500 * time.Millisecond, 1, true}, // never truncated to 0, the server default
+		{500 * time.Millisecond, 1, true},
 		{time.Second, 1, true},
 		{1500 * time.Millisecond, 2, true},
 		{operatoraccess.MaxExecTimeout, int64(operatoraccess.MaxExecTimeout / time.Second), true},
@@ -188,9 +187,6 @@ func TestTaskExecRejectsAnInvalidTimeoutBeforeConnecting(t *testing.T) {
 	}
 }
 
-// Exit statuses below 124 belong to the remote command. A refusal that arrives
-// before the stream opens (operator access disabled, a missing permission, a
-// class without the opt-in) ran nothing, so it must not exit 1.
 func TestTaskExecRefusalBeforeTheStreamExitsWith126(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -229,9 +225,6 @@ func TestOperatorExecFailureExitCodes(t *testing.T) {
 	}
 }
 
-// The copy lands in a temporary file that is renamed over the destination, and
-// the temporary file is created 0600. Replacing a local script must not make it
-// non-executable, or a shared file unreadable to its group.
 func TestCopyOutKeepsAnExistingFilesPermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows has no Unix permission bits")

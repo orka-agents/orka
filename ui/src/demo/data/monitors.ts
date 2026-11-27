@@ -11,10 +11,6 @@ import type {
 import { ago, DEMO_NAMESPACE, digest, uid } from '../shared'
 import { AGENTS, ORG, REPOS, type RepoKey } from '../world'
 
-// Repository monitor fixtures: maintainer automation on the Northwind Labs
-// repositories. PR queues, issue inventories, and audit trails reference the
-// review/triage/fix tasks in world.ts. Handlers mutate these arrays in place.
-
 const ns = DEMO_NAMESPACE
 const MINUTE = 60_000
 const BOT = 'northwind-orka[bot]'
@@ -117,8 +113,6 @@ export const monitors: RepositoryMonitor[] = [
   }),
 ]
 
-// ---- Runs ----
-
 export interface MonitorRunRecord {
   run: MonitorRun
   startedMs: number
@@ -163,8 +157,6 @@ export function viewMonitorRun(record: MonitorRunRecord, nowMs = Date.now()): Mo
   return { ...record.run, ...record.result, completedAt: new Date(record.finishMs).toISOString() }
 }
 
-// ---- Items (PR queue and issue inventory) ----
-
 type ItemSeed = Omit<MonitorItem, 'monitorNamespace' | 'itemKey' | 'updatedAt' | 'lastSeenAt'> & { monitorName: string; updatedAgo: number; labels?: string[] }
 
 function item(seed: ItemSeed): MonitorItem {
@@ -189,7 +181,6 @@ const reviewURL = (monitorName: string, number: number, id: number) =>
   `${monitors.find((m) => m.metadata.name === monitorName)?.spec.repoURL}/pull/${number}#pullrequestreview-${id}`
 
 export const items: MonitorItem[] = [
-  // checkout-service pull requests
   item({
     monitorName: 'checkout-service', kind: 'pull_request', number: 1486, title: 'fix(refunds): scope refund lookup to the calling merchant', author: BOT, state: 'open',
     baseBranch: 'main', headBranch: 'orka/security/refund-merchant-scope', headSHA: sha('pr1486'), ciState: 'pending', lastVerdict: 'queued', labels: ['security', 'orka'], updatedAgo: 95,
@@ -221,7 +212,6 @@ export const items: MonitorItem[] = [
     baseBranch: 'main', headBranch: 'jordan/remove-v1-checkout', headSHA: sha('pr1471'), ciState: 'passed', lastVerdict: 'security_sensitive',
     lastPublishPhase: 'skipped', lastPublishReason: 'postSecuritySensitive is false', labels: ['breaking-change'], updatedAgo: 300,
   }),
-  // checkout-service issues
   item({
     monitorName: 'checkout-service', kind: 'issue', number: 2221, title: 'Refund confirmation emails sent twice when the processor retries', author: 'lena.fischer', state: 'open',
     workflowPhase: 'triage_queued', labels: ['bug'], updatedAgo: 3,
@@ -243,7 +233,6 @@ export const items: MonitorItem[] = [
     monitorName: 'checkout-service', kind: 'issue', number: 2205, title: 'Document webhook signing secret rotation', author: 'dev.patel', state: 'open',
     workflowPhase: 'paused', skipReason: 'pause label orka:pause present', labels: ['docs', 'orka:pause'], updatedAgo: 60 * 26,
   }),
-  // inventory-api
   item({
     monitorName: 'inventory-api', kind: 'pull_request', number: 615, title: 'Lock the SKU row in reserve() with SELECT ... FOR UPDATE', author: 'dev.patel', state: 'open',
     baseBranch: 'main', headBranch: 'dev/reserve-row-lock', headSHA: sha('pr615'), ciState: 'passed', lastVerdict: 'needs_changes',
@@ -270,7 +259,6 @@ export const items: MonitorItem[] = [
     monitorName: 'inventory-api', kind: 'issue', number: 3380, title: 'Migrate warehouse adapters to the v3 scanner SDK', author: 'sam.okafor', state: 'open',
     workflowPhase: 'implementation_queued', skipReason: 'implementation_active_budget_exhausted', labels: ['enhancement', 'orka:implement'], updatedAgo: 60 * 20,
   }),
-  // web-storefront
   item({
     monitorName: 'web-storefront', kind: 'pull_request', number: 876, title: 'Release v2.14.0', author: 'maya.chen', state: 'open',
     baseBranch: 'main', headBranch: 'release/v2.14.0', headSHA: sha('pr876'), ciState: 'pending', lastVerdict: 'unseen', labels: ['release'], updatedAgo: 18,
@@ -286,8 +274,6 @@ export const items: MonitorItem[] = [
     baseBranch: 'main', headBranch: 'lena/pdp-layout', headSHA: sha('pr869'), ciState: 'failed', lastVerdict: 'skipped', skipReason: 'draft pull request', labels: ['wip'], updatedAgo: 60 * 30,
   }),
 ]
-
-// ---- Actions (agent outputs recorded per item) ----
 
 function action(monitorName: string, id: string, fields: Omit<MonitorAction, 'id' | 'monitorNamespace' | 'monitorName' | 'createdAt'>, createdAgo: number): MonitorAction {
   return { id, monitorNamespace: ns, monitorName, monitorGeneration: 1, createdAt: ago(createdAgo), ...fields }
@@ -305,8 +291,6 @@ export const actions: MonitorAction[] = [
   action('inventory-api', 'act_inventory_0228', { kind: 'issue', number: 3388, actionKind: 'triage', taskName: 'triage-issue-3388-k4v1s', verdict: 'success', confidence: 'medium', summary: 'Feature request; suggested reusing the CSV import pipeline from exports.' }, 139),
   action('web-storefront', 'act_storefront_0091', { kind: 'pull_request', number: 873, actionKind: 'review', headSHA: sha('pr873'), taskName: 'review-pr-873-f5j9w', verdict: 'passed', confidence: 'high', summary: 'loading="lazy" plus explicit dimensions avoids layout shift; LCP image correctly excluded.' }, 91),
 ]
-
-// ---- Commands ----
 
 function command(monitorName: string, id: string, fields: Omit<MonitorCommand, 'id' | 'monitorNamespace' | 'monitorName' | 'createdAt'>, createdAgo: number): MonitorCommand {
   const repo = monitors.find((m) => m.metadata.name === monitorName)?.spec.repository
@@ -331,8 +315,6 @@ export const commands: MonitorCommand[] = [
   command('inventory-api', 'cmd_inventory_0042', { kind: 'issue', number: 3391, source: 'github_comment', command: '/orka triage', author: 'dev.patel', authorAssociation: 'MEMBER', permission: 'maintain', intent: 'triage', status: 'processed' }, 40),
   command('inventory-api', 'cmd_inventory_0040', { kind: 'issue', number: 3380, source: 'github_label', label: 'orka:implement', author: 'sam.okafor', authorAssociation: 'MEMBER', permission: 'write', intent: 'implement', status: 'accepted' }, 60 * 20),
 ]
-
-// ---- Work actions (workflow timeline) ----
 
 function workAction(monitorName: string, id: string, fields: Omit<MonitorWorkAction, 'id' | 'monitorNamespace' | 'monitorName' | 'createdAt' | 'updatedAt' | 'attempt'> & { attempt?: number }, createdAgo: number, updatedAgo = createdAgo): MonitorWorkAction {
   return {
@@ -361,8 +343,6 @@ export const workActions: MonitorWorkAction[] = [
   workAction('web-storefront', 'wa_storefront_0048', { runID: 'run_web_0376', targetKind: 'pull_request', targetNumber: 873, targetSHA: sha('pr873'), intent: 'review', desiredAction: 'review', status: 'succeeded', phase: 'published', taskName: 'review-pr-873-f5j9w', completedAt: ago(90) }, 96, 90),
 ]
 
-// ---- Implementation jobs ----
-
 function implJob(monitorName: string, id: string, fields: Omit<MonitorImplementationJob, 'id' | 'monitorNamespace' | 'monitorName' | 'createdAt' | 'updatedAt' | 'attempt'> & { attempt?: number }, createdAgo: number, updatedAgo = createdAgo): MonitorImplementationJob {
   const repo = monitors.find((m) => m.metadata.name === monitorName)?.spec.repository
   return { id, monitorNamespace: ns, monitorName, repo: `${ORG}/${repo}`, attempt: 1, monitorGeneration: 1, createdAt: ago(createdAgo), updatedAt: ago(updatedAgo), ...fields }
@@ -374,8 +354,6 @@ export const implementationJobs: MonitorImplementationJob[] = [
   implJob('inventory-api', 'impl_inventory_0011', { issueNumber: 3372, phase: 'implementing', branch: 'orka/issue-3372-expiry-batching', validationState: 'pending', taskName: 'implement-issue-3372-v5k3t' }, 50, 4),
   implJob('inventory-api', 'impl_inventory_0009', { issueNumber: 3350, phase: 'blocked', attempt: 3, branch: 'orka/issue-3350-supplier-feed', validationState: 'failed', error: 'patch changes 34 files; maxChangedFiles is 20' }, 60 * 50, 60 * 46),
 ]
-
-// ---- GitHub mutations (audit trail) ----
 
 function mutation(monitorName: string, id: string, fields: Omit<MonitorMutation, 'id' | 'monitorNamespace' | 'monitorName' | 'createdAt'>, createdAgo: number): MonitorMutation {
   return {

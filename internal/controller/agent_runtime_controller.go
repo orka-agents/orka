@@ -77,7 +77,6 @@ const (
 	agentRuntimeCleanupSnapshotSchemaVersion   = 1
 )
 
-// AgentRuntimeReconciler reconciles external harness v2 registry entries.
 type AgentRuntimeReconciler struct {
 	client.Client
 	APIReader              client.Reader
@@ -97,8 +96,6 @@ type AgentRuntimeReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
 
-// Reconcile validates one exact external runtime and publishes condition-ready status.
-//
 //nolint:gocyclo // Registration, conformance, and readiness are reconciled as one lifecycle.
 func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -122,9 +119,6 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if err != nil {
 			message = err.Error()
 		}
-		// Retention recovery may fence owner metadata through an immutable
-		// historical boot snapshot. Refresh that write's resourceVersion before
-		// updating status, without carrying an observation to another owner.
 		current := &corev1alpha1.AgentRuntime{}
 		if err := r.endpointReader().Get(ctx, req.NamespacedName, current); err != nil {
 			return ctrl.Result{}, err
@@ -204,10 +198,7 @@ type agentRuntimeDeletionSnapshot struct {
 	CapabilityAuthSecretUID       types.UID                                      `json:"capabilityAuthSecretUID"`
 	ControllerAuthResourceVersion string                                         `json:"controllerAuthResourceVersion"`
 	CapabilityAuthResourceVersion string                                         `json:"capabilityAuthResourceVersion"`
-	// Optional for snapshots created before physical Service conformance was
-	// recorded. Such snapshots retain cleanup authority but cannot admit work
-	// through a Service until the current backend passes deep conformance.
-	ServiceBackendDigest string `json:"serviceBackendDigest,omitempty"`
+	ServiceBackendDigest          string                                         `json:"serviceBackendDigest,omitempty"`
 }
 
 func agentRuntimeCleanupSecretName(runtime *corev1alpha1.AgentRuntime) (string, error) {
@@ -565,9 +556,6 @@ func (r *AgentRuntimeReconciler) recordDrainedAgentRuntimeTaskCleanupForTask(
 		taskScopedRuntimeSessionCleanupCompleteForUID(task, taskUID) {
 		return true, nil
 	}
-	// A drain certifies only the supervisor boot that answered it. After an
-	// epoch rotation, a different live boot cannot prove cleanup for Tasks
-	// still bound to the frozen boot; only an existing exact receipt can.
 	if !canRecordNewProof {
 		return false, nil
 	}
@@ -588,9 +576,6 @@ func (r *AgentRuntimeReconciler) recordDrainedAgentRuntimeTaskCleanupForTask(
 	return true, nil
 }
 
-// A delayed metadata write must not affect a new object with the same name or
-// overwrite a newer finalizer set. Include the immutable UID in the merge patch
-// as well as its resourceVersion; ordinary MergeFrom omits an unchanged UID.
 func agentRuntimeCleanupMetadataPatch(base client.Object) client.Patch {
 	comparison := base.DeepCopyObject().(client.Object)
 	comparison.SetUID("")
@@ -986,10 +971,6 @@ func newAgentRuntimeDeletionDrainRequest(fence harnessv2.Fence, now time.Time) (
 	return request, nil
 }
 
-// retryPoisonedAgentRuntimeSession resumes one failed cleanup after drain has
-// closed admission. Active and already-deleting residents keep their current
-// cleanup owners. A later authenticated quiescent Status still gates finalizer
-// removal, even when this exact deletion succeeds.
 func retryPoisonedAgentRuntimeSession(ctx context.Context, runtimeClient *harnessv2.Client, status *harnessv2.StatusResponse) error {
 	for _, session := range status.Sessions {
 		if session.State != harnessv2.RuntimeSessionStatePoisoned {
@@ -1012,9 +993,6 @@ func retryPoisonedAgentRuntimeSession(ctx context.Context, runtimeClient *harnes
 		if err := sealMutation(&request.Metadata.RequestDigest, request); err != nil {
 			return fmt.Errorf("seal AgentRuntime session cleanup retry: %w", err)
 		}
-		// Failed cleanup does not record a completed DELETE. Success records
-		// this stable per-resident operation and removes the resident, so
-		// polling does not accumulate pool-wide drain operation records.
 		if _, err := runtimeClient.DeleteRuntimeSession(ctx, session.RuntimeSessionID, request); err != nil {
 			return fmt.Errorf("retry poisoned AgentRuntime session cleanup: %w", err)
 		}
@@ -1023,10 +1001,6 @@ func retryPoisonedAgentRuntimeSession(ctx context.Context, runtimeClient *harnes
 	return nil
 }
 
-// conflictingManagedRuntimePoolIdentityOwner reserves every managed
-// RuntimePool UID for that pool, regardless of its current lifecycle state.
-// External registrations must never make shared authorization lookups
-// ambiguous for an existing managed pool.
 func (r *AgentRuntimeReconciler) conflictingManagedRuntimePoolIdentityOwner(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
@@ -1048,11 +1022,6 @@ func (r *AgentRuntimeReconciler) conflictingManagedRuntimePoolIdentityOwner(
 	return nil, nil
 }
 
-// conflictingAgentRuntimePoolIdentityOwner returns the incumbent registration
-// for an authenticated pool identity. A single published registration remains
-// the owner even while NotReady because active sessions retain its broker
-// authority. If an upgrade left several published owners, stable object
-// identity ordering picks one so reconciling the others repairs the ambiguity.
 func (r *AgentRuntimeReconciler) conflictingAgentRuntimePoolIdentityOwner(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
@@ -1115,10 +1084,6 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	if err := r.validateAgentRuntimeEndpointPolicy(ctx, runtime); err != nil {
 		return nil, false, "", "", "", err.Error()
 	}
-	// Resolve the verified Service backend pins now, right after the endpoint
-	// policy passed, so every conformance dial below targets a proven
-	// backend Pod rather than the mutable Service ClusterIP. Non-Service
-	// endpoints return no pins and fall back to the public-address dial control.
 	backend, err := r.serviceBackendStateForValidatedEndpoint(ctx, runtime)
 	if err != nil {
 		return nil, false, "", "", "", err.Error()
@@ -1233,8 +1198,6 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 		"authenticated orka.harness.v2 conformance passed"
 }
 
-// Check each pinned endpoint under the same overall probe deadline. A pooled
-// HTTP connection to one Pod cannot certify another Pod selected by the Service.
 func checkAgentRuntimeServiceBackends(ctx context.Context, target v2conformance.Target) v2conformance.Result {
 	if len(target.PinnedBackendAddresses) < 2 {
 		return v2conformance.Check(ctx, target)
@@ -1267,8 +1230,6 @@ func checkAgentRuntimeV2Conformance(
 		if deep {
 			target.ProbeTimeout = agentRuntimeLifecycleTimeout
 		}
-		// Derive each check from the caller, so an identity change discovered
-		// near the shallow deadline still gets one bounded lifecycle check.
 		probeCtx, cancel := context.WithTimeout(ctx, target.ProbeTimeout)
 		defer cancel()
 		return check(probeCtx, target)
@@ -1525,10 +1486,6 @@ func agentRuntimeWorkspaceGovernance(spec corev1alpha1.AgentRuntimeWorkspaceGove
 	return claims, nil
 }
 
-// endpointReader prefers the uncached APIReader for endpoint-policy reads so
-// a Service, EndpointSlice, or backend Pod mutated just before dispatch is
-// observed exactly, not at manager-cache latency. It falls back to the cached
-// client when no APIReader is configured.
 func (r *AgentRuntimeReconciler) endpointReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
@@ -1560,17 +1517,9 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 		if err := r.endpointReader().Get(ctx, types.NamespacedName{Namespace: serviceNamespace, Name: serviceName}, &service); err != nil {
 			return fmt.Errorf("get AgentRuntime endpoint Service %s/%s: %w", serviceNamespace, serviceName, err)
 		}
-		// An ExternalName Service is a CNAME alias to an arbitrary hostname:
-		// it would let a namespace-scoped caller steer conformance traffic —
-		// which exempts recognized .svc hostnames from the public-address
-		// dial policy — at cross-namespace or internal targets.
 		if service.Spec.Type == corev1.ServiceTypeExternalName {
 			return fmt.Errorf("AgentRuntime endpoint Service %s/%s is an ExternalName alias; only cluster-backed Services are permitted", serviceNamespace, serviceName)
 		}
-		// The same-namespace exemption from the public-address dial policy is
-		// justified only when the Service routes to same-namespace Pods that
-		// Kubernetes selected. A selectorless Service or a manually managed
-		// EndpointSlice/Endpoints backend can route the ClusterIP anywhere.
 		if len(service.Spec.Selector) == 0 {
 			return fmt.Errorf("AgentRuntime endpoint Service %s/%s has no selector; only Services selecting same-namespace Pods are permitted", serviceNamespace, serviceName)
 		}
@@ -1583,40 +1532,21 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 	if parsed.Scheme != urlSchemeHTTPS {
 		return fmt.Errorf("external AgentRuntime endpoints must use https")
 	}
-	// A non-service endpoint is probed and conformance-tested from the
-	// controller's privileged network position. A private, link-local, or
-	// otherwise non-public IP literal would let a namespace-scoped caller
-	// bypass the same-namespace Service restriction (e.g. by naming a
-	// ClusterIP directly) and aim controller traffic at internal addresses.
 	if address, err := netip.ParseAddr(host); err == nil && !isPublicAgentRuntimeAddress(address) {
 		return fmt.Errorf("external AgentRuntime endpoints must not use non-public IP literals")
 	}
 	return nil
 }
 
-// isPublicAgentRuntimeAddress permits only public global unicast addresses
-// outside every special-use range (CGNAT, benchmarking, TEST-NETs, relays)
-// for external AgentRuntime endpoints, sharing the conformance dial policy.
 func isPublicAgentRuntimeAddress(address netip.Addr) bool {
 	return v2conformance.PublicAddressAllowed(address)
 }
 
-// validateAgentRuntimeServiceBackends resolves every EndpointSlice address
-// serving the endpoint Service back to a live same-namespace Pod that the
-// Service selector actually selects and whose PodIPs contain the advertised
-// address. EndpointSlice fields (managed-by label, TargetRef, Addresses) are
-// all writable by a namespace caller, so none of them are trusted as proof of
-// ownership; only the Pod's own status and labels are. This runs on every
-// reconcile immediately before probing.
 func (r *AgentRuntimeReconciler) validateAgentRuntimeServiceBackends(ctx context.Context, service *corev1.Service, targetPort int32) error {
 	_, err := r.verifiedAgentRuntimeServiceBackends(ctx, service, targetPort)
 	return err
 }
 
-// agentRuntimeEndpointServicePort resolves the Service port the endpoint URL
-// targets: the explicit URL port, or the scheme default. Only the EndpointSlice
-// port matching this Service port is pinned, so a Service exposing extra ports
-// (metrics, sidecars) never diverts controller bearer/capability traffic.
 func agentRuntimeEndpointServicePort(parsed *url.URL) (int32, error) {
 	if portText := parsed.Port(); portText != "" {
 		port, err := strconv.Atoi(portText)
@@ -1635,9 +1565,6 @@ func agentRuntimeEndpointServicePort(parsed *url.URL) (int32, error) {
 	}
 }
 
-// agentRuntimeTCPServicePort selects the HTTP endpoint's ServicePort. An
-// omitted protocol defaults to TCP; another protocol on the same number does
-// not select the ServicePort used by the authenticated connection.
 func agentRuntimeTCPServicePort(service *corev1.Service, targetPort int32) (*corev1.ServicePort, bool) {
 	for i := range service.Spec.Ports {
 		port := &service.Spec.Ports[i]
@@ -1648,9 +1575,6 @@ func agentRuntimeTCPServicePort(service *corev1.Service, targetPort int32) (*cor
 	return nil, false
 }
 
-// agentRuntimeServiceTargetPort resolves the selected TCP ServicePort against
-// this Pod. Numeric targets need no container-port declaration. Named targets
-// search regular containers, then restartable init sidecars, as Kubernetes does.
 func agentRuntimeServiceTargetPort(servicePort *corev1.ServicePort, pod *corev1.Pod) (int32, bool) {
 	switch servicePort.TargetPort.Type {
 	case intstr.Int:
@@ -1693,15 +1617,11 @@ type agentRuntimeServiceContainerIdentity struct {
 	StartedAt    metav1.Time `json:"startedAt"`
 }
 
-// Hash only physical identity, not resource versions or readiness timestamps:
-// normal EndpointSlice/status refreshes must not trigger lifecycle mutations.
 func agentRuntimeServicePodDigest(pod *corev1.Pod) (string, error) {
 	if pod.UID == "" || len(pod.Spec.Containers) == 0 || len(pod.Status.ContainerStatuses) != len(pod.Spec.Containers) {
 		return "", nil
 	}
 	containers := make(map[string]agentRuntimeServiceContainerIdentity)
-	// A Service can target a native sidecar or an ephemeral container too.
-	// Their process replacements must invalidate the same Pod's conformance.
 	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses, pod.Status.EphemeralContainerStatuses} {
 		for _, status := range statuses {
 			if status.Name == "" || status.ContainerID == "" || status.ImageID == "" {
@@ -1741,12 +1661,6 @@ func agentRuntimeServiceIdentityDigest(value any) (string, error) {
 	return fmt.Sprintf("sha256:%x", digest), nil
 }
 
-// verifiedAgentRuntimeServiceBackends validates the Service's backends and
-// returns the set of verified backend Pod IPs. Dispatch pins the authenticated
-// connection to one of these IPs so a Service or EndpointSlice swapped between
-// this check and the dial cannot route the request to an arbitrary address
-// (the validate-then-dial TOCTOU cannot be closed while routing through the
-// still-mutable Service ClusterIP).
 func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackends(
 	ctx context.Context,
 	service *corev1.Service,
@@ -1767,10 +1681,6 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackendState(
 	deny := func(detail string) error {
 		return fmt.Errorf("AgentRuntime endpoint Service %s/%s %s; only same-namespace Pods selected by the Service are permitted", serviceNamespace, serviceName, detail)
 	}
-	// Resolve the ServicePort the endpoint URL targets so only its matching
-	// EndpointSlice port is pinned. A Service exposing extra ports (metrics,
-	// sidecars) must never receive controller bearer/capability traffic, and an
-	// endpoint naming a port the Service does not expose is rejected.
 	servicePort, ok := agentRuntimeTCPServicePort(service, targetPort)
 	if !ok {
 		return agentRuntimeServiceBackendState{}, deny(fmt.Sprintf("does not expose TCP port %d", targetPort))
@@ -1845,12 +1755,6 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackendState(
 				backendKey = pod.Namespace + "\x00" + pod.Name
 			}
 			backendPods[backendKey] = struct{}{}
-			// Every endpoint's advertised address is still validated against the
-			// backing Pod, but only a currently serving backend enters the pinned
-			// set: ApplyPinnedBackendDial round-robins the pins without a health
-			// fallback, so an explicitly unready or terminating endpoint (or a Pod
-			// being deleted) would make dispatch fail even though healthy backends
-			// remain.
 			if !agentRuntimeEndpointPinnable(endpoint, &pod) {
 				continue
 			}
@@ -1871,12 +1775,6 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackendState(
 			}
 		}
 	}
-	// Fail closed: a Service endpoint with no verified backend for the selected
-	// port (a rollout gap, or a caller's validation race) must not degrade to an
-	// unpinned Service ClusterIP dial, which recognized .svc endpoints also
-	// exempt from the public-address control. Treating zero pins as "not pinned"
-	// would let an EndpointSlice added after this check divert authenticated
-	// status or mutation traffic to an unverified address.
 	if len(verified) == 0 {
 		return agentRuntimeServiceBackendState{}, deny(fmt.Sprintf("has no verified backend endpoint for port %d", targetPort))
 	}
@@ -1899,11 +1797,6 @@ func (r *AgentRuntimeReconciler) verifiedAgentRuntimeServiceBackendState(
 	return state, nil
 }
 
-// agentRuntimeEndpointPinnable reports whether an EndpointSlice endpoint is
-// currently serving and may be pinned. A nil EndpointSlice Ready condition is
-// tolerated for older controllers, but the backing Pod must independently be
-// Ready so publishNotReadyAddresses or a forged slice cannot put an unready Pod
-// in the authenticated dial set.
 func agentRuntimeEndpointPinnable(endpoint discoveryv1.Endpoint, pod *corev1.Pod) bool {
 	if endpoint.Conditions.Ready != nil && !*endpoint.Conditions.Ready {
 		return false
@@ -1922,8 +1815,6 @@ func agentRuntimeEndpointPinnable(endpoint discoveryv1.Endpoint, pod *corev1.Pod
 	return false
 }
 
-// agentRuntimeEndpointPortName dereferences an EndpointSlice port name, treating
-// a nil name as the empty name of a single unnamed ServicePort.
 func agentRuntimeEndpointPortName(name *string) string {
 	if name == nil {
 		return ""
@@ -1931,20 +1822,11 @@ func agentRuntimeEndpointPortName(name *string) string {
 	return *name
 }
 
-// AgentRuntimeServiceBackendPins validates the endpoint policy and, for a
-// same-namespace Service endpoint, returns the verified backend addresses to
-// pin the dial to. It returns nil for non-Service endpoints (which the
-// public-address dial control governs instead). The reader must be uncached
-// for a dispatch-time revalidation.
 func (r *AgentRuntimeReconciler) AgentRuntimeServiceBackendPins(ctx context.Context, runtime *corev1alpha1.AgentRuntime) ([]string, error) {
 	state, err := r.agentRuntimeServiceBackendState(ctx, runtime)
 	return state.pins, err
 }
 
-// AgentRuntimeConformedServiceBackendPins additionally requires that every
-// current v2 Service backend belongs to the last successful conformance check.
-// New work uses this method; cleanup keeps its original frozen authority and
-// uses AgentRuntimeServiceBackendPins even after the serving backend changes.
 func (r *AgentRuntimeReconciler) AgentRuntimeConformedServiceBackendPins(ctx context.Context, runtime *corev1alpha1.AgentRuntime) ([]string, error) {
 	state, err := r.agentRuntimeServiceBackendState(ctx, runtime)
 	if err != nil {
@@ -2018,8 +1900,6 @@ func (r *AgentRuntimeReconciler) agentRuntimeServiceBackendState(
 	return r.serviceBackendStateForValidatedEndpoint(ctx, runtime)
 }
 
-// serviceBackendStateForValidatedEndpoint returns backend pins and physical
-// identity after the caller has validated the endpoint policy.
 func (r *AgentRuntimeReconciler) serviceBackendStateForValidatedEndpoint(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
@@ -2044,20 +1924,10 @@ func (r *AgentRuntimeReconciler) serviceBackendStateForValidatedEndpoint(
 	return r.verifiedAgentRuntimeServiceBackendState(ctx, &service, servicePort)
 }
 
-// PinnedBackendDialTransport returns a proxy-disabled transport that dials only
-// the given verified backend addresses, ignoring the Service ClusterIP the URL
-// would otherwise resolve to. Pinning the authenticated connection to a
-// verified Pod backend closes the validate-then-dial TOCTOU that routing
-// through the still-mutable Service would leave open. It shares the conformance
-// package's dial implementation so dispatch and conformance pin identically.
 func PinnedBackendDialTransport(addresses []string) *http.Transport {
 	return v2conformance.PinnedBackendDialTransport(addresses)
 }
 
-// agentRuntimeEndpointRequiresPublicDial reports whether conformance dials to
-// the endpoint must be restricted to public addresses: everything except
-// recognized same-namespace Service DNS forms (which legitimately resolve to
-// cluster-internal addresses) and the loopback test escape hatch.
 func agentRuntimeEndpointRequiresPublicDial(endpoint string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil {
@@ -2135,20 +2005,12 @@ func (r *AgentRuntimeReconciler) agentRuntimeAuthMaterial(ctx context.Context, r
 	if !ok || len(capabilityKey) < harnessv2.MinCapabilitySecretBytes {
 		return agentRuntimeAuthMaterial{}, fmt.Errorf("AgentRuntime operation capability Secret %s/%s key %q must contain at least %d bytes", runtime.Namespace, capabilityRef.Name, capabilityRef.Key, harnessv2.MinCapabilitySecretBytes)
 	}
-	// Runtimes that project these Secrets as files trim surrounding
-	// whitespace before verifying, while the controller signs with the raw
-	// bytes; a trailing newline would make every signed capability invalid
-	// and leave the runtime permanently unready. Fail closed with a clear
-	// message instead.
 	if !bytes.Equal(controllerToken, bytes.TrimSpace(controllerToken)) {
 		return agentRuntimeAuthMaterial{}, fmt.Errorf("AgentRuntime controller bearer token Secret %s/%s key %q must not contain surrounding whitespace", runtime.Namespace, controllerRef.Name, controllerRef.Key)
 	}
 	if !bytes.Equal(capabilityKey, bytes.TrimSpace(capabilityKey)) {
 		return agentRuntimeAuthMaterial{}, fmt.Errorf("AgentRuntime operation capability Secret %s/%s key %q must not contain surrounding whitespace", runtime.Namespace, capabilityRef.Name, capabilityRef.Key)
 	}
-	// The bearer is transmitted on every request; the capability secret is a
-	// signing key that must never transit. Identical resolved bytes would let
-	// a bearer holder mint valid status and exact-fence capabilities.
 	if bytes.Equal(bytes.TrimSpace(controllerToken), bytes.TrimSpace(capabilityKey)) {
 		return agentRuntimeAuthMaterial{}, fmt.Errorf("AgentRuntime controller bearer token and operation capability secret must resolve to distinct values")
 	}
@@ -2162,9 +2024,6 @@ func (r *AgentRuntimeReconciler) agentRuntimeAuthMaterial(ctx context.Context, r
 	}, nil
 }
 
-// requireCurrentAgentRuntimeAuthMaterial revalidates both v2 auth Secrets
-// after conformance so readiness fails closed when either was replaced or
-// rotated while the probe ran.
 func (r *AgentRuntimeReconciler) requireCurrentAgentRuntimeAuthMaterial(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
@@ -2188,9 +2047,6 @@ func (r *AgentRuntimeReconciler) getAgentRuntimeAuthSecret(
 	runtime *corev1alpha1.AgentRuntime,
 	ref corev1alpha1.AgentRuntimeSecretKeyReference,
 ) (*corev1.Secret, error) {
-	// Prefer the uncached APIReader so rotation is observed exactly, not at
-	// informer-cache latency; the dispatcher constructs this reconciler
-	// without one and falls back to the cached client.
 	reader := client.Reader(r.Client)
 	if r.APIReader != nil {
 		reader = r.APIReader
@@ -2241,9 +2097,6 @@ func observedCapabilitiesFromConformance(
 				observed.AdapterDigest = sanitizeStatusValue(digest, 512)
 			}
 		}
-		// Conformance already proved that the registered provider and model are
-		// members of the advertised capability sets. Persist that exact selected
-		// identity even when the runtime advertises additional supported values.
 		observed.ProviderKind = sanitizeStatusValue(registeredProfile.ProviderKind, 512)
 		observed.Model = sanitizeStatusValue(registeredProfile.Model, 512)
 	}
@@ -2343,7 +2196,6 @@ func sanitizeAgentRuntimeEndpointForStatus(endpoint string) string {
 	return parsed.Scheme + "://" + parsed.Host
 }
 
-// SetupWithManager sets up the controller with the Manager.
 func (r *AgentRuntimeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.AgentRuntime{}).

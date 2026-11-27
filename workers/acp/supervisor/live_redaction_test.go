@@ -18,7 +18,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// mapRuntimeEvent maps a runtime event that produces at most one harness event.
 func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event acp.PromptEvent) (*harnessv2.Event, error) {
 	events, err := s.mapRuntimeEvents(state, prompt, event)
 	if err != nil || len(events) == 0 {
@@ -68,14 +67,12 @@ func TestRedactionStreamReplacesACredentialSplitAcrossChunks(t *testing.T) {
 
 func TestRedactionStreamHoldsTheLastWordAndACredentialPrefix(t *testing.T) {
 	stream := newCredentialRedactor(testLiveCredential).stream()
-	// The last word may still grow into a credential shape.
 	if got := stream.write("plain text with no prefix."); got != "plain text with no " {
 		t.Fatalf("write = %q, want the last word held", got)
 	}
 	if got := stream.write(" ends with orka-ses"); got != "prefix. ends with " {
 		t.Fatalf("write = %q, want the credential prefix held", got)
 	}
-	// The stream ends at turn end: the held text was not a credential.
 	if got := stream.flush(); got != "orka-ses" {
 		t.Fatalf("flush = %q", got)
 	}
@@ -84,8 +81,6 @@ func TestRedactionStreamHoldsTheLastWordAndACredentialPrefix(t *testing.T) {
 	}
 }
 
-// streamPublished streams chunks as the supervisor publishes them: every
-// released piece is pattern-redacted on its own.
 func streamPublished(stream *redactionStream, chunks ...string) []string {
 	_, emitted := streamThrough(stream, chunks...)
 	for i := range emitted {
@@ -110,7 +105,6 @@ func TestRedactionStreamKeepsCredentialPatternsWholeAcrossChunks(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			// Patterns apply without any exact credential configured.
 			pieces := streamPublished(newCredentialRedactor().stream(), tc.chunks...)
 			whole := executionevents.RedactExecutionEventText(strings.Join(tc.chunks, ""))
 			if joined := strings.Join(pieces, ""); joined != whole {
@@ -133,8 +127,6 @@ func TestRedactionStreamReleasesProseWordByWord(t *testing.T) {
 	if got := stream.write("ld and more\nnext"); got != "world and more\n" {
 		t.Fatalf("write = %q", got)
 	}
-	// Text with no safe cut past the hold bound waits for the end of the
-	// stream, and then comes out whole.
 	long := strings.Repeat("x", maxPatternHeldBytes+1)
 	for _, chunk := range []string{long, " done"} {
 		if got := stream.write(chunk); got != "" {
@@ -146,8 +138,6 @@ func TestRedactionStreamReleasesProseWordByWord(t *testing.T) {
 	}
 }
 
-// An unfinished construct past the hold bound is never released before its
-// value arrives, however much text it holds.
 func TestRedactionStreamKeepsAnUnfinishedConstructPastTheHoldBound(t *testing.T) {
 	long := strings.Repeat("x", maxPatternHeldBytes+1)
 	for name, chunks := range map[string][]string{
@@ -170,8 +160,6 @@ func TestRedactionStreamKeepsAnUnfinishedConstructPastTheHoldBound(t *testing.T)
 }
 
 func TestRedactionStreamCutsOnUTF8Boundaries(t *testing.T) {
-	// The credential starts with a multi-byte rune, so a held prefix could
-	// otherwise split it.
 	credential := "é-credential-value-0123456789"
 	stream := newCredentialRedactor(credential).stream()
 	first := stream.write("café é")
@@ -237,9 +225,6 @@ func TestSplitUTF8KeepsRunesWhole(t *testing.T) {
 	}
 }
 
-// writeCredentialEchoUpdates is the fake agent's credential-echo turn: the
-// credential split across assistant chunks that arrive too far apart to be
-// coalesced, then in a thought, a tool title, raw input, output and a diff.
 func writeCredentialEchoUpdates(writer *bufio.Writer, sessionID, workspace, credential string) {
 	update := func(value map[string]any) {
 		writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "method": acp.MethodSessionUpdate, "params": map[string]any{
@@ -254,7 +239,6 @@ func writeCredentialEchoUpdates(writer *bufio.Writer, sessionID, workspace, cred
 		time.Sleep(3 * assistantMessageCoalesceWindow)
 	}
 	update(text("agent_thought_chunk", "thinking about "+credential))
-	// Edits are reported under the ACP session cwd, the session workspace.
 	update(map[string]any{
 		"sessionUpdate": "tool_call", "toolCallId": "echo-call", "title": "echo " + credential, "kind": "edit",
 		"rawInput": map[string]any{"command": "echo " + credential},
@@ -341,7 +325,6 @@ func TestSupervisorStreamNeverCarriesASessionCredential(t *testing.T) {
 			if terminal.Completed == nil || terminal.Completed.Result.Content[0].Text != "key: [REDACTED] end" {
 				t.Fatalf("terminal result = %#v", terminal)
 			}
-			// A held word can make the thought arrive in more than one event.
 			thoughts := thought.String()
 			if live != (thoughts == "thinking about [REDACTED]" && diffs == 1 && rawInputs == 1) {
 				t.Fatalf("live=%v carried thought=%q diffs=%d rawInputs=%d", live, thoughts, diffs, rawInputs)
@@ -576,7 +559,6 @@ func TestReleasedTextStillRedactsTheCredentialItBegins(t *testing.T) {
 			t.Fatalf("%q was not released", tc.first)
 		}
 		sent = append(sent, early)
-		// Released text is not sent again, even when nothing follows it.
 		if again := stream.release(); again != "" {
 			t.Fatalf("released %q twice", again)
 		}
@@ -595,7 +577,6 @@ func TestReleasedTextStillRedactsTheCredentialItBegins(t *testing.T) {
 			t.Errorf("%q then %q sent %q, want the text around the credential once", tc.first, tc.rest, sent)
 		}
 	}
-	// Text released and followed by nothing is sent once.
 	stream := redactor.stream()
 	if first := stream.write("the end."); first != "the " {
 		t.Fatalf("write = %q", first)
@@ -609,7 +590,6 @@ func TestReleasedTextStillRedactsTheCredentialItBegins(t *testing.T) {
 	if rest := stream.flush(); rest != "" {
 		t.Fatalf("flush sent %q again", rest)
 	}
-	// Prose after released text continues it without repeating it.
 	stream = redactor.stream()
 	stream.write("an accurate project ")
 	stream.write("summary.")
@@ -692,8 +672,6 @@ func TestDigitOnlyCredentialsAreRedactedInNumericJSON(t *testing.T) {
 	}
 }
 
-// A live prompt's permission request carries the call's input, redacted, so
-// the person deciding sees what they decide on; any other prompt's does not.
 func TestLivePermissionRequestsCarryTheRedactedCallInput(t *testing.T) {
 	credential := "sk-live-permission-credential-0123456789abcdef"
 	toolCall := `{"toolCallId":"call_1","title":"Write","kind":"edit","status":"pending",` +

@@ -11,8 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This is the pre-native-limit nested wire shape. Strict decoding must continue
-// to work for an old controller, without relaxing any unknown-field checks.
 type legacyNativeProtocolLimits struct {
 	MaxResidentSessions      uint32 `json:"maxResidentSessions"`
 	MaxConcurrentPrompts     uint32 `json:"maxConcurrentPrompts"`
@@ -27,8 +25,6 @@ type legacyNativeProtocolLimits struct {
 	MaxWorkspaceDeltaBytes   int64  `json:"maxWorkspaceDeltaBytes"`
 }
 
-// Freeze the old top-level wire shape as well as its nested limits. Embedding
-// the current response would accidentally accept newly added capability fields.
 type legacyNativeCapabilities struct {
 	Protocol                          string                                    `json:"protocol"`
 	Transport                         string                                    `json:"transport"`

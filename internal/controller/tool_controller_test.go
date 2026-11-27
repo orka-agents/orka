@@ -233,7 +233,6 @@ var _ = Describe("Tool Controller", func() {
 		}
 
 		BeforeEach(func() {
-			// Create the secret with a different key
 			secret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "tool-secret-bad-key",

@@ -61,7 +61,6 @@ func TestPublisherPresentationCapabilityGatesExplicitOverrides(t *testing.T) {
 					if err == nil || !strings.Contains(err.Error(), "does not support") {
 						t.Fatal("unsupported explicit override was not rejected")
 					}
-					// Recheck at delivery before any artifact, claim, or push can be used.
 					_, err = dispatcher.publishWorkspaceDelta(t.Context(), task, "", store.ControllerEpochFence{}, harnessv2.WorkspaceBaseline{}, harnessv2.WorkspaceDeltaDescriptor{}, nil)
 					if err == nil || !strings.Contains(err.Error(), "does not support") {
 						t.Fatal("unsupported presentation was not gated before publication")
@@ -90,7 +89,6 @@ func TestTaskPresentationRejectsSensitivePromptBeforePublisherCalls(t *testing.T
 		if err == nil || !strings.Contains(err.Error(), "must not contain credentials") || strings.Contains(err.Error(), fakeToken) || calls.Load() != 0 {
 			t.Fatal("sensitive prompt was not stopped before publisher calls")
 		}
-		// A trusted explicit title means the prompt line is not published.
 		task.Spec.Workspace.PRTitle = "fix: remove credential"
 		if err := validateTaskPullRequestText(task); err != nil {
 			t.Fatal("explicit safe title did not replace the prompt-derived title")

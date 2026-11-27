@@ -122,9 +122,6 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 			return chatToolAuthorizationError(authorize, ctx, task, "Use a task authorized by the context token")
 		}
 	}
-	// Agents these tools write are written with Orka's identity, so each hook
-	// also checks the caller's Provider use. A profile installs a hook only
-	// for the Agent tools it exposes.
 	if cfg.Profile.AgentCreateAction != "" {
 		toolCtx.AuthorizeAgentCreate = func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
 			authorize := func(ctx context.Context, agent *corev1alpha1.Agent) error {
@@ -172,12 +169,6 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 	return toolCtx
 }
 
-// scopedLinkedAccounts builds the person's linked-account resolver under
-// the connector-read boundary the connector routes and list_connections
-// apply: under enforcement, a delegated token without that scope uses no
-// linked account (a catalog built-in keeps its own credential path, as it
-// does for a person with no link), and audit mode records the missing
-// scope when a linked built-in is actually resolved.
 func scopedLinkedAccounts(factory LinkedAccountsFactory, namespace string, requester *corev1alpha1.RequestedBy, ui *UserInfo, cfg ContextTokenAuthorizationConfig) tools.LinkedAccountCredentials {
 	if factory == nil || requester == nil {
 		return nil
@@ -193,14 +184,11 @@ func scopedLinkedAccounts(factory LinkedAccountsFactory, namespace string, reque
 	return scopeGatedLinkedAccounts{inner: inner, authorize: authorize}
 }
 
-// scopeGatedLinkedAccounts consults the connector-read boundary before it
-// resolves a linked account, so a refused token never reaches custody.
 type scopeGatedLinkedAccounts struct {
 	inner     tools.LinkedAccountCredentials
 	authorize func() *tools.ChatToolError
 }
 
-// BuiltinToolCredential implements tools.LinkedAccountCredentials.
 func (s scopeGatedLinkedAccounts) BuiltinToolCredential(ctx context.Context, toolName string) (tools.LinkedAccountCredential, bool, error) {
 	if _, linked := connectors.BuiltinConnectorToolClass(toolName); linked && s.authorize() != nil {
 		return tools.LinkedAccountCredential{}, false, nil

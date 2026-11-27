@@ -18,8 +18,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// newExecutionPatchFixture stores a Pending agent Task whose prompt is being
-// submitted, and returns the Task as last read from the API server.
 func newExecutionPatchFixture(t *testing.T) (client.WithWatch, *corev1alpha1.Task) {
 	t.Helper()
 	task := &corev1alpha1.Task{
@@ -37,8 +35,6 @@ func newExecutionPatchFixture(t *testing.T) (client.WithWatch, *corev1alpha1.Tas
 	return kube, task
 }
 
-// markPromptRunning is the execution mutation the dispatcher applies when the
-// runtime accepts a prompt.
 func markPromptRunning(status *corev1alpha1.TaskExecutionStatus) {
 	status.State = corev1alpha1.TaskExecutionStateRunning
 	status.Reason = ""
@@ -76,8 +72,6 @@ func TestACPPatchExecutionKeepsConcurrentTerminalPhase(t *testing.T) {
 			completed := metav1.NewTime(time.Date(2026, 10, 20, 8, 0, 0, 0, time.UTC))
 			const message = "finished by another writer"
 
-			// Another writer finishes the Task after the dispatcher has read it
-			// as Pending but before the dispatcher's Running transition lands.
 			reads, conflicts := 0, 0
 			racing := interceptor.NewClient(kube, interceptor.Funcs{
 				Get: func(ctx context.Context, c client.WithWatch, objectKey client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -146,8 +140,6 @@ func TestACPPatchExecutionStopsAfterRepeatedConflicts(t *testing.T) {
 	key := client.ObjectKeyFromObject(task)
 	before := task.DeepCopy()
 
-	// Another writer updates the Task after every dispatcher read, so every
-	// dispatcher write is stale.
 	reads, conflicts := 0, 0
 	busy := interceptor.NewClient(kube, interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, objectKey client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -202,8 +194,6 @@ func TestACPPatchExecutionReadsPastStaleCache(t *testing.T) {
 	kube, task := newExecutionPatchFixture(t)
 	key := client.ObjectKeyFromObject(task)
 
-	// The informer cache still holds the Task from before the dispatcher's
-	// previous status write.
 	stale := task.DeepCopy()
 	task.Status.Execution.RuntimeSessionSupervisorBootID = "boot-1"
 	if err := kube.Status().Update(ctx, task); err != nil {

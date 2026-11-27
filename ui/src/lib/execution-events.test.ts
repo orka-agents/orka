@@ -73,10 +73,6 @@ describe('parseExecutionEventFrame', () => {
   })
 
   it('preserves model telemetry on streamed ModelRequest events', () => {
-    // The backend emits provider/model/stopReason/inputTokens/outputTokens at the
-    // top level on model events. The schema must keep them (Zod strips undeclared
-    // keys), otherwise a streamed event would overwrite the full-telemetry row
-    // from the initial page via mergeEventsBySeq.
     const data = eventData({
       type: 'ModelRequestCompleted',
       provider: 'anthropic',
@@ -175,13 +171,10 @@ describe('executionEventCategory', () => {
     expect(executionEventCategory('ApprovalExecutionUpdated')).toBe('approvals')
     expect(executionEventCategory('TaskForkCreated')).toBe('fork')
     expect(executionEventCategory('WorkerStarted')).toBe('worker')
-    // Agent-runtime lifecycle, including cancellation, groups under worker.
     expect(executionEventCategory('AgentRuntimeCancelled')).toBe('worker')
     expect(executionEventCategory('AgentRuntimeFailed')).toBe('worker')
     expect(executionEventCategory('PlanUpdated')).toBe('worker')
     expect(executionEventCategory('ModelContextUpdated')).toBe('model')
-    // TaskDeleted is a synthetic stream event (not in the persisted taxonomy);
-    // it is intentionally categorized as lifecycle.
     expect(executionEventCategory('TaskDeleted')).toBe('lifecycle')
   })
 

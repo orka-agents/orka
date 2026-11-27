@@ -21,9 +21,6 @@ func speculativeTestIdentity() workspacev1alpha1.InstanceIdentity {
 	return workspacev1alpha1.InstanceIdentity{AllocationID: "allocation", InstanceID: "speculative-instance", RequestRevision: speculativeTestRevision}
 }
 
-// retireSpeculativeWorkload stands in for the RuntimePool controller and the
-// provider: the booted speculative request is retired with action and the
-// provider reports it stopped, with retained data only for a Suspend.
 func (f *speculativeTaskFixture) retireSpeculativeWorkload(t *testing.T, action workspacev1alpha1.WorkloadRetirementAction) {
 	t.Helper()
 	identity := speculativeTestIdentity()
@@ -41,8 +38,6 @@ func (f *speculativeTaskFixture) retireSpeculativeWorkload(t *testing.T, action 
 	})
 }
 
-// A class that disallows Suspend would retire an unclaimed first turn with
-// Stop and no retained data, so it keeps the attach-first path.
 func TestNonSuspendClassFirstTurnNeverSpeculates(t *testing.T) {
 	t.Parallel()
 	f := newSpeculativeTaskFixtureFor(t, newACPClassFixture(t, RuntimeProviderBackendSubstrate), nil)
@@ -84,7 +79,6 @@ func TestExpiredSpeculativeStartNeverStallsItsTask(t *testing.T) {
 		if pool, _ := f.pool(t); pool.Spec.DesiredReplicas != 0 {
 			t.Fatal("an expired speculative start kept its pool")
 		}
-		// The retirement is authorized but still running: the requester waits.
 		f.patch(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
 			w.Spec.Retirement = &workspacev1alpha1.WorkloadRetirement{Sequence: 1, Identity: speculativeTestIdentity(), Action: workspacev1alpha1.WorkloadRetirementSuspend}
 		})
@@ -106,7 +100,6 @@ func TestExpiredSpeculativeStartNeverStallsItsTask(t *testing.T) {
 		f.start(t, f.task, true, "")
 		f.bootSpeculativeWorkload(t)
 		expire(t, f)
-		// An expired start whose request still boots stays attachable.
 		if _, ready := attachTestACPWorkspace(t, f.r, f.task, f.plan, f.key.Name); !ready {
 			t.Fatal("the requester could not attach its booting request after the deadline")
 		}
@@ -142,8 +135,6 @@ func TestExpiredSpeculativeStartNeverStallsItsTask(t *testing.T) {
 		if ready || !errors.Is(err, errACPWorkspaceTerminalFailure) || !strings.Contains(err.Error(), "retry the Task") {
 			t.Fatalf("ensure = (%v, %v), want a terminal failure that asks for a retry", ready, err)
 		}
-		// The failed first turn's settlement deletes the empty incarnation,
-		// so the retry gets a fresh workspace.
 		f.settleUntilDone(t, f.task)
 		remaining := &workspacev1alpha1.ExecutionWorkspace{}
 		if err := f.r.Get(ctx, f.key, remaining); err == nil {

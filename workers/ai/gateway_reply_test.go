@@ -357,7 +357,6 @@ func TestNativeGatewayReplyTokenReviewBackendUnavailable(t *testing.T) {
 			server := httptest.NewServer(adaptor.FiberApp(app))
 			defer server.Close()
 			path := filepath.Join(t.TempDir(), "token")
-			// A unique never-authenticated token forces real TokenReview on every attempt.
 			require.NoError(t, os.WriteFile(path, []byte("uncached-"+server.URL), 0600))
 			env := workerenv.AIWorkerEnv{
 				BaseEnv: workerenv.BaseEnv{

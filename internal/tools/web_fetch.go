@@ -24,7 +24,6 @@ import (
 
 const extractorRaw = "raw"
 
-// WebFetchTool implements URL content fetching and extraction
 type WebFetchTool struct {
 	client               *http.Client
 	allowPrivateForTests bool
@@ -32,14 +31,12 @@ type WebFetchTool struct {
 	maxURLBytes          int
 }
 
-// WebFetchArgs are the arguments for the web fetch tool
 type WebFetchArgs struct {
 	URL      string `json:"url"`
 	MaxChars int    `json:"max_chars,omitempty"`
 	Raw      bool   `json:"raw,omitempty"`
 }
 
-// WebFetchResult represents the fetch result
 type WebFetchResult struct {
 	URL       string `json:"url"`
 	Status    int    `json:"status"`
@@ -50,13 +47,12 @@ type WebFetchResult struct {
 }
 
 const (
-	maxBodySize                 = 5 * 1024 * 1024 // 5MB
+	maxBodySize                 = 5 * 1024 * 1024
 	defaultWebFetchMaxChars     = 50000
 	brokeredWebFetchMaxChars    = defaultWebFetchMaxChars
 	brokeredWebFetchMaxURLBytes = 64 << 10
 )
 
-// NewWebFetchTool creates a new web fetch tool
 func NewWebFetchTool() *WebFetchTool {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
@@ -76,8 +72,6 @@ func NewWebFetchTool() *WebFetchTool {
 	return tool
 }
 
-// NewBrokeredWebFetchTool creates the bounded web fetch implementation exposed
-// through the controller MCP broker.
 func NewBrokeredWebFetchTool() *WebFetchTool {
 	tool := NewWebFetchTool()
 	tool.maxChars = brokeredWebFetchMaxChars
@@ -103,17 +97,14 @@ func validateWebFetchURL(parsed *url.URL, allowPrivate bool) error {
 	return nil
 }
 
-// Name returns the tool name
 func (t *WebFetchTool) Name() string {
 	return webFetchToolName
 }
 
-// Description returns the tool description
 func (t *WebFetchTool) Description() string {
 	return "Fetch and extract content from a URL. Returns extracted text from HTML pages, pretty-printed JSON, or raw content."
 }
 
-// Parameters returns the JSON Schema for parameters
 func (t *WebFetchTool) Parameters() json.RawMessage {
 	maximum := ""
 	if t.maxChars > 0 {
@@ -145,7 +136,6 @@ func (t *WebFetchTool) Parameters() json.RawMessage {
 	}`, maxLength, defaultWebFetchMaxChars, maximum))
 }
 
-// Execute fetches the URL and extracts content
 func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var fetchArgs WebFetchArgs
 	if err := json.Unmarshal(args, &fetchArgs); err != nil {
@@ -158,8 +148,6 @@ func (t *WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	if t.maxURLBytes > 0 && len(fetchArgs.URL) > t.maxURLBytes {
 		return "", fmt.Errorf("url must be no greater than %d bytes", t.maxURLBytes)
 	}
-	// The schema advertises the character count that fits the byte limit in
-	// any UTF-8 encoding; enforce that bound too.
 	if maxChars := t.maxURLBytes / utf8.UTFMax; t.maxURLBytes > 0 && utf8.RuneCountInString(fetchArgs.URL) > maxChars {
 		return "", fmt.Errorf("url must be no greater than %d characters", maxChars)
 	}
@@ -247,7 +235,6 @@ func truncateByRuneCount(value string, maxRunes int) (string, int, bool) {
 	return value, runeCount, false
 }
 
-// extractJSON pretty-prints JSON content
 func (t *WebFetchTool) extractJSON(body []byte) (string, string) {
 	var parsed any
 	if err := json.Unmarshal(body, &parsed); err != nil {
@@ -267,7 +254,6 @@ var (
 	whitespaceRe = regexp.MustCompile(`\s+`)
 )
 
-// extractText strips HTML tags, scripts, styles, and collapses whitespace
 func extractText(body []byte) string {
 	s := string(body)
 	s = scriptRe.ReplaceAllString(s, " ")
@@ -283,5 +269,4 @@ func extractText(body []byte) string {
 	return strings.TrimSpace(s)
 }
 
-// Ensure WebFetchTool implements Tool
 var _ Tool = (*WebFetchTool)(nil)

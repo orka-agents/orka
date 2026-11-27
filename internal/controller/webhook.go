@@ -38,8 +38,6 @@ const (
 	localhostHost      = "localhost"
 )
 
-// webhookPolicyError is a destination that policy rejects outright. Such a
-// notice is failed without any network attempt and never retried.
 type webhookPolicyError struct{ message string }
 
 func (e *webhookPolicyError) Error() string { return e.message }
@@ -48,9 +46,6 @@ func webhookPolicyErrorf(format string, args ...any) error {
 	return &webhookPolicyError{message: fmt.Sprintf(format, args...)}
 }
 
-// webhookTarget is a validated webhook destination. A same-namespace Service
-// destination is pinned to the Service's ClusterIPs; any other destination is
-// resolved at dial time and must be public.
 type webhookTarget struct {
 	url    *url.URL
 	pinned []netip.Addr
@@ -65,17 +60,12 @@ var blockedWebhookHosts = []string{
 	"kubernetes.default.svc.cluster.local",
 }
 
-// validateWebhookURLPolicy applies every check that needs no network: scheme,
-// host shape, well-known internal names, literal IP addresses, and the
-// same-namespace rule for cluster Service names. It returns the parsed URL and
-// whether the host names a same-namespace Service.
 func validateWebhookURLPolicy(rawURL, namespace string, policy taskwebhook.AddressPolicy) (*url.URL, bool, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, false, webhookPolicyErrorf("invalid webhook URL")
 	}
 
-	// Only allow http and https schemes
 	if u.Scheme != urlSchemeHTTP && u.Scheme != urlSchemeHTTPS {
 		return nil, false, webhookPolicyErrorf("webhook URL scheme %q not allowed, must be http or https", u.Scheme)
 	}
@@ -113,9 +103,6 @@ func validateWebhookURLPolicy(rawURL, namespace string, policy taskwebhook.Addre
 	return u, false, nil
 }
 
-// resolveWebhookTarget validates rawURL for a Task in namespace. Public names
-// are resolved and checked at dial time, on every connection, so a DNS
-// failure or a rebinding answer can never reach a non-public address.
 func resolveWebhookTarget(ctx context.Context, kubeClient ctrlclient.Reader, rawURL, namespace string, policy taskwebhook.AddressPolicy) (*webhookTarget, error) {
 	u, clusterService, err := validateWebhookURLPolicy(rawURL, namespace, policy)
 	if err != nil {
@@ -193,8 +180,6 @@ func isClusterServiceHost(host string) bool {
 	return strings.HasSuffix(host, ".svc") || strings.HasSuffix(host, ".svc.cluster.local")
 }
 
-// WebhookPayload is the payload sent to webhook URLs. Every attempt of one
-// delivery sends byte-identical JSON, so its digest identifies the notice.
 type WebhookPayload struct {
 	DeliveryID     string                 `json:"deliveryId"`
 	EventType      string                 `json:"eventType"`
@@ -211,13 +196,10 @@ type WebhookPayload struct {
 	RuntimeType    string                 `json:"runtimeType,omitempty"`
 }
 
-// ResultRefPayload is the result reference in the webhook payload
 type ResultRefPayload struct {
 	Available bool `json:"available"`
 }
 
-// webhookNotice identifies one delivery: a stable ID, the event, and the
-// exact body every attempt sends.
 type webhookNotice struct {
 	DeliveryID string
 	EventType  string
@@ -226,12 +208,10 @@ type webhookNotice struct {
 	Digest     string
 }
 
-// webhookEventType maps a terminal phase to its notice event type.
 func webhookEventType(phase corev1alpha1.TaskPhase) string {
 	return "task." + strings.ToLower(string(phase))
 }
 
-// buildWebhookNotice renders the notice body for the Task's current state.
 func buildWebhookNotice(task *corev1alpha1.Task, deliveryID, eventType string, occurredAt time.Time) (webhookNotice, error) {
 	payload := WebhookPayload{
 		DeliveryID:    deliveryID,
@@ -245,7 +225,6 @@ func buildWebhookNotice(task *corev1alpha1.Task, deliveryID, eventType string, o
 		Attempts:      task.Status.Attempts,
 	}
 
-	// Set RuntimeType for agent tasks
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
 		payload.RuntimeType = string(task.Spec.Type)
 	}
@@ -279,24 +258,19 @@ func buildWebhookNotice(task *corev1alpha1.Task, deliveryID, eventType string, o
 	}, nil
 }
 
-// WebhookNotifier sends signed webhook notifications for task completion.
 type WebhookNotifier struct {
 	client     *http.Client
 	kubeClient ctrlclient.Reader
 	keys       taskwebhook.KeySource
-	// policy admits literal IP destinations; dial-time checks use the same
-	// policy through the client's dialer.
-	policy taskwebhook.AddressPolicy
-	now    func() time.Time
-	newID  func() string
+	policy     taskwebhook.AddressPolicy
+	now        func() time.Time
+	newID      func() string
 
 	maxAttempts    int32
 	initialBackoff time.Duration
 	maxBackoff     time.Duration
 	attemptLease   time.Duration
 
-	// Approval notices (ADR 0053) share the initial backoff and lease but
-	// have a shorter bound.
 	approvalMaxAttempts int32
 	approvalMaxBackoff  time.Duration
 }
@@ -305,16 +279,11 @@ const (
 	defaultWebhookMaxAttempts    = 8
 	defaultWebhookInitialBackoff = 10 * time.Second
 	defaultWebhookMaxBackoff     = 15 * time.Minute
-	// defaultWebhookAttemptLease must exceed the request timeout so an
-	// in-flight attempt is never duplicated by a restarted controller.
-	defaultWebhookAttemptLease  = 2 * time.Minute
-	webhookSigningRetryInterval = 30 * time.Second
-	maxWebhookLastErrorLength   = 256
+	defaultWebhookAttemptLease   = 2 * time.Minute
+	webhookSigningRetryInterval  = 30 * time.Second
+	maxWebhookLastErrorLength    = 256
 )
 
-// NewWebhookNotifier creates a WebhookNotifier that only connects to public
-// addresses or validated same-namespace Services. Configure a key source with
-// SetKeySource; without one, deliveries fail closed and are never sent unsigned.
 func NewWebhookNotifier() *WebhookNotifier {
 	return newWebhookNotifier(&taskwebhook.Dialer{Policy: taskwebhook.PublicAddressPolicy})
 }
@@ -335,23 +304,18 @@ func newWebhookNotifier(dialer *taskwebhook.Dialer) *WebhookNotifier {
 	}
 }
 
-// SetKubeClient configures the Kubernetes reader used for same-namespace
-// service validation.
 func (w *WebhookNotifier) SetKubeClient(kubeClient ctrlclient.Reader) {
 	w.kubeClient = kubeClient
 }
 
-// SetKeySource configures the Ed25519 signing keys.
 func (w *WebhookNotifier) SetKeySource(keys taskwebhook.KeySource) {
 	w.keys = keys
 }
 
-// backoff is the terminal notice's delay after its attempts-th failure.
 func (w *WebhookNotifier) backoff(attempts int32) time.Duration {
 	return w.backoffUpTo(attempts, w.maxBackoff)
 }
 
-// backoffUpTo doubles the initial backoff per failed attempt, up to maxBackoff.
 func (w *WebhookNotifier) backoffUpTo(attempts int32, maxBackoff time.Duration) time.Duration {
 	delay := w.initialBackoff
 	for i := int32(1); i < attempts && delay < maxBackoff; i++ {
@@ -360,15 +324,11 @@ func (w *WebhookNotifier) backoffUpTo(attempts int32, maxBackoff time.Duration) 
 	return min(delay, maxBackoff)
 }
 
-// webhookAttemptResult is the sanitized outcome of one attempt.
 type webhookAttemptResult struct {
 	StatusCode int32
 	Err        error
 }
 
-// deliver sends one signed attempt of notice. It never returns the URL,
-// signature, or transport internals in its error, so the error is safe to
-// record in Task status.
 func (w *WebhookNotifier) deliver(ctx context.Context, task *corev1alpha1.Task, notice webhookNotice, attempt int32, key *taskwebhook.SigningKey) webhookAttemptResult {
 	target, err := resolveWebhookTarget(ctx, w.kubeClient, task.Spec.WebhookURL, task.Namespace, w.policy)
 	if err != nil {
@@ -418,8 +378,6 @@ func (w *WebhookNotifier) deliver(ctx context.Context, task *corev1alpha1.Task, 
 	return webhookAttemptResult{StatusCode: code}
 }
 
-// sanitizeWebhookTransportError maps a client error to a fixed description.
-// url.Error embeds the request URL, which may carry credentials.
 func sanitizeWebhookTransportError(err error) error {
 	switch {
 	case errors.Is(err, taskwebhook.ErrRedirectRefused):

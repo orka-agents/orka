@@ -15,8 +15,6 @@ import (
 	"time"
 )
 
-// waitPhaseServer returns a server whose /api/v1/tasks/example-task
-// endpoint answers with the given phase.
 func waitPhaseServer(phase string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -98,7 +96,6 @@ func TestWaitForTaskPhaseRejectsLateSuccess(t *testing.T) {
 		var out strings.Builder
 
 		err := waitForTaskPhase(ctx, "example-task", time.Millisecond, func(context.Context) (string, error) {
-			// A response can finish decoding after its request deadline expires.
 			time.Sleep(2 * time.Second)
 			return "Succeeded", nil
 		}, &out)

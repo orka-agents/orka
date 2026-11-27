@@ -8,8 +8,6 @@ import (
 	"strings"
 )
 
-// The model script the fixture plays, keyed by what the conversation already
-// holds. Tool call ids carry a prefix so results can be recognised.
 const (
 	ReadToolName  = "itemsread"
 	WriteToolName = "itemswrite"
@@ -41,18 +39,7 @@ type modelRequest struct {
 	Instructions string `json:"instructions"`
 }
 
-// model plays a fixed script through either the Chat Completions or the
-// Responses shape:
-//
-//  1. itemsread, then itemswrite. The worker parks itemswrite for approval, so
-//     the first run ends there.
-//  2. After a person approves, the run resumes with the resolved approval
-//     in the prompt: itemswrite again with identical arguments, then itemsread
-//     again (by now the first access token has expired, so this read is
-//     served by a refreshed token), then update_plan with the goal complete
-//     and a final answer.
 func (f *Fixture) model(w http.ResponseWriter, r *http.Request) {
-	// The scheme is part of the contract: a bare credential is refused.
 	authorization := r.Header.Get("Authorization")
 	credential, bearer := strings.CutPrefix(authorization, "Bearer ")
 	if !bearer || credential == "" || credential != f.cfg.ModelCredential {
@@ -105,8 +92,6 @@ func (f *Fixture) next(req modelRequest) (string, map[string]any) {
 	case !approved && !results[readOneID]:
 		return toolCall(readOneID, ReadToolName, map[string]any{"q": "connectors"})
 	case !approved:
-		// Parks for approval; the worker does not call the model again in
-		// this run.
 		return toolCall(writeID, WriteToolName, map[string]any{"title": WriteTitle})
 	case !results[writeID]:
 		return toolCall(writeID, WriteToolName, map[string]any{"title": WriteTitle})

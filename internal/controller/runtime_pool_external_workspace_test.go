@@ -677,8 +677,6 @@ func TestExternalRuntimePoolPublicResourceDefaultsAndFrozenRevalidation(t *testi
 		t.Fatal("external workload has no isolated scratch volumes")
 	}
 
-	// Revalidation never rewrites a persisted request, even one whose quotas
-	// differ from the current defaults.
 	request.Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")}}
 	request.Runtime.Template.Spec.Containers[0].Resources = request.Resources
 	for i := range request.Runtime.Template.Spec.Volumes {
@@ -907,8 +905,6 @@ func TestExternalRuntimePoolQuarantineAuthorizesStopForSuspendCapableClass(t *te
 	if err := f.r.Update(ctx, workspace); err != nil {
 		t.Fatal(err)
 	}
-	// Every external provider acts on quarantine only through a Stop (or Delete)
-	// authorization; a Suspend authorization would leave the instance running.
 	for range 6 {
 		runtimePoolReconcile(t, f.r, f.pool)
 		f.supervisor.probe = runtimePoolValidProbe(f.pool, &pod, "external-boot", true)
@@ -928,8 +924,6 @@ func TestExternalRuntimePoolQuarantineAuthorizesStopForSuspendCapableClass(t *te
 	}
 }
 
-// retireExternalPoolInstance drives the drain of the served instance until
-// Core authorizes its exact retirement.
 func (f *externalRuntimePoolFixture) retireExternalPoolInstance(t *testing.T, pod *corev1.Pod) *workspacev1alpha1.ExecutionWorkspace {
 	t.Helper()
 	for range 6 {
@@ -968,9 +962,6 @@ func (f *externalRuntimePoolFixture) taintWorkspace(t *testing.T) {
 	}
 }
 
-// Operator access forfeits retention (ADR 0044). A tainted workspace of a
-// Suspend-capable class must never earn a Suspend retirement, whichever
-// controller observes the taint first.
 func TestExternalRuntimePoolTaintAuthorizesStopForSuspendCapableClass(t *testing.T) {
 	ctx := context.Background()
 	t.Run("warm window scale-down before retention", func(t *testing.T) {
@@ -987,8 +978,6 @@ func TestExternalRuntimePoolTaintAuthorizesStopForSuspendCapableClass(t *testing
 		if got := runtimePoolTestGetPool(t, f.r, f.pool).Spec.DesiredReplicas; got != 1 {
 			t.Fatalf("open warm window released the runtime: replicas=%d", got)
 		}
-		// The taint lands during the window and the pool reconciles before
-		// retention deletes the workspace.
 		f.taintWorkspace(t)
 		if _, err := demand.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.workspace)}); err != nil {
 			t.Fatal(err)
@@ -1039,8 +1028,6 @@ func TestExternalRuntimePoolTaintAuthorizesStopForSuspendCapableClass(t *testing
 			t.Fatalf("untainted retirement = %s, want Suspend", workspace.Spec.Retirement.Action)
 		}
 		authorized := workspace.Spec.Retirement.DeepCopy()
-		// The provider may already be capturing; a later taint does not
-		// rewrite the exact authorization mid-flight.
 		f.taintWorkspace(t)
 		runtimePoolReconcile(t, f.r, f.pool)
 		if got := f.currentWorkspace(t).Spec.Retirement; !reflect.DeepEqual(got, authorized) {
@@ -1065,7 +1052,6 @@ func TestExternalRetirementActionRefusesSuspendForTaintedWorkspace(t *testing.T)
 	if got := externalRetirementAction(workspace, true, false); got != workspacev1alpha1.WorkloadRetirementDelete {
 		t.Fatalf("tainted deletion retirement = %s, want Delete", got)
 	}
-	// Only a Suspend authorized for the exact current instance is kept.
 	workspace.Spec.Retirement = &workspacev1alpha1.WorkloadRetirement{Sequence: 1, Identity: identity, Action: workspacev1alpha1.WorkloadRetirementSuspend}
 	if got := externalRetirementAction(workspace, false, false); got != workspacev1alpha1.WorkloadRetirementStop {
 		t.Fatalf("stale Suspend authorization kept for a tainted workspace: %s", got)
@@ -1078,7 +1064,6 @@ func TestExternalRetirementActionRefusesSuspendForTaintedWorkspace(t *testing.T)
 	if got := externalRetirementAction(workspace, false, false); got != workspacev1alpha1.WorkloadRetirementStop {
 		t.Fatalf("quarantined tainted retirement = %s, want Stop", got)
 	}
-	// Task-only taint (without workspace annotation) also blocks Suspend and eviction suspendability.
 	taskTainted := &workspacev1alpha1.ExecutionWorkspace{}
 	taskTainted.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
 	taskTainted.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{workspacev1alpha1.WorkspaceOnDetachSuspend}

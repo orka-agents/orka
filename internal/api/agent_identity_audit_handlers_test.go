@@ -108,7 +108,6 @@ func TestListAgentIdentityAuditFiltersAndScopesNamespace(t *testing.T) {
 	})
 	app.Get("/api/v1/audit/identity", handlers.ListAgentIdentityAudit)
 
-	// Query by task name in caller's namespace returns both team-a records, newest first.
 	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/audit/identity?namespace=team-a&task=task-a", nil))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -122,7 +121,6 @@ func TestListAgentIdentityAuditFiltersAndScopesNamespace(t *testing.T) {
 	require.Equal(t, "hmac-sha256:deadbeef", body.Items[0].Requester)
 	require.Equal(t, "issued", body.Items[1].Outcome)
 
-	// Filter by outcome=refused returns only the refused record.
 	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/audit/identity?namespace=team-a&outcome=refused", nil))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -131,17 +129,14 @@ func TestListAgentIdentityAuditFiltersAndScopesNamespace(t *testing.T) {
 	require.Len(t, body.Items, 1)
 	require.Equal(t, "graph_mail", body.Items[0].Tool)
 
-	// Cross-namespace request is rejected by namespace isolation.
 	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/audit/identity?namespace=team-b", nil))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 
-	// Invalid outcome returns 400.
 	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/audit/identity?namespace=team-a&outcome=bogus", nil))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 
-	// Records whose Task cannot be resolved in the namespace are omitted (fail closed).
 	buf.Record(outboundaccess.AgentIdentityAuditRecord{
 		Timestamp:       now.Add(3 * time.Minute),
 		Event:           "agent_identity_use",
@@ -212,7 +207,6 @@ func TestListAgentIdentityAuditEnforcesContextTokenTaskScope(t *testing.T) {
 	})
 	app.Get("/api/v1/audit/identity", handlers.ListAgentIdentityAudit)
 
-	// Unfiltered query only returns the record for task-allowed.
 	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/audit/identity?namespace=team-a", nil))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -223,7 +217,6 @@ func TestListAgentIdentityAuditEnforcesContextTokenTaskScope(t *testing.T) {
 	require.Len(t, body.Items, 1)
 	require.Equal(t, "allowed_tool", body.Items[0].Tool)
 
-	// Filtering directly by taskUID of another task returns empty.
 	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/audit/identity?namespace=team-a&taskUID=uid-other", nil))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -231,7 +224,6 @@ func TestListAgentIdentityAuditEnforcesContextTokenTaskScope(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	require.Empty(t, body.Items)
 
-	// Filtering by another task name returns 403.
 	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/audit/identity?namespace=team-a&task=task-other", nil))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -275,15 +267,12 @@ func TestListAgentIdentityAuditReturns404ForOtherUsersPrivateAHPTask(t *testing.
 	})
 	app.Get("/api/v1/audit/identity", handlers.ListAgentIdentityAudit)
 
-	// Another person's private AHP Task must return 404 (matching missing tasks)
-	// rather than 403 so existence is not leaked.
 	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/audit/identity?namespace=team-a&task=ahp-turn-bob-1", nil))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
 func TestAgentIdentityAuditBufferRedactionFromResolver(t *testing.T) {
-	// Verify that records written to the AuditSink carry no raw tokens or raw error text.
 	buf := outboundaccess.NewAgentIdentityAuditBuffer(10)
 	buf.Record(outboundaccess.AgentIdentityAuditRecord{
 		Timestamp:       time.Now().UTC(),

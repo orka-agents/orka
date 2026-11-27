@@ -25,24 +25,11 @@ import (
 )
 
 const (
-	// repositoryConfigSkillRegistryPath is the only registry path the suite's
-	// controller allows for runtime skills.
 	repositoryConfigSkillRegistryPath = "orka/e2e-skills"
 	repositoryConfigSkillName         = "repo-config-check"
-	// Appears only in the skill's description, which each runtime lists to the
-	// model when it loaded the skill.
-	repositoryConfigSkillNonce = "orka-e2e-skill-listed-5c2d9e17"
+	repositoryConfigSkillNonce        = "orka-e2e-skill-listed-5c2d9e17"
 )
 
-// runtimeEvalRepositoryConfigCase runs one read-intent Task against a commit
-// that carries agent configuration for every runtime (see
-// fakeforge.RepositoryConfigBranch). None of it may run: every command in it
-// only creates a marker in /tmp, and the Codex developer instructions carry a
-// nonce that must never reach the model. Model traffic must still flow
-// through the session-local proxy, which the repository's Claude settings try
-// to replace with a dead address. OpenCode refuses such a workspace outright.
-// With a skill image, the Agent also carries an Orka runtime skill, which must
-// still reach the model.
 type runtimeEvalRepositoryConfigCase struct {
 	provider, model, runID, name, repoURL, ref, skillImage string
 	readCredential                                         map[string]any
@@ -80,7 +67,6 @@ func (c runtimeEvalRepositoryConfigCase) run() {
 		failed := repositoryConfigWaitFailedTask(c.name + "-task")
 		ExpectWithOffset(1, failed.Status.Execution.Reason).To(Equal(corev1alpha1.TaskExecutionReason("RuntimeSessionStartFailed")))
 		ExpectWithOffset(1, failed.Status.Message).To(Equal(acp.OpenCodeProjectConfigurationRejectedMessage))
-		// OpenCode never started, so the model saw no request at all.
 		after, err := providerProxyMockLLM.evalSnapshot()
 		ExpectWithOffset(1, err).NotTo(HaveOccurred())
 		ExpectWithOffset(1, after.instanceID).To(Equal(before.instanceID), "aimock restarted during the check")
@@ -94,9 +80,6 @@ func (c runtimeEvalRepositoryConfigCase) run() {
 	canaries := runtimeEvalCanaries()
 	canaries["repository-developer-instructions"] = fakeforge.RepositoryConfigInstructionsNonce
 	requests := runtimeEvalRequests(before, marker, canaries)
-	// The repository's Claude settings point the provider at a dead address;
-	// a model request carrying the marker proves the runtime kept the route
-	// through the session-local proxy.
 	ExpectWithOffset(1, requests).NotTo(BeEmpty(), "no model request reached the provider proxy")
 	pool := getRuntimePool(Default, completed.Status.Execution.RuntimePoolName)
 	runtimeEvalVerifyPoolBearer(pool)
@@ -107,8 +90,6 @@ func (c runtimeEvalRepositoryConfigCase) run() {
 	repositoryConfigExpectNoMarkers(pool)
 }
 
-// buildRepositoryConfigSkillImage publishes a one-skill FROM scratch image to
-// the suite's local registry and returns its digest reference.
 func buildRepositoryConfigSkillImage() (string, error) {
 	dir, err := os.MkdirTemp("", "orka-e2e-skill-")
 	if err != nil {
@@ -124,8 +105,6 @@ func buildRepositoryConfigSkillImage() (string, error) {
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skill), 0o644); err != nil {
 		return "", err
 	}
-	// The copier runs as a fixed non-root identity, so everything must be
-	// world-readable.
 	for _, path := range []string{dir, filepath.Join(dir, "skills"), skillDir} {
 		if err := os.Chmod(path, 0o755); err != nil {
 			return "", err
@@ -146,8 +125,6 @@ func buildRepositoryConfigSkillImage() (string, error) {
 		repositoryConfigSkillRegistryPath+"/"+repositoryConfigSkillName+":e2e")
 }
 
-// repositoryConfigWaitFailedTask waits for a terminal Task and requires it to
-// have failed.
 func repositoryConfigWaitFailedTask(name string) corev1alpha1.Task {
 	var task corev1alpha1.Task
 	EventuallyWithOffset(2, func(g Gomega) {
@@ -163,9 +140,6 @@ func repositoryConfigWaitFailedTask(name string) corev1alpha1.Task {
 	return task
 }
 
-// repositoryConfigExpectNoMarkers lists /tmp in the runtime Pod. Session
-// children run as distinct unprivileged identities, so the check also requires
-// /tmp to be writable by them; otherwise a missing marker would prove nothing.
 func repositoryConfigExpectNoMarkers(pool corev1alpha1.RuntimePool) {
 	_, pod := runtimePoolAndActivePod(Default, pool.Name)
 	container := ""

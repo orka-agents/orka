@@ -71,7 +71,6 @@ func TestRepositoryMonitorAutomaticRepairRecoversExhaustedPreTaskCommands(t *tes
 				if err := db.CreateRepairJob(ctx, job); err != nil {
 					t.Fatal(err)
 				}
-				// An accepted command with no Task retains its canonical retries.
 				item.RepairState = ""
 				if handled, err := r.tryRepositoryMonitorAutomaticRepair(ctx, monitor, &store.MonitorRun{}, "orka-agents", "orka", pr, item); err != nil || !handled {
 					t.Fatalf("accepted command recovery: handled=%v err=%v", handled, err)
@@ -80,7 +79,6 @@ func TestRepositoryMonitorAutomaticRepairRecoversExhaustedPreTaskCommands(t *tes
 				if err != nil || len(all) != attempt+1 {
 					t.Fatalf("accepted command spawned another attempt: commands=%+v err=%v", all, err)
 				}
-				// Persist the state left after pre-Task run retries are exhausted.
 				command.Status = "processed"
 				now := time.Now()
 				command.ProcessedAt, command.Error = &now, "retry_attempts_exhausted"
@@ -108,8 +106,6 @@ func TestRepositoryMonitorAutomaticRepairRecoversExhaustedPreTaskCommands(t *tes
 					t.Fatalf("exhausted pre-Task failure was lost: state=%q err=%v", item.RepairState, err)
 				}
 			}
-			// The head has no review yet, so the refusal leaves the pull
-			// request to review selection; the bound still allows no command.
 			if handled, err := r.tryRepositoryMonitorAutomaticRepair(ctx, monitor, &store.MonitorRun{}, "orka-agents", "orka", pr, item); err != nil || handled || item.SkipReason != wantReason {
 				t.Fatalf("attempt bound not enforced: handled=%v reason=%q err=%v", handled, item.SkipReason, err)
 			}

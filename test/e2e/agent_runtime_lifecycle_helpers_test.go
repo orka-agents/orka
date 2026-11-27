@@ -3,9 +3,6 @@
 
 package e2e
 
-// Go ports of the RuntimePool, Task fence, and cleanup checks in
-// scripts/agent-runtime-e2e.sh, used by agent_runtime_lifecycle_test.go.
-
 import (
 	"crypto/sha256"
 	"encoding/hex"
@@ -34,10 +31,8 @@ const (
 	agentRuntimeCleanupFinalizer  = "orka.ai/cleanup"
 	defaultRuntimeNamespace       = "orka-runtimes"
 	harnessV2Protocol             = "orka.harness.v2"
-	// agentRuntimeWait and agentRuntimeStateWait match the bash lane's
-	// ACP_E2E_WAIT_SECONDS and ACP_E2E_STATE_WAIT_SECONDS defaults.
-	agentRuntimeWait      = 15 * time.Minute
-	agentRuntimeStateWait = 5 * time.Minute
+	agentRuntimeWait              = 15 * time.Minute
+	agentRuntimeStateWait         = 5 * time.Minute
 )
 
 var (
@@ -53,8 +48,6 @@ var (
 	}
 )
 
-// runtimePoolSnapshot is one validated, stable view of a serving RuntimePool
-// and its active runtime Pod.
 type runtimePoolSnapshot struct {
 	PoolName                   string
 	PoolUID                    string
@@ -94,7 +87,6 @@ func runtimePoolNamespace(pool corev1alpha1.RuntimePool) string {
 	return defaultRuntimeNamespace
 }
 
-// runtimePoolPods returns the pool's non-terminating runtime Pods.
 func runtimePoolPods(g Gomega, pool corev1alpha1.RuntimePool) []corev1.Pod {
 	var pods corev1.PodList
 	kubectlJSON(g, &pods, "get", "pods", "-n", runtimePoolNamespace(pool), "-l",
@@ -116,7 +108,6 @@ func runtimePoolAndActivePod(g Gomega, name string) (corev1alpha1.RuntimePool, c
 	return pool, pod
 }
 
-// validateRuntimePoolProjection ports pool_profile_projection_valid.
 func validateRuntimePoolProjection(
 	g Gomega,
 	pool corev1alpha1.RuntimePool,
@@ -190,8 +181,6 @@ func validateRuntimePoolProjection(
 	g.Expect(status.Capacity.MaxRunningPrompts).To(BeNumerically("<=", status.Capacity.MaxResidentSessions))
 }
 
-// runtimePoolProjectionFingerprint covers every field the projection check
-// reads, so two equal reads prove the projection was stable.
 func runtimePoolProjectionFingerprint(g Gomega, pool corev1alpha1.RuntimePool, pod corev1.Pod) string {
 	encoded, err := json.Marshal(map[string]any{
 		"uid": pool.UID, "name": pool.Name, "generation": pool.Generation,
@@ -210,7 +199,6 @@ func runtimePoolProjectionFingerprint(g Gomega, pool corev1alpha1.RuntimePool, p
 	return string(encoded)
 }
 
-// assertPodImagesDigestPinned ports assert_all_pod_images.
 func assertPodImagesDigestPinned(g Gomega, pod corev1.Pod) {
 	for _, container := range append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...) {
 		g.Expect(container.Image).To(MatchRegexp(imageDigestPattern.String()), "container %s image", container.Name)
@@ -224,8 +212,6 @@ func assertPodImagesDigestPinned(g Gomega, pod corev1.Pod) {
 	}
 }
 
-// captureRuntimePoolSnapshot ports capture_pool_snapshot: two equal valid
-// reads 250ms apart, then the Pod, image, and single-replica checks.
 func captureRuntimePoolSnapshot(
 	poolName, provider, model string,
 	intent corev1alpha1.WorkspaceIntent,
@@ -268,8 +254,6 @@ func captureRuntimePoolSnapshot(
 	return snapshot
 }
 
-// assertTaskFence ports assert_task_fence; after a controller restart the
-// epoch may only advance (assert_restart_task_fence).
 func assertTaskFence(g Gomega, task corev1alpha1.Task, snapshot runtimePoolSnapshot, afterRestart bool) {
 	execution := task.Status.Execution
 	g.Expect(execution).NotTo(BeNil())
@@ -289,7 +273,6 @@ func assertTaskFence(g Gomega, task corev1alpha1.Task, snapshot runtimePoolSnaps
 	g.Expect(execution.Attempt).To(Equal(int32(1)), "the prompt must not be replayed")
 }
 
-// waitTaskTerminalProjection ports task_terminal_projection_ready.
 func waitTaskTerminalProjection(name string) corev1alpha1.Task {
 	var task corev1alpha1.Task
 	EventuallyWithOffset(1, func(g Gomega) {
@@ -306,7 +289,6 @@ func waitTaskTerminalProjection(name string) corev1alpha1.Task {
 	return task
 }
 
-// waitTaskPoolName waits for the Task's RuntimePool assignment.
 func waitTaskPoolName(name string) string {
 	var pool string
 	EventuallyWithOffset(1, func(g Gomega) {
@@ -318,8 +300,6 @@ func waitTaskPoolName(name string) string {
 	return pool
 }
 
-// assertTaskSucceededRead ports assert_task_succeeded_read for a read of the
-// pinned agentRuntimeRepoRef.
 func assertTaskSucceededRead(name string, snapshot runtimePoolSnapshot) corev1alpha1.Task {
 	task := waitTaskTerminalProjection(name)
 	g := NewWithT(GinkgoT())
@@ -337,7 +317,6 @@ func assertTaskSucceededRead(name string, snapshot runtimePoolSnapshot) corev1al
 	return task
 }
 
-// assertCancelledTask ports assert_cancelled_task.
 func assertCancelledTask(name string, snapshot runtimePoolSnapshot, reason corev1alpha1.TaskExecutionReason) {
 	task := waitTaskTerminalProjection(name)
 	g := NewWithT(GinkgoT())
@@ -349,8 +328,6 @@ func assertCancelledTask(name string, snapshot runtimePoolSnapshot, reason corev
 	assertTaskFence(g, task, snapshot, false)
 }
 
-// assertRestartTaskSettled ports assert_restart_task_settled: a prompt in
-// flight across a controller restart settles once, without replay.
 func assertRestartTaskSettled(name string, snapshot runtimePoolSnapshot) {
 	task := waitTaskTerminalProjection(name)
 	g := NewWithT(GinkgoT())
@@ -379,20 +356,12 @@ func taskSessionIdentity(g Gomega, name string) (string, int64) {
 	return task.Status.Execution.RuntimeSessionUID, task.Status.Execution.RuntimeSessionGeneration
 }
 
-// runtimeSessionProcessesScript prints the owner of one RuntimeSession's
-// private home, then the status of every process in the runtime container.
-// The home stays child-owned even when a read-intent workspace protects the
-// session root and workspace.
 const runtimeSessionProcessesScript = `set -- /sessions/session-"$1"-*
 if [ "$#" -ne 1 ] || [ ! -d "$1" ]; then echo "no single RuntimeSession tree $1" >&2; exit 3; fi
 echo "Owner: $(stat -c %u "$1/home")"
 cat /proc/[0-9]*/status 2>/dev/null
 exit 0`
 
-// runtimeSessionAdapters returns the PIDs of the adapters the supervisor (PID
-// 1 in the runtime container) runs for RuntimeSession uid/generation. The
-// supervisor starts each adapter as the leader of its own process group under
-// the session's private UID, which also owns the session's private home.
 func runtimeSessionAdapters(g Gomega, snapshot runtimePoolSnapshot, uid string, generation int64) []int {
 	sum := sha256.Sum256(fmt.Appendf(nil, "%s:%d", uid, generation))
 	output, err := utils.Run(exec.Command("kubectl", "exec", "-n", snapshot.PodNamespace, snapshot.PodName,
@@ -404,9 +373,6 @@ func runtimeSessionAdapters(g Gomega, snapshot runtimePoolSnapshot, uid string, 
 	return adapters
 }
 
-// parseRuntimeSessionAdapters reads runtimeSessionProcessesScript output: the
-// home owner, then the processes that are children of PID 1, run as that
-// owner, and lead their own process group.
 func parseRuntimeSessionAdapters(output string) (string, []int, error) {
 	owner := ""
 	process := map[string]string{}
@@ -441,9 +407,6 @@ func parseRuntimeSessionAdapters(output string) (string, []int, error) {
 	return owner, adapters, parseErr
 }
 
-// killRuntimeSessionAdapter kills the process group of the idle adapter behind
-// RuntimeSession uid/generation, as an adapter crash between prompts would, and
-// waits until the supervisor has reaped it. It returns the killed PID.
 func killRuntimeSessionAdapter(snapshot runtimePoolSnapshot, uid string, generation int64) int {
 	adapters := runtimeSessionAdapters(Default, snapshot, uid, generation)
 	ExpectWithOffset(1, adapters).To(HaveLen(1),
@@ -467,7 +430,6 @@ func waitRuntimePoolServing(name string) {
 		agentRuntimeWait, 2*time.Second).Should(Succeed())
 }
 
-// waitTaskRunningOnPool ports pool_running_for_task.
 func waitTaskRunningOnPool(task, pool string) {
 	EventuallyWithOffset(1, func(g Gomega) { taskRunningOnPool(g, task, pool) },
 		agentRuntimeStateWait, 2*time.Second).Should(Succeed())
@@ -480,7 +442,6 @@ func taskRunningOnPool(g Gomega, task, pool string) {
 	g.Expect(getRuntimePool(g, pool).Status.Capacity.RunningPrompts).To(BeNumerically(">", 0))
 }
 
-// waitRuntimePoolInstanceReplaced ports pool_instance_changed_and_serving.
 func waitRuntimePoolInstanceReplaced(name, previous string) {
 	EventuallyWithOffset(1, func(g Gomega) {
 		pool := getRuntimePool(g, name)
@@ -491,8 +452,6 @@ func waitRuntimePoolInstanceReplaced(name, previous string) {
 	}, agentRuntimeWait, 2*time.Second).Should(Succeed())
 }
 
-// runtimePoolLifecycleTargets ports pool_lifecycle_reached: each target also
-// accepts the states after it.
 var runtimePoolLifecycleTargets = map[string][]string{
 	"Draining":  {"Draining/Draining", "Quiescent/Draining", "Stopping/Closed", "Stopped/Closed"},
 	"Quiescent": {"Quiescent/Draining", "Stopping/Closed", "Stopped/Closed"},
@@ -508,7 +467,6 @@ func waitRuntimePoolLifecycle(name, target string) {
 	}, agentRuntimeStateWait, 250*time.Millisecond).Should(Succeed())
 }
 
-// waitRuntimePoolCountersZero ports pool_transient_counters_zero.
 func waitRuntimePoolCountersZero(name string, expectedResident int32) {
 	EventuallyWithOffset(1, func(g Gomega) {
 		capacity := getRuntimePool(g, name).Status.Capacity
@@ -526,8 +484,6 @@ func waitRuntimePoolCountersZero(name string, expectedResident int32) {
 	}, agentRuntimeStateWait, 2*time.Second).Should(Succeed())
 }
 
-// waitRuntimePoolStopped ports pool_stopped, including the absence of runtime
-// Pods.
 func waitRuntimePoolStopped(name string) {
 	EventuallyWithOffset(1, func(g Gomega) {
 		pool := getRuntimePool(g, name)
@@ -554,8 +510,6 @@ func patchRuntimePoolReplicas(name string, replicas int) {
 	ExpectWithOffset(2, err).NotTo(HaveOccurred())
 }
 
-// parkRuntimePool and resumeRuntimePool port park_runtimepool and
-// resume_runtimepool.
 func parkRuntimePool(name string) {
 	patchRuntimePoolReplicas(name, 0)
 	waitRuntimePoolStopped(name)
@@ -566,7 +520,6 @@ func resumeRuntimePool(name string) {
 	waitRuntimePoolServing(name)
 }
 
-// parkProviderRuntimePoolsExcept ports park_provider_runtimepools_except.
 func parkProviderRuntimePoolsExcept(provider, keep string) {
 	var pools corev1alpha1.RuntimePoolList
 	kubectlJSON(Default, &pools, "get", "runtimepools", "-n", namespace)
@@ -577,8 +530,6 @@ func parkProviderRuntimePoolsExcept(provider, keep string) {
 	}
 }
 
-// addTaskObserverFinalizer ports add_task_observer_finalizer: the test holds
-// the Task after deletion so it can see the controller's cleanup finish.
 func addTaskObserverFinalizer(name, uid string) {
 	task := getACPTask(Default, name)
 	ExpectWithOffset(1, string(task.UID)).To(Equal(uid))
@@ -591,8 +542,6 @@ func addTaskObserverFinalizer(name, uid string) {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 }
 
-// waitTaskObserverReleaseReady ports task_observer_release_ready: execution
-// and delivery settled, and only the observer finalizer left.
 func waitTaskObserverReleaseReady(name, uid string) {
 	EventuallyWithOffset(1, func(g Gomega) {
 		task := getACPTask(g, name)
@@ -632,9 +581,6 @@ func waitTaskAbsent(name string) {
 	}, agentRuntimeStateWait, 2*time.Second).Should(Succeed())
 }
 
-// archiveSessionViaAPI ports archive_test_sessions for one Session: the API
-// must describe the same RuntimeSession every owning Task ran on, and was
-// created no earlier than the Task that asked for it.
 func archiveSessionViaAPI(apiBaseURL, token, session, runID string) {
 	url := fmt.Sprintf("%s/api/v1/sessions/%s?namespace=%s", strings.TrimRight(apiBaseURL, "/"), session, namespace)
 	body, status, err := doAuthorizedJSONRequest(http.MethodGet, url, token, "", "")
@@ -684,7 +630,6 @@ func archiveSessionViaAPI(apiBaseURL, token, session, runID string) {
 	}, agentRuntimeStateWait, 2*time.Second).Should(Succeed())
 }
 
-// agentRuntimeAgentManifest ports apply_agent.
 func agentRuntimeAgentManifest(name, provider, model, runID string, maxTurns int, allowBash bool,
 	opencodeLimits *corev1alpha1.ModelTokenLimits) map[string]any {
 	runtime := map[string]any{"type": provider, "contractVersion": harnessV2Protocol, "defaultMaxTurns": maxTurns}
@@ -713,8 +658,6 @@ func agentRuntimeAgentManifest(name, provider, model, runID string, maxTurns int
 	}
 }
 
-// agentRuntimeReadTask describes one read-intent Task, as apply_read_task
-// builds it.
 type agentRuntimeReadTask struct {
 	Name, Agent, Provider, Prompt, Timeout string
 	Session                                string
@@ -763,8 +706,6 @@ func deploymentContainer(deployment appsv1.Deployment, names ...string) corev1.C
 	return corev1.Container{}
 }
 
-// expectDeploymentPersistent ports assert_deployment_persistent: the primary
-// container mounts at least one PersistentVolumeClaim, and each is Bound.
 func expectDeploymentPersistent(name string, containers ...string) {
 	var deployment appsv1.Deployment
 	kubectlJSON(Default, &deployment, "get", "deployment", name, "-n", namespace)
@@ -786,10 +727,6 @@ func expectDeploymentPersistent(name string, containers ...string) {
 	}
 }
 
-// expectPublisherBrokeredAuthority ports assert_publisher_brokered_authority:
-// the publisher reaches credentials and artifact authorization only through
-// the controller's brokers, reaches SCMs only through the egress proxy, and
-// cannot read Secrets itself.
 func expectPublisherBrokeredAuthority() {
 	var deployment appsv1.Deployment
 	kubectlJSON(Default, &deployment, "get", "deployment", publisherDeployment, "-n", namespace)

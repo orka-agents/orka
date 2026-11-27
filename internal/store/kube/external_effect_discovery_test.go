@@ -42,8 +42,6 @@ func TestExternalEffectApprovalDiscoveryCreationPreservesIdentity(t *testing.T) 
 			require.Empty(t, object.OwnerReferences, "discovery must not make receipts subject to Task garbage collection")
 
 			completed := settleApprovalDiscoveryEffect(t, kubeStore, request, effect, store.ExternalEffectSucceeded)
-			// Omitting the optional hint must still return the same completed
-			// execution and must not remove an existing discovery label.
 			request.ApprovalTaskUID = ""
 			replayed, err := kubeStore.ReserveExternalEffect(t.Context(), request)
 			require.NoError(t, err)

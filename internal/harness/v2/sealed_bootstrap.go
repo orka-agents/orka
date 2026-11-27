@@ -18,9 +18,6 @@ const (
 	SealedBootstrapSchema      = "orka.harness.v2/sealed-bootstrap/v1"
 )
 
-// SubstrateActorIdentity comes from Substrate's read-only SystemInfo volume,
-// regenerated on every run/restore. It is not copied from a snapshot or trusted
-// from template environment variables.
 type SubstrateActorIdentity struct {
 	Atespace string `json:"atespace"`
 	Name     string `json:"name"`
@@ -34,8 +31,6 @@ func (i SubstrateActorIdentity) Validate() error {
 	return nil
 }
 
-// SealedBootstrapChallenge contains only public material. The key and boot
-// nonce are newly generated in each credential-free supervisor process.
 type SealedBootstrapChallenge struct {
 	Schema    string                 `json:"schema"`
 	Nonce     string                 `json:"nonce"`
@@ -51,8 +46,6 @@ type SealedCredentialBootstrap struct {
 	Ciphertext      string                   `json:"ciphertext"`
 }
 
-// CredentialBootstrapReceiver holds a single process's private key. Full
-// memory snapshots are prohibited; this key never goes into durable storage.
 type CredentialBootstrapReceiver struct {
 	Challenge SealedBootstrapChallenge
 	key       *ecdh.PrivateKey
@@ -97,17 +90,11 @@ func (c SealedBootstrapChallenge) Validate(nonce string, expected SubstrateActor
 	return nil
 }
 
-// SealCredentialBootstrap encrypts the payload for the exact observed process
-// and Actor lifetime. The caller additionally signs the resulting envelope
-// with the controller-only bootstrap signing seed. A rerouted request or
-// replaced process cannot decrypt a prior process's payload.
 func SealCredentialBootstrap(challenge SealedBootstrapChallenge, nonce string, actor SubstrateActorIdentity, plaintext []byte) ([]byte, error) {
 	body, _, err := SealCredentialBootstrapExchange(challenge, nonce, actor, plaintext)
 	return body, err
 }
 
-// SealCredentialBootstrapExchange also retains the ephemeral exchange key so
-// the caller can authenticate and decrypt a response from this exact process.
 func SealCredentialBootstrapExchange(challenge SealedBootstrapChallenge, nonce string, actor SubstrateActorIdentity, plaintext []byte) ([]byte, *CredentialBootstrapExchange, error) {
 	if err := challenge.Validate(nonce, actor); err != nil {
 		return nil, nil, err

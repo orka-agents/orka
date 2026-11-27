@@ -17,10 +17,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-// Recover in one startup after process death leaves a durable mutation interlock.
-// The failed release preserves the production TTL without sleeping in real time
-// or contacting a cluster. Startup must not steal or renew the abandoned lock.
-//
 //nolint:gocyclo // Keep crash, lease-expiry, and fencing assertions in one ordered scenario.
 func TestControllerEpochManagerCrashRecoveryAfterMutationExpiry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -99,7 +95,6 @@ func TestControllerEpochManagerCrashRecoveryAfterMutationExpiry(t *testing.T) {
 			t.Fatalf("waiting startup changed the authoritative epoch: %v", err)
 		}
 
-		// The next capped retry must recover without restarting the manager.
 		time.Sleep(time.Second + time.Nanosecond)
 		synctest.Wait()
 		acquired, ready := manager.Current()
@@ -134,7 +129,6 @@ func TestControllerEpochManagerCrashRecoveryAfterMutationExpiry(t *testing.T) {
 			t.Fatal("recovered epoch allowed a predecessor mutation")
 		}
 
-		// The acquisition deadline must not limit the acquired manager's lifetime.
 		time.Sleep(3 * time.Minute)
 		synctest.Wait()
 		select {

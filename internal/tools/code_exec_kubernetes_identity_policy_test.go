@@ -15,10 +15,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// config/admission/ai_worker_identity_protection.yaml admits only AI worker
-// Jobs and Secrets of this shape. A code_exec change that breaks any of these
-// properties makes the Kubernetes backend fail admission in every install, so
-// update the policy together with the builder.
 func TestKubernetesCodeExecJobMeetsAIWorkerIdentityPolicy(t *testing.T) {
 	executor := &KubernetesJobCodeExecutor{}
 	for _, runID := range []string{"session/task/tool-call-01", strings.Repeat("long-run-id-", 12), "///"} {

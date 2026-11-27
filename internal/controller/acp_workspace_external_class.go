@@ -35,9 +35,6 @@ func externalACPProvider(provider *workspacev1alpha1.ExecutionWorkspaceProvider)
 		slices.Contains(provider.Spec.RequiredContracts, workspacev1alpha1.LifecycleContractV1)
 }
 
-// resolveExternalWorkspaceParameters keeps provider APIs out of Orka's scheme.
-// Their installed schema and adapter validate native inputs; core freezes the
-// functional spec and exact object revision before admitting a workload.
 func resolveExternalWorkspaceParameters(ctx context.Context, reader client.Reader, mapper apimeta.RESTMapper,
 	namespace string, ref *workspacev1alpha1.TypedObjectReference, scope apimeta.RESTScopeName,
 ) (*unstructured.Unstructured, error) {
@@ -114,15 +111,10 @@ func validateExternalACPProvider(ctx context.Context, c client.Client, provider 
 	return nil
 }
 
-// externalACPProfileRetention is the retention policy core reads from an
-// external provider profile as unstructured data.
 type externalACPProfileRetention struct {
-	// SuspendMode is the permitted suspension scope; empty forbids Suspend.
-	SuspendMode string
-	// MaxSuspendedWorkspaces is the class retention cap, or nil.
+	SuspendMode            string
 	MaxSuspendedWorkspaces *int32
-	// SuspendAfterDetach is the warm-detach window (ADR 0055), or zero.
-	SuspendAfterDetach time.Duration
+	SuspendAfterDetach     time.Duration
 }
 
 func externalACPProfilePolicy(profile *unstructured.Unstructured, class *workspacev1alpha1.ExecutionWorkspaceClass) (externalACPProfileRetention, error) {
@@ -319,9 +311,6 @@ func (r *TaskReconciler) resolveExternalACPWorkspaceClass(ctx context.Context, r
 	return resolved, nil
 }
 
-// Checkpoint use is authorized against the live caller by Task admission. A
-// fresh destination also rechecks the public artifact identity before creation;
-// it need not read the source workspace, which may already have been deleted.
 func (r *TaskReconciler) validateACPWorkspaceRestoreCheckpoint(ctx context.Context, task *corev1alpha1.Task, binding *ACPRuntimeWorkspaceBinding) error {
 	if binding == nil || binding.RestoreFrom == nil || binding.Class == nil || binding.Class.ControllerName == "" {
 		return nil

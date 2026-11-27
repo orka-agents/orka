@@ -36,49 +36,27 @@ import (
 )
 
 const (
-	// substrateMCPProxyMaxRequestBytes bounds one MCP JSON-RPC request body.
-	substrateMCPProxyMaxRequestBytes = 4 << 20
-	// substrateMCPProxyMaxResponseBytes bounds one streamed actor response,
-	// above the 10 MiB tool result limit plus SSE framing.
-	substrateMCPProxyMaxResponseBytes = 16 << 20
-	substrateMCPProxyDefaultTimeout   = 30 * time.Second
-	substrateMCPProxyMaxTimeout       = 5 * time.Minute
-	// substrateMCPProxyWriteTimeout bounds writing one proxied response to the
-	// caller. The upstream timeout cannot interrupt a write blocked by a
-	// caller that stopped reading. It exceeds the longest upstream timeout, so
-	// it never cuts short a response the Actor is still allowed to send.
-	substrateMCPProxyWriteTimeout  = substrateMCPProxyMaxTimeout + time.Second
-	substrateMCPProxyMaxTokenBytes = 16 << 10
-	// substrateMCPProxyRequestReadTimeout bounds reading one proxied request,
-	// body included, so a stalled upload costs only its own connection.
+	substrateMCPProxyMaxRequestBytes    = 4 << 20
+	substrateMCPProxyMaxResponseBytes   = 16 << 20
+	substrateMCPProxyDefaultTimeout     = 30 * time.Second
+	substrateMCPProxyMaxTimeout         = 5 * time.Minute
+	substrateMCPProxyWriteTimeout       = substrateMCPProxyMaxTimeout + time.Second
+	substrateMCPProxyMaxTokenBytes      = 16 << 10
 	substrateMCPProxyRequestReadTimeout = 30 * time.Second
 	substrateMCPProxyAction             = "callSubstrateMCPTool"
-	// substrateMCPProxyCallNameMember is the tools/call member naming the callable.
-	substrateMCPProxyCallNameMember = apiFieldName
+	substrateMCPProxyCallNameMember     = apiFieldName
 )
 
-// SubstrateMCPProxyConfig enables the Orka API MCP proxy for Substrate MCP
-// actor Tools. The router uses the manager's pod-certificate identity, the
-// only client on the Substrate router's SPIFFE allowlist. A nil Router leaves
-// the proxy unavailable (503).
 type SubstrateMCPProxyConfig struct {
 	Router *workerexecutor.SubstrateMCPRouter
 }
 
-// substrateMCPProxyRequestHeaders are the only caller headers forwarded to an
-// actor. Authorization, cookies, the caller's own Txn-Token (Orka API
-// authentication) and every other header are dropped.
 var substrateMCPProxyRequestHeaders = []string{
 	fiber.HeaderAccept, "MCP-Protocol-Version", "Mcp-Session-Id", "Idempotency-Key", "traceparent", "tracestate",
 }
 
-// substrateMCPProxyResponseHeaders are the only actor response headers returned.
 var substrateMCPProxyResponseHeaders = []string{fiber.HeaderContentType, "Mcp-Session-Id", "MCP-Protocol-Version"}
 
-// ProxySubstrateMCPTool forwards one MCP Streamable HTTP request to the
-// Substrate actor that backs a Tool. The route policy has already required
-// `get tools/<name>` in the resolved namespace for Kubernetes identities.
-//
 //nolint:gocyclo // Authentication, Tool admission, credential and transport checks fail closed in order.
 func (h *Handlers) ProxySubstrateMCPTool(c fiber.Ctx) error {
 	name := c.Params(apiFieldName)
@@ -92,10 +70,7 @@ func (h *Handlers) ProxySubstrateMCPTool(c fiber.Ctx) error {
 	}
 	switch ui.AuthType {
 	case AuthTypeTokenReview:
-		// Authorized by the route policy's SubjectAccessReview.
 	case AuthTypeContextToken:
-		// Transaction tokens carry their own scopes. Audit-only or disabled
-		// authorization would let any valid token invoke an actor.
 		if !h.contextTokenAuthorization.enforcing() {
 			return fiber.NewError(fiber.StatusForbidden, "Substrate MCP proxy requires enforced transaction-token authorization")
 		}
@@ -117,9 +92,6 @@ func (h *Handlers) ProxySubstrateMCPTool(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	// The caller validated credential authority and approvals against its own
-	// Tool snapshot. Refuse before resolving credentials or contacting an Actor
-	// if that snapshot is not this exact Tool lifetime, spec and Actor.
 	if !workerexecutor.SubstrateMCPToolBindingMatches(tool,
 		c.Get(workerexecutor.SubstrateMCPToolUIDHeader),
 		c.Get(workerexecutor.SubstrateMCPToolGenerationHeader),
@@ -134,8 +106,6 @@ func (h *Handlers) ProxySubstrateMCPTool(c fiber.Ctx) error {
 	method := c.Method()
 	var body []byte
 	if method == fiber.MethodPost {
-		// Refuse a body declared past the limit before reading any of it, and
-		// read a streamed one at most one byte past the limit.
 		if c.Request().Header.ContentLength() > substrateMCPProxyMaxRequestBytes ||
 			!readBoundedRawBody(c, substrateMCPProxyMaxRequestBytes) {
 			return fiber.NewError(fiber.StatusRequestEntityTooLarge, "MCP request body is too large")
@@ -148,8 +118,6 @@ func (h *Handlers) ProxySubstrateMCPTool(c fiber.Ctx) error {
 		if parseErr != nil || mediaType != fiber.MIMEApplicationJSON {
 			return fiber.NewError(fiber.StatusUnsupportedMediaType, "MCP requests must be application/json")
 		}
-		// Authorization named this Tool. Forward only the message the proxy
-		// checked, never the caller's bytes.
 		if body, err = substrateMCPProxyRequestBody(body, tool.Name); err != nil {
 			return err
 		}
@@ -160,10 +128,6 @@ func (h *Handlers) ProxySubstrateMCPTool(c fiber.Ctx) error {
 	}
 
 	timeout := substrateMCPProxyTimeout(tool)
-	// fasthttp streams the body after this handler returns, so the upstream
-	// request is bounded by its own timeout rather than the handler context.
-	// Only the trace identity carries over, so the routed Actor call joins the
-	// caller's trace without inheriting the handler's cancellation.
 	upstreamCtx, cancel := context.WithTimeout(
 		trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(c.Context())), timeout)
 	request, err := h.substrateMCPRouter.NewRequest(upstreamCtx, tool, method, bytes.NewReader(body))
@@ -201,8 +165,6 @@ func (h *Handlers) ProxySubstrateMCPTool(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusBadGateway, "Substrate MCP actor request failed")
 	}
-	// The caller no longer holds the values the proxy injected, so it cannot
-	// redact them from what the Actor returns.
 	injected := substrateMCPProxyInjectedSecrets(tool, credential, toolTxnToken)
 	stream := newSubstrateMCPProxyStream(response.Body, cancel, injected)
 	for _, header := range substrateMCPProxyResponseHeaders {
@@ -220,10 +182,6 @@ func (h *Handlers) ProxySubstrateMCPTool(c fiber.Ctx) error {
 	return nil
 }
 
-// isSubstrateMCPProxyRoute reports whether a request targets the MCP proxy
-// routes, POST and DELETE /api/v1/tools/:name/mcp, matching the path the way
-// Fiber routes it: on the original path, without regard to case or a trailing
-// slash.
 func isSubstrateMCPProxyRoute(header *fasthttp.RequestHeader) bool {
 	if !header.IsPost() && !header.IsDelete() {
 		return false
@@ -262,8 +220,6 @@ func (h *Handlers) substrateMCPProxyTool(ctx context.Context, namespace, name st
 	if _, err := workerexecutor.SubstrateMCPActorTarget(tool); err != nil {
 		return nil, fiber.NewError(fiber.StatusServiceUnavailable, "MCP tool actor endpoint is not ready")
 	}
-	// Status names the previous Actor until the controller reconciles a spec
-	// change; never pair the current credential with that Actor.
 	if !workerexecutor.SubstrateMCPToolReadyForCurrentGeneration(tool) {
 		return nil, fiber.NewError(fiber.StatusServiceUnavailable, "MCP tool actor is not ready for the current Tool specification")
 	}
@@ -282,12 +238,6 @@ func (h *Handlers) substrateMCPProxyTool(ctx context.Context, namespace, name st
 	return tool, nil
 }
 
-// substrateMCPProxyCredential checks the caller may use every credential the
-// Tool's invocation uses, then resolves the Tool's configured auth Secret.
-// That includes egress credentials the Substrate gateway injects into the
-// actor's outbound requests, which the proxy never reads. Kubernetes
-// identities need `get secrets/<name>`, transaction tokens need the
-// credential-read scope and a matching secret constraint.
 func (h *Handlers) substrateMCPProxyCredential(c fiber.Ctx, ui *UserInfo, tool *corev1alpha1.Tool) (string, error) {
 	secretNames := aitools.SubstrateMCPEgressCredentialSecretNames(tool)
 	var ref *corev1alpha1.SecretKeySelector
@@ -362,7 +312,6 @@ func substrateMCPProxyTimeout(tool *corev1alpha1.Tool) time.Duration {
 	return min(timeout, substrateMCPProxyMaxTimeout)
 }
 
-// substrateMCPProxyMessage is the JSON-RPC envelope the proxy forwards.
 type substrateMCPProxyMessage struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
@@ -370,15 +319,6 @@ type substrateMCPProxyMessage struct {
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
-// substrateMCPProxyRequestBody admits one MCP message for the Tool the caller
-// was authorized to use and returns the body to forward.
-//
-// A Tool stands for the single callable that carries its name, but its Actor's
-// MCP server may expose others. The proxy therefore admits only the session
-// handshake and a tools/call for that name, and rejects batches, other methods
-// and client responses. It forwards a message rebuilt from the members it
-// checked, so a duplicate or differently cased member the Actor's parser might
-// prefer never reaches it.
 func substrateMCPProxyRequestBody(body []byte, toolName string) ([]byte, error) {
 	malformed := func(message string) error { return fiber.NewError(fiber.StatusBadRequest, message) }
 	var envelope map[string]json.RawMessage
@@ -424,7 +364,6 @@ func substrateMCPProxyRequestBody(body []byte, toolName string) ([]byte, error) 
 		return nil, fiber.NewError(fiber.StatusForbidden, fmt.Sprintf("MCP method %q is not available through the Orka MCP proxy", message.Method))
 	}
 	if params != nil {
-		// Rebuilding drops duplicate members, which a map keeps only once.
 		rebuilt, err := json.Marshal(params)
 		if err != nil {
 			return nil, malformed("MCP request params must be an object")
@@ -440,9 +379,6 @@ func substrateMCPProxyRequestBody(body []byte, toolName string) ([]byte, error) 
 
 const substrateMCPProxyRedaction = "[REDACTED]"
 
-// substrateMCPProxyInjectedSecrets lists the values the proxy added to the
-// Actor request. Longer values come first so one that contains another is
-// replaced whole.
 func substrateMCPProxyInjectedSecrets(tool *corev1alpha1.Tool, credential, toolTxnToken string) [][]byte {
 	values := append(workerexecutor.SubstrateMCPSensitiveHeaderValues(toolHTTPHeaders(tool)), credential, toolTxnToken)
 	seen := map[string]struct{}{}
@@ -463,14 +399,10 @@ type substrateMCPProxyMatch int
 
 const (
 	substrateMCPProxyNoMatch substrateMCPProxyMatch = iota
-	// substrateMCPProxyPartialMatch means data ended while it still spelled
-	// the beginning of the secret.
 	substrateMCPProxyPartialMatch
 	substrateMCPProxyFullMatch
 )
 
-// decodeSubstrateMCPProxyJSONEscape decodes the JSON string escape that data
-// begins with. A surrogate pair is one escape.
 func decodeSubstrateMCPProxyJSONEscape(data []byte) (rune, int, substrateMCPProxyMatch) {
 	if len(data) < 2 {
 		return 0, 0, substrateMCPProxyPartialMatch
@@ -493,7 +425,6 @@ func decodeSubstrateMCPProxyJSONEscape(data []byte) (rune, int, substrateMCPProx
 		return 0, 0, substrateMCPProxyNoMatch
 	}
 	unit := func(data []byte) (rune, substrateMCPProxyMatch) {
-		// data begins with a backslash; expect `\uXXXX`.
 		var value rune
 		for i := 1; i < 6; i++ {
 			if i >= len(data) {
@@ -537,24 +468,16 @@ func decodeSubstrateMCPProxyJSONEscape(data []byte) (rune, int, substrateMCPProx
 	return 0, 0, substrateMCPProxyNoMatch
 }
 
-// substrateMCPProxyMatcher matches one secret at the start of data.
 type substrateMCPProxyMatcher struct {
 	data, secret []byte
-	// tried records positions where both readings of a backslash failed, so a
-	// run of backslashes cannot be explored more than once per position.
-	tried map[[2]int]substrateMCPProxyMatch
+	tried        map[[2]int]substrateMCPProxyMatch
 }
 
-// matchSubstrateMCPProxySecret reports whether data begins with secret, either
-// byte for byte or with any of its characters written as a JSON string escape
-// (`\/`, `\u002B`, ...). A JSON serializer may choose those freely and the
-// caller decodes them back to the secret. It returns the matched length.
 func matchSubstrateMCPProxySecret(data, secret []byte) (int, substrateMCPProxyMatch) {
 	matcher := substrateMCPProxyMatcher{data: data, secret: secret}
 	return matcher.match(0, 0)
 }
 
-// match continues at data[k:] and secret[j:] and returns where the match ends.
 func (m *substrateMCPProxyMatcher) match(k, j int) (int, substrateMCPProxyMatch) {
 	for j < len(m.secret) {
 		if k >= len(m.data) {
@@ -568,8 +491,6 @@ func (m *substrateMCPProxyMatcher) match(k, j int) (int, substrateMCPProxyMatch)
 			j++
 			continue
 		}
-		// A backslash is either the start of an escape or, when the secret has
-		// one here, itself. Try both.
 		literal := m.secret[j] == '\\'
 		if outcome, ok := m.tried[[2]int{k, j}]; ok {
 			return 0, outcome
@@ -603,11 +524,6 @@ func (m *substrateMCPProxyMatcher) match(k, j int) (int, substrateMCPProxyMatch)
 	return k, substrateMCPProxyFullMatch
 }
 
-// redactSubstrateMCPProxy appends data to out with every secret replaced and
-// returns how much of data it consumed. Unless final, it stops before a tail
-// that may still become a secret once more data arrives; because that is
-// decided by matching rather than by length, a complete SSE event is never
-// held back.
 func redactSubstrateMCPProxy(out, data []byte, secrets [][]byte, final bool) ([]byte, int) {
 	flushed := 0
 scan:
@@ -624,8 +540,6 @@ scan:
 				continue scan
 			}
 			if status == substrateMCPProxyPartialMatch && !final {
-				// A longer secret may still complete here; do not settle for
-				// a shorter one or release these bytes yet.
 				return append(out, data[flushed:i]...), i
 			}
 		}
@@ -634,12 +548,6 @@ scan:
 	return append(out, data[flushed:]...), len(data)
 }
 
-// substrateMCPProxyStream streams a bounded actor response and releases the
-// upstream request when fasthttp closes it. Exceeding the bound fails the
-// response rather than truncating a JSON-RPC message silently.
-//
-// Values the proxy injected are replaced before they reach the caller, also
-// when one spans two reads.
 type substrateMCPProxyStream struct {
 	body      io.ReadCloser
 	remaining int64
@@ -647,7 +555,6 @@ type substrateMCPProxyStream struct {
 	closed    bool
 
 	secrets [][]byte
-	// pending is response data that may still become a secret.
 	pending []byte
 	ready   []byte
 	err     error
@@ -680,8 +587,6 @@ func (s *substrateMCPProxyStream) Read(p []byte) (int, error) {
 
 func (s *substrateMCPProxyStream) readBounded(p []byte) (int, error) {
 	if s.remaining <= 0 {
-		// Only a clean end of the upstream body completes a response that
-		// reached the bound; a failed read must not pass for one.
 		var probe [1]byte
 		for {
 			n, err := s.body.Read(probe[:])

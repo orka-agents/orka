@@ -6,7 +6,6 @@ vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
 import { useUIStore } from '@/stores/ui'
 import { useResolvedTheme } from './use-resolved-theme'
 
-// jsdom has no matchMedia; this one reports the system theme and announces changes.
 function stubSystemTheme(dark: boolean) {
   const listeners = new Set<() => void>()
   Object.defineProperty(window, 'matchMedia', {

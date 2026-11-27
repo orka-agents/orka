@@ -41,7 +41,6 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
-		// Keep the token in memory; the command runner logs command arguments.
 		cmd := exec.CommandContext(ctx, "kubectl", "create", "token", serviceAccountName,
 			"-n", namespace, "--duration=10m", "--request-timeout=10s")
 		tokenBytes, err := cmd.Output()
@@ -191,9 +190,6 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 	})
 })
 
-// cleanupAgentSessionTasks requests cancellation before archival, then waits for
-// normal Task finalization. Session-bound Tasks retain their cleanup authority
-// until Session DELETE has durably archived the original turn receipts.
 func cleanupAgentSessionTasks(
 	ctx context.Context, apiBaseURL, token, sessionName string,
 	taskNames []string, run func(*exec.Cmd) (string, error),
@@ -231,8 +227,6 @@ func cleanupAgentSessionTasks(
 		case http.StatusNoContent, http.StatusNotFound:
 			return true, nil
 		case http.StatusConflict:
-			// Active turns and unsettled original cleanup remain owned. Retry
-			// the same canonical Session cleanup request within the deadline.
 			return false, nil
 		default:
 			return false, fmt.Errorf("Session DELETE returned HTTP %d", resp.StatusCode)

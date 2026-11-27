@@ -14,8 +14,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// protocolStore is the SQLite provider with hooks on the conditional
-// commands' provider calls.
 type protocolStore struct {
 	*sqlite.Store
 	afterResolve func()
@@ -59,10 +57,6 @@ func acceptedProposal(t *testing.T, client *storageclient.Client, id, descriptio
 	return proposal
 }
 
-// TestApplyMemoryProposalAuthorizesTheMemoryAConcurrentApplyCreated races a
-// second application between resolving "create a memory" and committing.
-// The client must not return the winner's memory until the caller is
-// authorized to read that exact memory.
 func TestApplyMemoryProposalAuthorizesTheMemoryAConcurrentApplyCreated(t *testing.T) {
 	client, backend := newProtocolClient(t)
 	ctx := t.Context()
@@ -185,8 +179,6 @@ func TestScanIngestionRecordsReadsAndPreviewsOnlyAfterWrites(t *testing.T) {
 	require.Equal(t, "open", stored.State)
 }
 
-// A consolidation proposal changes memories nobody named in the apply
-// request, so the client authorizes changing each of them before it commits.
 func TestApplyMemoryProposalAuthorizesEveryConsolidationTarget(t *testing.T) {
 	client, _ := newProtocolClient(t)
 	ctx := t.Context()
@@ -247,8 +239,6 @@ func TestApplyMemoryProposalAuthorizesEveryConsolidationTarget(t *testing.T) {
 	require.Empty(t, checked, "replaying an applied proposal changes no memory, so it authorizes none")
 }
 
-// A stale consolidation proposal fails once with a conflict: resolving again
-// cannot make its targets current.
 func TestApplyMemoryProposalRefusesAStaleConsolidation(t *testing.T) {
 	client, _ := newProtocolClient(t)
 	ctx := t.Context()

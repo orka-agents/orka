@@ -8,23 +8,13 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// acpSkillRuntimeSupport lists the built-in runtimes whose native skills
-// folder the supervisor projects Agent Skills into, limited to exactly the
-// Orka-provided skills where the runtime allows it.
 var acpSkillRuntimeSupport = map[corev1alpha1.AgentRuntimeType]bool{
 	corev1alpha1.AgentRuntimeCodex:    true,
 	corev1alpha1.AgentRuntimeClaude:   true,
 	corev1alpha1.AgentRuntimeOpencode: true,
 }
 
-// acpSkillRuntimeUnsupportedReasons explains why a built-in runtime can't
-// receive skills. Every runtime is rejected at admission and planning instead
-// of silently ignoring its skills.
 var acpSkillRuntimeUnsupportedReasons = map[corev1alpha1.AgentRuntimeType]string{
-	// Copilot CLI 1.0.96 in ACP mode keeps loading repository skills
-	// (.github/skills, .agents/skills, .claude/skills) whatever its settings
-	// say, so enabling its skill tool would also hand the model untrusted
-	// repository skills, whose allowed-tools can add permission rules.
 	corev1alpha1.AgentRuntimeCopilot: "Copilot CLI cannot limit skill discovery to Orka-provided skills in ACP mode, so enabling skills would also enable untrusted repository skills",
 }
 
@@ -43,7 +33,6 @@ const (
 	acpSkillsExecutionWorkspaceError = "runtime.skills are not supported with Task.spec.execution.workspace; execution workspaces (including Agent Sandbox and Substrate) cannot mount skills yet"
 )
 
-// agentSkills returns the Agent's declared runtime skills, or nil.
 func agentSkills(agent *corev1alpha1.Agent) []corev1alpha1.AgentRuntimeSkill {
 	if agent == nil || agent.Spec.Runtime == nil {
 		return nil
@@ -51,9 +40,6 @@ func agentSkills(agent *corev1alpha1.Agent) []corev1alpha1.AgentRuntimeSkill {
 	return agent.Spec.Runtime.Skills
 }
 
-// RuntimeSkillsFromAgent converts Agent skills into the profile shape,
-// preserving declared order and resolving the default source path so the
-// frozen profile names the exact folder that is read.
 func RuntimeSkillsFromAgent(skills []corev1alpha1.AgentRuntimeSkill) []harnessv2.RuntimeSkill {
 	if len(skills) == 0 {
 		return nil
@@ -96,9 +82,6 @@ func runtimeSkillsFromPool(skills []corev1alpha1.RuntimePoolSkill) []harnessv2.R
 	return result
 }
 
-// ValidateAgentSkills applies the full skill policy to an Agent: feature
-// gates, image-delivery availability, built-in runtime support, shape rules,
-// and the registry allowlist. An Agent without skills always passes.
 func (p ACPToolboxPolicy) ValidateAgentSkills(agent *corev1alpha1.Agent) error {
 	skills := agentSkills(agent)
 	if len(skills) == 0 {
@@ -134,9 +117,6 @@ func (p ACPToolboxPolicy) ValidateAgentSkills(agent *corev1alpha1.Agent) error {
 	return nil
 }
 
-// agentSkillPlanRejection repeats the admission checks at planning time so a
-// Task never reaches a RuntimePool with skills it cannot bind, even if the
-// Agent was admitted under a different policy.
 func (p ACPToolboxPolicy) agentSkillPlanRejection(task *corev1alpha1.Task, agent *corev1alpha1.Agent, external bool) string {
 	if len(agentSkills(agent)) == 0 {
 		return ""

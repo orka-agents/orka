@@ -30,10 +30,6 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-// Contenders for k slots all run eventually, at most k at a time, whether
-// they are admitted one at a time or race in parallel, for the namespace limit
-// and for a coordinator's child limit. A Pending Task waiting for a slot never
-// blocks another, so contenders that outnumber the slots still make progress.
 func TestTaskAdmissionSlotsAdmitEveryContender(t *testing.T) {
 	for _, scopeKind := range []string{"namespace", "children"} {
 		for _, parallel := range []bool{false, true} {
@@ -138,7 +134,6 @@ func runAdmissionContenders(t *testing.T, scopeKind string, parallel bool, conte
 		if admitted == 0 && int32(len(running)) < limit { //nolint:gosec // test sizes are tiny
 			t.Fatalf("round %d: a slot was free but no waiting Task took it", round)
 		}
-		// The longest-running Task finishes and frees its slot.
 		if len(running) > 0 {
 			setPhase(running[0], corev1alpha1.TaskPhaseSucceeded)
 			running = running[1:]
@@ -146,8 +141,6 @@ func runAdmissionContenders(t *testing.T, scopeKind string, parallel bool, conte
 	}
 }
 
-// A granted Task keeps its slot on later passes, even before its own state
-// shows it admitted, and a holder that finishes frees its slot.
 func TestTaskAdmissionSlotIsKeptByItsHolderAndFreedOnCompletion(t *testing.T) {
 	ctx := context.Background()
 	first := limitTestTask("first")
@@ -176,10 +169,6 @@ func TestTaskAdmissionSlotIsKeptByItsHolderAndFreedOnCompletion(t *testing.T) {
 	}
 }
 
-// A grant recorded for a Task this reconcile has not seen admitted, such as
-// one created and granted moments ago by a concurrent reconcile, is a holder:
-// the Tasks are listed after each ledger read, so its grant is never mistaken
-// for a finished Task's and pruned.
 func TestTaskAdmissionHonorsAConcurrentlyRecordedGrant(t *testing.T) {
 	ctx := context.Background()
 	checking := limitTestTask("checking")
@@ -198,9 +187,6 @@ func TestTaskAdmissionHonorsAConcurrentlyRecordedGrant(t *testing.T) {
 	}
 }
 
-// Namespace ledgers kept in the controller namespace are reaped when their
-// namespace is gone, or when no grant is live and none was made for the stale
-// interval, never while a grant is live, and never once a grant changed them.
 func TestReapNamespaceAdmissionLedgers(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
@@ -243,7 +229,6 @@ func TestReapNamespaceAdmissionLedgers(t *testing.T) {
 	r.Client = interceptor.NewClient(base, interceptor.Funcs{
 		Delete: func(ctx context.Context, delegate client.WithWatch, object client.Object, options ...client.DeleteOption) error {
 			if object.GetName() == taskAdmissionNamespaceLedger+taskAdmissionLedgerDigest("raced") {
-				// A grant lands between the reaper's read and its delete.
 				current := &coordinationv1.Lease{}
 				if err := delegate.Get(ctx, client.ObjectKeyFromObject(object), current); err != nil {
 					return err
@@ -269,9 +254,6 @@ func TestReapNamespaceAdmissionLedgers(t *testing.T) {
 	}
 }
 
-// A ledger never holds more grants than its limit, and every limit is capped
-// at MaxTaskAdmissionSlots, so a full ledger of UUID-shaped UIDs stays far
-// below the 256KiB Kubernetes allows for all of an object's annotations.
 func TestTaskAdmissionLedgerSizeIsBoundedByTheSlotCap(t *testing.T) {
 	entries := make([]types.UID, MaxTaskAdmissionSlots)
 	for i := range entries {
@@ -294,7 +276,6 @@ func TestTaskAdmissionLedgerSizeIsBoundedByTheSlotCap(t *testing.T) {
 	}
 }
 
-// A limit above the cap admits at most MaxTaskAdmissionSlots holders.
 func TestTaskAdmissionClampsALimitAboveTheCap(t *testing.T) {
 	ctx := context.Background()
 	holders := make([]corev1alpha1.Task, MaxTaskAdmissionSlots)
@@ -312,8 +293,6 @@ func TestTaskAdmissionClampsALimitAboveTheCap(t *testing.T) {
 	}
 }
 
-// writeAdmissionLedger stores grants in a ledger as a forger with write
-// access to it would.
 func writeAdmissionLedger(t *testing.T, c client.Client, ledger types.NamespacedName, grants ...types.UID) {
 	t.Helper()
 	encoded, err := json.Marshal(grants)
@@ -328,9 +307,6 @@ func writeAdmissionLedger(t *testing.T, c client.Client, ledger types.Namespaced
 	}
 }
 
-// A grant in the ledger is not enough to be admitted. A Task that writes its
-// own UID into a full namespace or child ledger is still refused, and grants
-// naming no live, schedule-free Task of the scope take no capacity.
 func TestForgedAdmissionGrantsNeverRaiseCapacity(t *testing.T) {
 	ctx := context.Background()
 	parent := limitTestTask("coordinator")
@@ -378,9 +354,6 @@ func TestForgedAdmissionGrantsNeverRaiseCapacity(t *testing.T) {
 	})
 }
 
-// Ledgers live only in the controller namespace, out of Task authors' reach;
-// without one, a limit admits nothing rather than trusting a ledger they
-// could write.
 func TestAdmissionLedgersLiveOnlyInTheControllerNamespace(t *testing.T) {
 	parent := limitTestTask("coordinator")
 	r := newUnitReconciler(newTestScheme(), parent)
@@ -399,8 +372,6 @@ func TestAdmissionLedgersLiveOnlyInTheControllerNamespace(t *testing.T) {
 	}
 }
 
-// Child ledgers are reaped once their coordinator is gone and no child grant
-// is live, and kept while a child grant is live.
 func TestReapChildAdmissionLedgers(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
@@ -440,11 +411,6 @@ func TestReapChildAdmissionLedgers(t *testing.T) {
 	}
 }
 
-// A coordinator recreated under the same name while a child of the old one is
-// still running: the child limit counts only the children pinned to the
-// current parent's UID, so the old child does not take the new parent's slot,
-// a child pinned to the new parent does, and an unpinned child is counted to
-// be safe. Each incarnation has its own ledger.
 func TestChildAdmissionCountsOnlyThisParentIncarnation(t *testing.T) {
 	ctx := context.Background()
 	parent := limitTestTask("coordinator")
@@ -488,11 +454,6 @@ func TestChildAdmissionCountsOnlyThisParentIncarnation(t *testing.T) {
 	}
 }
 
-// Children pinned to a replaced parent are never granted a slot under the
-// Task that now holds its name: its scope does not list them, so a grant
-// written for one would be dropped by the next request and let several run
-// past the limit. The new parent's children are still admitted up to it, and
-// a Task the namespace scope no longer lists is not admitted either.
 func TestAdmissionNeverGrantsATaskItsScopeDoesNotList(t *testing.T) {
 	ctx := context.Background()
 	parent := limitTestTask("coordinator")
@@ -560,11 +521,6 @@ func TestAdmissionNeverGrantsATaskItsScopeDoesNotList(t *testing.T) {
 	}
 }
 
-// A limit lowered from 2 to 1 while both granted Job Tasks back off between
-// retries: exactly one, the oldest, proceeds, and the other proceeds once it
-// finishes. Neither grant is dropped. A retrying Task whose grant was pruned
-// still holds its place and proceeds after both, and a new Task waits for
-// all of them.
 func TestLoweredLimitElectsOneRetryingHolderAtATime(t *testing.T) {
 	for _, scopeKind := range []string{taskAdmissionLedgerKindNamespace, taskAdmissionLedgerKindChildren} {
 		t.Run(scopeKind, func(t *testing.T) {
@@ -582,7 +538,6 @@ func TestLoweredLimitElectsOneRetryingHolderAtATime(t *testing.T) {
 				}
 				return task
 			}
-			// "younger" sorts first by UID; age alone elects "older".
 			younger, older := task("a-younger", time.Minute, true), task("b-older", 2*time.Minute, true)
 			pruned, fresh := task("c-pruned", 0, true), task("d-fresh", 0, false)
 			r := newUnitReconciler(newTestScheme(), parent, younger, older, pruned, fresh)
@@ -640,9 +595,6 @@ func TestLoweredLimitElectsOneRetryingHolderAtATime(t *testing.T) {
 	}
 }
 
-// Running holders over a lowered limit keep their grants and run on; a
-// granted Task backing off between retries waits until the running Tasks
-// number fewer than the new limit.
 func TestLoweredLimitRetryingHolderWaitsForRunningHolders(t *testing.T) {
 	ctx := context.Background()
 	running := func(name string) *corev1alpha1.Task {
@@ -689,14 +641,6 @@ func TestLoweredLimitRetryingHolderWaitsForRunningHolders(t *testing.T) {
 	}
 }
 
-// Tasks running work without a grant still hold their slot under a limit of
-// one, so a waiting Task is held until they finish:
-//   - after a restart or takeover, a Task Running on a Job recorded in its
-//     status, admitted before ledgers existed or with no grant left;
-//   - a Task whose Job a controller created but stopped before recording,
-//     found from the Job it owns (finished or deleting Jobs do not count);
-//   - a Task whose Job was deleted externally and that is backing off
-//     before the retry path recreates it.
 func TestAdmissionCountsTasksRunningWithoutAGrant(t *testing.T) {
 	ctx := context.Background()
 	ownedJob := func(owner *corev1alpha1.Task, mutate func(*batchv1.Job)) *batchv1.Job {
@@ -766,9 +710,6 @@ func TestAdmissionCountsTasksRunningWithoutAGrant(t *testing.T) {
 	}
 }
 
-// A Task that takes the last slot and starts running between another
-// Task's ledger read and its List is still counted: its grant changed the
-// ledger, so the other Task's write conflicts and it counts again.
 func TestAdmissionCountsATaskThatStartsBetweenTheReadAndTheWrite(t *testing.T) {
 	ctx := context.Background()
 	racer, waiting := limitTestTask("racer"), limitTestTask("waiting")

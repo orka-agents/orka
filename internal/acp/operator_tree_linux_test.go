@@ -26,13 +26,11 @@ func TestTaggedProcessesMatchUIDAndSupplementaryTag(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("10", "20001", "61005")       // tagged operation process
-	write("11", "20001", "")            // the agent: same UID, no tag
-	write("12", "20002", "61005")       // another UID can never be killed
-	write("13", "20001", "61006 61005") // multiple groups still match
+	write("10", "20001", "61005")
+	write("11", "20001", "")
+	write("12", "20002", "61005")
+	write("13", "20001", "61006 61005")
 	write("self", "0", "")
-	// A terminated, unreaped process (for example the operation leader before
-	// its parent's Wait) no longer counts.
 	if err := os.MkdirAll(filepath.Join(root, "14"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -68,10 +66,6 @@ func TestOperatorExecHelperInvocationCarriesTag(t *testing.T) {
 	}
 }
 
-// TestKillOperatorTagContainsEscapedDescendantsAsRoot proves containment end
-// to end: a tagged command spawns a daemon in a new session and exits; the
-// daemon is reparented away, yet the tag kill still finds and kills it while
-// an untagged process of the same UID survives. Requires root (setgroups).
 func TestKillOperatorTagContainsEscapedDescendantsAsRoot(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root to assign supplementary groups")
@@ -110,9 +104,6 @@ func TestKillOperatorTagContainsEscapedDescendantsAsRoot(t *testing.T) {
 	}
 }
 
-// TestOperatorCommandRunsThroughExecHelperAsRoot launches a real operator
-// command through the built exec helper (ORKA_TEST_EXEC_HELPER) and checks the
-// child identity, empty-but-tag groups, and working directory.
 func TestOperatorCommandRunsThroughExecHelperAsRoot(t *testing.T) {
 	helper := os.Getenv("ORKA_TEST_EXEC_HELPER")
 	if os.Geteuid() != 0 || helper == "" {
@@ -181,9 +172,6 @@ func TestOperatorTerminalCommandRunsThroughExecHelperAsRoot(t *testing.T) {
 	}
 }
 
-// TestKillOperatorTagProvesContainmentBeforeReapAsRoot covers the cp path:
-// the helper exits on its own, and containment must be proven while its
-// zombie still awaits Wait.
 func TestKillOperatorTagProvesContainmentBeforeReapAsRoot(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root to assign supplementary groups")
@@ -195,15 +183,12 @@ func TestKillOperatorTagProvesContainmentBeforeReapAsRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = cmd.Wait() }()
-	time.Sleep(200 * time.Millisecond) // exited, not yet reaped
+	time.Sleep(200 * time.Millisecond)
 	if !KillOperatorTag(uid, tag) {
 		t.Fatal("an exited, unreaped operation must count as contained")
 	}
 }
 
-// Only exited processes of the operation's UID that carry its tag are reaped;
-// the agent's processes, other UIDs, live processes, and held operator
-// leaders are left alone.
 func TestReapOperatorTagReapsOnlyTheOperationsZombies(t *testing.T) {
 	root := t.TempDir()
 	write := func(pid, state, uid, groups string) {
@@ -218,13 +203,13 @@ func TestReapOperatorTagReapsOnlyTheOperationsZombies(t *testing.T) {
 	}
 	tag := OperatorTagFirstGID + 5
 	tagged := strconv.Itoa(tag)
-	write("40", "Z (zombie)", "20001", tagged)                              // orphaned descendant: reaped
-	write("41", "Z (zombie)", "20001", strconv.Itoa(tag+1)+" "+tagged)      // multiple groups: reaped
-	write("42", "Z (zombie)", "20001", "")                                  // the agent's orphan
-	write("43", "Z (zombie)", "20002", tagged)                              // another UID
-	write("44", "S (sleeping)", "20001", tagged)                            // still live
-	write("45", "Z (zombie)", "20001", tagged)                              // a held operator leader
-	write("46", "Z (zombie)", "20001", strconv.Itoa(OperatorTagFirstGID+6)) // another operation
+	write("40", "Z (zombie)", "20001", tagged)
+	write("41", "Z (zombie)", "20001", strconv.Itoa(tag+1)+" "+tagged)
+	write("42", "Z (zombie)", "20001", "")
+	write("43", "Z (zombie)", "20002", tagged)
+	write("44", "S (sleeping)", "20001", tagged)
+	write("45", "Z (zombie)", "20001", tagged)
+	write("46", "Z (zombie)", "20001", strconv.Itoa(OperatorTagFirstGID+6))
 	held := &operatorLeaderRegistration{pid: 45}
 	operatorLeaders.mu.Lock()
 	operatorLeaders.pids[45] = held
@@ -255,11 +240,9 @@ func TestTaggedProcessesCountZombieLeadersWithLiveThreads(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Leader 20 called pthread_exit; thread 21 still runs.
 	write(filepath.Join(root, "20", "status"), "Z (zombie)")
 	write(filepath.Join(root, "20", "task", "20", "status"), "Z (zombie)")
 	write(filepath.Join(root, "20", "task", "21", "status"), "S (sleeping)")
-	// Leader 30 and all its threads have exited.
 	write(filepath.Join(root, "30", "status"), "Z (zombie)")
 	write(filepath.Join(root, "30", "task", "30", "status"), "Z (zombie)")
 	tagged, ok := taggedProcesses(root, 20001, 61007)
@@ -268,8 +251,6 @@ func TestTaggedProcessesCountZombieLeadersWithLiveThreads(t *testing.T) {
 	}
 }
 
-// TestKillOperatorTagStopsForkAndExitChainAsRoot runs a descendant chain in
-// which every process forks its successor and exits immediately.
 func TestKillOperatorTagStopsForkAndExitChainAsRoot(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root to assign supplementary groups")
@@ -292,8 +273,6 @@ func TestKillOperatorTagStopsForkAndExitChainAsRoot(t *testing.T) {
 	}
 }
 
-// An operator process whose state cannot be read completely is never presumed
-// gone: the scan reports unsettled and containment stays unproven.
 func TestOperatorTagScanFailsClosedOnUninspectableProcesses(t *testing.T) {
 	const tag = 61009
 	write := func(t *testing.T, root, pid, status string) {
@@ -308,8 +287,6 @@ func TestOperatorTagScanFailsClosedOnUninspectableProcesses(t *testing.T) {
 	clean := "Name:\tsh\nState:\tS (sleeping)\nUid:\t20001\t20001\t20001\t20001\nGroups:\t\n"
 	cases := map[string]func(t *testing.T, root string){
 		"unreadable status": func(t *testing.T, root string) {
-			// A directory in place of the status file fails the read with
-			// EISDIR, standing in for EACCES or EIO.
 			if err := os.MkdirAll(filepath.Join(root, "21", "status"), 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -325,8 +302,6 @@ func TestOperatorTagScanFailsClosedOnUninspectableProcesses(t *testing.T) {
 		},
 		"zombie leader whose threads cannot be listed": func(t *testing.T, root string) {
 			write(t, root, "21", "Name:\tsh\nState:\tZ (zombie)\nUid:\t20001\t20001\t20001\t20001\nGroups:\t61009\n")
-			// A regular file in place of the task directory fails ReadDir with
-			// ENOTDIR, not ENOENT.
 			if err := os.WriteFile(filepath.Join(root, "21", "task"), nil, 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -354,7 +329,6 @@ func TestOperatorTagScanFailsClosedOnUninspectableProcesses(t *testing.T) {
 	t.Run("exited processes still settle", func(t *testing.T) {
 		root := t.TempDir()
 		write(t, root, "20", clean)
-		// A listed PID whose directory vanished exited before inspection.
 		if err := os.MkdirAll(filepath.Join(root, "23"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -364,8 +338,6 @@ func TestOperatorTagScanFailsClosedOnUninspectableProcesses(t *testing.T) {
 	})
 }
 
-// The supervisor never kills a tagged process of another UID, but while one
-// is live it cannot claim the operation is contained.
 func TestOperatorTagContainmentRefusesATaggedProcessOfAnotherUID(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "30"), 0o755); err != nil {
@@ -383,9 +355,6 @@ func TestOperatorTagContainmentRefusesATaggedProcessOfAnotherUID(t *testing.T) {
 	}
 }
 
-// startOperatorKillVictim starts a real process standing in for an unrelated
-// process that reused a scanned operator PID, and lists it in a fake /proc as
-// a tagged operator process.
 func startOperatorKillVictim(t *testing.T, procRoot string, uid, tag int) *exec.Cmd {
 	t.Helper()
 	victim := exec.Command("sleep", "30")
@@ -413,8 +382,6 @@ func writeFakeOperatorStatus(t *testing.T, procRoot string, pid, uid int, groups
 	}
 }
 
-// requireOperatorVictimAlive checks the real process state: a killed child
-// stays a zombie until reaped, and signal 0 still succeeds on a zombie.
 func requireOperatorVictimAlive(t *testing.T, victim *exec.Cmd) {
 	t.Helper()
 	time.Sleep(20 * time.Millisecond)
@@ -424,17 +391,12 @@ func requireOperatorVictimAlive(t *testing.T, victim *exec.Cmd) {
 	}
 }
 
-// A scanned operator PID can exit and be reused by an unrelated process
-// before the root supervisor signals it. The process must be re-verified
-// after it is pinned, and an unrelated successor never signaled.
 func TestKillOperatorTagNeverSignalsAProcessThatReusedAScannedPID(t *testing.T) {
 	const uid, tag = 20001, 61011
 	procRoot := t.TempDir()
 	victim := startOperatorKillVictim(t, procRoot, uid, tag)
 	t.Cleanup(func() { operatorTagScannedHook = nil })
 	operatorTagScannedHook = func() {
-		// The tagged process exited; its PID now belongs to an unrelated
-		// process of another UID without the tag.
 		writeFakeOperatorStatus(t, procRoot, victim.Process.Pid, 0, "")
 	}
 	killOperatorTag(procRoot, uid, tag, 3, time.Millisecond)
@@ -442,8 +404,6 @@ func TestKillOperatorTagNeverSignalsAProcessThatReusedAScannedPID(t *testing.T) 
 	requireOperatorVictimAlive(t, victim)
 }
 
-// Without pidfds a process is never signaled by bare PID; containment stays
-// unproven instead.
 func TestKillOperatorTagRefusesToSignalWithoutPidfds(t *testing.T) {
 	const uid, tag = 20001, 61012
 	procRoot := t.TempDir()
@@ -457,8 +417,6 @@ func TestKillOperatorTagRefusesToSignalWithoutPidfds(t *testing.T) {
 	requireOperatorVictimAlive(t, victim)
 }
 
-// A process that still carries the tag after it is pinned is killed through
-// its pidfd.
 func TestKillOperatorTagSignalsAVerifiedProcessThroughItsPidfd(t *testing.T) {
 	const uid, tag = 20001, 61013
 	procRoot := t.TempDir()
@@ -466,7 +424,6 @@ func TestKillOperatorTagSignalsAVerifiedProcessThroughItsPidfd(t *testing.T) {
 	exited := make(chan struct{})
 	go func() {
 		_, _ = victim.Process.Wait()
-		// Once reaped, the fake process table no longer lists it.
 		_ = os.RemoveAll(filepath.Join(procRoot, strconv.Itoa(victim.Process.Pid)))
 		close(exited)
 	}()

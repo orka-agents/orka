@@ -5,7 +5,6 @@ import { OTHER_CATEGORIES, usageOther, usageReport, usageWork, type UsageFilter 
 
 class BadRequest extends Error {}
 
-/** Parses a `YYYY-MM-DD` (UTC midnight) or RFC 3339 query value. */
 function parseDate(value: string | undefined, fallback: Date): Date {
   if (!value) return fallback
   const parsed = new Date(/^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00Z` : value)
@@ -13,7 +12,6 @@ function parseDate(value: string | undefined, fallback: Date): Date {
   return parsed
 }
 
-/** The selection the controller derives from the query (see usageReportFilter). */
 function usageFilter(request: Request, detail: boolean): UsageFilter {
   const now = new Date()
   const asOf = parseDate(query(request, 'asOf'), now)
@@ -47,7 +45,6 @@ function usagePage(request: Request) {
   return { limit: Math.min(read('limit', 25, 1), 100), offset: read('offset', 0, 0) }
 }
 
-/** Runs a handler body, turning filter validation failures into 400s. */
 function respond(body: () => Response) {
   try {
     return body()
@@ -57,7 +54,6 @@ function respond(body: () => Response) {
   }
 }
 
-/** Usage and PR-outcome reporting. */
 export const usageHandlers = [
   http.get(api('/usage'), ({ request }) =>
     respond(() => HttpResponse.json(usageReport(usageLedger, usageFilter(request, false), usagePage(request))))),

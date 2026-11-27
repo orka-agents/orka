@@ -106,12 +106,10 @@ func TestRenewPromptLeaseLoopSeparatesStopFromRuntimeCancellation(t *testing.T) 
 				TaskUID: harnessv2.TaskUID(task.UID), TaskAttempt: 1, PromptID: "prompt-renew-stop",
 				LeaseGeneration: lease.Generation, ToolPolicyDigest: toolDigest, ApprovalPolicyDigest: approvalDigest,
 				MCPConfigurationDigest: mcpDigest, ToolPolicy: toolPolicy, ApprovalPolicy: approvalPolicy,
-				ExpiresAt: now, // Renew immediately so the test controls the in-flight operation.
+				ExpiresAt: now,
 			}
 			ctx := logf.IntoContext(t.Context(), funcr.New(func(_, message string) {
 				if scenario.stopAt == "decision" && strings.Contains(message, "renewal rejected") {
-					// Pause after the loop observes a live lease context, but before
-					// it cancels the context also needed by result delivery.
 					close(entered)
 					<-resume
 				}
@@ -139,7 +137,6 @@ func TestRenewPromptLeaseLoopSeparatesStopFromRuntimeCancellation(t *testing.T) 
 				case <-time.After(3 * time.Second):
 					t.Fatal("renewal did not reach its controlled in-flight operation")
 				}
-				// Stream completion stops renewal before result delivery and cleanup.
 				stopLease()
 				resumeRenewal()
 			}
@@ -148,7 +145,6 @@ func TestRenewPromptLeaseLoopSeparatesStopFromRuntimeCancellation(t *testing.T) 
 			case <-time.After(3 * time.Second):
 				t.Fatal("renewal loop did not stop")
 			}
-			// Stopping cannot undo a failure that already cancelled an active runtime.
 			stopLease()
 			if cancelled := runtimeCtx.Err() != nil; cancelled != scenario.wantCancelled {
 				t.Fatalf("runtime cancelled = %t, want %t", cancelled, scenario.wantCancelled)

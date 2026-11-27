@@ -66,7 +66,6 @@ func TestRepositoryMonitorReviewPublishUpdatesSameHeadVerdictChange(t *testing.T
 			if publishServer.PostCount != 1 || publishServer.PutCount != 0 {
 				t.Fatalf("first review: posts=%d updates=%d, want one post", publishServer.PostCount, publishServer.PutCount)
 			}
-			// A later review of the same head reaches a different verdict.
 			review("review-second", repositoryMonitorReviewVerdictPassed)
 			wantUpdates := 0
 			if policy == repositoryMonitorPublishSameHeadPolicyUpdate {
@@ -92,14 +91,11 @@ func TestRepositoryMonitorReviewPublishUpdatesSameHeadVerdictChange(t *testing.T
 			if err != nil || len(updates) != 1 || updates[0].SkipReason != repositoryMonitorPublishSkipUpdatedPublishedReview || !strings.Contains(updates[0].ReviewRecordID, "review-second") || updates[0].GitHubReviewID != "123" {
 				t.Fatalf("update records = %+v err=%v, want one for the second review", updates, err)
 			}
-			// The same verdict again leaves the published review alone.
 			review("review-third", repositoryMonitorReviewVerdictPassed)
 			if publishServer.PutCount != 1 {
 				t.Fatalf("unchanged verdict updated the review again: updates=%d", publishServer.PutCount)
 			}
 
-			// GitHub accepted the original review but Orka never recorded it:
-			// marker recovery restores it, and a changed verdict still updates it.
 			original := records[0]
 			original.Phase = repositoryMonitorPublishPhaseFailed
 			if err := monitorStore.UpdateReviewPublishRecord(ctx, &original); err != nil {
@@ -128,7 +124,6 @@ func TestRepositoryMonitorShownReviewReadsEveryPage(t *testing.T) {
 	record := func(id, reviewID, reason string, at time.Time) *store.ReviewPublishRecord {
 		return &store.ReviewPublishRecord{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 9, HeadSHA: "head9", ReviewRecordID: reviewID, Phase: repositoryMonitorPublishPhaseSkipped, SkipReason: reason, CreatedAt: at, UpdatedAt: at}
 	}
-	// The update happens first, then more than a page of same-verdict skips.
 	records := make([]*store.ReviewPublishRecord, 0, 151)
 	records = append(records, record("pub-update", "review-update", repositoryMonitorPublishSkipUpdatedPublishedReview, start.Add(time.Second)))
 	for i := range 150 {
@@ -158,7 +153,6 @@ func TestRepositoryMonitorReviewPublishRewritesAfterAnUnrecordedUpdate(t *testin
 	}
 	publishServer := newRepositoryMonitorPublishTestServer(t, repositoryMonitorPublishTestServerConfig{HeadSHA: repositoryMonitorTestHeadSHA})
 	t.Cleanup(publishServer.Close)
-	// GitHub applies this server's updates, but their responses are lost.
 	lostResponses := newRepositoryMonitorPublishTestServer(t, repositoryMonitorPublishTestServerConfig{HeadSHA: repositoryMonitorTestHeadSHA, PutBody: "{"})
 	t.Cleanup(lostResponses.Close)
 	postPassed := true
@@ -198,8 +192,6 @@ func TestRepositoryMonitorReviewPublishRewritesAfterAnUnrecordedUpdate(t *testin
 	if lostResponses.PutCount != 1 || !strings.Contains(lostResponses.PutBody, "ended with passed") {
 		t.Fatalf("second review: updates=%d body=%q, want the passed summary sent", lostResponses.PutCount, lostResponses.PutBody)
 	}
-	// GitHub now shows passed, while Orka's records still show the first
-	// review's needs_changes. A third needs_changes review must rewrite it.
 	reconciler.GitHubAPIBaseURL = publishServer.URL
 	if err := review("review-third", repositoryMonitorReviewVerdictNeedsChanges); err != nil {
 		t.Fatalf("third review: %v", err)
@@ -207,7 +199,6 @@ func TestRepositoryMonitorReviewPublishRewritesAfterAnUnrecordedUpdate(t *testin
 	if publishServer.PutCount != 1 || !strings.Contains(publishServer.PutBody, "ended with needs_changes") {
 		t.Fatalf("third review: updates=%d body=%q, want GitHub's summary rewritten to needs_changes", publishServer.PutCount, publishServer.PutBody)
 	}
-	// Once recorded, the same verdict again leaves the review alone.
 	if err := review("review-fourth", repositoryMonitorReviewVerdictNeedsChanges); err != nil || publishServer.PutCount != 1 {
 		t.Fatalf("fourth review: updates=%d err=%v, want no further update", publishServer.PutCount, err)
 	}

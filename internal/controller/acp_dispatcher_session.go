@@ -34,9 +34,6 @@ type acpTaskSession struct {
 
 const acpPreSubmissionCleanupTimeout = 30 * time.Second
 
-// errACPSessionNotFound marks a sessionRef with create=false that names a
-// Session that does not exist. Retrying cannot create it, so the Task fails
-// instead of waiting for its deadline.
 var errACPSessionNotFound = errors.New("SessionNotFound")
 
 func promptAttemptSessionBound(attempt *store.PromptAttempt) (bool, error) {
@@ -70,10 +67,6 @@ func (d *ACPDispatcher) rememberFinalizedSessionTurn(taskUID types.UID, turnID s
 	d.finalizedTurns[taskUID] = turnID
 }
 
-// pruneFinalizedSessionTurns bounds the lookup cache to Tasks returned by the
-// current cluster-wide scan. A Task deleted during the scan can leave one
-// entry until the next pass, but cumulative historical throughput cannot grow
-// the map indefinitely.
 func (d *ACPDispatcher) pruneFinalizedSessionTurns(tasks []corev1alpha1.Task) {
 	live := make(map[types.UID]struct{}, len(tasks))
 	for i := range tasks {
@@ -91,18 +84,6 @@ func (d *ACPDispatcher) pruneFinalizedSessionTurns(tasks []corev1alpha1.Task) {
 	}
 }
 
-// sessionTurnRequiresTerminalRecovery reports a session-bound Task whose
-// attempt settled in any terminal state while its SessionTurn is still open.
-// Inline settle finalization silently skips when its in-memory turn is
-// missing, and the recovery sweep otherwise assumes a complete projection
-// implies a finalized turn - leaving artifact retirement blocked on
-// "SessionTurn is not finalized" until the Task deadline fails it. Succeeded
-// additionally waits for terminal delivery because publication recovery owns
-// the open turn until then; Failed, Cancelled, and OutcomeUnknown attempts
-// have no delivery to wait for. The check runs for Finalizing AND settled
-// terminal phases: a finalizer that silently skipped its missing in-memory
-// turn still terminalizes the Task, so a terminal phase alone is never proof
-// of a finalized turn.
 func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -114,10 +95,6 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 			!store.IsTerminalPromptDeliveryState(attempt.DeliveryState)) {
 		return false, nil
 	}
-	// A settled Task phase is NOT proof of a finalized turn: a finalizer that
-	// silently skipped its missing in-memory turn still terminalizes the Task
-	// (for example deletion-driven cancellation), so every terminal phase is
-	// inspected alongside Finalizing.
 	switch task.Status.Phase {
 	case corev1alpha1.TaskPhaseFinalizing, corev1alpha1.TaskPhaseSucceeded,
 		corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
@@ -156,13 +133,6 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 	if turn.State != store.SessionTurnFinalized {
 		return true, nil
 	}
-	// SessionTurnFinalized proves only the durable turn commit, not the
-	// cross-store activation tail (lease release, status projection, outbox
-	// activation). The Task controller can terminalize independently after
-	// that commit, so Task phase is never durable tail-completion proof.
-	// ResumeSessionTurnFinalization is idempotent. A successful live
-	// finalization, which runs the same tail, or a successful recovery records
-	// the immutable turn ID in the cache above.
 	return true, nil
 }
 
@@ -201,8 +171,6 @@ func (d *ACPDispatcher) reconcileUnfinalizedTaskSession(
 		}
 	case store.PromptExecutionSucceeded:
 		if !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
-			// Publication recovery owns the still-open SessionTurn and lease until
-			// delivery reaches a durable terminal receipt.
 			return nil
 		}
 	case store.PromptExecutionFailed, store.PromptExecutionCancelled, store.PromptExecutionOutcomeUnknown:
@@ -212,8 +180,6 @@ func (d *ACPDispatcher) reconcileUnfinalizedTaskSession(
 	if err := d.finalizeRecoveredTerminalSession(ctx, task, attempt, fence); err != nil {
 		return err
 	}
-	// Recovery reconstructs a separate SessionTurn. Reflect its completed
-	// durable finalization on the live turn before runtime cleanup examines it.
 	session.finalized = d.finalizedSessionTurnKnown(task.UID, session.Turn.Turn.ID)
 	return nil
 }
@@ -243,14 +209,10 @@ func acpSessionTranscriptAppendPolicyForTask(task *corev1alpha1.Task) acpSession
 	return acpSessionTranscriptAppendPolicy{skipUserPromptAppend: task.Spec.SessionRef.PromptIncluded}
 }
 
-// acpSessionLineageIdentity carries the protocol/runtime lineage identity
-// claimed atomically with the Session mutation lease.
 type acpSessionLineageIdentity struct {
-	NamespaceUID    string
-	RuntimeIdentity string
-	ConfigDigest    string
-	// WorkspaceSessionUID is the immutable SessionControl identity frozen into
-	// a session-reused execution-workspace binding.
+	NamespaceUID        string
+	RuntimeIdentity     string
+	ConfigDigest        string
 	WorkspaceSessionUID string
 }
 
@@ -284,10 +246,6 @@ func acpSessionLineageConfigurationDigest(
 	if err := store.ValidateCanonicalDigest("session lineage workspace binding digest", workspaceBindingDigest); err != nil {
 		return "", err
 	}
-	// This is the provider-backed execution-workspace binding frozen into the
-	// RuntimePool plan. It is deliberately distinct from the harness
-	// RuntimeSession WorkspaceDigest, whose repo-less baseline may rotate after
-	// the Session lease is acquired without changing protocol lineage.
 	return acpDomainDigest("runtime-session-lineage-configuration/v1", struct {
 		RuntimeProfileDigest   string `json:"runtimeProfileDigest"`
 		RuntimeImage           string `json:"runtimeImage"`
@@ -390,8 +348,6 @@ func (d *ACPDispatcher) prepareTaskSession(
 	}, nil
 }
 
-// rejectMissingTaskSession fails a Task whose sessionRef has create=false and
-// names a Session that does not exist. It runs before any Session binding.
 func (d *ACPDispatcher) rejectMissingTaskSession(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence) error {
 	reason := corev1alpha1.TaskExecutionReason(errACPSessionNotFound.Error())
 	message := fmt.Sprintf("session %s does not exist and sessionRef.create is false", strings.TrimSpace(task.Spec.SessionRef.Name))
@@ -439,9 +395,6 @@ func (d *ACPDispatcher) planTaskSession(
 		return nil, err
 	}
 
-	// Complete every fallible transcript/runtime planning read before acquiring
-	// the mutation Lease. Once the Lease is held, the only next durable action is
-	// opening the exact SessionTurn.
 	current := d.currentRuntimeSessionBinding(control.SessionUID)
 	if current == nil {
 		current, err = runtimeSessionBindingFromTaskStatus(
@@ -657,9 +610,6 @@ func (d *ACPDispatcher) bindAndOpenTaskSessionTurn(
 	}
 	markACPStep(ctx, "attemptSessionStarting")
 
-	// Re-enter exact lease acquisition even when the Lease already exists. This
-	// is idempotent and completes a lineage payload projection that may have
-	// failed after the Kubernetes-authoritative status CAS.
 	lease, err := d.acquireTaskSessionLease(ctx, task, fence, control, lineage)
 	if err != nil {
 		return nil, nil, d.requeueSessionLeaseFailure(ctx, task, attemptID, fence, err)
@@ -895,8 +845,6 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 	delivery corev1alpha1.TaskDeliveryStatus,
 ) error {
 	if session == nil || session.Turn == nil {
-		// The turn-aware recovery sweep converges the still-open SessionTurn;
-		// log so the skip is attributable when it happens.
 		logf.FromContext(ctx).Info("skipping inline ACP session finalization without an open in-memory turn",
 			"namespace", task.Namespace, "task", task.Name)
 		return nil
@@ -911,9 +859,6 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 	if err != nil {
 		return err
 	}
-	// The outbox may publish the terminal phase before or after live
-	// settlement. Include a fixed message so either ordering can record a
-	// meaningful lifecycle event without copying assistant or runtime text.
 	message := "ACP task completed"
 	switch phase {
 	case corev1alpha1.TaskPhaseFailed:
@@ -936,9 +881,6 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 	})
 	if err == nil {
 		d.markTaskSessionFinalized(task, session)
-		// Only a complete binding may replace the live one: a recovered
-		// session that could not rebuild its generation must not clobber
-		// the binding the live path recorded.
 		if session.Binding.Generation > 0 {
 			d.setRuntimeSessionBinding(session.Binding)
 		}
@@ -984,10 +926,6 @@ func (d *ACPDispatcher) finalizeTaskSessionUnknown(ctx context.Context, task *co
 	return err
 }
 
-// markTaskSessionFinalized records a turn whose finalization store call
-// succeeded. That call already completed the activation tail, so the recovery
-// sweep must not resume it: doing so reruns the tail and resettles the Task as
-// if its live settlement had been interrupted.
 func (d *ACPDispatcher) markTaskSessionFinalized(task *corev1alpha1.Task, session *acpTaskSession) {
 	session.finalized = true
 	d.rememberFinalizedSessionTurn(task.UID, session.Turn.Turn.ID)
@@ -1035,10 +973,6 @@ func (d *ACPDispatcher) finalizeTaskSessionMarker(
 	return err
 }
 
-// taskSessionProjectionExecution overlays only the terminal classification on
-// the Task's frozen execution identity. Session finalization projections are
-// immutable reclamation evidence, so omitting the request digest or runtime
-// identity would make the source PromptAttempt impossible to retire safely.
 func taskSessionProjectionExecution(
 	task *corev1alpha1.Task,
 	terminal corev1alpha1.TaskExecutionStatus,
@@ -1099,27 +1033,6 @@ func (d *ACPDispatcher) removeRuntimeSessionBinding(sessionUID string) {
 	d.mu.Unlock()
 }
 
-// retireRecoveredRuntimeSessionBinding drops the in-memory RuntimeSession
-// binding after recovered terminal settlement unless the RuntimeSession is
-// known to stay live: a session-bound read RuntimeSession whose prompt
-// succeeded remains resident on the supervisor after its turn finalizes, and
-// its binding must survive so the next continuation Task plans a reuse
-// instead of a controller-restart style recreation at a new generation with
-// a full transcript bootstrap. Task-scoped sessions (no durable Session, or a
-// write workspace) are retired with the Task, and any non-successful
-// settlement (failed, cancelled, outcome unknown) schedules supervisor
-// cleanup of the RuntimeSession, so those bindings are dropped exactly as the
-// normal failure path does.
-//
-// Retention additionally requires a reusable terminal delivery state (a read
-// prompt that succeeded but whose delivery failed, for example a modified
-// read-only workspace, is cleaned up by the live failure paths) and a
-// complete binding: a recovered session may carry only the SessionUID, and
-// retaining a binding without a generation would make the next continuation
-// fail planning instead of recreating the runtime.
-//
-// A turn that parked is never reusable: its continuation must start from the
-// Session transcript, not from the parked turn's live process.
 func (d *ACPDispatcher) retireRecoveredRuntimeSessionBinding(
 	ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt, binding ACPRuntimeSessionBinding,
 ) {
@@ -1135,8 +1048,6 @@ func (d *ACPDispatcher) retireRecoveredRuntimeSessionBinding(
 		if binding.Generation > 0 {
 			return
 		}
-		// The recovered binding could not be rebuilt; the live binding, if
-		// complete, is still authoritative and stays.
 		if current := d.currentRuntimeSessionBinding(sessionUID); current != nil && current.Generation > 0 {
 			return
 		}
@@ -1154,7 +1065,6 @@ func bootstrapPromptText(bootstrap *ACPBootstrapTranscript) string {
 func (d *ACPDispatcher) requeueSessionLeaseFailure(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, cause error) error {
 	rollbackErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, cause)
 	if rollbackErr != nil && errors.Is(cause, store.ErrSessionConfigurationMismatch) {
-		// Candidate Session authority must be cleared before terminal settlement.
 		return errors.Join(errSessionAdmissionRollback, rollbackErr)
 	}
 	return errors.Join(cause, rollbackErr)

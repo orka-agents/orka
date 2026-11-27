@@ -119,8 +119,6 @@ func newRepositoryMonitorPausedAuthFixture(t *testing.T) *repositoryMonitorPause
 	if err := cl.Get(t.Context(), types.NamespacedName{Namespace: monitor.Namespace, Name: item.LastActionTaskName}, &task); err != nil {
 		t.Fatal(err)
 	}
-	// Model a builtin ACP Task persisted before monitor Task creation became
-	// credential-free. Its immutable auth binding remains required by ingestion.
 	immutable := true
 	snapshot := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "paused-runtime-auth", Namespace: monitor.Namespace, UID: "uid-paused-runtime-auth", Labels: map[string]string{labels.LabelCreatedBy: repositoryMonitorTaskCreatedBy, labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name)}, Annotations: map[string]string{repositoryMonitorIssueAnnotationRuntimeAuthTask: task.Name}}, Immutable: &immutable, Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte("runtime-test-placeholder")}}
 	if err := controllerutil.SetControllerReference(monitor, snapshot, scheme); err != nil {
@@ -190,7 +188,6 @@ func TestRepositoryMonitorPausedImplementationRetainsAuthForReplay(t *testing.T)
 		}
 		f.assertSnapshot(t, true)
 	}
-	// Retryable credential reads still fail closed, without retiring the binding.
 	f.scanError.Store(true)
 	if _, err := f.r.Reconcile(t.Context(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: f.monitor.Namespace, Name: f.monitor.Name}}); err == nil {
 		t.Fatal("credential lookup failure did not stop replay")

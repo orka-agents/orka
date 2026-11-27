@@ -162,11 +162,6 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 			skipReason = repositoryMonitorIssueSkipReason(monitor.Spec, issue, selected, maxPerRun)
 			if skipReason == repositoryMonitorSkipReasonOverLimit && !supersededPausedResult &&
 				repositoryMonitorIssueRetainWorkflowUnderRunLimit(item, existing) {
-				// The per-run cap bounds newly selected issues. An issue already
-				// past discovery keeps its recorded workflow even when its current
-				// content produces a new snapshot digest. Plan approval, an open
-				// PR, and verdict bookkeeping stay intact, and the retained item
-				// does not consume a selection slot or count as selected.
 				if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 					return selected, createdTasks, skipped, err
 				}
@@ -189,10 +184,6 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 			if existing != nil && repositoryMonitorMatchingLabel(repositoryMonitorPauseLabels(monitor.Spec), issue.Labels) != "" &&
 				(repositoryMonitorIssueWorkflowRetainedUnderRunLimit(existing) ||
 					(existing.WorkflowPhase == repositoryMonitorIssuePhaseBlocked && !repositoryMonitorIssueInventoryBlockCanClear(existing.SkipReason))) {
-				// Pause holds the next action. Preserve the current Task or its
-				// completed result, including failures that release job budgets.
-				// Keep its snapshot too, so edits are rediscovered on unpause
-				// instead of attaching the old result to new requirements.
 				item.SnapshotDigest = existing.SnapshotDigest
 				item.Title = existing.Title
 				item.Body = existing.Body
@@ -324,9 +315,6 @@ func (r *RepositoryMonitorReconciler) retireMissingRepositoryMonitorIssues(ctx c
 	return nil
 }
 
-// repositoryMonitorIssueWorkflowRetainedUnderRunLimit reports whether an
-// existing item carries workflow state that a background run's selection
-// cap must leave intact.
 func repositoryMonitorIssueWorkflowRetainedUnderRunLimit(existing *store.MonitorItem) bool {
 	if existing == nil {
 		return false
@@ -349,11 +337,6 @@ func repositoryMonitorIssueRetainWorkflowUnderRunLimit(item, existing *store.Mon
 	item.LastActionTaskName = existing.LastActionTaskName
 	item.LastVerdict = existing.LastVerdict
 	item.SkipReason = existing.SkipReason
-	// The retained workflow describes the snapshot it was started from, so
-	// the stored snapshot must stay that one: persisting the new digest
-	// next to the old workflow would make later runs treat the edited
-	// issue as unchanged (never rediscovered) and let an in-flight
-	// implementation result settle against requirements it never saw.
 	item.SnapshotDigest = existing.SnapshotDigest
 	item.Title = existing.Title
 	item.Body = existing.Body

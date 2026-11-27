@@ -67,7 +67,6 @@ describe('TaskArtifactsPanel', () => {
         return HttpResponse.text('blob')
       }),
     )
-    // jsdom lacks blob URL + anchor click plumbing; stub them.
     const createUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:x')
     const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})

@@ -16,9 +16,6 @@ import (
 
 var _ store.PromptAttemptStore = (*Store)(nil)
 
-// CreatePromptAttempt inserts a canonical prompt attempt. Repeating the exact
-// immutable request, binding, and snapshot digests returns the committed row;
-// reusing the identity for different immutable input conflicts.
 func (s *Store) CreatePromptAttempt(ctx context.Context, attempt *store.PromptAttempt, fence store.ControllerEpochFence) (*store.PromptAttempt, error) {
 	normalized, fence, err := store.NormalizePromptAttemptForCreate(attempt, fence)
 	if err != nil {
@@ -81,7 +78,6 @@ func (s *Store) CreatePromptAttempt(ctx context.Context, attempt *store.PromptAt
 	return &normalized, nil
 }
 
-// GetPromptAttempt returns one durable prompt attempt.
 func (s *Store) GetPromptAttempt(ctx context.Context, id string) (*store.PromptAttempt, error) {
 	id = strings.TrimSpace(id)
 	if err := store.ValidateControlIdentifier("prompt attempt ID", id); err != nil {
@@ -114,18 +110,11 @@ type promptAttemptReclamationMarker struct {
 	CreatedAt                           time.Time
 }
 
-// PreparePromptAttemptReclamation proves and durably records the complete
-// task-scoped retention barrier without deleting PromptAttempts.
 func (s *Store) PreparePromptAttemptReclamation(ctx context.Context, request store.ReclaimPromptAttemptsRequest) error {
 	_, err := s.runPromptAttemptReclamation(ctx, request, false)
 	return err
 }
 
-// ReclaimPromptAttempts is the SQLite compatibility implementation of the
-// task-scoped retention contract. Marker creation and deletion are committed in
-// one transaction for direct callers; controller callers may prepare first so
-// artifact retirement happens between durable authorization and deletion.
-//
 //nolint:gocyclo // Retention keeps every cross-aggregate safety barrier explicit and auditable in one transaction.
 func (s *Store) ReclaimPromptAttempts(ctx context.Context, request store.ReclaimPromptAttemptsRequest) (int, error) {
 	return s.runPromptAttemptReclamation(ctx, request, true)
@@ -757,8 +746,6 @@ func getPromptAttemptReclamationMarkerSQLite(ctx context.Context, q controlQuery
 	return marker, nil
 }
 
-// RecoverPromptAttemptPreSubmission returns a pre-acceptance attempt to
-// Reserved without inventing a new attempt or replaying an accepted prompt.
 func (s *Store) RecoverPromptAttemptPreSubmission(ctx context.Context, recovery store.PromptAttemptPreSubmissionRecovery) (*store.PromptAttempt, error) {
 	recovery.ID = strings.TrimSpace(recovery.ID)
 	if err := store.ValidateControlIdentifier("prompt attempt ID", recovery.ID); err != nil {
@@ -857,8 +844,6 @@ func (s *Store) RecoverPromptAttemptPreSubmission(ctx context.Context, recovery 
 	return &attempt, nil
 }
 
-// TransitionPromptAttemptExecution applies an exact version/state/epoch CAS.
-//
 //nolint:gocyclo // Execution-state, fencing, and immutable runtime/session bindings are one CAS boundary.
 func (s *Store) TransitionPromptAttemptExecution(ctx context.Context, transition store.PromptAttemptExecutionTransition) (*store.PromptAttempt, error) {
 	transition.ID = strings.TrimSpace(transition.ID)
@@ -1001,7 +986,6 @@ func (s *Store) TransitionPromptAttemptExecution(ctx context.Context, transition
 	return &attempt, nil
 }
 
-// TransitionPromptAttemptDelivery applies an exact delivery-state CAS.
 func (s *Store) TransitionPromptAttemptDelivery(ctx context.Context, transition store.PromptAttemptDeliveryTransition) (*store.PromptAttempt, error) {
 	transition.ID = strings.TrimSpace(transition.ID)
 	if err := store.ValidateControlIdentifier("prompt attempt ID", transition.ID); err != nil {

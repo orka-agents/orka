@@ -7,7 +7,6 @@ interface RequestOptions extends Omit<RequestInit, 'headers'> {
 }
 
 class ApiError extends Error {
-  /** Raw response body, kept for diagnostics; `message` is the readable form. */
   readonly body: string
 
   constructor(public status: number, body: string) {
@@ -17,12 +16,6 @@ class ApiError extends Error {
   }
 }
 
-/**
- * Extract a human-readable message from an API error body. The server wraps
- * errors as `{"error":{"code":403,"message":"not authorized"}}` (or, from some
- * paths, `{"error":"..."}` / `{"message":"..."}`); anything else is returned
- * verbatim so callers never render raw JSON.
- */
 export function apiErrorMessage(body: string): string {
   const text = body.trim()
   if (!text.startsWith('{')) return text
@@ -39,7 +32,6 @@ export function apiErrorMessage(body: string): string {
       if (typeof record.message === 'string' && record.message) return record.message
     }
   } catch {
-    // Not JSON; fall through to the raw text.
   }
   return text
 }
@@ -80,10 +72,6 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   const response = await fetch(url, { ...fetchOptions, headers })
 
   if (!response.ok) {
-    // A 401 condemns only the token this request carried. A late answer to a
-    // request sent with no token, or with one since replaced (signing in
-    // while the previous page's requests are in flight), must not sign the
-    // new session out.
     if (response.status === 401 && token && useAuthStore.getState().token === token) {
       useAuthStore.getState().clearToken()
     }

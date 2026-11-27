@@ -19,9 +19,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-// SubstrateActorKey is the routable, namespace-qualified identity of an Actor.
-// Native Actor names and Atespaces are each DNS labels, so the separator is
-// unambiguous. Resource UIDs, rather than this name, fence an Actor lifetime.
 func SubstrateActorKey(atespace, name string) string {
 	name = strings.TrimSpace(name)
 	if strings.Contains(name, ".") {
@@ -90,10 +87,6 @@ func newSubstrateConnection(cfg SubstrateConfig, controlAuth bool) (*grpc.Client
 	return conn, nil
 }
 
-// Native lifecycle RPCs synchronously boot, restore, or checkpoint the Actor.
-// Give those operations a bounded window for image pulls and snapshot I/O,
-// while keeping discovery and metadata calls short. Caller deadlines and
-// cancellation still take precedence, and no failed mutation is replayed.
 func substrateRPCDeadline(ctx context.Context, method string, req, reply any, conn *grpc.ClientConn, invoke grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 	timeout := 30 * time.Second
 	switch method {
@@ -125,12 +118,6 @@ func substrateTransportCredentials(cfg SubstrateConfig) (credentials.TransportCr
 	return credentials.NewTLS(tlsConfig), nil
 }
 
-// NewSubstrateRouterHTTPClient returns the client for Actor traffic through
-// atenet-router. Upstream v1 serves only mTLS from SPIFFE IDs on its ingress
-// allowlist, so the pod-certificate client identity is required. Proxies are
-// never used for Actor traffic, and redirects are never followed: an Actor
-// answers these requests, and following its redirect would send the
-// controller's request, body and credentials wherever the Actor names.
 func NewSubstrateRouterHTTPClient(cfg SubstrateConfig) (*http.Client, error) {
 	router, err := url.Parse(strings.TrimSpace(cfg.RouterURL))
 	if err != nil || router.Scheme != "https" || router.Host == "" || router.User != nil {
@@ -150,8 +137,6 @@ func NewSubstrateRouterHTTPClient(cfg SubstrateConfig) (*http.Client, error) {
 	}, nil
 }
 
-// refuseSubstrateRouterRedirect returns a redirect response to the caller
-// instead of following it.
 func refuseSubstrateRouterRedirect(*http.Request, []*http.Request) error {
 	return http.ErrUseLastResponse
 }
@@ -178,9 +163,6 @@ func substrateTLSConfig(cfg SubstrateConfig) (*tls.Config, error) {
 		return nil, NewError("configure substrate", ErrorKindInvalidArgument, "both Substrate client certificate and key files are required", false, nil)
 	}
 	if cfg.APICertFile != "" {
-		// Kubernetes rotates projected Secret files in place. Reload the pair
-		// at every handshake, including reconnects, rather than freezing it at
-		// controller startup. Error text never includes certificate contents.
 		loadPair := func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 			pair, err := tls.LoadX509KeyPair(cfg.APICertFile, cfg.APIKeyFile)
 			if err != nil {
@@ -228,16 +210,6 @@ func (c *grpcSubstrateControlClient) GetActor(ctx context.Context, actorID strin
 	return converted, nil
 }
 
-// resolveBootedTemplateUID fills the guest-state template identity of an Actor
-// that is placed on a worker but has never been snapshotted. Upstream v1 records
-// the template UID only on snapshots, and resolves an Actor's template by name
-// when it boots. ActorTemplates are immutable, so the template that name
-// resolves to now is the one the Actor booted from only if it already existed
-// when the Actor was created: a template that has existed since then was not
-// deleted, and the Actor cannot have booted before it was created. A template
-// created later may be a replacement under the same name while the Actor still
-// runs the deleted one, so its UID is not the Actor's identity. The identity is
-// then left unknown, as it is when either time is missing.
 func (c *grpcSubstrateControlClient) resolveBootedTemplateUID(ctx context.Context, actor *ateapipb.Actor, converted *substrateActor) error {
 	if converted == nil || converted.TemplateUID != "" || len(actor.GetStatus().GetSnapshots()) != 0 ||
 		actor.GetStatus().GetWorkerAssignment() == nil || actor.GetActorTemplate().GetName() == "" {
@@ -246,12 +218,6 @@ func (c *grpcSubstrateControlClient) resolveBootedTemplateUID(ctx context.Contex
 	template, err := c.client.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{ActorTemplate: actor.GetActorTemplate()})
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
-			// The Actor exists; only its template is gone, which upstream
-			// allows. Reporting NotFound would read as a missing Actor: Delete
-			// would call a live Actor already deleted and Claim would try to
-			// create it. Leave the identity unknown instead. A placed Actor
-			// with no template UID fails every comparison against a pinned template UID, and Delete,
-			// which is fenced by the Actor UID, can still remove it.
 			return nil
 		}
 		return substrateControlError("get actor template", err)
@@ -279,10 +245,6 @@ func (c *grpcSubstrateControlClient) CreateActor(ctx context.Context, actorID, t
 	return substrateActorFromProto(actor), nil
 }
 
-// ResumeActor resumes an Actor. Upstream v1 removed the per-call boot flag;
-// a boot request is honored only when Substrate cannot seed the Actor from a
-// golden snapshot: the Actor has no snapshot or source Tag and its template has
-// golden snapshots disabled. Otherwise the request fails closed.
 func (c *grpcSubstrateControlClient) ResumeActor(ctx context.Context, actorID string, boot bool) (*substrateActor, error) {
 	ref, err := substrateObjectRef(actorID, c.atespace)
 	if err != nil {
@@ -333,10 +295,6 @@ func (c *grpcSubstrateControlClient) SuspendActor(ctx context.Context, actorID s
 	return substrateActorFromProto(resp.GetActor()), nil
 }
 
-// DeleteActor terminates the Actor in any state without taking a snapshot.
-// A nonempty actorUID is sent as a native precondition, so a different Actor
-// recreated under the same name is never deleted. Cleanup callers prove their
-// own lifetime and ownership fences before invoking this.
 func (c *grpcSubstrateControlClient) DeleteActor(ctx context.Context, actorID, actorUID string) error {
 	ref, err := substrateObjectRef(actorID, c.atespace)
 	if err != nil {
@@ -386,8 +344,6 @@ func (c *grpcSubstrateControlClient) ListActors(ctx context.Context) ([]substrat
 	}
 }
 
-// A page may be empty while its continuation token is nonempty. A repeated
-// token is a protocol error, never an excuse to return incomplete inventory.
 type substratePages struct {
 	token string
 	seen  map[string]struct{}
@@ -412,7 +368,6 @@ func (p *substratePages) options() *ateapipb.ListOptions {
 	return &ateapipb.ListOptions{PageSize: 1000, PageToken: p.token}
 }
 
-// latestSubstrateSnapshot returns the Actor's newest snapshot generation.
 func latestSubstrateSnapshot(snapshots []*ateapipb.Snapshot) *ateapipb.Snapshot {
 	var latest *ateapipb.Snapshot
 	for _, snapshot := range snapshots {
@@ -423,9 +378,6 @@ func latestSubstrateSnapshot(snapshots []*ateapipb.Snapshot) *ateapipb.Snapshot 
 	return latest
 }
 
-// substrateSnapshotScope classifies a snapshot fidelity. Only VOLUMES holds
-// data alone; ROOTFS keeps no process memory but is not data-only either, so it
-// is left unclassified and data-only checks fail closed on it.
 func substrateSnapshotScope(fidelity ateapipb.SnapshotFidelity) SubstrateSnapshotContentScope {
 	switch fidelity {
 	case ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES:

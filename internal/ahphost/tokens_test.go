@@ -49,8 +49,6 @@ func TestMintStoresOnlyAHash(t *testing.T) {
 	require.Equal(t, "team", principal.Namespace)
 }
 
-// A person holds at most MaxActiveTokensPerUser live tokens; revoking or
-// outliving one makes room, and the ended ones kept stay bounded.
 func TestMintBoundsAPersonsTokens(t *testing.T) {
 	tokens := newTokenService(t)
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -74,8 +72,6 @@ func TestMintBoundsAPersonsTokens(t *testing.T) {
 	_, err = tokens.Mint(ctx, alice)
 	require.NoError(t, err, "a revoked token makes room")
 
-	// Every token outlives itself; each mint after that keeps at most the
-	// newest ended ones.
 	now = now.Add(2 * time.Hour)
 	for range MaxActiveTokensPerUser {
 		_, err := tokens.Mint(ctx, alice)
@@ -86,7 +82,6 @@ func TestMintBoundsAPersonsTokens(t *testing.T) {
 	require.LessOrEqual(t, len(listed), MaxActiveTokensPerUser+storagev1.MaxAHPEndedTokensPerUser)
 }
 
-// Concurrent mints cannot together pass the active-token cap.
 func TestConcurrentMintsKeepTheCap(t *testing.T) {
 	tokens := newTokenService(t)
 	ctx := context.Background()
@@ -116,8 +111,6 @@ func TestMintRejectsBadRequests(t *testing.T) {
 	}
 }
 
-// A maximum below the default lifetime still lets a token be minted without
-// one, for that maximum; asking for more is still refused.
 func TestMintDefaultsToAMaximumBelowTheDefault(t *testing.T) {
 	tokens := newTokenService(t)
 	tokens.MaxTTL = 24 * time.Hour

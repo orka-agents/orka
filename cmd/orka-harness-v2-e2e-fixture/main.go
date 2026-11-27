@@ -41,7 +41,7 @@ func main() {
 		if err != nil {
 			log.Fatal("invalid broker probe profile")
 		}
-		address = "" // A private backend; the observer proxy owns the public port.
+		address = ""
 	}
 
 	server, err := conformancetest.NewServer(conformancetest.Config{

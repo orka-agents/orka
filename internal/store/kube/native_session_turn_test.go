@@ -29,8 +29,6 @@ func TestCrossStoreCarriedNativeCheckpoint(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewComposite: %v", err)
 			}
-			// The mirror holds the Kubernetes epoch before the first write,
-			// which carries it.
 			syncTestEpochMirror(t, kubeStore, sqliteStore)
 			snapshot := storetest.NativeSessionSnapshot(t, "retained native context")
 			snapshot.RuntimeSessionUID, snapshot.RuntimeProfileDigest, snapshot.WorkingDirectory = "", "", ""

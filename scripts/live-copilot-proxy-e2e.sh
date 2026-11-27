@@ -13,10 +13,6 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 
 kind_cluster="${KIND_CLUSTER:-orka-live-copilot-proxy-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
-# Legacy Provider/Chat/Anthropic paths call the configured upstream directly,
-# so keep their fixture outside the production Vekil ingress policy. The ACP
-# RuntimePool matrix uses a second fixture at the fixed production identity and
-# therefore still traverses the authenticated provider-proxy boundary.
 copilot_proxy_namespace="${COPILOT_PROXY_NAMESPACE:-default}"
 copilot_proxy_service="${COPILOT_PROXY_SERVICE:-copilot-proxy}"
 copilot_proxy_service_port="${COPILOT_PROXY_SERVICE_PORT:-1337}"
@@ -46,8 +42,6 @@ cleanup_port_forward() {
   fi
 }
 
-# The shared redact() (scripts/lib/redact.sh) substitutes the current value of
-# the proxy token at call time.
 ORKA_REDACT_SECRET_VARS=(token_value)
 
 dump_diagnostics() {

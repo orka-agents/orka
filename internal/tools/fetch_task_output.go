@@ -18,7 +18,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// FetchTaskOutputTool fetches the result/output of a completed task.
 type FetchTaskOutputTool struct{}
 
 func (t *FetchTaskOutputTool) Name() string { return fetchTaskOutputToolName }

@@ -28,8 +28,6 @@ func TestControllerEpochMutationSerializesTakeoverAndReleasesOnError(t *testing.
 		if !bounded || time.Until(deadline) > 21*time.Second {
 			t.Fatal("external mutation did not receive a bounded context")
 		}
-		// Takeover uses a distinct store instance so this checks the durable
-		// Lease authority, not just a per-instance synchronization primitive.
 		successor, err := New(kubeStore.client, testControlNamespace, WithAPIReader(kubeStore.readClient()))
 		if err != nil {
 			t.Fatal(err)
@@ -69,8 +67,6 @@ func TestControllerEpochMutationHeldLockContentionAndRecovery(t *testing.T) {
 	require.NoError(t, err)
 	release := sync.OnceFunc(func() { owner.releaseControllerEpochMutation(snapshot) })
 	t.Cleanup(release)
-	// A distinct Store bypasses the owner's local queue and must acquire the
-	// same durable Lease before its callback can run.
 	contender, err := New(rawClient, testControlNamespace, WithAPIReader(rawClient))
 	require.NoError(t, err)
 	called := 0

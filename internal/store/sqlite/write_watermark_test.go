@@ -8,9 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Describe reports a new incarnation each time the store opens and the same
-// one while it stays open, and derives the durability class from the
-// synchronous mode the connection uses.
 func TestDescribeReportsIncarnationAndDurability(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "orka.db")
 	s, err := OpenLockedStore(path)
@@ -60,8 +57,6 @@ func TestParseSynchronous(t *testing.T) {
 	}
 }
 
-// The write watermark is part of the dataset's identity row, so it survives
-// a reopen, and a copy of the file taken earlier holds the earlier value.
 func TestWriteWatermarkSurvivesReopenAndMovesWithTheFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "orka.db")

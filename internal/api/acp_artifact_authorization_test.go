@@ -403,8 +403,6 @@ func TestACPArtifactAuthorizationBrokerAuthenticatesBeforeBody(t *testing.T) {
 		body           string
 	}{
 		{name: "missing pool identity headers", bearer: controllerToken, setPoolHeaders: false, body: "{}"},
-		// An invalid-JSON body would yield 400 if the handler parsed it first;
-		// rejecting the wrong bearer with 403 proves pre-auth precedes the body.
 		{name: "wrong bearer before body parse", bearer: strings.Repeat("x", 32), setPoolHeaders: true, body: "not-json{"},
 	}
 	for _, tc := range cases {

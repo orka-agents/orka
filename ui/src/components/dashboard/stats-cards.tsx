@@ -9,24 +9,16 @@ import type { LoadProblem } from '@/lib/load-problem'
 
 interface StatsCardsProps {
   tasks?: Task[]
-  /** True when the bounded task walk stopped with more pages available. */
   tasksTruncated?: boolean
-  /** Set when the tasks list could not be loaded; shown instead of a fabricated "0". */
   tasksProblem?: LoadProblem
   sessionCount?: number
-  /** True when the bounded session walk stopped with more pages available. */
   sessionsTruncated?: boolean
-  /** Set when the sessions list could not be loaded; shown instead of a fabricated "0". */
   sessionsProblem?: LoadProblem
   agentCount?: number
-  /** Set when the agents list could not be loaded; shown instead of a fabricated "0". */
   agentsProblem?: LoadProblem
   toolCount?: number
-  /** Set when the tools list could not be loaded; shown instead of a fabricated "0". */
   toolsProblem?: LoadProblem
-  /** Every list is still loading: render skeleton cards only. */
   isLoading?: boolean
-  /** Per-list loading, so each card fills in as its own data arrives. */
   loading?: { tasks?: boolean; sessions?: boolean; agents?: boolean; tools?: boolean }
 }
 
@@ -34,7 +26,6 @@ function ValueSkeleton() {
   return <Skeleton className="h-8 w-16" />
 }
 
-/** The body a stat card renders instead of a fabricated count. */
 function ProblemStat({ resource, problem }: { resource: string; problem: LoadProblem }) {
   const detail = problem.message ? ` (${problem.message})` : ''
   return (
@@ -49,18 +40,6 @@ function ProblemStat({ resource, problem }: { resource: string; problem: LoadPro
   )
 }
 
-/**
- * Bucket a set of tasks into a coarse cumulative "created over time" series
- * (oldest→newest), derived entirely client-side from the existing task list.
- *
- * The bucketing window (`min`/`max`) is passed in so every per-status series
- * shares the same time axis — otherwise each status would be rescaled to its
- * own first/last task and the sparklines wouldn't be comparable.
- *
- * NOTE: a backend timeseries endpoint (throughput per interval) would give
- * higher-fidelity trends than bucketing creation timestamps; this is a v1
- * approximation that needs no API change.
- */
 function cumulativeSeries(
   tasks: Task[],
   window: { min: number; max: number } | null,
@@ -81,7 +60,6 @@ function cumulativeSeries(
   return counts.map((c) => (acc += c))
 }
 
-/** Shared time window spanning all tasks, or null when none are timestamped. */
 function taskWindow(tasks: Task[]): { min: number; max: number } | null {
   const times = tasks
     .map((t) => (t.metadata.creationTimestamp ? new Date(t.metadata.creationTimestamp).getTime() : NaN))
@@ -134,9 +112,6 @@ export function StatsCards({
   const finished = succeeded + failed
   const successRate = finished > 0 ? Math.round((succeeded / finished) * 100) : null
 
-  // All sparklines share one time window so each status's trend is comparable;
-  // each card plots only its own status's tasks (the Failed card stays flat
-  // when there are no failures, rather than echoing the total trend).
   const window = taskWindow(allTasks)
   const stats = [
     { label: tasksTruncated ? 'Tasks loaded' : 'Total Tasks', value: total, icon: ListTodo, color: 'text-foreground', spark: 'text-primary', series: cumulativeSeries(allTasks, window) },

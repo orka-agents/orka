@@ -3,17 +3,8 @@ import type { Connection } from '@/lib/connectors'
 import { api, apiError, DEMO_NAMESPACE, digest, inDemoNamespace, noContent, notFound } from '../shared'
 import { connectionName, connectorProviders, grantedScopes, seedConnections } from '../data/connectors'
 
-// Linking an account normally sends the browser to the provider's consent
-// page, which redirects back with a one-time completion token. The demo skips
-// the provider: the consent URL points straight back at the Connectors page
-// with that callback, and the page finishes the link as it would for real.
-// The full-page round trip resets in-memory state, so links persist in
-// sessionStorage for the tab.
-
 interface StoredConnection extends Connection {
-  /** mode the pending consent grants */
   pendingMode?: string
-  /** when a requested disconnect finishes (epoch ms) */
   removeAt?: number
 }
 
@@ -24,7 +15,6 @@ function load(): StoredConnection[] {
     const saved = sessionStorage.getItem(STORAGE_KEY)
     if (saved) return JSON.parse(saved) as StoredConnection[]
   } catch {
-    // Storage unavailable: start from the seed.
   }
   return seedConnections()
 }
@@ -35,11 +25,9 @@ function save() {
   try {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(connections))
   } catch {
-    // Links still work for this page load.
   }
 }
 
-/** Drops links whose disconnect has finished. */
 function current(): StoredConnection[] {
   const before = connections.length
   connections = connections.filter((c) => !c.removeAt || c.removeAt > Date.now())
@@ -47,7 +35,6 @@ function current(): StoredConnection[] {
   return connections
 }
 
-/** The Connection as the API returns it, without the demo's bookkeeping. */
 function publicView(stored: StoredConnection): Connection {
   const connection = { ...stored }
   delete connection.pendingMode
@@ -57,7 +44,6 @@ function publicView(stored: StoredConnection): Connection {
 
 const displayName = (provider: string) => connectorProviders.find((p) => p.name === provider)?.displayName ?? provider
 
-/** Where the provider would send the browser after consent: back to this page with the callback. */
 function consentURL(connection: StoredConnection): string {
   const callback = new URLSearchParams({
     status: 'pending',
@@ -66,7 +52,6 @@ function consentURL(connection: StoredConnection): string {
     completion: `demo-${digest(`${connection.name}:${Date.now()}`, 24)}`,
   })
   const url = new URL(window.location.href)
-  // A fresh query forces a real page load, as returning from a provider would.
   url.search = `?consent=${Date.now().toString(36)}`
   url.hash = `/settings/connectors?${callback}`
   return url.toString()
@@ -80,7 +65,6 @@ function startConsent(connection: StoredConnection, mode: string) {
 
 const find = (name: string) => current().find((c) => c.name === name)
 
-/** ConnectorProviders and the visitor's linked accounts. */
 export const connectorHandlers = [
   http.get(api('/connectors'), ({ request }) =>
     HttpResponse.json({ items: inDemoNamespace(request) ? connectorProviders : [] })),
@@ -115,7 +99,6 @@ export const connectorHandlers = [
     if (!connection || !inDemoNamespace(request)) return notFound(`connection ${String(params.name)}`)
     const { mode } = (await request.json()) as { mode?: string }
     if (mode !== 'readOnly' && mode !== 'readWrite') return apiError(400, 'mode must be readOnly or readWrite')
-    // Write access needs a fresh consent for the write scopes; dropping it does not.
     if (mode === 'readWrite' && connection.mode !== 'readWrite') return startConsent(connection, mode)
     connection.mode = mode
     connection.grantedScopes = grantedScopes(connection.provider, mode)
@@ -135,7 +118,6 @@ export const connectorHandlers = [
     if (!completion?.startsWith('demo-')) return apiError(409, 'the consent expired or was superseded')
     let connection = find(name)
     if (!connection) {
-      // Storage was unavailable across the round trip: rebuild the link from its name.
       const provider = connectorProviders.find((p) => connectionName(p.name) === name)
       if (!provider || !inDemoNamespace(request)) return notFound(`connection ${name}`)
       connection = { name, namespace: DEMO_NAMESPACE, provider: provider.name, mode: 'readOnly', state: 'Pending', ready: false }
@@ -160,7 +142,6 @@ export const connectorHandlers = [
   http.delete(api('/connections/:name'), ({ request, params }) => {
     const connection = find(String(params.name))
     if (!connection || !inDemoNamespace(request)) return notFound(`connection ${String(params.name)}`)
-    // The finalizer revokes the provider tokens before the link disappears.
     Object.assign(connection, { deleting: true, ready: false, removeAt: Date.now() + 3500 })
     save()
     return noContent()

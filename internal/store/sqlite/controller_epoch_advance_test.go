@@ -18,8 +18,6 @@ func TestAcknowledgedEpochGapSurvivesReopen(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.Close())
 
-	// Each takeover starts from disk, as after a crash before recording a
-	// recovery hold. Neither may replace the restored epoch 9 with 11 or 12.
 	for _, next := range []int64{11, 12} {
 		reopened, err := OpenLockedStore(s.dbPath)
 		require.NoError(t, err)

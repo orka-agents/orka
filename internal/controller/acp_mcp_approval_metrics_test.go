@@ -68,8 +68,6 @@ func TestMCPApprovalDecisionMetricsRevocation(t *testing.T) {
 			_, _, err = f.broker.revokeApproval(f.ctx, call, credentials, tc.cause)
 			require.NoError(t, err)
 			requireMCPApprovalDecisionMetric(t, f, tc.outcome)
-			// Repeated settlement, polling and execution projection are no-ops
-			// for decision metrics, including after reconstructing the handler.
 			restarted := *f.broker
 			_, _, err = restarted.revokeApproval(f.ctx, call, credentials, tc.cause)
 			require.NoError(t, err)

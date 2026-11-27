@@ -44,8 +44,6 @@ func requireStorageRecord(t *testing.T, kubeStore *Store) controlstore.StorageRe
 	return record
 }
 
-// Acknowledgements are recorded per contract and never move backward for
-// the same dataset; a contract served by another dataset is replaced.
 func TestStorageAcknowledgementsOnlyMoveForward(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, _, fence := newTestStoreWithEpoch(t)
@@ -105,8 +103,6 @@ func TestStorageAcknowledgementsOnlyMoveForward(t *testing.T) {
 	}
 }
 
-// Every storage record write is fenced by the epoch the object holds, and
-// the record survives the status sync of a later epoch.
 func TestStorageRecordIsFencedAndSurvivesEpochSync(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, kubeClient, fence := newTestStoreWithEpoch(t)
@@ -145,9 +141,6 @@ func TestStorageRecordIsFencedAndSurvivesEpochSync(t *testing.T) {
 	}
 }
 
-// A hold is recorded once, with its condition; it refuses new
-// acknowledgements, and only the acknowledged hold can be released, which
-// replaces the acknowledgements in the same update.
 func TestStorageRecoveryHoldLifecycle(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, kubeClient, fence := newTestStoreWithEpoch(t)
@@ -223,9 +216,6 @@ func TestStorageRecoveryHoldLifecycle(t *testing.T) {
 	}
 }
 
-// An API server still serving the older ControllerEpoch schema accepts a
-// status update but drops the storage fields. The write then fails instead of
-// letting an acknowledgement or a hold vanish.
 func TestStorageRecordFailsWhenTheSchemaDropsIt(t *testing.T) {
 	ctx := context.Background()
 	kubeStore, rawClient, fence := newTestStoreWithEpoch(t)

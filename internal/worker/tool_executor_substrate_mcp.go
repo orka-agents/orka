@@ -29,21 +29,12 @@ import (
 )
 
 const (
-	// SubstrateMCPToolTxnTokenHeader carries a task-scoped transaction token
-	// from an Orka MCP proxy caller to the proxy, which forwards it to the
-	// actor as Txn-Token. The caller's own Txn-Token header is reserved for
-	// Orka API authentication and is never forwarded.
 	SubstrateMCPToolTxnTokenHeader = "X-Orka-Tool-Txn-Token"
 
-	// The proxy reloads the Tool. These headers carry the exact Tool lifetime,
-	// spec generation and Actor the caller validated (credential authority,
-	// approvals), so a Tool changed in between is refused rather than run with
-	// another credential or Actor.
 	SubstrateMCPToolUIDHeader        = "X-Orka-Tool-UID"
 	SubstrateMCPToolGenerationHeader = "X-Orka-Tool-Generation"
 	SubstrateMCPToolActorHeader      = "X-Orka-Tool-Actor"
 
-	// SubstrateMCPDefaultPath is the actor MCP path when spec.mcp.path is empty.
 	SubstrateMCPDefaultPath = "/mcp"
 
 	substrateMCPMaxPathLength = 1024
@@ -53,17 +44,12 @@ func substrateMCPHTTPScheme(scheme string) bool {
 	return strings.EqualFold(scheme, "https") || strings.EqualFold(scheme, "http")
 }
 
-// SubstrateMCPProxyPath returns the Orka API MCP proxy path for a Tool. It is
-// relative to the Orka API base URL and is published as Tool.status.endpoint.
 func SubstrateMCPProxyPath(namespace, name string) string {
 	query := neturl.Values{}
 	query.Set("namespace", namespace)
 	return "/api/v1/tools/" + neturl.PathEscape(name) + "/mcp?" + query.Encode()
 }
 
-// SubstrateMCPSensitiveHeaderValues returns the configured Tool header values
-// a caller must keep out of tool results: the values this executor redacts when
-// it sends those headers to an Actor itself.
 func SubstrateMCPSensitiveHeaderValues(headers map[string]string) []string {
 	values := []string{}
 	for name, value := range headers {
@@ -74,13 +60,10 @@ func SubstrateMCPSensitiveHeaderValues(headers map[string]string) []string {
 	return values
 }
 
-// IsSubstrateMCPActorTool reports whether a Tool is backed by a Substrate MCP actor.
 func IsSubstrateMCPActorTool(tool *corev1alpha1.Tool) bool {
 	return isMCPSubstrateActorTool(tool)
 }
 
-// SubstrateMCPActorTarget derives the router target ("atespace/name") only
-// from the controller-owned Tool status. Caller input never selects an Actor.
 func SubstrateMCPActorTarget(tool *corev1alpha1.Tool) (string, error) {
 	if !isMCPSubstrateActorTool(tool) {
 		return "", errors.New("tool is not a Substrate MCP actor tool")
@@ -96,7 +79,6 @@ func SubstrateMCPActorTarget(tool *corev1alpha1.Tool) (string, error) {
 	return target, nil
 }
 
-// SubstrateMCPActorPath returns the validated MCP path inside the actor.
 func SubstrateMCPActorPath(tool *corev1alpha1.Tool) (string, error) {
 	path := ""
 	if tool != nil && tool.Spec.MCP != nil {
@@ -117,16 +99,11 @@ func SubstrateMCPActorPath(tool *corev1alpha1.Tool) (string, error) {
 	return path, nil
 }
 
-// SubstrateMCPRouter sends MCP requests to Substrate actors through
-// atenet-router. Only the Orka manager holds a client identity on the router's
-// SPIFFE allowlist; workers reach actors through the Orka API MCP proxy.
 type SubstrateMCPRouter struct {
 	base   *neturl.URL
 	client *http.Client
 }
 
-// NewSubstrateMCPRouter validates the router URL and the mTLS client returned
-// by workspace.NewSubstrateRouterHTTPClient.
 func NewSubstrateMCPRouter(routerURL string, client *http.Client) (*SubstrateMCPRouter, error) {
 	parsed, err := neturl.Parse(strings.TrimSpace(routerURL))
 	if err != nil || parsed.Host == "" || !substrateMCPHTTPScheme(parsed.Scheme) || parsed.User != nil ||
@@ -141,7 +118,6 @@ func NewSubstrateMCPRouter(routerURL string, client *http.Client) (*SubstrateMCP
 	return &SubstrateMCPRouter{base: parsed, client: client}, nil
 }
 
-// HTTPClient returns the router client. Callers must not follow redirects.
 func (r *SubstrateMCPRouter) HTTPClient() *http.Client {
 	if r == nil {
 		return nil
@@ -149,9 +125,6 @@ func (r *SubstrateMCPRouter) HTTPClient() *http.Client {
 	return r.client
 }
 
-// NewRequest builds a request to the Tool's actor. The URL path comes from the
-// Tool spec, and the target only from its status. Headers other than the
-// router target are left to the caller.
 func (r *SubstrateMCPRouter) NewRequest(ctx context.Context, tool *corev1alpha1.Tool, method string, body io.Reader) (*http.Request, error) {
 	if r == nil || r.base == nil || r.client == nil {
 		return nil, errors.New("substrate MCP router is not configured")
@@ -174,9 +147,6 @@ func (r *SubstrateMCPRouter) NewRequest(ctx context.Context, tool *corev1alpha1.
 	return req, nil
 }
 
-// SubstrateMCPReservedHeader reports headers a Tool configuration must never
-// set on a Substrate MCP request: routing, authority, transport, MCP session,
-// transaction and idempotency headers are owned by Orka.
 func SubstrateMCPReservedHeader(name string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(name))
 	switch normalized {
@@ -191,16 +161,11 @@ func SubstrateMCPReservedHeader(name string) bool {
 		strings.HasPrefix(normalized, "x-orka-")
 }
 
-// substrateMCPProxyConfig sends Substrate MCP requests to the Orka API proxy,
-// authenticated as the calling workload.
 type substrateMCPProxyConfig struct {
 	baseURL     *neturl.URL
 	tokenSource func() (string, error)
 }
 
-// SetSubstrateMCPRouter makes this executor call Substrate MCP actors directly
-// through the router. Use it only inside the Orka manager, whose pod
-// certificate is the router's allowlisted client identity.
 func (e *ToolExecutor) SetSubstrateMCPRouter(router *SubstrateMCPRouter) {
 	if e == nil {
 		return
@@ -208,8 +173,6 @@ func (e *ToolExecutor) SetSubstrateMCPRouter(router *SubstrateMCPRouter) {
 	e.substrateMCPRouter = router
 }
 
-// SetSubstrateMCPProxy makes this executor call Substrate MCP actors through
-// the Orka API MCP proxy at baseURL, authenticating with tokenSource.
 func (e *ToolExecutor) SetSubstrateMCPProxy(baseURL string, tokenSource func() (string, error)) error {
 	if e == nil {
 		return nil
@@ -226,8 +189,6 @@ func (e *ToolExecutor) SetSubstrateMCPProxy(baseURL string, tokenSource func() (
 	return nil
 }
 
-// substrateMCPProxyFromEnvironment configures worker Pods from
-// ORKA_CONTROLLER_URL and the projected ServiceAccount token.
 func substrateMCPProxyFromEnvironment() *substrateMCPProxyConfig {
 	base := strings.TrimSpace(os.Getenv(workerenv.ControllerURL))
 	if base == "" {
@@ -240,8 +201,6 @@ func substrateMCPProxyFromEnvironment() *substrateMCPProxyConfig {
 	return executor.substrateMCPProxy
 }
 
-// WorkloadServiceAccountToken reads the workload's ServiceAccount token used
-// to authenticate to the Orka API.
 func WorkloadServiceAccountToken() (string, error) {
 	paths := []string{}
 	if path := strings.TrimSpace(os.Getenv(workerenv.ServiceAccountTokenPath)); path != "" {
@@ -261,9 +220,6 @@ func WorkloadServiceAccountToken() (string, error) {
 	return "", errors.New("workload ServiceAccount token is unavailable for the Orka MCP proxy")
 }
 
-// validateSubstrateMCPEgressCredentialAuthority checks the Task may use the
-// Secrets the Substrate egress gateway injects into the actor's outbound
-// requests; a call on either route uses them.
 func (e *ToolExecutor) validateSubstrateMCPEgressCredentialAuthority(tool *corev1alpha1.Tool) error {
 	secretNames := aitools.SubstrateMCPEgressCredentialSecretNames(tool)
 	if slices.Contains(secretNames, "") {
@@ -274,9 +230,6 @@ func (e *ToolExecutor) validateSubstrateMCPEgressCredentialAuthority(tool *corev
 	)
 }
 
-// substrateMCPRouterClient copies the shared router client, which has no
-// timeout of its own, and gives the copy the executor's default; a Tool's own
-// timeout still applies on top.
 func substrateMCPRouterClient(shared *http.Client) *http.Client {
 	client := *shared
 	if client.Timeout <= 0 {
@@ -285,8 +238,6 @@ func substrateMCPRouterClient(shared *http.Client) *http.Client {
 	return &client
 }
 
-// prepareSubstrateMCPRequest routes a Substrate MCP tools/call either through
-// the in-process router (Orka manager) or the authenticated Orka API proxy.
 func (e *ToolExecutor) prepareSubstrateMCPRequest(
 	ctx context.Context,
 	tool *corev1alpha1.Tool,
@@ -353,9 +304,6 @@ func (e *ToolExecutor) prepareSubstrateMCPRequest(
 			secrets = append(secrets, token)
 		}
 	case e.substrateMCPProxy != nil:
-		// The proxy resolves and injects Tool-configured credentials. Keep the
-		// Task's credential authority check here so a Task that may not use
-		// the Tool's Secret never asks the proxy to use it.
 		if httpConfig.AuthSecretRef != nil {
 			if err := outboundaccess.ValidateCredentialAuthority(
 				e.credentialAuthorityEnforced, e.credentialScopeAllowed, e.credentialSecret,
@@ -409,7 +357,6 @@ func (e *ToolExecutor) prepareSubstrateMCPRequest(
 	}, nil
 }
 
-// SetSubstrateMCPToolBinding records the Tool revision a proxy caller validated.
 func SetSubstrateMCPToolBinding(header http.Header, tool *corev1alpha1.Tool) {
 	header.Set(SubstrateMCPToolUIDHeader, string(tool.UID))
 	header.Set(SubstrateMCPToolGenerationHeader, strconv.FormatInt(tool.Generation, 10))
@@ -420,9 +367,6 @@ func SetSubstrateMCPToolBinding(header http.Header, tool *corev1alpha1.Tool) {
 	header.Set(SubstrateMCPToolActorHeader, actorID)
 }
 
-// SubstrateMCPToolBindingMatches reports whether a proxy request was validated
-// against this exact Tool lifetime, spec generation and Actor. Missing values
-// never match.
 func SubstrateMCPToolBindingMatches(tool *corev1alpha1.Tool, uid, generation, actorID string) bool {
 	if tool == nil || tool.UID == "" || tool.Status.Actor == nil {
 		return false
@@ -433,10 +377,6 @@ func SubstrateMCPToolBindingMatches(tool *corev1alpha1.Tool, uid, generation, ac
 		current != "" && strings.TrimSpace(actorID) == current
 }
 
-// SubstrateMCPToolReadyForCurrentGeneration reports whether the controller
-// verified the Tool's Actor for its current spec generation. After a spec
-// update, status still names the previous Actor until reconciliation, so a
-// newly configured credential must never be sent to it.
 func SubstrateMCPToolReadyForCurrentGeneration(tool *corev1alpha1.Tool) bool {
 	if tool == nil || !tool.Status.Available {
 		return false

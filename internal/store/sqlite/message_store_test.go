@@ -12,7 +12,6 @@ func TestGetMessagesEmpty(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// No messages exist — should return empty slice, not error
 	msgs, err := s.GetMessages(ctx, "ns1", "nobody", "parent", false)
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
@@ -26,7 +25,6 @@ func TestGetMessagesMarkReadEmpty(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// markRead=true with no messages should not error
 	msgs, err := s.GetMessages(ctx, "ns1", "nobody", "parent", true)
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
@@ -40,7 +38,6 @@ func TestDeleteTaskMessagesNonexistent(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Deleting messages for a task with no messages should be a no-op
 	if err := s.DeleteTaskMessages(ctx, "ns1", "nonexistent"); err != nil {
 		t.Errorf("DeleteTaskMessages nonexistent: %v", err)
 	}
@@ -50,7 +47,6 @@ func TestDeleteParentMessagesNonexistent(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Deleting messages for a nonexistent parent should be a no-op
 	if err := s.DeleteParentMessages(ctx, "ns1", "nonexistent-parent"); err != nil {
 		t.Errorf("DeleteParentMessages nonexistent: %v", err)
 	}
@@ -71,7 +67,6 @@ func TestGetMessagesNamespaceIsolation(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
-	// Different namespace should not see the message
 	msgs, err := s.GetMessages(ctx, "other-ns", "receiver", "parent", false)
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
@@ -129,7 +124,6 @@ func TestGetMessagesMultipleMarkRead(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Send multiple messages
 	for i := range 3 {
 		msg := &store.Message{
 			Namespace:  "ns-multi",
@@ -143,7 +137,6 @@ func TestGetMessagesMultipleMarkRead(t *testing.T) {
 		}
 	}
 
-	// Read all with markRead=true
 	msgs, err := s.GetMessages(ctx, "ns-multi", "reader", "parent", true)
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
@@ -152,7 +145,6 @@ func TestGetMessagesMultipleMarkRead(t *testing.T) {
 		t.Fatalf("got %d messages, want 3", len(msgs))
 	}
 
-	// All should now be read
 	msgs, err = s.GetMessages(ctx, "ns-multi", "reader", "parent", false)
 	if err != nil {
 		t.Fatalf("GetMessages: %v", err)
@@ -185,8 +177,6 @@ func TestGetMessagesMarkReadLargeInbox(t *testing.T) {
 		}
 	}
 
-	// A consuming read returns at most one batch; the rest follows on the
-	// next read.
 	for _, want := range []int{store.MaxMessageBatch, count - store.MaxMessageBatch} {
 		msgs, err := s.GetMessages(ctx, namespace, taskName, parentTask, true)
 		if err != nil {
@@ -249,7 +239,6 @@ func TestMessageStore(t *testing.T) { //nolint:gocyclo
 			t.Fatalf("SendMessage: %v", err)
 		}
 
-		// task-b should see the broadcast (same parent, different sender)
 		msgs, err := s.GetMessages(ctx, "ns1", "task-b", "coordinator", false)
 		if err != nil {
 			t.Fatalf("GetMessages: %v", err)
@@ -264,7 +253,6 @@ func TestMessageStore(t *testing.T) { //nolint:gocyclo
 			t.Error("task-b did not receive broadcast from task-c")
 		}
 
-		// task-c should NOT see its own broadcast
 		msgs, err = s.GetMessages(ctx, "ns1", "task-c", "coordinator", false)
 		if err != nil {
 			t.Fatalf("GetMessages: %v", err)
@@ -288,7 +276,6 @@ func TestMessageStore(t *testing.T) { //nolint:gocyclo
 			t.Fatalf("SendMessage: %v", err)
 		}
 
-		// First read with markRead=true
 		msgs, err := s.GetMessages(ctx, "ns2", "reader", "parent", true)
 		if err != nil {
 			t.Fatalf("GetMessages: %v", err)
@@ -297,7 +284,6 @@ func TestMessageStore(t *testing.T) { //nolint:gocyclo
 			t.Fatalf("got %d messages, want 1", len(msgs))
 		}
 
-		// Second read should return nothing
 		msgs, err = s.GetMessages(ctx, "ns2", "reader", "parent", false)
 		if err != nil {
 			t.Fatalf("GetMessages: %v", err)
@@ -319,7 +305,6 @@ func TestMessageStore(t *testing.T) { //nolint:gocyclo
 			t.Fatalf("SendMessage: %v", err)
 		}
 
-		// Worker in parent-2 should NOT see messages from parent-1
 		msgs, err := s.GetMessages(ctx, "ns3", "worker-y", "parent-2", false)
 		if err != nil {
 			t.Fatalf("GetMessages: %v", err)

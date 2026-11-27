@@ -54,8 +54,6 @@ type mcpTestToolResult struct {
 	IsError           bool           `json:"isError"`
 }
 
-// newMCPFixture is the external-authorization fixture with a Kubernetes
-// client that assigns UIDs on create, as the API server does.
 func newMCPFixture(t *testing.T) *externalAuthorizationFixture {
 	t.Helper()
 	f := newExternalAuthorizationFixture(t)
@@ -119,10 +117,6 @@ func mcpBody(t *testing.T, method string, params any) string {
 	return string(data)
 }
 
-// mcpRPC sends a request with the Streamable HTTP headers a conforming
-// client mirrors from the body: Mcp-Method always, MCP-Protocol-Version for a
-// _meta protocol version, and Mcp-Name for a tools/call name or, on
-// tasks/get, tasks/update, and tasks/cancel, the task ID.
 func (f *externalAuthorizationFixture) mcpRPC(t *testing.T, method string, params any) mcpTestResponse {
 	t.Helper()
 	return f.mcpRaw(t, http.MethodPost, mcpBody(t, method, params), mcpMirroredHeaders(method, params))
@@ -196,9 +190,6 @@ func TestMCPProtocolConformance(t *testing.T) {
 	})
 
 	t.Run("a revision that requires batches is not negotiated", func(t *testing.T) {
-		// 2025-03-26 requires receiving JSON-RPC batches, which this server
-		// refuses, so a client asking for it is offered the latest legacy
-		// revision and a request claiming it is refused.
 		response := f.mcpRPC(t, "initialize", map[string]any{"protocolVersion": "2025-03-26"})
 		require.Equal(t, http.StatusOK, response.status, response.body)
 		var result map[string]any
@@ -354,8 +345,6 @@ type mcpToolRouteCase struct {
 	route string
 }
 
-// mcpToolRouteCases maps every tool to the REST route whose authorization it
-// must reproduce exactly.
 var mcpToolRouteCases = []mcpToolRouteCase{
 	{mcpToolListAgents, map[string]any{}, "GET /api/v1/agents"},
 	{mcpToolGetAgent, map[string]any{"name": "protected"}, "GET /api/v1/agents/:name"},
@@ -398,9 +387,6 @@ func TestMCPToolRouteCasesCoverEveryTool(t *testing.T) {
 	require.Len(t, mcpToolRouteCases, len(tools))
 }
 
-// Every tool asks exactly the REST route's SubjectAccessReviews in order and
-// stops at the first denial, before any Kubernetes read, store write, or
-// provider call, and with only the caller's identity.
 func TestMCPToolsDenyEachRESTPermissionBeforeEffects(t *testing.T) {
 	f := newMCPFixture(t)
 	for _, tc := range mcpToolRouteCases {
@@ -433,8 +419,6 @@ func TestMCPToolsDenyEachRESTPermissionBeforeEffects(t *testing.T) {
 	}
 }
 
-// mcpToolRESTRequests is the REST request each tool case replays, sent
-// directly to compare the reviews both paths ask.
 var mcpToolRESTRequests = map[string]struct{ method, path, body string }{
 	mcpToolListAgents:           {http.MethodGet, "/api/v1/agents?limit=20", ""},
 	mcpToolGetAgent:             {http.MethodGet, "/api/v1/agents/protected", ""},
@@ -450,8 +434,6 @@ var mcpToolRESTRequests = map[string]struct{ method, path, body string }{
 	mcpToolGetTaskArtifact:      {http.MethodGet, "/api/v1/tasks/protected/artifacts/protected", ""},
 }
 
-// With every permission granted, a tool asks exactly the reviews of the REST
-// request it replays: the route policy first, then the handler's own checks.
 func TestMCPToolsAskTheSameReviewsAsREST(t *testing.T) {
 	asked := func(f *externalAuthorizationFixture) []authorizationv1.ResourceAttributes {
 		attributes := make([]authorizationv1.ResourceAttributes, 0, len(f.reviews))
@@ -715,7 +697,6 @@ func TestMCPTasksExtensionLifecycle(t *testing.T) {
 	require.Equal(t, map[string]any{"approval-1": "approved", "approval-2": "declined"}, statuses)
 	require.Equal(t, mcpStatusWorking, get()["status"])
 
-	// Finished: tasks/get carries the create_task result.
 	require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "delegated"}, stored))
 	stored.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 	stored.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
@@ -731,16 +712,12 @@ func TestMCPTasksExtensionLifecycle(t *testing.T) {
 	response = f.mcpRPC(t, "tasks/cancel", map[string]any{"taskId": taskID, "_meta": extensionMeta()})
 	require.Equal(t, mcpCodeInvalidParams, response.Error.Code, "finished tasks cannot be cancelled")
 
-	// A Task replaced under the same name is a different MCP task.
 	require.NoError(t, f.kube.Delete(t.Context(), stored))
 	createMCPTestTask(t, f, "delegated", corev1alpha1.TaskPhaseRunning, func(task *corev1alpha1.Task) { task.UID = "uid-replacement" })
 	response = f.mcpRPC(t, "tasks/get", map[string]any{"taskId": taskID, "_meta": extensionMeta()})
 	require.Equal(t, mcpCodeInvalidParams, response.Error.Code)
 }
 
-// A tasks/update whose later decision fails after an earlier one was recorded
-// can be retried as sent: a response that matches the recorded decision is
-// satisfied, and a conflicting one is refused before anything is recorded.
 func TestMCPTasksUpdateRetryOfPartiallyAppliedUpdate(t *testing.T) {
 	f := newMCPFixture(t)
 	var decisionCalls atomic.Int32
@@ -781,14 +758,12 @@ func TestMCPTasksUpdateRetryOfPartiallyAppliedUpdate(t *testing.T) {
 	approve := map[string]any{"action": "accept", "content": map[string]any{"decision": "approve"}}
 	decline := map[string]any{"action": "decline"}
 
-	// The second decision's REST call fails after the first was recorded.
 	failPatch.Store(2)
 	sent := map[string]any{"first": approve, "second": decline}
 	response := update(sent)
 	require.NotNil(t, response.Error, response.body)
 	require.Equal(t, mcpCodeInternalError, response.Error.Code, response.body)
 
-	// Retrying the same update succeeds and nudges the Task again.
 	failPatch.Store(0)
 	before := patches.Load()
 	response = update(sent)
@@ -797,9 +772,6 @@ func TestMCPTasksUpdateRetryOfPartiallyAppliedUpdate(t *testing.T) {
 	require.Equal(t, map[string]any{"first": "approved", "second": "declined", "third": "pending"}, statuses())
 	require.GreaterOrEqual(t, patches.Load()-before, int32(2), "each decision is replayed through the REST route")
 
-	// A response that conflicts with a recorded decision is refused before
-	// any decision is sent, so a pending request in the same update is not
-	// decided.
 	decided := decisionCalls.Load()
 	response = update(map[string]any{"first": decline, "third": approve})
 	require.NotNil(t, response.Error, response.body)
@@ -811,12 +783,10 @@ func TestMCPTasksUpdateRetryOfPartiallyAppliedUpdate(t *testing.T) {
 	require.Equal(t, decided, decisionCalls.Load(), "no decision reaches the REST route")
 	require.Equal(t, map[string]any{"first": "approved", "second": "declined", "third": "pending"}, statuses())
 
-	// A dismissed response decides nothing, whatever the request's status.
 	response = update(map[string]any{"first": map[string]any{"action": "cancel"}, "third": approve})
 	require.Nil(t, response.Error, response.body)
 	require.Equal(t, map[string]any{"first": "approved", "second": "declined", "third": "approved"}, statuses())
 
-	// An unknown request is still refused.
 	response = update(map[string]any{"unknown": approve})
 	require.NotNil(t, response.Error, response.body)
 	require.Equal(t, mcpCodeInvalidParams, response.Error.Code, response.body)
@@ -862,7 +832,6 @@ func TestMCPCoreTaskAugmentedCreateTask(t *testing.T) {
 		"cancellation keeps the Task and its output")
 	require.Contains(t, cancelled.Annotations, labels.AnnotationCancelRequested)
 
-	// tasks/result returns the tool result of a finished Task.
 	createMCPTestTask(t, f, "failed", corev1alpha1.TaskPhaseFailed, func(task *corev1alpha1.Task) { task.Status.Message = "boom" })
 	response = f.mcpRPC(t, "tasks/result", map[string]any{"taskId": encodeMCPTaskID("default", "failed", "uid-failed")})
 	require.Nil(t, response.Error, response.body)
@@ -932,7 +901,6 @@ func TestMCPResultsAreBoundedAndRedacted(t *testing.T) {
 		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
 	})
 	secret := "ghp_" + strings.Repeat("A", 36)
-	// Put the token across the first chunk boundary.
 	text := strings.Repeat("a", mcpDefaultOutputBytes-10) + " " + secret + " " + strings.Repeat("é", 40000)
 	require.NoError(t, f.store.SaveResult(t.Context(), "default", "output", []byte(text)))
 
@@ -978,7 +946,6 @@ func TestMCPResultsAreBoundedAndRedacted(t *testing.T) {
 	unsafe := f.mcpTool(t, mcpToolGetTaskArtifact, map[string]any{"name": "output", "filename": "../secret"})
 	require.True(t, unsafe.IsError)
 
-	// Task summaries never carry environment values or credential references.
 	createMCPTestTask(t, f, "with-env", corev1alpha1.TaskPhaseRunning, func(task *corev1alpha1.Task) {
 		task.Spec.Env = append(task.Spec.Env, corev1.EnvVar{Name: "API_TOKEN", Value: "plain-env-secret-value"})
 		task.Spec.SecretRef = &corev1alpha1.SecretReference{Name: "credentials-secret"}
@@ -1017,8 +984,6 @@ func TestMCPWaitForTaskIsBounded(t *testing.T) {
 	require.Equal(t, float64(http.StatusTooManyRequests), mcpErrorStatus(t, busy))
 }
 
-// tasks/result keeps waiting through input_required under one wait permit,
-// so result waits can never hold more than the reserved share of requests.
 func TestMCPTaskResultHoldsItsWaitPermitWhileInputIsRequired(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
@@ -1043,8 +1008,6 @@ func TestMCPTaskResultHoldsItsWaitPermitWhileInputIsRequired(t *testing.T) {
 	require.Empty(t, mcp.waitSlots)
 }
 
-// A stalled upload holds no concurrency permit: the body is read, bounded in
-// size and time by the MCP request config, before a permit is taken.
 func TestMCPStalledUploadHoldsNoPermit(t *testing.T) {
 	for _, path := range []string{mcpEndpointPath, "/MCP/", mcpEndpointPath + "?x=1"} {
 		var header fasthttp.RequestHeader
@@ -1069,8 +1032,6 @@ func TestMCPStalledUploadHoldsNoPermit(t *testing.T) {
 		require.NoError(t, <-served)
 	})
 
-	// Send more than fasthttp's 8 KiB body prefetch, so the handler runs
-	// while the rest of the body is still outstanding.
 	stalled, err := net.Dial("tcp", listener.Addr().String())
 	require.NoError(t, err)
 	_, err = fmt.Fprintf(stalled, "POST %s HTTP/1.1\r\nHost: orka\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n{%s",
@@ -1084,9 +1045,6 @@ func TestMCPStalledUploadHoldsNoPermit(t *testing.T) {
 	require.Equal(t, http.StatusOK, response.StatusCode, "the stalled upload holds no permit")
 	require.NoError(t, stalled.Close())
 
-	// A chunked body carries no Content-Length and fasthttp does not bound
-	// the stream: the read stops one byte past the limit and is refused
-	// without waiting for the rest of the upload.
 	chunked, err := net.Dial("tcp", listener.Addr().String())
 	require.NoError(t, err)
 	defer chunked.Close() //nolint:errcheck
@@ -1100,8 +1058,6 @@ func TestMCPStalledUploadHoldsNoPermit(t *testing.T) {
 	defer tooLarge.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusRequestEntityTooLarge, tooLarge.StatusCode)
 
-	// Decoding a Content-Encoding is work admitted by a permit: with every
-	// permit taken, a compressed body is refused before it is expanded.
 	var compressed bytes.Buffer
 	writer := gzip.NewWriter(&compressed)
 	_, err = writer.Write([]byte(strings.Repeat(" ", 2*mcpMaxRequestBytes)))
@@ -1117,8 +1073,6 @@ func TestMCPStalledUploadHoldsNoPermit(t *testing.T) {
 	require.Equal(t, http.StatusTooManyRequests, busy.StatusCode)
 }
 
-// The replay decodes nothing: Content-Encoding describes the MCP body, which
-// was decoded before parsing, not the JSON the replay sends.
 func TestMCPReplayDropsContentEncoding(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
@@ -1139,7 +1093,6 @@ func TestMCPReplayDropsContentEncoding(t *testing.T) {
 	require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "gzipped"}, &corev1alpha1.Task{}))
 }
 
-// Every maxBytes the schema allows advances through any content.
 func TestMCPOutputChunksAlwaysAdvance(t *testing.T) {
 	for _, text := range []string{"é" + strings.Repeat("x", 10), "𝄞𝄞𝄞", "a\x80\x80\x80\x80\x80\x80b", "\x80\x80\x80\x80\x80\x80\x80"} {
 		limit := int64(utf8.UTFMax)
@@ -1180,13 +1133,9 @@ func TestMCPOutputChunksAlwaysAdvance(t *testing.T) {
 	require.Greater(t, smallest.StructuredContent["nextOffset"], float64(0))
 }
 
-// tasks/result and tasks/cancel fence their REST replays to the task ID's
-// UID, and the REST routes enforce it, so a Task that reuses the name between
-// the MCP layer's UID check and the replay is neither read nor deleted.
 func TestMCPTaskResultAndCancelAreUIDFenced(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
-	// Record Delete preconditions; the fake client does not enforce UIDs.
 	var preconditions []*metav1.Preconditions
 	f.kube = interceptor.NewClient(f.kube.(client.WithWatch), interceptor.Funcs{
 		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
@@ -1226,7 +1175,6 @@ func TestMCPTaskResultAndCancelAreUIDFenced(t *testing.T) {
 	require.Equal(t, `{"reason":"","uid":"uid-running"}`, cancelBody, "the cancel request carries the task ID's UID")
 	require.Empty(t, preconditions, "cancellation never deletes the Task")
 
-	// REST enforcement: a mismatched uid is "task not found" and changes nothing.
 	status, body := f.request(t, http.MethodGet, "/api/v1/tasks/reused/result?uid=uid-original", "")
 	require.Equal(t, http.StatusNotFound, status, body)
 	require.NotContains(t, body, "reused output")
@@ -1244,9 +1192,6 @@ func TestMCPTaskResultAndCancelAreUIDFenced(t *testing.T) {
 	require.Equal(t, types.UID("uid-kept"), *preconditions[0].UID, "the Delete itself is UID-preconditioned")
 }
 
-// tasks/update answers the Task its task ID names: the decision replay
-// carries the UID, and the REST decision route refuses a Task that reused the
-// name and the approval ID since the MCP layer resolved it.
 func TestMCPTaskUpdateDecisionsAreUIDFenced(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
@@ -1273,8 +1218,6 @@ func TestMCPTaskUpdateDecisionsAreUIDFenced(t *testing.T) {
 	require.Contains(t, replays, "POST /api/v1/tasks/fenced/approvals/same/decision?namespace=default&uid=uid-fenced")
 }
 
-// Delivery branch names and pull request URLs pass through the same
-// redaction as every other text field.
 func TestMCPTaskDeliveryIsRedacted(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
@@ -1293,9 +1236,6 @@ func TestMCPTaskDeliveryIsRedacted(t *testing.T) {
 	require.NotContains(t, task.Content[0].Text, "hunter2hunter2")
 }
 
-// A same-name replacement can publish its result before the cache sees it, so
-// the post-read UID check must read live: a stale cached Task that still
-// matches the requested UID must not let the replacement's output through.
 func TestTaskResultUIDFenceReadsLiveTask(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
@@ -1303,8 +1243,6 @@ func TestTaskResultUIDFenceReadsLiveTask(t *testing.T) {
 		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
 	})
 	require.NoError(t, f.store.SaveResult(t.Context(), "default", "replaced", []byte("replacement output")))
-	// The cached client still holds uid-replaced; the live reader already
-	// sees the replacement Task.
 	f.config.APIReader = interceptor.NewClient(f.kube.(client.WithWatch), interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 			if err := c.Get(ctx, key, obj, opts...); err != nil {
@@ -1323,9 +1261,6 @@ func TestTaskResultUIDFenceReadsLiveTask(t *testing.T) {
 	require.NotContains(t, body, "replacement output")
 }
 
-// A Streamable HTTP client may POST a chunked body without Content-Length.
-// The full middleware chain must let it reach the MCP handler's bounded body
-// reader, while other API routes keep requiring a Content-Length.
 func TestMCPAcceptsChunkedRequestThroughServer(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
@@ -1355,8 +1290,6 @@ func TestMCPAcceptsChunkedRequestThroughServer(t *testing.T) {
 	require.Equal(t, http.StatusLengthRequired, status, body)
 }
 
-// Browser Streamable HTTP clients send MCP headers after initialization; the
-// CORS preflight allows them only while the endpoint is enabled.
 func TestMCPCORSPreflightAllowsMCPHeaders(t *testing.T) {
 	preflight := func(server *Server) http.Header {
 		request := httptest.NewRequest(http.MethodOptions, mcpEndpointPath, nil)
@@ -1380,10 +1313,6 @@ func TestMCPCORSPreflightAllowsMCPHeaders(t *testing.T) {
 	require.NotContains(t, allowed, "mcp-")
 }
 
-// requireExtensionDetailedTask checks a tasks/get result against the
-// io.modelcontextprotocol/tasks 2026-07-28 GetTaskResult (Result &
-// DetailedTask): the common Task fields, then exactly the payload field of the
-// status variant.
 func requireExtensionDetailedTask(t *testing.T, task map[string]any) {
 	t.Helper()
 	require.Equal(t, "complete", task["resultType"])
@@ -1408,9 +1337,6 @@ func requireExtensionDetailedTask(t *testing.T, task map[string]any) {
 	}
 }
 
-// The extension reserves failed for JSON-RPC errors: a failed tool call is
-// completed with an isError result, and a cancelled task carries no result.
-// The 2025-11-25 core status keeps failed, which covers isError results.
 func TestMCPExtensionTaskShapesFollowTheSchema(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
@@ -1460,10 +1386,6 @@ func TestMCPExtensionTaskShapesFollowTheSchema(t *testing.T) {
 	require.Contains(t, string(response.Result), `"isError":true`)
 }
 
-// Waits trade their request permit for a wait permit, so with a single
-// request permit a pending tasks/result wait never blocks the approval
-// decision or cancellation that ends it, and waits beyond the wait permits are
-// refused rather than queued.
 func TestMCPWaitsNeverStarveShortRequests(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
@@ -1493,7 +1415,6 @@ func TestMCPWaitsNeverStarveShortRequests(t *testing.T) {
 	require.False(t, decided.IsError, decided.Content)
 	cancelled := f.mcpRPC(t, "tasks/cancel", map[string]any{"taskId": taskID})
 	require.Nil(t, cancelled.Error, cancelled.body)
-	// The controller then ends the Task as Cancelled.
 	parked := &corev1alpha1.Task{}
 	require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "parked"}, parked))
 	require.Contains(t, parked.Annotations, labels.AnnotationCancelRequested)
@@ -1510,10 +1431,6 @@ func TestMCPWaitsNeverStarveShortRequests(t *testing.T) {
 	require.Empty(t, mcp.waitSlots)
 }
 
-// Streamable HTTP 2026-07-28: mirrored headers must be present on sessionless
-// requests and match the body; header, version, and capability failures are
-// 400, an unimplemented sessionless method is 404, and sessions are never
-// minted or echoed.
 func TestMCPSessionlessHeadersAreValidated(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
@@ -1568,7 +1485,6 @@ func TestMCPSessionlessHeadersAreValidated(t *testing.T) {
 	unsupported := send("ping", nil, func(h map[string]string) { h[mcpProtocolVersionHeader] = "2024-11-05" })
 	require.Contains(t, unsupported.body, `"supported"`)
 
-	// Legacy clients keep their shapes: no required headers, 200 errors.
 	legacy := f.mcpRaw(t, http.MethodPost, mcpBody(t, "ping", nil), map[string]string{mcpProtocolVersionHeader: "2025-11-25"})
 	require.Equal(t, http.StatusOK, legacy.status, legacy.body)
 	require.Nil(t, legacy.Error, legacy.body)
@@ -1577,9 +1493,6 @@ func TestMCPSessionlessHeadersAreValidated(t *testing.T) {
 	require.Equal(t, mcpCodeMethodNotFound, missing.Error.Code)
 }
 
-// The REST replay carries only the allow-listed caller headers: credentials
-// (including configured context-token headers) and request labels. Nothing
-// else an MCP client sends reaches the REST route.
 func TestMCPReplayForwardsOnlyAllowListedHeaders(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
@@ -1621,10 +1534,6 @@ func TestMCPReplayForwardsOnlyAllowListedHeaders(t *testing.T) {
 	}
 }
 
-// A finished state is final for an MCP client, so tasks/get and tasks/result
-// never report one without the Task's output when the result read fails
-// transiently; they fail and the client retries. A result the REST route
-// reports as absent is reported without output.
 func TestMCPTerminalResultsAreNeverSilentlyDropped(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
@@ -1656,7 +1565,6 @@ func TestMCPTerminalResultsAreNeverSilentlyDropped(t *testing.T) {
 	require.Nil(t, get.Error, get.body)
 	require.Contains(t, get.body, "the output")
 
-	// The store lost the result: the Task is still reported, without output.
 	createMCPTestTask(t, f, "lost", corev1alpha1.TaskPhaseSucceeded, func(task *corev1alpha1.Task) {
 		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
 	})
@@ -1668,9 +1576,6 @@ func TestMCPTerminalResultsAreNeverSilentlyDropped(t *testing.T) {
 	require.Equal(t, mcpStatusCompleted, task["status"])
 }
 
-// The Tasks extension has a client mirror params.taskId in Mcp-Name on
-// tasks/get, tasks/update, and tasks/cancel. A conforming request is served,
-// and a missing or different header is refused like any other mirror.
 func TestMCPTaskMethodsMirrorTheTaskIDInMcpName(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
@@ -1702,7 +1607,6 @@ func TestMCPTaskMethodsMirrorTheTaskIDInMcpName(t *testing.T) {
 		h[mcpNameHeader] = "=?base64?" + base64.StdEncoding.EncodeToString([]byte(taskID)) + "?="
 	}
 
-	// tasks/cancel last: it asks the Task the others read to stop.
 	for _, method := range []string{"tasks/get", "tasks/update", "tasks/cancel"} {
 		t.Run(method, func(t *testing.T) {
 			for name, edit := range map[string]func(map[string]string){"missing": drop, "different": differ} {
@@ -1730,8 +1634,6 @@ func TestMCPTaskMethodsMirrorTheTaskIDInMcpName(t *testing.T) {
 				}
 				response := send(method, tc.meta, tc.edit)
 				if response.Error != nil {
-					// tasks/update without the extension is refused for the
-					// capability, not for its headers.
 					require.Equal(t, mcpCodeMissingCapabilities, response.Error.Code, "%s: %s", name, response.body)
 					require.Equal(t, "tasks/update", method, name)
 					continue
@@ -1745,8 +1647,6 @@ func TestMCPTaskMethodsMirrorTheTaskIDInMcpName(t *testing.T) {
 	require.Contains(t, routed.Annotations, labels.AnnotationCancelRequested, "the conforming tasks/cancel reached the Task")
 }
 
-// Deciding an approval moves the task from input_required to working, so
-// lastUpdatedAt follows the decision, not the request it answered.
 func TestMCPTaskLastUpdatedFollowsApprovalDecisions(t *testing.T) {
 	created := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
 	requested, decided := created.Add(time.Minute), created.Add(5*time.Minute)
@@ -1764,8 +1664,6 @@ func TestMCPTaskLastUpdatedFollowsApprovalDecisions(t *testing.T) {
 	require.Equal(t, mcpTimeValue(decided), state.coreTaskFields()["lastUpdatedAt"])
 }
 
-// laggingMCPFixture reads Tasks through a client that, like the manager's
-// cache, does not see a Task for its first lag reads after the create.
 func laggingMCPFixture(t *testing.T, lag int64) (*externalAuthorizationFixture, *atomic.Int64) {
 	t.Helper()
 	f := newMCPFixture(t)
@@ -1791,8 +1689,6 @@ func laggingMCPFixture(t *testing.T, lag int64) (*externalAuthorizationFixture, 
 	return f, &hidden
 }
 
-// A task handle is returned only once tasks/get would resolve it: the read
-// trails the create, and a client may poll the handle at once.
 func TestMCPCreateTaskReturnsOnlyAResolvableHandle(t *testing.T) {
 	arguments := func(name string) map[string]any {
 		return map[string]any{"agent": "protected", "prompt": "do the thing", "taskType": "agent", "name": name}
@@ -1842,15 +1738,12 @@ func TestMCPCreateTaskReturnsOnlyAResolvableHandle(t *testing.T) {
 			polled := f.mcpRPC(t, "tasks/get", params)
 			require.Nil(t, polled.Error, "a returned handle resolves at once: %s", polled.body)
 
-			// Still unreadable at the bound: no handle, and an error that
-			// names the Task so the caller does not create another.
 			f, _ = laggingMCPFixture(t, 1<<30)
 			f.server.mcpServer.createdTaskWait = 200 * time.Millisecond
 			unreadable := f.mcpRPC(t, "tools/call", tc.params("stuck"))
 			require.Contains(t, unreadable.body, "task stuck in namespace default was created")
 			require.NotContains(t, unreadable.body, "taskId")
 			if tc.meta == nil {
-				// 2025-11-25: a JSON-RPC error, never a tool result.
 				require.NotNil(t, unreadable.Error, unreadable.body)
 				require.Equal(t, mcpCodeInternalError, unreadable.Error.Code)
 				return
@@ -1863,9 +1756,6 @@ func TestMCPCreateTaskReturnsOnlyAResolvableHandle(t *testing.T) {
 	}
 }
 
-// The wait is for the read to catch up, nothing else: a caller who may create
-// Tasks but not read them gets the handle without delay, since waiting would
-// not change the answer tasks/get gives them.
 func TestMCPCreateTaskHandleDoesNotWaitOnARefusedRead(t *testing.T) {
 	f, _ := laggingMCPFixture(t, 0)
 	f.review = func(review *authorizationv1.SubjectAccessReview) error {
@@ -1888,9 +1778,6 @@ func TestMCPCreateTaskHandleDoesNotWaitOnARefusedRead(t *testing.T) {
 	require.Equal(t, mcpCodeForbidden, polled.Error.Code, polled.body)
 }
 
-// 2025-11-25 task augmentation is offered by create_task alone. Another tool
-// asked to run as a task is refused before it has any effect, rather than run
-// as an ordinary call whose result a task-aware client would not accept.
 func TestMCPTaskAugmentationIsRefusedForOtherTools(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
@@ -1917,7 +1804,6 @@ func TestMCPTaskAugmentationIsRefusedForOtherTools(t *testing.T) {
 	}
 	require.True(t, untouched(), "cancel_task was refused before it asked the Task to stop")
 
-	// A legacy request is held to the 2025-11-25 task shape.
 	response := f.mcpRPC(t, "tools/call", map[string]any{
 		"name": mcpToolCancelTask, "task": map[string]any{"ttl": "unlimited"}, "arguments": map[string]any{"name": "kept"},
 	})
@@ -1925,9 +1811,6 @@ func TestMCPTaskAugmentationIsRefusedForOtherTools(t *testing.T) {
 	require.Equal(t, mcpCodeInvalidParams, response.Error.Code, response.body)
 	require.True(t, untouched())
 
-	// The sessionless revisions define no params.task: it is an unknown
-	// field, ignored like any other without being held to the 2025-11-25
-	// shape, and the call runs.
 	meta := map[string]any{mcpMetaProtocolVersion: mcpProtocolVersionSessionless, mcpMetaClientCapabilities: map[string]any{}}
 	response = f.mcpRPC(t, "tools/call", map[string]any{
 		"name": mcpToolCancelTask, "task": map[string]any{"ttl": "unlimited"}, "arguments": map[string]any{"name": "kept"}, "_meta": meta,
@@ -1937,9 +1820,6 @@ func TestMCPTaskAugmentationIsRefusedForOtherTools(t *testing.T) {
 	require.False(t, untouched())
 }
 
-// A bounded wait ends at its deadline even when a read it started is slow:
-// the deadline reaches the REST replay, so the wait permit is not held past
-// the advertised timeout by a stalled authorization or storage call.
 func TestMCPWaitDeadlineBoundsItsRESTReads(t *testing.T) {
 	const stall = 12 * time.Second
 	stalledFixture := func(t *testing.T, stallAfter time.Duration) (*externalAuthorizationFixture, func()) {
@@ -1987,9 +1867,6 @@ func TestMCPWaitDeadlineBoundsItsRESTReads(t *testing.T) {
 	})
 }
 
-// A compressed request is decoded through the same 1 MiB limit a plain one is
-// held to: a small body that expands far past it is refused without being
-// expanded, so it cannot be used to exhaust the replica's memory.
 func TestMCPCompressedBodiesAreDecodedWithinTheRequestLimit(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
@@ -2003,8 +1880,6 @@ func TestMCPCompressedBodiesAreDecodedWithinTheRequestLimit(t *testing.T) {
 	}
 	ping := mcpBody(t, "ping", nil)
 
-	// Twelve times the limit, yet under the API-wide body limit that Fiber's
-	// own decoding stops at.
 	const expanded = 12 * mcpMaxRequestBytes
 	require.Less(t, expanded, defaultAPIRequestBodyLimit)
 	bomb := gzipped(append([]byte(ping), bytes.Repeat([]byte(" "), expanded)...))
@@ -2041,9 +1916,6 @@ func TestMCPCompressedBodiesAreDecodedWithinTheRequestLimit(t *testing.T) {
 	}
 }
 
-// stallingMCPFixture reads Tasks through a client whose reads, while stall
-// reports true, block until their context ends, or for far longer than any
-// bound under test when it never does.
 const mcpTestStall = 12 * time.Second
 
 func stallingMCPFixture(t *testing.T, stall func(client.Object) bool) *externalAuthorizationFixture {
@@ -2067,9 +1939,6 @@ func stallingMCPFixture(t *testing.T, stall func(client.Object) bool) *externalA
 	return f
 }
 
-// The read that checks a new Task is visible ends with its bound: a slow one
-// cannot hold the request permit past it, and the caller is told the Task
-// exists.
 func TestMCPCreatedTaskWaitBoundsItsRead(t *testing.T) {
 	f := stallingMCPFixture(t, func(client.Object) bool { return true })
 	f.server.mcpServer.createdTaskWait = 300 * time.Millisecond
@@ -2087,8 +1956,6 @@ func TestMCPCreatedTaskWaitBoundsItsRead(t *testing.T) {
 	require.Empty(t, f.server.mcpServer.slots, "the request permit is released")
 }
 
-// tasks/result holds its wait permit while it reads the result, so the wait's
-// deadline bounds that read as well as the polling before it.
 func TestMCPTaskResultReadIsBoundedByTheWait(t *testing.T) {
 	var readingResult atomic.Bool
 	f := stallingMCPFixture(t, func(client.Object) bool { return readingResult.Load() })
@@ -2115,15 +1982,12 @@ func TestMCPTaskResultReadIsBoundedByTheWait(t *testing.T) {
 	require.Contains(t, response.Error.Message, "request the result again")
 	require.Empty(t, mcp.waitSlots, "the wait permit is released")
 
-	// Asked again with the read no longer slow, the result is returned.
 	mcp.handler = next
 	response = f.mcpRPC(t, "tasks/result", map[string]any{"taskId": encodeMCPTaskID("default", "finished", "uid-finished")})
 	require.Nil(t, response.Error, response.body)
 	require.Contains(t, response.body, "done")
 }
 
-// The sessionless revisions define no params.task, so it selects nothing
-// there: create_task answers as it would without the field.
 func TestMCPSessionlessCreateTaskIgnoresTaskAugmentation(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
@@ -2141,7 +2005,6 @@ func TestMCPSessionlessCreateTaskIgnoresTaskAugmentation(t *testing.T) {
 	}
 
 	legacyTask := map[string]any{"ttl": 60000}
-	// A value the 2025-11-25 shape does not accept is still ignored.
 	for name, task := range map[string]any{"plain": legacyTask, "unlimited": map[string]any{"ttl": "unlimited"}, "scalar": "later"} {
 		plain := call(name, map[string]any{}, task)
 		require.Equal(t, "complete", plain["resultType"], "an ordinary tool result")
@@ -2156,9 +2019,6 @@ func TestMCPSessionlessCreateTaskIgnoresTaskAugmentation(t *testing.T) {
 	require.Contains(t, extension, "pollIntervalMs")
 }
 
-// A 2025-11-25 task-augmented create_task that creates no task answers with a
-// JSON-RPC error: its client reads the result as a CreateTaskResult. The
-// extension's clients handle an ordinary result, so they keep the tool error.
 func TestMCPFailedTaskAugmentedCreateIsAJSONRPCError(t *testing.T) {
 	f := newMCPFixture(t)
 	createMCPTestTask(t, f, "taken", corev1alpha1.TaskPhaseRunning)
@@ -2199,16 +2059,12 @@ func TestMCPFailedTaskAugmentedCreateIsAJSONRPCError(t *testing.T) {
 	}
 }
 
-// A result too large for the MCP layer to read does not make a finished Task
-// unreadable: tasks/result and tasks/get report the Task and where to read
-// its result, instead of an error no retry can clear.
 func TestMCPOversizedResultStillCompletesTheTask(t *testing.T) {
 	f := newMCPFixture(t)
 	f.allowAll()
 	createMCPTestTask(t, f, "large", corev1alpha1.TaskPhaseSucceeded, func(task *corev1alpha1.Task) {
 		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
 	})
-	// Accepted by result submission, and larger than a replayed response.
 	size := mcpRESTResponseLimit + 1024
 	require.Less(t, size, maxResultSize)
 	require.NoError(t, f.store.SaveResult(t.Context(), "default", "large", bytes.Repeat([]byte("x"), size)))
@@ -2236,7 +2092,6 @@ func TestMCPOversizedResultStillCompletesTheTask(t *testing.T) {
 	require.Equal(t, mcpStatusCompleted, task["status"])
 	requireReported(task["result"].(map[string]any))
 
-	// The paging tool cannot carry it either, and says so.
 	direct := f.mcpTool(t, mcpToolGetTaskResult, map[string]any{"name": "large"})
 	require.Equal(t, float64(http.StatusInsufficientStorage), mcpErrorStatus(t, direct))
 }

@@ -13,11 +13,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// The cases in this file hold providers to the conditional commands that
-// replace Go callbacks: Orka resolves a target, authorizes or computes in its
-// own process with no provider transaction open, and the provider applies
-// only while the resolved target and version still match.
-
 const conditionalNamespace = "tenant-conditional"
 
 func acceptedMemoryProposal(t *testing.T, p storagev1.StateProvider, id string) *storagev1.MemoryProposal {
@@ -36,7 +31,6 @@ func proposalMemory(proposal *storagev1.MemoryProposal, at time.Time) *storagev1
 		Content: proposal.Content, Tags: []string{"applied"}, CreatedAt: at, UpdatedAt: at}
 }
 
-// applyProposal resolves and commits until the target holds, as Orka does.
 func applyProposal(ctx context.Context, p storagev1.StateProvider, proposal *storagev1.MemoryProposal, appliedBy string, at time.Time) (*storagev1.Memory, error) {
 	for range 2 * concurrentCallers {
 		target, err := p.ResolveMemoryProposalApplication(ctx, proposal.Namespace, proposal.ID)
@@ -131,7 +125,6 @@ func runMemoryProposalApplication(t *testing.T, newProvider StateFactory) {
 		winner, err := applyProposal(ctx, p, proposal, "winner", at)
 		require.NoError(t, err)
 
-		// The caller authorized creating a memory, not reading the winner's.
 		memory, err := p.CommitMemoryProposalApplication(ctx, storagev1.MemoryProposalApplication{
 			Target: stale, AppliedBy: "late", AppliedAt: at, Memory: proposalMemory(proposal, at),
 		})
@@ -218,7 +211,6 @@ func runMemoryProposalApplication(t *testing.T, newProvider StateFactory) {
 	})
 }
 
-// fencedOperation is one fence-checking method, called with ctx.
 type fencedOperation struct {
 	name string
 	call func(ctx context.Context, p storagev1.StateProvider) error
@@ -335,7 +327,6 @@ func fencedOperations(at time.Time) []fencedOperation {
 	}
 }
 
-// requireNoFencedEffects checks that refused fenced writes left nothing.
 func requireNoFencedEffects(t *testing.T, p storagev1.StateProvider) {
 	t.Helper()
 	ctx := t.Context()
@@ -481,8 +472,6 @@ func runTaskDataFences(t *testing.T, newProvider StateFactory) {
 	})
 }
 
-// runArtifactFence covers a fenced artifact write on a provider that serves
-// both contracts; providers that serve only state.v1 skip it.
 func runArtifactFence(t *testing.T, newProvider StateFactory) {
 	p, ctx := newProvider(t), t.Context()
 	artifacts, ok := p.(storagev1.ArtifactStore)
@@ -558,8 +547,6 @@ func ingestionFinding(fingerprint string) *storagev1.Finding {
 	return finding
 }
 
-// ingestionCommit applies one review: it reads a finding, writes it as
-// observed and counts it on the run.
 func ingestionCommit(t *testing.T, p storagev1.StateProvider, task, fingerprint string, at time.Time) storagev1.ScanTaskIngestionCommit {
 	t.Helper()
 	run, err := p.GetScanRun(t.Context(), workflowNamespace, "run-1")
@@ -604,7 +591,6 @@ func runScanIngestion(t *testing.T, newProvider StateFactory) {
 		_, err = p.GetFinding(ctx, workflowNamespace, "finding-1")
 		require.ErrorIs(t, err, storagev1.ErrNotFound, "a preview changes nothing")
 
-		// A commit that replays the preview's read sees the same result.
 		run, err := p.GetScanRun(ctx, workflowNamespace, "run-1")
 		require.NoError(t, err)
 		steps[1].Expect = &results[1]

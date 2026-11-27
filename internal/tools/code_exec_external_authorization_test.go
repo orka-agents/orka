@@ -49,8 +49,6 @@ func TestKubernetesCodeExecTimeoutPreservesPodLogAuthorization(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Timeout collection replaces the canceled tool context with a fresh
-			// context. The captured caller authorizer must survive that handoff.
 			result := executor.timeoutResult(clients, jobName, 1024)
 			if !result.TimedOut || authorizations != 1 {
 				t.Fatalf("timeout=%v authorizations=%d, want true and one authorization", result.TimedOut, authorizations)

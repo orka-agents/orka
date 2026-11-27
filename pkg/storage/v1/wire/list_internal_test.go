@@ -8,9 +8,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb"
 )
 
-// Splitting a list shares the response's items with the parts instead of
-// copying them, so a long list costs allocations for the parts only, and the
-// parts hold every item once, in order.
 func TestSplitListSharesTheItems(t *testing.T) {
 	response := &storagepb.ListArtifactsResponse{}
 	for index := range 20_000 {
@@ -31,8 +28,6 @@ func TestSplitListSharesTheItems(t *testing.T) {
 	}
 
 	allocs := testing.AllocsPerRun(5, func() { _ = splitList(response, field) })
-	// Appending through reflection costs one allocation per item; copying
-	// the items would cost at least one more each.
 	require.Less(t, allocs, 1.5*float64(len(response.Artifacts)),
 		"splitting never copies the items")
 }

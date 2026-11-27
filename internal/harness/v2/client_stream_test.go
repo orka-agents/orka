@@ -149,7 +149,6 @@ func TestClientDetectsMidstreamDisconnectAfterAcceptance(t *testing.T) {
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
-		// Returning closes the body without the required terminal event.
 	}))
 	defer server.Close()
 
@@ -222,10 +221,6 @@ func TestClientPromptStreamContextCancellation(t *testing.T) {
 	}
 }
 
-// clientTestAfterRequestWritten holds next until the client has recorded its
-// WroteRequest trace hook. net/http can return a response before that deferred
-// hook runs, leaving the evidence request_write_ambiguous. httptrace calls the
-// client's hook before the one this context adds, so releasing on ours is enough.
 func clientTestAfterRequestWritten(t *testing.T, next http.HandlerFunc) (context.Context, http.Handler) {
 	t.Helper()
 	written := make(chan struct{})
@@ -296,8 +291,6 @@ func TestClientPromptNotAcceptedPreservesRequestWriteEvidence(t *testing.T) {
 	}
 }
 
-// A response can be read before net/http reports WroteRequest. Until that
-// report arrives, the evidence must stay ambiguous and never resend-safe.
 func TestRequestTraceResponseBeforeWriteReportStaysAmbiguous(t *testing.T) {
 	tracker := newRequestTrace(true)
 	trace := tracker.clientTrace()

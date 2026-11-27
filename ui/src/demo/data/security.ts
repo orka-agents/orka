@@ -2,11 +2,6 @@ import type { DroppedFinding, PatchProposal, RepositoryScan, ReviewSlice, ScanRu
 import { ago, DEMO_NAMESPACE, digest, uid } from '../shared'
 import { AGENTS, REPOS, type RepoKey } from '../world'
 
-// Security scanning fixtures: four RepositoryScans on the Northwind Labs
-// repositories, their scan history, review slices, threat models, findings,
-// dropped model output, and patch proposals. The handlers mutate these arrays
-// in place, so everything resets on page reload.
-
 const ns = DEMO_NAMESPACE
 const MINUTE = 60_000
 
@@ -22,10 +17,8 @@ export const repoURLForScan = (name: string) => {
   return key ? REPOS[key].url : undefined
 }
 
-/** A RepositoryScan without its derived status fields (counts, phase, last scan). */
 export interface ScanRecord {
   resource: RepositoryScan
-  /** Set when the repository is misconfigured; reported through Ready=False. */
   problem?: { reason: string; message: string }
 }
 
@@ -89,14 +82,10 @@ export const scans: ScanRecord[] = [
   },
 ]
 
-// ---- Scan runs ----
-
-/** A scan run plus the wall-clock window it runs in; phase is derived from now. */
 export interface ScanRunRecord {
   run: ScanRun
   startedMs: number
   finishMs: number
-  /** Final outcome once finishMs passes. */
   outcome: 'succeeded' | 'failed'
   finalSummary: string
 }
@@ -166,7 +155,6 @@ export const scanRuns: ScanRunRecord[] = [
     commitCount: 52, sliceCount: 3, reviewedSliceCount: 3, skippedSliceCount: 0, acceptedFindings: 2, droppedFindings: 3,
     summary: 'Initial full review. Accepted 2 findings; threat model v2 generated.',
   }),
-  // In progress when the page loads; finishes about two minutes later.
   scanRun('web-storefront', 8, 'incremental', 3, 5, {
     baseCommit: digest('storefront:prev'), headCommit: digest('storefront:head'),
     commitCount: 12, sliceCount: 2,
@@ -180,7 +168,6 @@ export const scanRuns: ScanRunRecord[] = [
   }),
 ]
 
-/** Current view of a scan run: running until finishMs, then its outcome. */
 export function viewScanRun(record: ScanRunRecord, nowMs = Date.now()): ScanRun {
   if (nowMs < record.finishMs) {
     const progress = Math.min(1, Math.max(0, (nowMs - record.startedMs) / (record.finishMs - record.startedMs)))
@@ -204,8 +191,6 @@ export function viewScanRun(record: ScanRunRecord, nowMs = Date.now()): ScanRun 
     summary: record.finalSummary,
   }
 }
-
-// ---- Threat models ----
 
 export const threatModels: ThreatModel[] = [
   {
@@ -299,8 +284,6 @@ export const threatModels: ThreatModel[] = [
   },
 ]
 
-// ---- Review slices ----
-
 function slice(repo: string, id: string, fields: Omit<ReviewSlice, 'id' | 'repositoryScan' | 'namespace' | 'source' | 'confidence' | 'status'> & Partial<Pick<ReviewSlice, 'confidence' | 'status'>>, reviewedAgo: number, lastScanRunID: string): ReviewSlice {
   return {
     schemaVersion: 1,
@@ -387,11 +370,8 @@ export const slices: ReviewSlice[] = [
   }, 716, 'scan_web_007'),
 ]
 
-// ---- Findings ----
-
 type FindingSeed = Omit<SecurityFinding, 'namespace' | 'fingerprint' | 'createdAt' | 'updatedAt' | 'id'> & { createdAgo: number; updatedAgo?: number; key: string }
 
-/** Stable finding ID for a fixture key. */
 export const findingID = (key: string) => `fnd_${digest(`finding:${key}`, 12)}`
 
 function finding(seed: FindingSeed): SecurityFinding {
@@ -411,7 +391,6 @@ const validation = (fields: { summary: string; steps: string[]; attackPath: stri
     summary: fields.summary,
     validation_steps: fields.steps,
     attack_path_analysis: fields.attackPath,
-    // Omitted lists stay absent so the dashboard does not render empty columns.
     assumptions: fields.assumptions,
     controls: fields.controls,
     blindspots: fields.blindspots,
@@ -651,14 +630,10 @@ export const findings: SecurityFinding[] = [
   }),
 ]
 
-/** States that no longer count as open work. */
 export const CLOSED_FINDING_STATES = new Set(['dismissed', 'suppressed', 'false_positive', 'fixed', 'resolved'])
-
-// ---- Patch proposals ----
 
 export interface PatchRecord {
   proposal: PatchProposal
-  /** Patch generation finishes at this time; until then the proposal is running. */
   readyMs?: number
 }
 
@@ -697,8 +672,6 @@ export const patches: PatchRecord[] = [
     },
   },
 ]
-
-// ---- Dropped findings ----
 
 function dropped(repo: string, scanRunID: string, taskName: string, n: number, layer: string, reason: string, createdAgo: number, sliceID?: string): DroppedFinding {
   return {

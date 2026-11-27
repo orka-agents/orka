@@ -127,9 +127,6 @@ func TestToolReconcilerEgressCredentialsFailClosed(t *testing.T) {
 	}
 }
 
-// A running credential-bearing actor whose Tool stops validating must lose
-// all egress and be stopped, not keep the last installed policy and its
-// injected credential while the gateway still caches it.
 func TestToolReconcilerRevokesRunningActorEgressWhenCredentialBecomesInvalid(t *testing.T) {
 	for name, invalidate := range map[string]func(t *testing.T, r *ToolReconciler){
 		"credential provider cleared": func(_ *testing.T, r *ToolReconciler) { r.SubstrateConfig.EgressCredentialProvider = "" },
@@ -166,7 +163,6 @@ func TestToolReconcilerRevokesRunningActorEgressWhenCredentialBecomesInvalid(t *
 			if stops := len(executor.releaseReqs) + len(executor.deleteReqs); stops != 1 {
 				t.Fatalf("releases=%v deletes=%v, want the actor stopped once", executor.releaseReqs, executor.deleteReqs)
 			}
-			// The Tool stays invalid: reconciling again reports the same state.
 			if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
 				t.Fatal(err)
 			}
@@ -179,8 +175,6 @@ func TestToolReconcilerRevokesRunningActorEgressWhenCredentialBecomesInvalid(t *
 	}
 }
 
-// An actor whose egress cannot be denied would keep its last rules and the
-// credential the gateway injects for them, so it is stopped instead.
 func TestToolReconcilerReportsAndRetriesFailedEgressRevocation(t *testing.T) {
 	r, executor, _ := newEgressCredentialToolReconciler(t, workspace.SubstrateKubernetesSecretsCredentialProvider, githubTokenSecret("ghp_secret_value"))
 	for range 3 {
@@ -207,8 +201,6 @@ func TestToolReconcilerReportsAndRetriesFailedEgressRevocation(t *testing.T) {
 	}
 }
 
-// Turning Substrate MCP Tools off must not leave a running actor egressing
-// with its gateway-injected credential: the restarted controller revokes it.
 func TestToolReconcilerRevokesCredentialedActorEgressAfterRestartWithMCPToolsDisabled(t *testing.T) {
 	for name, applyErr := range map[string]error{"revoked": nil, "revocation fails": errors.New("substrate unavailable")} {
 		t.Run(name, func(t *testing.T) {

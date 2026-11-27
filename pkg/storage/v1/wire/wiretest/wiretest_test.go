@@ -15,8 +15,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/wiretest"
 )
 
-// slowPlans answers GetPlan only once released, as a provider that does not
-// watch its context might. Every other method is unimplemented.
 type slowPlans struct {
 	storagev1.StateProvider
 	entered  chan struct{}
@@ -35,8 +33,6 @@ func (p slowPlans) GetPlan(context.Context, string, string) (*storagev1.PlanStat
 	return nil, storagev1.ErrNotFound
 }
 
-// heldCleanups keeps the cleanups the loopback registers, so the test runs
-// them itself and can watch them while a handler is still running.
 type heldCleanups struct {
 	*testing.T
 	cleanups []func()
@@ -52,14 +48,11 @@ func (h *heldCleanups) run() {
 	}
 }
 
-// The loopback's cleanup waits for a handler that is still running after its
-// call was cancelled, so nothing the test closes afterwards is still in use.
 func TestCleanupWaitsForRunningHandlers(t *testing.T) {
 	provider := slowPlans{entered: make(chan struct{}), release: make(chan struct{}), finished: new(atomic.Bool)}
 	release := sync.OnceFunc(func() { close(provider.release) })
 	loopback := &heldCleanups{T: t}
 	stop := sync.OnceFunc(loopback.run)
-	// A failure below still frees the handler and then stops the loopback.
 	t.Cleanup(func() {
 		release()
 		stop()

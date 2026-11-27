@@ -19,34 +19,22 @@ const (
 
 var (
 	nodeSourceExtensions = []string{extTS, extTSX, extJS, extJSX, extMJS, extCJS}
-	// nodeImportPattern finds module specifiers in import and export
-	// statements, dynamic imports, and require calls; the first group names
-	// the syntax.
-	nodeImportPattern = regexp.MustCompile(`(\bfrom|\bimport|\brequire)\s*\(?\s*["']([^"'\n]+)["']`)
+	nodeImportPattern    = regexp.MustCompile(`(\bfrom|\bimport|\brequire)\s*\(?\s*["']([^"'\n]+)["']`)
 )
 
-// nodeImportGraph links TypeScript and JavaScript files through relative
-// imports and imports of workspace packages in the checkout. Test files do
-// not count as importers.
 type nodeImportGraph struct {
 	edges   map[string]map[string]struct{}
 	reverse map[string]map[string]struct{}
 }
 
 type nodePackage struct {
-	name string
-	dir  string
-	main string
-	// exports maps package.json "exports" subpaths, such as "." or "./api"
-	// or "./*", to their targets: a path or a condition object.
+	name    string
+	dir     string
+	main    string
 	exports map[string]json.RawMessage
-	// imports maps package.json "imports" specifiers, such as "#db" or
-	// "#internal/*", to their targets.
 	imports map[string]json.RawMessage
 }
 
-// Only files with a line count, which are regular and within the reference
-// size bound, are read.
 func newNodeImportGraph(root string, files []repoFile, lines map[string]int) *nodeImportGraph {
 	graph := &nodeImportGraph{edges: map[string]map[string]struct{}{}, reverse: map[string]map[string]struct{}{}}
 	known := make(map[string]struct{}, len(files))
@@ -94,7 +82,6 @@ func resolveNodeImport(fromDir, spec string, require bool, known map[string]stru
 	if require {
 		conditions = nodeRequireConditions
 	}
-	// Subpath imports such as "#db" resolve through the nearest package.
 	if strings.HasPrefix(spec, "#") {
 		pkg, ok := nearestNodePackage(fromDir, packages)
 		if !ok {
@@ -107,10 +94,8 @@ func resolveNodeImport(fromDir, spec string, require bool, known map[string]stru
 		if target == "" || strings.HasPrefix(target, "#") {
 			return ""
 		}
-		// A target may name another package.
 		return resolveNodeImport(pkg.dir, target, require, known, packages, aliases)
 	}
-	// The nearest tsconfig with path aliases applies, as for the compiler.
 	for dir := fromDir; ; dir = path.Dir(dir) {
 		if list, ok := aliases[dir]; ok && len(list) > 0 {
 			for _, alias := range list {
@@ -136,14 +121,12 @@ func resolveNodeImport(fromDir, spec string, require bool, known map[string]stru
 		}
 		if pkg.exports != nil {
 			target := pkg.exportTarget("."+strings.TrimPrefix(spec, pkg.name), conditions)
-			// Node rejects a subpath the exports map does not export.
 			if target == "" {
 				return ""
 			}
 			if found := resolveNodeBase(target, known); found != "" {
 				return found
 			}
-			// An exported build output, such as dist, falls back to source below.
 		}
 		if spec == pkg.name && pkg.main != "" {
 			if found := resolveNodeBase(pkg.main, known); found != "" {
@@ -155,8 +138,6 @@ func resolveNodeImport(fromDir, spec string, require bool, known map[string]stru
 	return ""
 }
 
-// nearestNodePackage returns the package whose directory most closely
-// contains dir.
 func nearestNodePackage(dir string, packages []nodePackage) (nodePackage, bool) {
 	best, found := nodePackage{}, false
 	for _, pkg := range packages {
@@ -170,9 +151,6 @@ func nearestNodePackage(dir string, packages []nodePackage) (nodePackage, bool) 
 	return best, found
 }
 
-// exportTarget resolves a subpath through the package's exports map,
-// including a single "*" pattern such as "./*": "./src/*.ts", choosing the
-// first of conditions a condition object names.
 func (p nodePackage) exportTarget(subpath string, conditions []string) string {
 	if target := nodeMappedTarget(p.exports, subpath, conditions); target != "" {
 		return path.Join(p.dir, target)
@@ -180,8 +158,6 @@ func (p nodePackage) exportTarget(subpath string, conditions []string) string {
 	return ""
 }
 
-// nodeMappedTarget resolves a key through an exports or imports map, with
-// exact keys first and then single-"*" patterns, most precise first.
 func nodeMappedTarget(mapping map[string]json.RawMessage, key string, conditions []string) string {
 	subpath := key
 	if raw, ok := mapping[subpath]; ok {
@@ -207,15 +183,10 @@ func nodeMappedTarget(mapping map[string]json.RawMessage, key string, conditions
 }
 
 var (
-	// The conditions Node matches for import syntax and for require calls.
 	nodeImportConditions  = []string{"import", "node", "node-addons", "default"}
 	nodeRequireConditions = []string{nodeRequireSyntax, "node", "node-addons", "default"}
 )
 
-// nodeExportTarget returns a string export target. For a condition object it
-// follows Node: the first key, in the object's own order, that is one of
-// conditions. A types-only target is the fallback, since TypeScript-only
-// workspace packages export nothing else.
 func nodeExportTarget(raw json.RawMessage, conditions []string, depth int) string {
 	var target string
 	if json.Unmarshal(raw, &target) == nil {
@@ -224,7 +195,6 @@ func nodeExportTarget(raw json.RawMessage, conditions []string, depth int) strin
 	if depth > 2 {
 		return ""
 	}
-	// A fallback array uses its first valid target.
 	var fallbacks []json.RawMessage
 	if json.Unmarshal(raw, &fallbacks) == nil {
 		for _, fallback := range fallbacks {
@@ -252,8 +222,6 @@ func nodeExportTarget(raw json.RawMessage, conditions []string, depth int) strin
 	return typesTarget
 }
 
-// orderedJSONObject returns a JSON object's keys and values in document
-// order, which Node uses to choose among export conditions.
 func orderedJSONObject(raw json.RawMessage) ([]string, []json.RawMessage, bool) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
@@ -280,8 +248,6 @@ func orderedJSONObject(raw json.RawMessage) ([]string, []json.RawMessage, bool) 
 	return keys, values, true
 }
 
-// readNodeExports returns a package's exports map by subpath. A string or a
-// root condition object is the export for ".".
 func readNodeExports(raw json.RawMessage) map[string]json.RawMessage {
 	if len(raw) == 0 {
 		return nil
@@ -302,7 +268,6 @@ func resolveNodeBase(base string, known map[string]struct{}) string {
 	if base == "" || base == ".." || strings.HasPrefix(base, "../") {
 		return ""
 	}
-	// A JSON import, such as a policy or schema, names its file.
 	if path.Ext(base) == extJSON {
 		if _, ok := known[base]; ok {
 			return base
@@ -310,7 +275,6 @@ func resolveNodeBase(base string, known map[string]struct{}) string {
 		return ""
 	}
 	candidates := []string{base}
-	// TypeScript ESM imports name the emitted JavaScript file.
 	stem := base
 	switch path.Ext(base) {
 	case extJS, extJSX, extMJS, extCJS:
@@ -330,9 +294,6 @@ func resolveNodeBase(base string, known map[string]struct{}) string {
 	return ""
 }
 
-// morePreciseNodePattern orders wildcard patterns as Node does for exports
-// and TypeScript does for paths: the longer prefix before "*" first, then
-// the longer pattern, then by text for a stable order.
 func morePreciseNodePattern(a, b string) bool {
 	prefixA, prefixB := strings.Index(a, "*"), strings.Index(b, "*")
 	if prefixA < 0 {
@@ -350,8 +311,6 @@ func morePreciseNodePattern(a, b string) bool {
 	return a < b
 }
 
-// nodePathAlias is one tsconfig compilerOptions.paths entry, such as
-// "@/*": ["./src/*"], with targets made repository-relative.
 type nodePathAlias struct {
 	pattern string
 	targets []string
@@ -368,13 +327,8 @@ func (a nodePathAlias) match(spec string) (string, bool) {
 	return spec[len(prefix) : len(spec)-len(suffix)], true
 }
 
-// readTSConfigAliases returns a tsconfig's path aliases with targets made
-// repository-relative, most precise first, followed by a lookup of bare
-// specifiers from baseUrl when one is set.
 func readTSConfigAliases(fullPath, dir string) []nodePathAlias {
 	options := readTSConfigOptions(fullPath, dir, 0)
-	// TypeScript resolves paths targets from baseUrl when one is set, and
-	// otherwise from the tsconfig that sets paths.
 	root := options.pathsDir
 	if options.baseURL != "" {
 		root = options.baseURL
@@ -394,22 +348,14 @@ func readTSConfigAliases(fullPath, dir string) []nodePathAlias {
 	return out
 }
 
-// maxTSConfigExtendsDepth bounds how many inherited tsconfig files are read.
 const maxTSConfigExtendsDepth = 4
 
-// tsconfigOptions are the compiler options that place imports, with
-// directories made repository-relative.
 type tsconfigOptions struct {
-	paths map[string][]string
-	// pathsDir is the directory of the tsconfig that sets paths.
+	paths    map[string][]string
 	pathsDir string
-	// baseURL is empty unless a tsconfig in the chain sets baseUrl.
-	baseURL string
+	baseURL  string
 }
 
-// readTSConfigOptions reads a tsconfig's options. Each option it does not set
-// is inherited through a relative "extends" chain within the repository,
-// later bases taking precedence, as the compiler does.
 func readTSConfigOptions(fullPath, dir string, depth int) tsconfigOptions {
 	var options tsconfigOptions
 	info, err := os.Lstat(fullPath)
@@ -431,7 +377,6 @@ func readTSConfigOptions(fullPath, dir string, depth int) tsconfigOptions {
 		return options
 	}
 	if depth < maxTSConfigExtendsDepth {
-		// TypeScript 5 accepts several bases.
 		var bases []string
 		var single string
 		if json.Unmarshal(config.Extends, &single) == nil {
@@ -441,7 +386,6 @@ func readTSConfigOptions(fullPath, dir string, depth int) tsconfigOptions {
 		}
 		for _, base := range bases {
 			base = strings.TrimSpace(base)
-			// Package-name bases live outside the repository.
 			if !strings.HasPrefix(base, "./") && !strings.HasPrefix(base, "../") {
 				continue
 			}
@@ -470,9 +414,6 @@ func readTSConfigOptions(fullPath, dir string, depth int) tsconfigOptions {
 	return options
 }
 
-// stripJSONComments removes the comments and trailing commas tsconfig files
-// allow, leaving strings intact. The second pass drops commas that preceded
-// a comment the first pass removed.
 func stripJSONComments(data []byte) []byte {
 	return stripJSONCommentsOnce(stripJSONCommentsOnce(data))
 }

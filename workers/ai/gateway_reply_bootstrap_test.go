@@ -29,10 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// Initialize the test process just as a controller-runtime application must.
-// Keep real diagnostics on the current stderr so captureNativeReplyStderr's
-// exact warning assertions still see them; only the missing-logger warning is
-// prevented, not filtered after the fact.
 func TestMain(m *testing.M) {
 	log.SetLogger(funcr.New(func(prefix, message string) {
 		if prefix != "" {
@@ -43,8 +39,6 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// Catch a missing local bootstrap bound (including context-free lazy discovery):
-// the normal model must run while optional Kubernetes endpoints remain stalled.
 func TestNativeGatewayReplyStalledKubernetesDoesNotBlockModel(t *testing.T) {
 	tools.RegisterBuiltinTools()
 	for _, stalled := range []string{"discovery", "task", "origin"} {
@@ -138,14 +132,13 @@ func TestNativeGatewayReplyStalledKubernetesDoesNotBlockModel(t *testing.T) {
 				}
 			case <-time.After(500 * time.Millisecond):
 				close(release)
-				<-done // Join the test goroutine even on the pre-fix blocking path.
+				<-done
 				t.Fatal("optional Kubernetes bootstrap blocked normal model work")
 			}
 		})
 	}
 }
 
-// Catch silent availability omissions and accidental inclusion of opaque errors.
 func TestNativeGatewayReplyAvailabilityWarningIsLocalAndSanitized(t *testing.T) {
 	logs := captureNativeReplyStderr(t)
 	env, tokenFile := nativeReplyBootstrapFixture(t)
@@ -171,7 +164,6 @@ func TestNativeGatewayReplyAvailabilityWarningIsLocalAndSanitized(t *testing.T) 
 	require.Less(t, len(output), 200)
 }
 
-// Catch treating a parent's cancellation/deadline as optional availability.
 func TestNativeGatewayReplyParentCancellationPropagates(t *testing.T) {
 	for _, deadline := range []bool{false, true} {
 		t.Run(fmt.Sprintf("deadline=%t", deadline), func(t *testing.T) {
@@ -205,7 +197,6 @@ func TestNativeGatewayReplyParentCancellationPropagates(t *testing.T) {
 	}
 }
 
-// Catch resetting the local deadline between the Task and origin stages.
 func TestNativeGatewayReplyBootstrapSharesOneBudget(t *testing.T) {
 	logs := captureNativeReplyStderr(t)
 	env, tokenFile := nativeReplyBootstrapFixture(t)
@@ -273,8 +264,6 @@ func TestNativeGatewayReplyReaderConstructionFailureOmitsTool(t *testing.T) {
 	require.Equal(t, "warning: reply_in_conversation omitted reason=task_read_unavailable\n", logs())
 }
 
-// Catch downgrading definitive Kubernetes denials to optional availability, and
-// leaking server-provided Warning headers or response bodies through the reader.
 func TestNativeGatewayReplyKubernetesDenialsRemainFatal(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {

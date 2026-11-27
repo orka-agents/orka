@@ -80,10 +80,6 @@ func TestACPSessionResultProjectionPreservesTerminalLifecycleMessage(t *testing.
 					if test.phase != corev1alpha1.TaskPhaseSucceeded {
 						delivery.Message = test.directText
 					}
-					// A fixed historical completionTime models an already-authoritative Task
-					// status from an interrupted prior settlement pass. Neither status writer
-					// in this matrix (queued outbox projection delivery, or the direct
-					// terminal delivery helper) may replace it with a fresh value.
 					historicalCompletion := metav1.NewTime(time.Date(2024, 9, 17, 8, 0, 0, 0, time.UTC))
 					task := &corev1alpha1.Task{
 						ObjectMeta: metav1.ObjectMeta{Namespace: control.Namespace, Name: "result-lifecycle", UID: types.UID(attempt.Key.TaskUID)},
@@ -131,9 +127,6 @@ func TestACPSessionResultProjectionPreservesTerminalLifecycleMessage(t *testing.
 						if err := dispatcher.finalizeTaskSessionResult(ctx, task, fence, session, assistantResult, publicationID, test.phase, delivery); err != nil {
 							t.Fatal(err)
 						}
-						// The live finalization already ran the activation tail. The
-						// recovery sweep must not resume it once the Task settles, or
-						// it resettles the Task as if live settlement was interrupted.
 						settled := task.DeepCopy()
 						settled.Status.Phase = test.phase
 						if needs, err := dispatcher.sessionTurnRequiresTerminalRecovery(ctx, settled, attempt); err != nil || needs {
@@ -158,8 +151,6 @@ func TestACPSessionResultProjectionPreservesTerminalLifecycleMessage(t *testing.
 					if payload.Execution.State != corev1alpha1.TaskExecutionStateSucceeded || payload.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeSucceeded || payload.Execution.Message != "" {
 						t.Fatal("Session result projection changed successful execution classification or included execution text")
 					}
-					// The recovery sweep must replay the immutable projection, including
-					// its message, when it finds an already finalized SessionTurn.
 					if err := dispatcher.finalizeRecoveredTerminalSession(ctx, task, attempt, fence); err != nil {
 						t.Fatal(err)
 					}
