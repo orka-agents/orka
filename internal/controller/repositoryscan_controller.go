@@ -123,11 +123,37 @@ type RepositoryScanReconciler struct {
 	PublicationStore              store.PublicationStore
 	ACPDispatchMaxConcurrentTasks int
 	createdReviewTasks            *createdTasks
-	recordedValidationMu          sync.Mutex
-	recordedValidationTasks       map[string]struct{}
+	recordedValidationTasks       *recordedValidationLedger
 	APIReader                     client.Reader
 	HTTPClient                    *http.Client
 	GitHubAPIBaseURL              string
+}
+
+const maxRecordedValidationTasks = 4096
+
+type recordedValidationLedger struct {
+	mu    sync.Mutex
+	seen  map[string]struct{}
+	order []string
+}
+
+func (l *recordedValidationLedger) markOnce(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.seen == nil {
+		l.seen = map[string]struct{}{}
+	}
+	if _, exists := l.seen[key]; exists {
+		return false
+	}
+	if len(l.order) >= maxRecordedValidationTasks {
+		oldest := l.order[0]
+		l.order = l.order[1:]
+		delete(l.seen, oldest)
+	}
+	l.seen[key] = struct{}{}
+	l.order = append(l.order, key)
+	return true
 }
 
 func (r *RepositoryScanReconciler) recordValidationOutcomeOnce(task *corev1alpha1.Task, status string) {
@@ -138,16 +164,12 @@ func (r *RepositoryScanReconciler) recordValidationOutcomeOnce(task *corev1alpha
 	if key == "" {
 		key = task.Namespace + "/" + task.Name
 	}
-	r.recordedValidationMu.Lock()
 	if r.recordedValidationTasks == nil {
-		r.recordedValidationTasks = map[string]struct{}{}
+		r.recordedValidationTasks = &recordedValidationLedger{}
 	}
-	if _, seen := r.recordedValidationTasks[key]; seen {
-		r.recordedValidationMu.Unlock()
+	if !r.recordedValidationTasks.markOnce(key) {
 		return
 	}
-	r.recordedValidationTasks[key] = struct{}{}
-	r.recordedValidationMu.Unlock()
 	metrics.RecordSecurityValidationOutcome(status)
 }
 
@@ -612,6 +634,7 @@ func (r *RepositoryScanReconciler) hasActiveScanRun(
 		if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
 			return false, err
 		}
+		metrics.RecordSecurityScanRun(run.Mode, run.Phase)
 	}
 	return false, nil
 }
@@ -1817,26 +1840,26 @@ func (r *RepositoryScanReconciler) persistThreatModelIfChanged(
 	scanID string,
 	scanStartedAt time.Time,
 	content string,
-) error {
+) (bool, error) {
 	if r.SecurityStore == nil {
-		return nil
+		return false, nil
 	}
 
 	content = strings.TrimSpace(content)
 	if content == "" {
-		return nil
+		return false, nil
 	}
 
 	latest, latestErr := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
 	if latestErr != nil && !errors.Is(latestErr, store.ErrNotFound) {
-		return latestErr
+		return false, latestErr
 	}
 	if latestErr == nil {
 		if strings.TrimSpace(latest.Content) == content {
-			return nil
+			return false, nil
 		}
 		if latest.GeneratedByScan != scanID && !scanStartedAt.IsZero() && scanStartedAt.Before(latest.UpdatedAt) {
-			return nil
+			return false, nil
 		}
 	}
 
@@ -1848,10 +1871,10 @@ func (r *RepositoryScanReconciler) persistThreatModelIfChanged(
 		GeneratedByScan: scanID,
 	}
 	if err := r.SecurityStore.SaveThreatModel(ctx, model); err != nil {
-		return err
+		return false, err
 	}
 
-	return nil
+	return true, nil
 }
 
 func (r *RepositoryScanReconciler) getArtifactWithRetry(ctx context.Context, namespace, taskName, filename string) ([]byte, error) {
@@ -3621,10 +3644,11 @@ func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, sc
 				return err
 			}
 		}
-		if err := tx.persistThreatModelIfChanged(ctx, scan, current.ID, current.StartedAt, content); err != nil {
+		saved, err := tx.persistThreatModelIfChanged(ctx, scan, current.ID, current.StartedAt, content)
+		if err != nil {
 			return err
 		}
-		threatModelUpdated = true
+		threatModelUpdated = saved
 		clearThreatModelRunError(current)
 		current.Summary = scanSummaryThreatModelPending
 		return nil
@@ -3824,7 +3848,7 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 		current.AcceptedFindings += newlyAccepted
 		current.DroppedFindings += len(dropped)
 		current.ReviewedSliceCount++
-		current.Summary = formatReviewSliceSummary(sliceID, findingsV2.Scan)
+		current.Summary = mergeReviewSliceSummary(current.Summary, sliceID, findingsV2.Scan)
 		ingestion.Completed = false
 		committedAccepted = newlyAccepted
 		committedDuplicates = len(duplicates)
@@ -3843,12 +3867,50 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 
 const securityDroppedLayerCap = "cap"
 
+func mergeReviewSliceSummary(previousSummary, sliceID string, scan security.FindingsV2Scan) string {
+	prior := extractSummaryLimitations(previousSummary)
+	combined := make([]string, 0, len(prior)+len(scan.Limitations))
+	seen := make(map[string]struct{}, len(prior)+len(scan.Limitations))
+	for _, item := range append(prior, scan.Limitations...) {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, exists := seen[item]; exists {
+			continue
+		}
+		seen[item] = struct{}{}
+		combined = append(combined, item)
+	}
+	merged := scan
+	merged.Limitations = combined
+	return formatReviewSliceSummary(sliceID, merged)
+}
+
 func formatReviewSliceSummary(sliceID string, scan security.FindingsV2Scan) string {
 	summary := strings.TrimSpace(scan.Summary)
 	if summary == "" {
 		summary = fmt.Sprintf("Reviewed slice %s", sliceID)
 	}
 	return appendLimitationsToSummary(summary, scan.Limitations)
+}
+
+func extractSummaryLimitations(summary string) []string {
+	suffix := extractSummaryLimitationsSuffix(summary)
+	if suffix == "" {
+		return nil
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(suffix, " (limitations: "), ")")
+	parts := strings.Split(inner, "; ")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || (strings.HasPrefix(part, "+") && strings.HasSuffix(part, " more")) {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
 }
 
 func extractSummaryLimitationsSuffix(summary string) string {

@@ -3007,9 +3007,16 @@ func TestPersistThreatModelIfChangedDeduplicatesRedactedResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseThreatModelResult() error = %v", err)
 	}
-	for range 2 {
-		if err := reconciler.persistThreatModelIfChanged(ctx, scan, scanID, time.Time{}, content); err != nil {
+	for attempt := range 2 {
+		saved, err := reconciler.persistThreatModelIfChanged(ctx, scan, scanID, time.Time{}, content)
+		if err != nil {
 			t.Fatalf("persistThreatModelIfChanged() error = %v", err)
+		}
+		if attempt == 0 && !saved {
+			t.Fatal("first persistThreatModelIfChanged() saved = false, want true")
+		}
+		if attempt == 1 && saved {
+			t.Fatal("duplicate persistThreatModelIfChanged() saved = true, want false")
 		}
 	}
 	latest, err := store.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
@@ -3044,7 +3051,7 @@ func TestPersistThreatModelIfChangedSkipsOlderGeneratedRun(t *testing.T) {
 		t.Fatalf("GetLatestThreatModel() error = %v", err)
 	}
 
-	if err := reconciler.persistThreatModelIfChanged(
+	if saved, err := reconciler.persistThreatModelIfChanged(
 		ctx,
 		scan,
 		"scan_old",
@@ -3052,6 +3059,8 @@ func TestPersistThreatModelIfChangedSkipsOlderGeneratedRun(t *testing.T) {
 		"# Generated Threat Model\n\nOlder scan output",
 	); err != nil {
 		t.Fatalf("persistThreatModelIfChanged() error = %v", err)
+	} else if saved {
+		t.Fatal("older persistThreatModelIfChanged() saved = true, want false")
 	}
 
 	latest, err = store.GetLatestThreatModel(ctx, defaultNS, "kaset")
@@ -3089,7 +3098,7 @@ func TestPersistThreatModelIfChangedPromotesNewerGeneratedRun(t *testing.T) {
 		t.Fatalf("GetLatestThreatModel() error = %v", err)
 	}
 
-	if err := reconciler.persistThreatModelIfChanged(
+	if saved, err := reconciler.persistThreatModelIfChanged(
 		ctx,
 		scan,
 		"scan_new",
@@ -3097,6 +3106,8 @@ func TestPersistThreatModelIfChangedPromotesNewerGeneratedRun(t *testing.T) {
 		"# Generated Threat Model\n\nFresh scan output",
 	); err != nil {
 		t.Fatalf("persistThreatModelIfChanged() error = %v", err)
+	} else if !saved {
+		t.Fatal("newer persistThreatModelIfChanged() saved = false, want true")
 	}
 
 	latest, err = store.GetLatestThreatModel(ctx, defaultNS, "kaset")
@@ -7538,7 +7549,7 @@ func TestKeepThreatModelInvestigationsCarriesSavedQuestions(t *testing.T) {
 	saved := security.RenderThreatModelInvestigations("# Threat model\n\nFull scan.", []security.SecurityInvestigation{
 		{Title: "Flow", Question: "Does input reach the sink?", Paths: []string{"pkg/flow"}},
 	})
-	if err := reconciler.persistThreatModelIfChanged(ctx, scan, "scan_full", time.Time{}, saved); err != nil {
+	if _, err := reconciler.persistThreatModelIfChanged(ctx, scan, "scan_full", time.Time{}, saved); err != nil {
 		t.Fatalf("persistThreatModelIfChanged() error = %v", err)
 	}
 	got, err := reconciler.keepThreatModelInvestigations(ctx, scan, "# Threat model\n\nIncremental update.")
