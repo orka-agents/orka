@@ -119,9 +119,6 @@ func (m *credentialManager) forgeCredential(ctx context.Context, parent Operatio
 	return operationCredential{filePath: path, cleanup: cleanup}, nil
 }
 
-// signingKeyCredential fetches an operation-scoped OpenSSH private key in
-// memory only (never written to disk) and returns its PEM bytes plus a cleanup
-// closure that zeroes the key buffer.
 func (m *credentialManager) signingKeyCredential(ctx context.Context, parent Operation, metadata OperationMetadata, reference *CredentialReference) ([]byte, func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, func() {}, err
@@ -139,8 +136,6 @@ func (m *credentialManager) signingKeyCredential(ctx context.Context, parent Ope
 	if err != nil {
 		return nil, func() {}, err
 	}
-	// Broker transport base64-encodes multi-line PEM keys into a single line;
-	// local-file providers return the PEM directly.
 	var keyPEM []byte
 	if bytes.Contains(raw, []byte("-----BEGIN ")) {
 		keyPEM = raw

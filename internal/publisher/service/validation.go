@@ -133,8 +133,6 @@ func validateSourceRef(ref string) error {
 	return validateBranchRef(ref)
 }
 
-// CanonicalWorkspaceSourceRef validates a workspace source selector while
-// preserving bare names for repository-aware branch/tag disambiguation.
 func CanonicalWorkspaceSourceRef(ref string) (string, error) {
 	if validateObjectID(ref) == nil {
 		return ref, nil

@@ -8,8 +8,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// failingAdmissionStore fails the admission of accepted events and stores
-// any other admission, such as a rejected event.
 type failingAdmissionStore struct {
 	store.GatewayEventStore
 	err error
@@ -22,10 +20,6 @@ func (s *failingAdmissionStore) AdmitGatewayEvent(ctx context.Context, request s
 	return s.GatewayEventStore.AdmitGatewayEvent(ctx, request)
 }
 
-// A fenced admission comes from a replaced controller. It also matches
-// ErrConflict, but it is not a Session ownership conflict, so the event is
-// neither recorded as rejected nor acknowledged: the adapter retries it
-// against the current controller.
 func TestGatewayIngressDoesNotRejectAnEventWhoseAdmissionWasFenced(t *testing.T) {
 	service, db, _ := newGatewayServiceFixture(t)
 	ctx := context.Background()

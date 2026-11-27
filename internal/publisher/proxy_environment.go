@@ -10,16 +10,11 @@ import (
 
 const proxyUsername = "orka-publisher"
 
-// ProxyEnvironment is an explicitly reviewed HTTPS proxy configuration for
-// trusted Git subprocesses. Ambient proxy variables remain ignored unless the
-// publisher command opts into this configuration during startup.
 type ProxyEnvironment struct {
 	HTTPSProxy string
 	NoProxy    string
 }
 
-// NormalizeProxyEnvironment validates the authenticated in-cluster forward
-// proxy and the narrow bypass list before either value enters a Git child.
 func NormalizeProxyEnvironment(rawHTTPSProxy, rawNoProxy string) (ProxyEnvironment, error) {
 	if rawHTTPSProxy == "" && rawNoProxy == "" {
 		return ProxyEnvironment{}, nil
@@ -119,7 +114,6 @@ func safeNoProxyToken(token string) bool {
 	}
 }
 
-// Variables returns the only proxy variables allowed into Git subprocesses.
 func (environment ProxyEnvironment) Variables() []string {
 	if environment.HTTPSProxy == "" {
 		return nil

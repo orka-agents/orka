@@ -77,29 +77,22 @@ func TestSetupGitCredentials_NoSecrets(t *testing.T) {
 }
 
 func TestSetupGitCredentials_WithTokenFile(t *testing.T) {
-	// Create a temp directory simulating /secrets/git/token
 	dir := t.TempDir()
 	tokenPath := dir + "/token"
 	if err := os.WriteFile(tokenPath, []byte("  my-secret-token  \n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	// We can't override the hard-coded paths, but we can verify the function
-	// doesn't panic with files that don't exist. The NoSecrets test already
-	// covers the negative path. Here we test the username file path.
 	usernamePath := dir + "/username"
 	if err := os.WriteFile(usernamePath, []byte("bot-user\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	// SetupGitCredentials reads from fixed paths (/secrets/git/...) so in
-	// tests without those mounted, it simply no-ops. Verify it doesn't error.
 	t.Setenv("GIT_TOKEN", "")
 	t.Setenv("GIT_ASKPASS", "")
 	t.Setenv("GIT_USERNAME", "")
 	t.Setenv("GITHUB_TOKEN", "")
 	SetupGitCredentials()
-	// No panic = success for the unmounted case.
 }
 
 func TestCloneRepo_InvalidRepo(t *testing.T) {
@@ -119,11 +112,9 @@ func TestCloneRepo_InvalidRepo(t *testing.T) {
 }
 
 func TestCloneRepo_WithBranch(t *testing.T) {
-	// Create a local bare repo to clone from
 	bareDir := t.TempDir()
 	runGit(t, bareDir, "init", "--bare")
 
-	// Create a working copy, add a commit, and push
 	workDir := t.TempDir()
 	runGit(t, workDir, "init")
 	runGit(t, workDir, "checkout", "-b", "main")
@@ -148,18 +139,11 @@ func TestCloneRepo_WithBranch(t *testing.T) {
 		t.Fatalf("CloneRepo failed: %v", err)
 	}
 
-	// Verify the file exists
 	if _, err := os.Stat(cloneDir + "/test.txt"); err != nil {
 		t.Errorf("expected test.txt in cloned repo: %v", err)
 	}
 }
 
-// When ORKA_PUSH_BRANCH is set, CloneRepo must pre-checkout a local branch
-// with that name so an agent-initiated `git push origin HEAD` lands on the
-// intended remote branch rather than overwriting "main". This prevents the
-// production bug we hit on sozercan/vekil where the Codex agent committed
-// and pushed inside its own loop, landing on main and breaking the worker's
-// post-run push to ORKA_PUSH_BRANCH.
 func TestCloneRepo_PreChecksOutPushBranchFromEnv(t *testing.T) {
 	bareDir := t.TempDir()
 	runGit(t, bareDir, "init", "--bare")
@@ -194,9 +178,6 @@ func TestCloneRepo_PreChecksOutPushBranchFromEnv(t *testing.T) {
 	}
 }
 
-// When ORKA_PUSH_BRANCH is unset, CloneRepo must NOT alter the checked-out
-// branch. Tasks that only read the workspace (validation, discovery) rely on
-// HEAD remaining on the cloned branch.
 func TestCloneRepo_NoPushBranchLeavesHEADAlone(t *testing.T) {
 	bareDir := t.TempDir()
 	runGit(t, bareDir, "init", "--bare")
@@ -232,11 +213,9 @@ func TestCloneRepo_NoPushBranchLeavesHEADAlone(t *testing.T) {
 }
 
 func TestCloneRepo_WithRef(t *testing.T) {
-	// Create a local bare repo
 	bareDir := t.TempDir()
 	runGit(t, bareDir, "init", "--bare")
 
-	// Working copy with two commits
 	workDir := t.TempDir()
 	runGit(t, workDir, "init")
 	runGit(t, workDir, "checkout", "-b", "main")
@@ -253,7 +232,7 @@ func TestCloneRepo_WithRef(t *testing.T) {
 	cloneDir := t.TempDir() + "/cloned"
 	cfg := &WorkspaceConfig{
 		GitRepo: bareDir,
-		GitRef:  "main", // using branch name as ref
+		GitRef:  "main",
 	}
 
 	err := CloneRepo(context.Background(), cfg, cloneDir)
@@ -723,7 +702,7 @@ func TestCloneRepo_ReusedWorkspaceRejectsDifferentRemote(t *testing.T) {
 
 func TestCloneRepo_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
+	cancel()
 
 	cfg := &WorkspaceConfig{
 		GitRepo: "https://github.com/example/repo.git",
@@ -767,7 +746,6 @@ func runGitOutput(t *testing.T, dir string, args ...string) string {
 	return string(out)
 }
 
-// runGit is a test helper to execute git commands.
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

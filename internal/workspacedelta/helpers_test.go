@@ -8,13 +8,10 @@ package workspacedelta
 
 import "fmt"
 
-// Build compares a trusted pre-prompt baseline with a frozen post-prompt tree.
-// It returns no artifact for no-change and read-only-modified classifications.
 func Build(baseline *Snapshot, postRoot string, intent Intent) (Result, error) {
 	return BuildWithLimits(baseline, postRoot, intent, BuildLimits{})
 }
 
-// ManifestDigest returns the content digest of the normalized snapshot.
 func (s *Snapshot) ManifestDigest() string {
 	if s == nil {
 		return ""

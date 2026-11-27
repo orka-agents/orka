@@ -4,8 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package workerenv defines the process contract shared by the controller job
-// builder and worker binaries.
 package workerenv
 
 import (
@@ -18,7 +16,6 @@ import (
 )
 
 const (
-	// Base worker env vars used by all worker types.
 	TaskName       = "ORKA_TASK_NAME"
 	TaskNamespace  = "ORKA_TASK_NAMESPACE"
 	ResultEndpoint = "ORKA_RESULT_ENDPOINT"
@@ -27,13 +24,11 @@ const (
 	Command        = "ORKA_COMMAND"
 	AgentName      = "ORKA_AGENT_NAME"
 
-	// Task relationship env vars.
 	PriorTask           = "ORKA_PRIOR_TASK"
 	PriorTaskNamespace  = "ORKA_PRIOR_TASK_NAMESPACE"
 	PriorTaskDiffSHA256 = "ORKA_PRIOR_TASK_DIFF_SHA256"
 	ParentTask          = "ORKA_PARENT_TASK"
 
-	// Transaction context env vars.
 	TransactionID                              = "ORKA_TRANSACTION_ID"
 	TransactionProfile                         = "ORKA_TRANSACTION_PROFILE"
 	TransactionIssuer                          = "ORKA_TRANSACTION_ISSUER"
@@ -60,7 +55,6 @@ const (
 	OutboundAccessTrustedGatewayServices       = "ORKA_OUTBOUND_ACCESS_TRUSTED_GATEWAY_SERVICES"
 	OutboundAccessTrustedTokenEndpointServices = "ORKA_OUTBOUND_ACCESS_TRUSTED_TOKEN_ENDPOINT_SERVICES"
 
-	// AI worker env vars.
 	AIProvider              = "ORKA_AI_PROVIDER"
 	AIModel                 = "ORKA_AI_MODEL"
 	AITemperature           = "ORKA_AI_TEMPERATURE"
@@ -74,18 +68,14 @@ const (
 	AIDeprecatedMemoryTools = "ORKA_AI_DEPRECATED_MEMORY_TOOLS"
 	GatewayReplyEnabled     = "ORKA_GATEWAY_REPLY_ENABLED"
 	AIFallbackCount         = "ORKA_AI_FALLBACK_COUNT"
-	// AIFallbackEnvPrefix starts every fallback provider env var, including
-	// AIFallbackCount.
-	AIFallbackEnvPrefix = "ORKA_AI_FALLBACK_"
-	ControllerMode      = "ORKA_CONTROLLER_MODE"
+	AIFallbackEnvPrefix     = "ORKA_AI_FALLBACK_"
+	ControllerMode          = "ORKA_CONTROLLER_MODE"
 
-	// Telemetry env vars.
 	EnableTelemetry = "ORKA_ENABLE_TELEMETRY"
 	TraceParent     = "ORKA_TRACEPARENT"
 	TraceState      = "ORKA_TRACESTATE"
 	TraceBaggage    = "ORKA_BAGGAGE"
 
-	// Coordination/autonomous env vars used by AI worker and coordination tools.
 	CoordinationEnabled       = "ORKA_COORDINATION_ENABLED"
 	CoordinationMaxDepth      = "ORKA_COORDINATION_MAX_DEPTH"
 	CoordinationMaxChildren   = "ORKA_COORDINATION_MAX_CHILDREN"
@@ -96,15 +86,10 @@ const (
 	AutonomousMaxIterations   = "ORKA_AUTONOMOUS_MAX_ITERATIONS"
 	TaskUID                   = "ORKA_TASK_UID"
 	ApprovalRequiredTools     = "ORKA_APPROVAL_REQUIRED_TOOLS"
-	// ConnectorToolDigests is a JSON object mapping each connector-backed
-	// tool dispatched with the Job to the digest of its Tool spec at dispatch.
-	ConnectorToolDigests = "ORKA_CONNECTOR_TOOL_DIGESTS"
-	// ConnectionBindings is the JSON list of Connection identities frozen
-	// for the Task at dispatch (no token material).
-	ConnectionBindings = "ORKA_CONNECTION_BINDINGS"
-	ResolvedApprovals  = "ORKA_RESOLVED_APPROVALS"
+	ConnectorToolDigests      = "ORKA_CONNECTOR_TOOL_DIGESTS"
+	ConnectionBindings        = "ORKA_CONNECTION_BINDINGS"
+	ResolvedApprovals         = "ORKA_RESOLVED_APPROVALS"
 
-	// Agent runtime env vars.
 	SessionName           = "ORKA_SESSION_NAME"
 	SessionPromptIncluded = "ORKA_SESSION_PROMPT_INCLUDED"
 	AnthropicBaseURL      = "ANTHROPIC_BASE_URL"
@@ -117,16 +102,12 @@ const (
 	GitAskpass            = "GIT_ASKPASS"
 	GitUsername           = "GIT_USERNAME"
 
-	// Tool integration env vars.
 	SearchAPIKey = "SEARCH_API_KEY"
 	SearchAPIURL = "SEARCH_API_URL"
 
-	// Kubernetes namespace env vars used by workers/tools.
 	PodNamespace = "POD_NAMESPACE"
 	Namespace    = "NAMESPACE"
 
-	// Code execution tool env vars. Every name starts with CodeExecEnvPrefix,
-	// which the controller reserves from AI Task spec.env.
 	CodeExecEnvPrefix               = "ORKA_CODE_EXEC_"
 	CodeExecBackend                 = "ORKA_CODE_EXEC_BACKEND"
 	CodeExecLocalCPUSeconds         = "ORKA_CODE_EXEC_LOCAL_CPU_SECONDS"
@@ -145,7 +126,6 @@ const (
 	CodeExecKubernetesAppArmor      = "ORKA_CODE_EXEC_K8S_APPARMOR_PROFILE"
 	OrkaNamespace                   = "ORKA_NAMESPACE"
 
-	// Workspace env vars used by general and agent-runtime workers.
 	GitRepo              = "ORKA_GIT_REPO"
 	GitBranch            = "ORKA_GIT_BRANCH"
 	GitRef               = "ORKA_GIT_REF"
@@ -163,49 +143,35 @@ const (
 
 	WorkspaceBootstrapToken = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
 
-	// Git config env vars used to mark the prepared workspace as safe.
 	GitConfigCount  = "GIT_CONFIG_COUNT"
 	GitConfigKey0   = "GIT_CONFIG_KEY_0"
 	GitConfigValue0 = "GIT_CONFIG_VALUE_0"
 
-	// Memory/controller context env vars used by AI worker memory integration.
 	MemoryContextEnabled    = "ORKA_MEMORY_CONTEXT_ENABLED"
 	MemoryContextLimit      = "ORKA_MEMORY_CONTEXT_LIMIT"
 	MemoryContextMaxChars   = "ORKA_MEMORY_CONTEXT_MAX_CHARS"
 	ServiceAccountToken     = "ORKA_SA_TOKEN"
 	ServiceAccountTokenPath = "ORKA_SA_TOKEN_PATH"
 
-	// MemoryConsolidationMode makes a native AI worker run memory
-	// consolidation (ADR 0051) in the named mode, DryRun or Propose. The
-	// controller owns it.
 	MemoryConsolidationMode = "ORKA_MEMORY_CONSOLIDATION_MODE"
 
 	ServiceAccountTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 	ResultStdoutPrefix = "ORKA_RESULT_B64:"
 
-	// RepositoryValidationUnavailableExitCode identifies a validation worker
-	// that could not exec the configured validation command. The controller
-	// treats this as unavailable infrastructure rather than a command failure.
 	RepositoryValidationUnavailableExitCode = 125
 
-	// RepositoryValidationMaxProcesses bounds processes and threads created by
-	// one repository validation command.
 	RepositoryValidationMaxProcesses = 512
 
-	// RepositoryValidationMaxCommandBytes bounds the command selected by a
-	// repository reviewer and materialized for the validation container.
 	RepositoryValidationMaxCommandBytes = 8192
 )
 
 const trueString = "true"
 
-// Env returns a simple Kubernetes environment variable.
 func Env(name, value string) corev1.EnvVar {
 	return corev1.EnvVar{Name: name, Value: value}
 }
 
-// AppendIfSet appends name=value to envVars only when value is non-empty.
 func AppendIfSet(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {
 	if value == "" {
 		return envVars
@@ -213,12 +179,10 @@ func AppendIfSet(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {
 	return append(envVars, Env(name, value))
 }
 
-// IsTrue returns true when value enables a boolean env flag.
 func IsTrue(value string) bool {
 	return strings.EqualFold(strings.TrimSpace(value), trueString)
 }
 
-// SplitCSV returns trimmed, non-empty items from a comma-separated env value.
 func SplitCSV(value string) []string {
 	parts := strings.Split(value, ",")
 	out := make([]string, 0, len(parts))
@@ -230,8 +194,6 @@ func SplitCSV(value string) []string {
 	return out
 }
 
-// ReadTokenFile reads and trims a token file. It fails closed when the
-// configured path cannot be read or contains only whitespace.
 func ReadTokenFile(path, description string) (string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -248,9 +210,6 @@ func ReadTokenFile(path, description string) (string, error) {
 	return token, nil
 }
 
-// ReadTokenFileEnv reads and trims a token file path referenced by envName.
-// It returns ok=false when envName is unset, and fails closed when a configured
-// path cannot be read or contains only whitespace.
 func ReadTokenFileEnv(envName, description string) (string, bool, error) {
 	path := strings.TrimSpace(os.Getenv(envName))
 	if path == "" {
@@ -260,8 +219,6 @@ func ReadTokenFileEnv(envName, description string) (string, bool, error) {
 	return token, true, err
 }
 
-// RequireTokenFileEnv reads a token file path referenced by envName and returns
-// an error when the env var is unset.
 func RequireTokenFileEnv(envName, description string) (string, error) {
 	token, ok, err := ReadTokenFileEnv(envName, description)
 	if err != nil {
@@ -273,12 +230,10 @@ func RequireTokenFileEnv(envName, description string) (string, error) {
 	return token, nil
 }
 
-// JoinCSV joins values using the comma-separated format used by worker env vars.
 func JoinCSV(values []string) string {
 	return strings.Join(values, ",")
 }
 
-// BaseEnv is the common env contract passed to all Orka worker containers.
 type BaseEnv struct {
 	TaskName           string
 	TaskNamespace      string
@@ -290,7 +245,6 @@ type BaseEnv struct {
 	TransactionProfile string
 }
 
-// EnvVars renders the base worker environment.
 func (e BaseEnv) EnvVars() []corev1.EnvVar {
 	envVars := []corev1.EnvVar{
 		Env(TaskName, e.TaskName),
@@ -305,7 +259,6 @@ func (e BaseEnv) EnvVars() []corev1.EnvVar {
 	return envVars
 }
 
-// ParseBaseEnv reads the common worker environment.
 func ParseBaseEnv(getenv func(string) string) BaseEnv {
 	return BaseEnv{
 		TaskName:           getenv(TaskName),
@@ -319,7 +272,6 @@ func ParseBaseEnv(getenv func(string) string) BaseEnv {
 	}
 }
 
-// TransactionLogFields returns safe key/value fragments for worker stdout logs.
 func TransactionLogFields(transactionID, profile string) string {
 	fields := []string{}
 	if transactionID != "" {
@@ -334,7 +286,6 @@ func TransactionLogFields(transactionID, profile string) string {
 	return " " + strings.Join(fields, " ")
 }
 
-// FallbackProviderEnv is one fallback provider entry from the AI worker env contract.
 type FallbackProviderEnv struct {
 	Provider            string
 	APIKey              string
@@ -344,7 +295,6 @@ type FallbackProviderEnv struct {
 	AzureDeploymentName string
 }
 
-// FallbackPrefix returns the prefix for fallback provider i.
 func FallbackPrefix(i int) string {
 	return fmt.Sprintf("%s%d", AIFallbackEnvPrefix, i)
 }
@@ -358,8 +308,6 @@ func FallbackAzureDeploymentNameKey(i int) string {
 	return FallbackPrefix(i) + "_AZURE_DEPLOYMENT_NAME"
 }
 
-// EnvVars renders the non-secret fallback metadata env vars for fallback i.
-// API keys should normally be rendered from SecretKeyRef by the caller.
 func (e FallbackProviderEnv) EnvVars(i int) []corev1.EnvVar {
 	envVars := []corev1.EnvVar{
 		Env(FallbackProviderKey(i), e.Provider),
@@ -374,7 +322,6 @@ func (e FallbackProviderEnv) EnvVars(i int) []corev1.EnvVar {
 	return envVars
 }
 
-// ParseFallbackProviderEnv reads fallback provider i.
 func ParseFallbackProviderEnv(getenv func(string) string, i int) FallbackProviderEnv {
 	return FallbackProviderEnv{
 		Provider:            getenv(FallbackProviderKey(i)),
@@ -386,8 +333,6 @@ func ParseFallbackProviderEnv(getenv func(string) string, i int) FallbackProvide
 	}
 }
 
-// ParseFallbacks reads all fallback provider entries from env. Invalid counts are
-// treated as no fallbacks to preserve historical worker behavior.
 func ParseFallbacks(getenv func(string) string) []FallbackProviderEnv {
 	countStr := strings.TrimSpace(getenv(AIFallbackCount))
 	if countStr == "" {
@@ -404,14 +349,12 @@ func ParseFallbacks(getenv func(string) string) []FallbackProviderEnv {
 	return fallbacks
 }
 
-// AIWorkerEnv is the typed AI worker env contract shared by JobBuilder and the
-// AI worker binary.
 type AIWorkerEnv struct {
 	BaseEnv
 	Provider                         string
 	Model                            string
-	Temperature                      string // Raw optional setting; validated by the AI worker.
-	MaxTokens                        string // Raw optional setting; validated by the AI worker.
+	Temperature                      string
+	MaxTokens                        string
 	Prompt                           string
 	SystemPrompt                     string
 	BaseURL                          string
@@ -430,8 +373,6 @@ type AIWorkerEnv struct {
 	ControllerMode                   string
 }
 
-// EnvVars renders AI worker env vars. Fallback API keys are included only when
-// set on the struct; JobBuilder should usually add them separately via secrets.
 func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 	envVars := make([]corev1.EnvVar, 0, 8+len(e.Fallbacks)*4)
 	if e.BaseEnv != (BaseEnv{}) {
@@ -479,7 +420,6 @@ func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 	return envVars
 }
 
-// ParseAIWorkerEnv reads the AI worker environment.
 func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 	return AIWorkerEnv{
 		BaseEnv:                          ParseBaseEnv(getenv),
@@ -506,8 +446,6 @@ func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 	}
 }
 
-// ValidateRequired returns an error when required AI worker fields are missing.
-// hasSessionPrompt must only be true after the worker validates its transcript input.
 func (e AIWorkerEnv) ValidateRequired(hasSessionPrompt bool) error {
 	if e.Provider == "" {
 		return fmt.Errorf("%s is required", AIProvider)
@@ -534,7 +472,6 @@ type CoordinationEnv struct {
 	ApprovalRequiredTools   []string
 }
 
-// EnvVars renders coordination/autonomous env vars.
 func (e CoordinationEnv) EnvVars() []corev1.EnvVar {
 	if !e.Enabled {
 		return nil
@@ -565,7 +502,6 @@ func (e CoordinationEnv) EnvVars() []corev1.EnvVar {
 	return envVars
 }
 
-// ParseCoordinationEnv reads coordination/autonomous settings.
 func ParseCoordinationEnv(getenv func(string) string) CoordinationEnv {
 	return CoordinationEnv{
 		Enabled:                 IsTrue(getenv(CoordinationEnabled)),

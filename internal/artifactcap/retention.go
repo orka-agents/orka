@@ -18,7 +18,6 @@ import (
 )
 
 const (
-	// DefaultRoot is the controller PVC subdirectory used by ACP artifact transport.
 	DefaultRoot                   = "/data/acp-artifacts"
 	defaultRetentionSweepInterval = time.Minute
 	defaultRetentionLockTimeout   = 5 * time.Second
@@ -27,24 +26,16 @@ const (
 	operationRecordMaxBytes       = 64 << 10
 )
 
-// MinimumRetirementGrace keeps a retired identity blocked until every
-// capability that could have been issued before retirement is expired.
 const MinimumRetirementGrace = MaxCapabilityTTL + MaxClockSkew
 
-// IdentityRetirer retires immutable artifact identities after their owning
-// attempt/publication state can no longer require transport or replay.
 type IdentityRetirer interface {
 	Retire(context.Context, ...Identity) error
 }
 
-// CapabilityReservationRecorder persists a digest reservation before a
-// capability is returned to a caller. Reservations keep cross-identity objects
-// live until the capability expires or its identity is retired.
 type CapabilityReservationRecorder interface {
 	Reserve(context.Context, OperationRequest, time.Time) error
 }
 
-// CollectorConfig configures reference-aware artifact retention.
 type CollectorConfig struct {
 	Root          string
 	SweepInterval time.Duration
@@ -52,10 +43,6 @@ type CollectorConfig struct {
 	Now           func() time.Time
 }
 
-// Collector reclaims artifact objects and replay records only after the
-// controller explicitly retires their immutable Task/publication identities.
-// The artifact store and this retention format ship together in the Orka harness v2
-// hard cutover, so there is no supported pre-retention ledger to backfill.
 type Collector struct {
 	root          string
 	objectsDir    string
@@ -131,13 +118,8 @@ func NewCollector(config CollectorConfig) (*Collector, error) {
 	}, nil
 }
 
-// NeedLeaderElection keeps periodic sweeping on the controller leader. The
-// filesystem lock still protects transport during rolling overlap.
 func (*Collector) NeedLeaderElection() bool { return true }
 
-// Start runs startup and periodic recovery sweeps. A direct Retire call still
-// performs synchronous reclamation; the loop bounds short-lived tombstones and
-// resumes cleanup after crashes.
 func (c *Collector) Start(ctx context.Context) error {
 	logger := logf.FromContext(ctx).WithName("acp-artifact-retention")
 	if err := c.Sweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -157,9 +139,6 @@ func (c *Collector) Start(ctx context.Context) error {
 	}
 }
 
-// Reserve persists one exact capability reference before the capability is
-// returned. The exclusive lock serializes reservation publication with
-// reclamation; transport operations use the fair shared side of the same gate.
 func (c *Collector) Reserve(ctx context.Context, request OperationRequest, expiresAt time.Time) error {
 	if err := request.Validate(); err != nil {
 		return err
@@ -219,10 +198,6 @@ func (c *Collector) verifyReservedDownload(request OperationRequest) error {
 	return nil
 }
 
-// Retire persistently blocks the supplied immutable identities before
-// reclaiming their unshared objects and replay records. Callers must establish
-// that no attempt, publication, external effect, or outbox recovery can need
-// the identities again.
 func (c *Collector) Retire(ctx context.Context, identities ...Identity) error {
 	if len(identities) == 0 {
 		return fmt.Errorf("%w: at least one artifact identity is required", ErrInvalidRequest)
@@ -255,14 +230,9 @@ func (c *Collector) Retire(ctx context.Context, identities ...Identity) error {
 			return err
 		}
 	}
-	// Keep objects and replay records through the maximum capability lifetime.
-	// This gives every capability issued to another live identity time to start
-	// and persist its own replay reference before reclamation.
 	return nil
 }
 
-// Sweep resumes crash-interrupted reclamation and prunes retirement tombstones
-// only after the maximum capability lifetime has elapsed.
 func (c *Collector) Sweep(ctx context.Context) error {
 	lockCtx, cancel := context.WithTimeout(ctx, c.lockTimeout)
 	release, err := acquireArtifactRootLock(lockCtx, c.root, true)
@@ -416,8 +386,6 @@ func (c *Collector) removeRetiredArtifacts(ctx context.Context, liveDigests, can
 		}
 		removedObjects = removedObjects || removed
 	}
-	// Persist object/metadata removal before deleting the replay records that
-	// identify crash-recovery candidates.
 	if removedMetadata {
 		if err := syncDirectory(c.metadataDir); err != nil {
 			return fmt.Errorf("sync retired artifact metadata: %w", err)

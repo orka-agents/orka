@@ -88,10 +88,6 @@ func (p *Publisher) ensurePublicationDirectory(publicationID string, generation 
 	return directory, nil
 }
 
-// publicationIdentityForRequest loads the exact cache identity. A live
-// directory created by the pre-identity format may be upgraded only for that
-// format's sole generation; deterministic staging/tombstone directories may
-// recover the generation encoded by their request-derived path.
 func (p *Publisher) publicationIdentityForRequest(
 	directory string, request ReclaimRequest, legacyLiveDirectory bool,
 ) (publicationStorageIdentity, bool, error) {
@@ -261,10 +257,6 @@ func (p *Publisher) loadPrepared(publicationID string) (PreparedPublication, err
 	return prepared, nil
 }
 
-// RestorePrepared imports a controller-durable prepared bundle into the local
-// Publisher cache. The bundle is strictly verified before the local receipt is
-// made visible, so loss of the Publisher PVC does not make a Prepared
-// Publication unrecoverable.
 func (p *Publisher) RestorePrepared(ctx context.Context, prepared PreparedPublication, bundle []byte) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -342,9 +334,6 @@ func (p *Publisher) readPublicationIdentity(directory, publicationID string) (pu
 		return publicationStorageIdentity{}, operationError(ErrPreparedArtifactCorrupt, "read publication cache identity", publicationID, err)
 	}
 
-	// Upgrade a complete pre-identity cache in place. Older prepared receipts
-	// contain the exact Publication ID and generation, so they remain a safe
-	// reclamation fence after this format is introduced.
 	var prepared PreparedPublication
 	if err := readCanonical(filepath.Join(directory, preparedMetadataName), &prepared); err != nil {
 		if errors.Is(err, os.ErrNotExist) {

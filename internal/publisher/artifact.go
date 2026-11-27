@@ -144,10 +144,6 @@ func parseDeltaArtifact(artifact []byte, expectedDigest string, maxBytes int64) 
 	return result, nil
 }
 
-// withRelativeRoot translates artifact-relative paths into repository-relative
-// paths exactly once. The immutable artifact and its manifest digest remain
-// unchanged; only the trusted in-memory view used for full-tree validation and
-// application is rooted beneath the session's declared workspace subpath.
 func (d parsedDelta) withRelativeRoot(relativeRoot string) (parsedDelta, error) {
 	if relativeRoot == "" || relativeRoot == "." {
 		return d, nil

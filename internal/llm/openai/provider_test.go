@@ -98,7 +98,6 @@ func TestNewProvider_APIKeyRequired(t *testing.T) {
 }
 
 func TestProvider_Implements_Interface(t *testing.T) {
-	// Verify that Provider implements llm.Provider at compile time
 	var _ llm.Provider = (*Provider)(nil)
 }
 
@@ -124,7 +123,6 @@ func TestProvider_ClientNotNil(t *testing.T) {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
 
-	// Verify the provider was created (client is a value type, always initialized)
 	if provider == nil {
 		t.Error("provider should not be nil")
 	}
@@ -251,7 +249,7 @@ func TestConvertInputItems(t *testing.T) {
 					{ID: "tc1", Name: testToolNameSearch, Arguments: json.RawMessage(testToolArguments)},
 				},
 			}},
-			2, // function_call + assistant content message
+			2,
 		},
 		{
 			"assistant with tool calls no content",
@@ -261,7 +259,7 @@ func TestConvertInputItems(t *testing.T) {
 					{ID: "tc1", Name: testToolNameSearch, Arguments: json.RawMessage(testToolArguments)},
 				},
 			}},
-			1, // just function_call
+			1,
 		},
 		{
 			"tool result",
@@ -476,7 +474,6 @@ func TestNewProvider_AzureOpenAI_CustomAPIVersion(t *testing.T) {
 func TestComplete_ChatCompletions_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// Return 404 for Responses API probe, then handle Chat Completions
 		if r.URL.Path == testResponsesPath {
 			w.WriteHeader(http.StatusNotFound)
 			fmt.Fprint(w, `{"error":{"message":"Not Found","type":"invalid_request_error","code":"invalid_url"}}`) //nolint:errcheck
@@ -506,7 +503,6 @@ func TestComplete_ChatCompletions_Success(t *testing.T) {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
 
-	// Force chat completions mode
 	provider.mode.Store(int32(apiModeChatCompletions))
 
 	resp, err := provider.Complete(context.Background(), &llm.CompletionRequest{
@@ -587,7 +583,6 @@ func TestComplete_ChatCompletions_ServerError(t *testing.T) {
 		t.Fatalf("NewProvider() error = %v", err)
 	}
 
-	// Force chat completions mode
 	provider.mode.Store(int32(apiModeChatCompletions))
 
 	_, err = provider.Complete(context.Background(), &llm.CompletionRequest{
@@ -749,7 +744,6 @@ func TestComplete_AutoDetect_FallbackToChatCompletions(t *testing.T) {
 	if resp.Content != testFallbackWorks {
 		t.Errorf("expected content %q, got %q", testFallbackWorks, resp.Content)
 	}
-	// Should have tried responses first, then chat completions
 	if apiMode(provider.mode.Load()) != apiModeChatCompletions {
 		t.Error("expected mode to be set to apiModeChatCompletions after fallback")
 	}
@@ -1141,7 +1135,6 @@ func TestStream_ChatCompletions_LegacyFunctionCall(t *testing.T) {
 	}
 }
 
-// responsesJSON returns a valid Responses API JSON body.
 func responsesJSON(text string, inputTokens, outputTokens int) string {
 	return fmt.Sprintf(`{
 		"id": "resp_test",
@@ -1646,7 +1639,6 @@ func TestComplete_ResponsesAPI_WithAllOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
-	// Verify options were sent in the request body
 	if receivedBody["instructions"] == nil {
 		t.Error("expected instructions to be set")
 	}
@@ -2281,13 +2273,11 @@ func TestStream_ResponsesAPI_Error(t *testing.T) {
 func TestStream_AutoDetect_FallbackToChatCompletions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == testResponsesPath {
-			// Check if this is the streaming request (has stream in body) or probe
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
 			fmt.Fprint(w, `{"error":{"message":"Not Found","type":"invalid_request_error","code":"invalid_url"}}`) //nolint:errcheck
 			return
 		}
-		// Chat completions streaming
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
 		fmt.Fprint(w, "data: {\"id\":\"cc-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Fallback\"},\"finish_reason\":null}]}\n\n") //nolint:errcheck
@@ -2429,12 +2419,10 @@ func TestStream_AutoDetect_ResponsesSuccess(t *testing.T) {
 		requestCount++
 		if r.URL.Path == testResponsesPath {
 			if requestCount == 1 {
-				// First call is probe (non-streaming)
 				w.Header().Set("Content-Type", "application/json")
 				fmt.Fprint(w, responsesJSON("probe", 1, 1)) //nolint:errcheck
 				return
 			}
-			// Second call is the actual streaming request
 			w.Header().Set("Content-Type", "text/event-stream")
 			flusher, _ := w.(http.Flusher)
 			fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Streamed\",\"item_id\":\"i1\",\"output_index\":0,\"content_index\":0}\n\n") //nolint:errcheck
@@ -2503,7 +2491,6 @@ func TestStream_ChatCompletions_WithToolCalls(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		flusher, _ := w.(http.Flusher)
-		// Tool call delta chunks
 		fmt.Fprint(w, "data: {\"id\":\"cc-tc\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n") //nolint:errcheck
 		flusher.Flush()
 		fmt.Fprint(w, "data: {\"id\":\"cc-tc\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\":\\\"test\\\"}\"}}]},\"finish_reason\":null}]}\n\n") //nolint:errcheck
@@ -2751,7 +2738,6 @@ func TestProviderChatHistoryOrigins(t *testing.T) {
 					{Role: "user", Content: "hello"}, {Role: "assistant", Content: "before "}, {Role: "assistant", Content: "after"}, {Role: "user", Content: "continue"},
 				}}
 				expected := `[{"role":"user","content":"hello"},{"role":"assistant","content":"before "},{"role":"assistant","content":"after"},{"role":"user","content":"continue"}]`
-				// Extra capacity exposes accidental mutation when a second call is grouped.
 				backing := []llm.ToolCall{{ID: "call-one", Name: "first", Arguments: json.RawMessage(`{}`)}, {ID: "guard", Name: "guard", Arguments: json.RawMessage(`{}`)}}
 				if fromResponses {
 					req.Messages = []llm.Message{

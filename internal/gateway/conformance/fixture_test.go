@@ -288,7 +288,6 @@ func TestCheckDeliveryFixtureMasksOverlappingOutputFields(t *testing.T) {
 				fixture.ContextID = "context-test-auth-suffix"
 			}
 			server := httptest.NewServer(testAdapterHandler("test-auth", caps, func(w http.ResponseWriter, r *http.Request) {
-				// Finish the size probes before injecting the final delivery error.
 				_, _ = io.Copy(io.Discard, r.Body)
 				w.WriteHeader(http.StatusBadRequest)
 			}))

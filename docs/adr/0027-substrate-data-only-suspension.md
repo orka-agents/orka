@@ -21,7 +21,9 @@ Amended by [ADR 0057](0057-substrate-continuation-latency.md): on an eligible sp
 resume, the continuation records demand while the workspace stays `Suspended` and the
 `RuntimePool` flips it back to `Ready` in the same write that publishes the next workload
 (and installs the staged attachment when present); the continuation's direct flip to
-`Ready` remains the fallback.
+`Ready` remains the fallback. Consumed one-time bootstrap material also rotates on
+confirmed retirement (`Stopped`) rather than waiting for the next publication, under the
+same termination proof and fail-closed fallback.
 
 ## Context
 

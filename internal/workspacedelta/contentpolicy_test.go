@@ -142,8 +142,6 @@ func TestCaptureContentPolicyDoesNotRunAfterWalkFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// This directory sorts after the regular files, so the reserved path fails
-	// the walk after policy work has been queued.
 	failureDir := filepath.Join(root, "z-failure")
 	if err := os.Mkdir(failureDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -160,8 +158,6 @@ func TestCaptureContentPolicyDoesNotRunAfterWalkFailure(t *testing.T) {
 	if !errors.Is(err, ErrReservedPath) {
 		t.Fatalf("Capture() error = %v, want ErrReservedPath", err)
 	}
-	// The lexical layout proves every regular file was submitted before the
-	// failure. Cancellation may legitimately win before any callback starts.
 	if got := calls.Load(); got >= int32(fileCount) {
 		t.Fatalf("flagger ran for all %d files; queued work was not discarded", got)
 	}

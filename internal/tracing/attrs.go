@@ -27,9 +27,6 @@ const (
 	ToolKindDelegate = "delegate"
 )
 
-// TaskAttributes returns safe Orka-native task attributes for spans.
-// Empty optional values are omitted. The values must be stable metadata only;
-// callers must never pass prompts, completions, tokens, credentials, or result bodies.
 func TaskAttributes(taskName, namespace, tenant, agentName, userSub string) []attribute.KeyValue {
 	attrs := make([]attribute.KeyValue, 0, 5)
 	if taskName != "" {
@@ -53,7 +50,6 @@ func TaskAttributes(taskName, namespace, tenant, agentName, userSub string) []at
 	return attrs
 }
 
-// DelegateAttributes returns safe parent/child task relationship attributes.
 func DelegateAttributes(parentTaskID, childTaskID string) []attribute.KeyValue {
 	attrs := make([]attribute.KeyValue, 0, 2)
 	if parentTaskID != "" {

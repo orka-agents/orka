@@ -18,31 +18,22 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// ErrInterimDeliveryUnsupported identifies an absent adapter capability without
-// conflating it with Task lifecycle or idempotency conflicts.
 var ErrInterimDeliveryUnsupported = &HTTPError{
 	Code: http.StatusConflict, Message: "gateway adapter does not advertise interimDelivery capability",
 }
 
-// TaskMessageReceipt acknowledges durable admission, not provider delivery. A
-// replay returns the retained row's current status without requeueing it.
 type TaskMessageReceipt struct {
 	DeliveryID string                     `json:"deliveryID"`
 	Status     store.GatewayDeliveryState `json:"status"`
 	Created    bool                       `json:"created"`
 }
 
-// PreparedTaskMessage carries only controller-derived admission data. Prepare it
-// during live authorization, then enqueue in the authorized task-data writer.
-// It is not a worker credential and must not be retained across requests.
 type PreparedTaskMessage struct {
 	service            *Service
 	request            store.GatewayMessageEnqueue
 	admissionGateError error
 }
 
-// EnqueueTaskMessage admits a message for an exact, already-authorized Task
-// identity. Worker APIs must also fence Job revocation using the split methods.
 func (s *Service) EnqueueTaskMessage(ctx context.Context, namespace, taskName, taskUID, requestID, content string) (*TaskMessageReceipt, error) {
 	prepared, err := s.PrepareTaskMessage(ctx, namespace, taskName, taskUID, requestID, content)
 	if err != nil {
@@ -51,13 +42,10 @@ func (s *Service) EnqueueTaskMessage(ctx context.Context, namespace, taskName, t
 	return s.EnqueuePreparedTaskMessage(ctx, prepared)
 }
 
-// PrepareTaskMessage performs live Kubernetes checks outside the SQLite writer.
-// No routing or controller policy is accepted from the caller.
 func (s *Service) PrepareTaskMessage(ctx context.Context, namespace, taskName, taskUID, requestID, content string) (*PreparedTaskMessage, error) {
 	if s == nil || !s.Config.Enabled || s.EventStore == nil || s.DeliveryStore == nil || s.freshReader() == nil {
 		return nil, &HTTPError{Code: http.StatusServiceUnavailable, Message: "gateway message processing is unavailable"}
 	}
-	// Check the raw text before sanitization can shrink it; never silently truncate.
 	if len(content) > protocol.MaxInterimTextBytes {
 		return nil, &HTTPError{Code: http.StatusRequestEntityTooLarge, Message: "gateway message content exceeds 16 KiB"}
 	}
@@ -107,15 +95,11 @@ func (s *Service) prepareMessageIdentity(ctx context.Context, namespace, taskNam
 	return event, object, nil
 }
 
-// EnqueuePreparedTaskMessage performs only store work and reuses an existing
-// authorized writer. Durable event state is the terminal-race cutoff; there is
-// deliberately no claim of a transaction spanning Kubernetes and SQLite.
 func (s *Service) EnqueuePreparedTaskMessage(ctx context.Context, prepared *PreparedTaskMessage) (*TaskMessageReceipt, error) {
 	if prepared == nil || prepared.service != s || s == nil || !s.Config.Enabled {
 		return nil, &HTTPError{Code: http.StatusServiceUnavailable, Message: "gateway message preparation is unavailable"}
 	}
 	request := prepared.request
-	// Refresh admission time rather than reusing the earlier live-read time.
 	request.Now = time.Now().UTC()
 	row, created, err := s.DeliveryStore.EnqueueGatewayMessage(ctx, request)
 	if errors.Is(err, store.ErrGatewayMessageReplayOnly) {
@@ -194,9 +178,6 @@ func messageIdentityReadError(err error) error {
 	return &HTTPError{Code: http.StatusServiceUnavailable, Message: "gateway message identity is unavailable"}
 }
 
-// Revalidate immediately before network dispatch. Terminal Tasks remain valid:
-// accepted messages must drain before final/error. Missing/replaced identities,
-// deleting Tasks or withdrawn capability abandon the message, never downgrade it.
 func (s *Service) validateMessageDelivery(ctx context.Context, delivery *store.GatewayDelivery) error {
 	event, err := s.EventStore.GetGatewayEvent(ctx, delivery.Namespace, delivery.EventID)
 	if err != nil {

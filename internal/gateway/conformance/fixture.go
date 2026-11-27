@@ -27,7 +27,6 @@ var (
 	fixtureQuotedEscape  = regexp.MustCompile(`\\(?:u[dD][89aAbB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|x[0-9a-fA-F]{2}|[0-7]{3}|["\\/abfnrtv])`)
 )
 
-// DeliveryFixture supplies only the routing identities for a conformance delivery.
 type DeliveryFixture struct {
 	AccountID          string `json:"accountId"`
 	ContextID          string `json:"contextId"`
@@ -39,8 +38,6 @@ type DeliveryFixture struct {
 type fixtureTransport struct{ http.RoundTripper }
 
 func (t fixtureTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	// An adapter can echo private routing in unsolicited HTTP/1.x bytes. Close
-	// each connection so net/http cannot print those bytes from its idle reader.
 	request = request.Clone(request.Context())
 	request.Close = true
 	return t.RoundTripper.RoundTrip(request)
@@ -61,8 +58,6 @@ func (f DeliveryFixture) deliveryRequest() (protocol.DeliveryRequest, error) {
 	if err := protocol.ValidateDeliveryRequest(&delivery); err != nil {
 		return protocol.DeliveryRequest{}, errors.New("invalid delivery fixture")
 	}
-	// V1 validates trimmed required identities and does not bound the optional thread.
-	// Check the original values because those are what the fixture transmits.
 	for _, identity := range []string{f.AccountID, f.ContextID, f.ThreadID, f.ReplyTarget, f.OriginatingEventID} {
 		if len(identity) > protocol.MaxIdentityBytes || !utf8.ValidString(identity) || strings.ContainsFunc(identity, unicode.IsControl) {
 			return protocol.DeliveryRequest{}, errors.New("invalid delivery fixture")
@@ -97,8 +92,6 @@ func (f DeliveryFixture) maskResultFields(
 			return string(char)
 		})
 	}
-	// Mask whole fields before bearer sanitization: partial replacements can hide
-	// overlapping identities and expose their remaining fragments.
 	mask := func(value string) string {
 		candidates := []string{value}
 		seen := map[string]bool{value: true}
@@ -109,8 +102,6 @@ func (f DeliveryFixture) maskResultFields(
 				if identity == "" {
 					continue
 				}
-				// HTTP and JSON errors can repeatedly quote an already quoted identity.
-				// Escaping only grows the fragment, so the field length bounds this work.
 				for escaped := identity; len(escaped) <= len(decoded); {
 					if strings.Contains(decoded, escaped) {
 						return redactedValue
@@ -123,15 +114,10 @@ func (f DeliveryFixture) maskResultFields(
 					escaped = next
 				}
 			}
-			// Check each decoding separately so an identity containing literal escape
-			// text is not skipped when URL and string quoting are nested. Query spaces
-			// use +; the path candidate preserves literal plus signs. Safe output and
-			// transmitted routing stay unchanged.
 			for _, next := range []string{unescape(decoded), unescape(strings.ReplaceAll(decoded, "+", " ")), unescapeQuoted(decoded)} {
 				if seen[next] {
 					continue
 				}
-				// Bound work on nested encodings without exposing an unchecked field.
 				if len(candidates) == 8 {
 					return redactedValue
 				}

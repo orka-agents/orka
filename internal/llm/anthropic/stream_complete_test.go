@@ -32,16 +32,16 @@ func TestAcceptsSamplingParams(t *testing.T) {
 		"claude-fable-5-2":                     false,
 		"claude-mythos-5-2":                    false,
 		"claude-mythos-preview":                false,
-		"claude-opus-5.5":                      false, // Copilot spelling
+		"claude-opus-5.5":                      false,
 		"CLAUDE-OPUS-4.7":                      false,
-		"anthropic.claude-opus-5-5":            false, // Bedrock
+		"anthropic.claude-opus-5-5":            false,
 		"us.anthropic.claude-sonnet-5":         false,
 		"claude-opus-4-6":                      true,
 		"claude-sonnet-4-6":                    true,
 		"claude-haiku-4-5":                     true,
 		"claude-haiku-4.5":                     true,
-		"claude-opus-4-5@20251101":             true, // Vertex snapshot
-		"claude-sonnet-4-20250514":             true, // date, not a minor version
+		"claude-opus-4-5@20251101":             true,
+		"claude-sonnet-4-20250514":             true,
 		"claude-opus-4-1-20250805":             true,
 		"claude-3-7-sonnet-20250219":           true,
 		"claude-3-sonnet-20240229":             true,
@@ -130,8 +130,6 @@ func newStreamTestProvider(t *testing.T, handler http.HandlerFunc) *Provider {
 	return provider
 }
 
-// The SDK refuses a non-streaming request above about 21,333 max_tokens
-// before sending it.
 func TestCompleteAcceptsLargeMaxTokens(t *testing.T) {
 	provider := newStreamTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
@@ -190,11 +188,9 @@ func TestCompleteRejectsTruncatedStream(t *testing.T) {
 	if !ok {
 		t.Fatalf("error type = %T, want *llm.ProviderError", err)
 	}
-	// A dropped connection is transient, and no output escaped Complete.
 	if pe.StatusCode != http.StatusBadGateway || !llm.ShouldRetry(err) {
 		t.Errorf("status code = %d, retry = %t; want 502, true", pe.StatusCode, llm.ShouldRetry(err))
 	}
-	// The attempt was billed for its input, so its usage survives the error.
 	if resp == nil || resp.InputTokens != 1 || resp.Content != "" {
 		t.Errorf("response = %+v, want only the reported input usage", resp)
 	}
@@ -217,7 +213,6 @@ func TestCompleteReturnsStreamErrorEvent(t *testing.T) {
 	if resp == nil || resp.InputTokens != 1 || resp.Content != "" {
 		t.Errorf("response = %+v, want only the reported input usage", resp)
 	}
-	// Overloaded before the stream starts is an HTTP 529, which is retried.
 	if pe.StatusCode != 529 || !llm.ShouldRetry(err) {
 		t.Errorf("status code = %d, retry = %t; want 529, true", pe.StatusCode, llm.ShouldRetry(err))
 	}
@@ -245,7 +240,6 @@ func TestCompleteKeepsHTTPStatusCode(t *testing.T) {
 func TestCompleteRetriesBrokenStream(t *testing.T) {
 	provider := newStreamTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		// Promise more body than is sent, so the client reads an unexpected EOF.
 		w.Header().Set("Content-Length", "100000")
 		_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n")
 	})
@@ -296,7 +290,7 @@ func TestCompleteAbandonsStalledStream(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = fmt.Fprint(w, messageStartEvent)
 		w.(http.Flusher).Flush()
-		<-r.Context().Done() // stall without closing the connection
+		<-r.Context().Done()
 	})
 	start := time.Now()
 	resp, err := provider.Complete(context.Background(), &llm.CompletionRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}})
@@ -315,7 +309,6 @@ func TestCompleteAbandonsStalledStream(t *testing.T) {
 	}
 }
 
-// Pings carry no event the SDK returns, but they show the stream is alive.
 func TestCompleteKeepsStreamAliveOnPings(t *testing.T) {
 	shortenStreamIdleTimeout(t, 300*time.Millisecond)
 	provider := newStreamTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -347,8 +340,6 @@ func TestCompleteRetriesStreamTimeoutEvent(t *testing.T) {
 	}
 }
 
-// A large max_tokens used to fail before sending and fall back to
-// completeViaStream, which keeps text and tool calls in order for Responses.
 func TestCompleteKeepsOutputOrderForResponses(t *testing.T) {
 	provider := newStreamTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = anthropictest.WriteMessage(w, `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[
@@ -446,7 +437,7 @@ func TestStreamAbandonsStalledStream(t *testing.T) {
 		_, _ = fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
 		_, _ = fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")
 		w.(http.Flusher).Flush()
-		<-r.Context().Done() // stall without closing the connection
+		<-r.Context().Done()
 	})
 	chunks, err := provider.Stream(context.Background(), &llm.CompletionRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}})
 	if err != nil {
@@ -466,7 +457,6 @@ func TestStreamAbandonsStalledStream(t *testing.T) {
 	}
 }
 
-// The idle timer measures the upstream, not how fast the caller reads.
 func TestStreamWaitsForSlowReader(t *testing.T) {
 	shortenStreamIdleTimeout(t, 100*time.Millisecond)
 	provider := newStreamTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
