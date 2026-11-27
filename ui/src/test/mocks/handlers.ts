@@ -167,6 +167,10 @@ export const handlers = [
     return new HttpResponse(null, { status: 200 })
   }),
 
+  http.get(`${API}/auth/whoami`, () => {
+    return HttpResponse.json({ authenticated: true, authType: 'token', username: 'test-user' })
+  }),
+
   http.get(`${API}/chat/config`, () => {
     return HttpResponse.json({
       enabled: true,

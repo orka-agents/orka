@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
 import { render, screen } from '@/test/test-utils'
 import userEvent from '@testing-library/user-event'
 
@@ -22,8 +22,15 @@ import { useAuthStore } from '@/stores/auth'
 import { Header } from './header'
 
 describe('Header', () => {
+  beforeAll(() => {
+    if (!HTMLElement.prototype.hasPointerCapture) HTMLElement.prototype.hasPointerCapture = () => false
+    if (!HTMLElement.prototype.setPointerCapture) HTMLElement.prototype.setPointerCapture = () => {}
+    if (!HTMLElement.prototype.releasePointerCapture) HTMLElement.prototype.releasePointerCapture = () => {}
+    if (!HTMLElement.prototype.scrollIntoView) HTMLElement.prototype.scrollIntoView = () => {}
+  })
+
   beforeEach(() => {
-    useUIStore.setState({ sidebarCollapsed: false, theme: 'light', namespace: 'default' })
+    useUIStore.setState({ sidebarCollapsed: false, theme: 'light', namespace: 'default', recentNamespaces: ['default'], callerNamespace: null })
     useAuthStore.setState({ token: 'test-token' })
   })
 
@@ -34,6 +41,46 @@ describe('Header', () => {
 
   it('names the namespace selector', () => {
     render(<Header />)
+    expect(screen.getByRole('combobox', { name: 'Namespace' })).toHaveTextContent('default')
+  })
+
+  it("offers the caller's and recent namespaces instead of two fixed entries", async () => {
+    const user = userEvent.setup()
+    useUIStore.setState({ namespace: 'team-a', recentNamespaces: ['team-a', 'team-b'], callerNamespace: 'team-a' })
+    render(<Header />)
+    await user.click(screen.getByRole('combobox', { name: 'Namespace' }))
+    const options = await screen.findAllByRole('option')
+    expect(options.map((option) => option.textContent)).toEqual(['team-a', 'team-b', 'Other namespace…'])
+
+    await user.click(screen.getByRole('option', { name: 'team-b' }))
+    expect(useUIStore.getState().namespace).toBe('team-b')
+  })
+
+  it('switches to a typed namespace and remembers it', async () => {
+    const user = userEvent.setup()
+    render(<Header />)
+    await user.click(screen.getByRole('combobox', { name: 'Namespace' }))
+    await user.click(await screen.findByRole('option', { name: 'Other namespace…' }))
+    await user.type(screen.getByRole('textbox', { name: 'Namespace name' }), 'team-c{Enter}')
+
+    expect(useUIStore.getState().namespace).toBe('team-c')
+    expect(useUIStore.getState().recentNamespaces).toEqual(['team-c', 'default'])
+    expect(screen.getByRole('combobox', { name: 'Namespace' })).toHaveTextContent('team-c')
+  })
+
+  it('rejects a typed namespace that is not a DNS-1123 label', async () => {
+    const user = userEvent.setup()
+    render(<Header />)
+    await user.click(screen.getByRole('combobox', { name: 'Namespace' }))
+    await user.click(await screen.findByRole('option', { name: 'Other namespace…' }))
+    const input = screen.getByRole('textbox', { name: 'Namespace name' })
+    await user.type(input, 'Team_A{Enter}')
+
+    expect(input).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByRole('alert')).toHaveTextContent('DNS-1123')
+    expect(useUIStore.getState().namespace).toBe('default')
+
+    await user.keyboard('{Escape}')
     expect(screen.getByRole('combobox', { name: 'Namespace' })).toHaveTextContent('default')
   })
 

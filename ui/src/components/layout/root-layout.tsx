@@ -5,12 +5,14 @@ import { Header } from './header'
 import { Toaster } from '@/components/ui/sonner'
 import { useIsMobile } from '@/hooks/use-media-query'
 import { useUIStore } from '@/stores/ui'
+import { useCallerNamespace } from '@/hooks/use-caller-namespace'
 
 const DemoTour = import.meta.env.MODE === 'demo'
   ? lazy(() => import('@/demo/tour/tour').then((m) => ({ default: m.TourPanel })))
   : null
 
 export function RootLayout() {
+  useCallerNamespace()
   const isMobile = useIsMobile()
   const mobileSidebarOpen = useUIStore((s) => s.mobileSidebarOpen)
   const pageInert = isMobile && mobileSidebarOpen

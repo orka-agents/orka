@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import { Monitor, Moon, Sun, LogOut } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import {
   DropdownMenu,
@@ -8,7 +10,8 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { useUIStore, type ThemePreference } from '@/stores/ui'
+import { namespaceOptions, useUIStore, type ThemePreference } from '@/stores/ui'
+import { isKubernetesNamespace } from '@/lib/connectors'
 import { useAuthStore } from '@/stores/auth'
 import { useNavigate } from '@tanstack/react-router'
 
@@ -18,8 +21,83 @@ const THEMES = [
   { value: 'dark', label: 'Dark', Icon: Moon },
 ] as const
 
+const OTHER_NAMESPACE = '__other__'
+
+function NamespacePicker() {
+  const namespace = useUIStore((s) => s.namespace)
+  const recentNamespaces = useUIStore((s) => s.recentNamespaces)
+  const callerNamespace = useUIStore((s) => s.callerNamespace)
+  const setNamespace = useUIStore((s) => s.setNamespace)
+  const [typing, setTyping] = useState(false)
+  const [draft, setDraft] = useState('')
+  const typed = draft.trim()
+  const invalid = typed !== '' && !isKubernetesNamespace(typed)
+
+  const stopTyping = () => {
+    setTyping(false)
+    setDraft('')
+  }
+
+  if (typing) {
+    return (
+      <form
+        className="flex items-center gap-2"
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (!isKubernetesNamespace(typed)) return
+          setNamespace(typed)
+          stopTyping()
+        }}
+      >
+        <Input
+          autoFocus
+          className="w-48"
+          aria-label="Namespace name"
+          aria-invalid={invalid}
+          aria-describedby={invalid ? 'namespace-name-error' : undefined}
+          placeholder="Type a namespace"
+          autoCapitalize="none"
+          autoComplete="off"
+          spellCheck={false}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') stopTyping()
+          }}
+          onBlur={() => {
+            if (typed === '') stopTyping()
+          }}
+        />
+        {invalid && (
+          <span id="namespace-name-error" role="alert" className="hidden text-xs text-destructive sm:inline">
+            Use a lowercase DNS-1123 label
+          </span>
+        )}
+      </form>
+    )
+  }
+
+  return (
+    <Select
+      value={namespace}
+      onValueChange={(value) => (value === OTHER_NAMESPACE ? setTyping(true) : setNamespace(value))}
+    >
+      <SelectTrigger className="w-48" aria-label="Namespace">
+        <SelectValue placeholder="Namespace" />
+      </SelectTrigger>
+      <SelectContent>
+        {namespaceOptions({ namespace, recentNamespaces, callerNamespace }).map((option) => (
+          <SelectItem key={option} value={option}>{option}</SelectItem>
+        ))}
+        <SelectItem value={OTHER_NAMESPACE}>Other namespace…</SelectItem>
+      </SelectContent>
+    </Select>
+  )
+}
+
 export function Header() {
-  const { theme, setTheme, namespace, setNamespace } = useUIStore()
+  const theme = useUIStore((s) => s.theme)
+  const setTheme = useUIStore((s) => s.setTheme)
   const current = THEMES.find((option) => option.value === theme) ?? THEMES[0]
   const { clearToken } = useAuthStore()
   const navigate = useNavigate()
@@ -32,15 +110,7 @@ export function Header() {
   return (
     <header className="z-20 flex h-14 shrink-0 items-center justify-between border-b border-border bg-card/80 px-6 backdrop-blur-md">
       <div className="flex items-center gap-4">
-        <Select value={namespace} onValueChange={setNamespace}>
-          <SelectTrigger className="w-48" aria-label="Namespace">
-            <SelectValue placeholder="Namespace" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="default">default</SelectItem>
-            <SelectItem value="orka-system">orka-system</SelectItem>
-          </SelectContent>
-        </Select>
+        <NamespacePicker />
         {import.meta.env.MODE === 'demo' && (
           <span
             title="Orka's optional web dashboard, on mock data in your browser. Nothing is sent to a cluster or a model, and everything you see or do in it can be done with the orka CLI or kubectl."
