@@ -71,6 +71,9 @@ func TestJobBuilderK8sCapabilities(t *testing.T) {
 	if job135.Spec.Template.Spec.HostUsers == nil || *job135.Spec.Template.Spec.HostUsers {
 		t.Fatalf("HostUsers = %v, want false", job135.Spec.Template.Spec.HostUsers)
 	}
+	if policy := taskPodFailurePolicy(true); policy != nil {
+		t.Fatalf("taskPodFailurePolicy(validationTask=true) = %#v, want nil", policy)
+	}
 }
 
 func TestJobBuilderForwardsCodeExecK8sCapabilitiesToAIWorker(t *testing.T) {

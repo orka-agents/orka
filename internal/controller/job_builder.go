@@ -502,7 +502,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:     new(int32(0)),
-			PodFailurePolicy: defaultDisruptionIgnoringPodFailurePolicy(),
+			PodFailurePolicy: taskPodFailurePolicy(validationTask),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
@@ -593,6 +593,13 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	}
 
 	return job, nil
+}
+
+func taskPodFailurePolicy(validationTask bool) *batchv1.PodFailurePolicy {
+	if validationTask {
+		return nil
+	}
+	return defaultDisruptionIgnoringPodFailurePolicy()
 }
 
 func defaultDisruptionIgnoringPodFailurePolicy() *batchv1.PodFailurePolicy {
