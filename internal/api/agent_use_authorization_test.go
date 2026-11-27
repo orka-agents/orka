@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
@@ -172,6 +173,62 @@ func TestCreateManualSecurityScanEnforcesValidationAgentUse(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestCreateManualSecurityScan_WorkerDeniedForIdentityBoundValidator(t *testing.T) {
+	enableAgentUseAuthorization(t)
+	clientset := kubefake.NewClientset()
+	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+		review.Status.Allowed = true
+		return true, review, nil
+	})
+
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "scan-1",
+			Namespace: "demo",
+		},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:            securityTestRepoURL,
+			Branch:             "main",
+			AnalysisAgentRef:   corev1alpha1.AgentReference{Name: "analysis"},
+			ValidationAgentRef: &corev1alpha1.AgentReference{Name: "identity-validator"},
+		},
+	}
+	analysisAgent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "analysis", Namespace: "demo"},
+	}
+	identityValidator := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "identity-validator", Namespace: "demo"},
+		Spec: corev1alpha1.AgentSpec{
+			Identity: &corev1alpha1.AgentIdentity{
+				Entra: &corev1alpha1.EntraAgentIdentity{
+					AgentIdentityID: "11111111-2222-3333-4444-555555555555",
+				},
+			},
+		},
+	}
+	_, handlers := setupSecurityHandlersWithAuthzFixture(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, scan, analysisAgent, identityValidator)
+	handlers.clientset = clientset
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username: "system:serviceaccount:demo:orka-ai-worker",
+			AuthType: AuthTypeTokenReview,
+		})
+		return c.Next()
+	})
+	app.Post("/security/repositories/:name/scans", handlers.CreateManualSecurityScan)
+
+	req := httptest.NewRequest(http.MethodPost, "/security/repositories/scan-1/scans?namespace=demo", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	var tasks corev1alpha1.TaskList
+	require.NoError(t, handlers.client.List(context.Background(), &tasks, client.InNamespace("demo")))
+	require.Empty(t, tasks.Items)
 }
 
 func TestCreateRepositoryMonitorEnforcesAgentUse(t *testing.T) {

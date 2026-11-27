@@ -4012,7 +4012,8 @@ func (r *RepositoryScanReconciler) leaveReviewSliceUnreviewed(
 				return err
 			}
 		}
-		current.Summary = fmt.Sprintf("Review slice %s could not be reviewed after a retry: %s", sliceID, message)
+		current.Summary = fmt.Sprintf("Review slice %s could not be reviewed after a retry: %s", sliceID, message) +
+			extractSummaryLimitationsSuffix(current.Summary)
 		return nil
 	}, func(_ *store.ScanRun) {
 		metrics.RecordSecurityReviewSlice(reviewSliceStatusFailed)
@@ -4227,7 +4228,8 @@ func (r *RepositoryScanReconciler) retryReviewSlice(
 		current.Phase = scanRunPhaseRunning
 		current.CompletedAt = nil
 		current.ErrorMessage = ""
-		current.Summary = fmt.Sprintf("Retrying review slice %s after %s", sliceID, cause)
+		current.Summary = fmt.Sprintf("Retrying review slice %s after %s", sliceID, cause) +
+			extractSummaryLimitationsSuffix(current.Summary)
 		return nil
 	})
 }
