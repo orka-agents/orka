@@ -308,12 +308,25 @@ type DroppedFindingDiagnostic struct {
 }
 
 type PatchSummaryArtifact struct {
-	SchemaVersion int            `json:"schemaVersion"`
-	FindingID     string         `json:"findingId"`
-	Summary       string         `json:"summary"`
-	ChangedFiles  []string       `json:"changedFiles"`
-	TestsRun      []PatchTestRun `json:"testsRun,omitempty"`
-	Risk          string         `json:"risk"`
+	SchemaVersion          int                          `json:"schemaVersion"`
+	FindingID              string                       `json:"findingId"`
+	Summary                string                       `json:"summary"`
+	ChangedFiles           []string                     `json:"changedFiles"`
+	TestsRun               []PatchTestRun               `json:"testsRun,omitempty"`
+	ControllerVerification *PatchControllerVerification `json:"controllerVerification,omitempty"`
+	Risk                   string                       `json:"risk"`
+}
+
+type PatchControllerVerification struct {
+	Status                string `json:"status"`
+	Command               string `json:"command,omitempty"`
+	RequireFailBeforePass bool   `json:"requireFailBeforePass,omitempty"`
+	BaseCommit            string `json:"baseCommit,omitempty"`
+	PatchedCommit         string `json:"patchedCommit,omitempty"`
+	BaseTaskName          string `json:"baseTaskName,omitempty"`
+	PatchedTaskName       string `json:"patchedTaskName,omitempty"`
+	BasePassed            *bool  `json:"basePassed,omitempty"`
+	PatchedPassed         *bool  `json:"patchedPassed,omitempty"`
 }
 
 type PatchTestRun struct {

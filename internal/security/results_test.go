@@ -400,6 +400,23 @@ func TestPatchSummaryArtifactUnmarshalRejectsMissingOrNullExitCode(t *testing.T)
 	}
 }
 
+func TestNormalizePatchSummaryArtifactRejectsAgentControllerVerification(t *testing.T) {
+	t.Parallel()
+	_, err := NormalizePatchSummaryArtifact(PatchSummaryArtifact{
+		SchemaVersion: SchemaVersionPatchSummary,
+		FindingID:     testPatchFindingID,
+		Summary:       "Fix",
+		ChangedFiles:  []string{"a.go"},
+		ControllerVerification: &PatchControllerVerification{
+			Status: "verified",
+		},
+		Risk: "low",
+	})
+	if err == nil {
+		t.Fatal("NormalizePatchSummaryArtifact() accepted agent-supplied controllerVerification")
+	}
+}
+
 func TestParsePatchResultRejectsGenericCredentialAssignments(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{"AWS_SECRET_ACCESS_KEY", "DATABASE_SECRET", "SERVICE_CREDENTIALS"} {

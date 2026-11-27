@@ -36,6 +36,7 @@ const (
 	StageReview      = "review"
 	StageValidation  = "validation"
 	StagePatch       = "patch"
+	StagePatchVerify = "patch-verify"
 )
 
 type ValidationArtifact struct {
@@ -954,7 +955,23 @@ func RemediationPullRequestBody(finding *store.Finding, summary *PatchSummaryArt
 			}
 			section("**Changed files:**", files.String())
 		}
-		if len(summary.TestsRun) > 0 {
+		if summary.ControllerVerification != nil {
+			switch summary.ControllerVerification.Status {
+			case "verified":
+				if summary.ControllerVerification.RequireFailBeforePass {
+					section("**Verification status:**", "Controller-verified fix (fail->pass): verification command failed on base commit and passed on patched commit.")
+				} else {
+					section("**Verification status:**", "Controller-verified fix: verification command passed on patched commit.")
+				}
+			case "failed":
+				section("**Verification status:**", "Controller verification failed; fix behavior is unverified and requires CI and human review.")
+			default:
+				section("**Verification status:**", "Controller verification pending; fix behavior is not yet verified.")
+			}
+			if cmd := strings.TrimSpace(summary.ControllerVerification.Command); cmd != "" {
+				section("**Controller verification command:**", "`"+cmd+"`")
+			}
+		} else if len(summary.TestsRun) > 0 {
 			var tests strings.Builder
 			allPassed := true
 			for _, test := range summary.TestsRun {

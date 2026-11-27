@@ -166,6 +166,36 @@ spec:
                 required:
                 - name
                 type: object
+              patchVerification:
+                description: |-
+                  PatchVerification configures optional controller-executed test verification
+                  for remediation patches. When configured with a digest-pinned image and
+                  test command, Orka runs the test command against both the base commit
+                  (expecting failure when RequireFailBeforePass is true) and the patched
+                  commit (expecting success) before opening or accepting a verified fix.
+                properties:
+                  command:
+                    description: |-
+                      Command is the shell command executed inside the verification container
+                      against the checked-out workspace.
+                    maxLength: 4096
+                    minLength: 1
+                    type: string
+                  image:
+                    description: Image is the digest-pinned OCI container image used
+                      to execute patch verification tests.
+                    maxLength: 2048
+                    pattern: ^[^\s@]+@sha256:[a-f0-9]{64}$
+                    type: string
+                  requireFailBeforePass:
+                    description: |-
+                      RequireFailBeforePass requires the verification command to fail on the
+                      unpatched base commit before passing on the patched commit (fail->pass gate).
+                    type: boolean
+                required:
+                - command
+                - image
+                type: object
               prBaseBranch:
                 description: PRBaseBranch is the pull request base branch for remediation.
                 type: string

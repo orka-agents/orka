@@ -553,6 +553,9 @@ func (r *RepositoryScanReconciler) decorateSecurityPatchPullRequest(ctx context.
 		if data, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: summaryArtifact}); err == nil {
 			var parsed security.PatchSummaryArtifact
 			if json.Unmarshal(data, &parsed) == nil {
+				if !repositoryScanPatchVerificationEnabled(scan) {
+					parsed.ControllerVerification = nil
+				}
 				summary = &parsed
 			}
 		}
