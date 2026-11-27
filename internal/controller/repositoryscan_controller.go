@@ -3835,7 +3835,7 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 const securityDroppedLayerCap = "cap"
 
 func mergeReviewSliceSummary(previousSummary, sliceID string, scan security.FindingsV2Scan) string {
-	prior := extractSummaryLimitations(previousSummary)
+	prior, priorExtra := extractSummaryLimitations(previousSummary)
 	combined := make([]string, 0, len(prior)+len(scan.Limitations))
 	seen := make(map[string]struct{}, len(prior)+len(scan.Limitations))
 	for _, item := range append(prior, scan.Limitations...) {
@@ -3849,9 +3849,11 @@ func mergeReviewSliceSummary(previousSummary, sliceID string, scan security.Find
 		seen[item] = struct{}{}
 		combined = append(combined, item)
 	}
-	merged := scan
-	merged.Limitations = combined
-	return formatReviewSliceSummary(sliceID, merged)
+	summary := strings.TrimSpace(scan.Summary)
+	if summary == "" {
+		summary = fmt.Sprintf("Reviewed slice %s", sliceID)
+	}
+	return appendLimitationsWithExtraToSummary(summary, combined, priorExtra)
 }
 
 func formatReviewSliceSummary(sliceID string, scan security.FindingsV2Scan) string {
@@ -3859,25 +3861,32 @@ func formatReviewSliceSummary(sliceID string, scan security.FindingsV2Scan) stri
 	if summary == "" {
 		summary = fmt.Sprintf("Reviewed slice %s", sliceID)
 	}
-	return appendLimitationsToSummary(summary, scan.Limitations)
+	return appendLimitationsWithExtraToSummary(summary, scan.Limitations, 0)
 }
 
-func extractSummaryLimitations(summary string) []string {
+func extractSummaryLimitations(summary string) ([]string, int) {
 	suffix := extractSummaryLimitationsSuffix(summary)
 	if suffix == "" {
-		return nil
+		return nil, 0
 	}
 	inner := strings.TrimSuffix(strings.TrimPrefix(suffix, " (limitations: "), ")")
 	parts := strings.Split(inner, "; ")
 	out := make([]string, 0, len(parts))
+	extra := 0
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
-		if part == "" || (strings.HasPrefix(part, "+") && strings.HasSuffix(part, " more")) {
+		if part == "" {
+			continue
+		}
+		if strings.HasPrefix(part, "+") && strings.HasSuffix(part, " more") {
+			if n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(part, "+"), " more")); err == nil && n > 0 {
+				extra += n
+			}
 			continue
 		}
 		out = append(out, part)
 	}
-	return out
+	return out, extra
 }
 
 func extractSummaryLimitationsSuffix(summary string) string {
@@ -3888,27 +3897,28 @@ func extractSummaryLimitationsSuffix(summary string) string {
 	return summary[idx:]
 }
 
-func appendLimitationsToSummary(summary string, limitations []string) string {
-	if len(limitations) == 0 {
+func appendLimitationsWithExtraToSummary(summary string, limitations []string, priorExtra int) string {
+	if len(limitations) == 0 && priorExtra <= 0 {
 		return summary
 	}
 	const maxSummaryLimitations = 3
 	shown := make([]string, 0, min(len(limitations), maxSummaryLimitations))
+	nonEmpty := 0
 	for _, limitation := range limitations {
 		limitation = strings.TrimSpace(limitation)
 		if limitation == "" {
 			continue
 		}
-		shown = append(shown, limitation)
-		if len(shown) == maxSummaryLimitations {
-			break
+		nonEmpty++
+		if len(shown) < maxSummaryLimitations {
+			shown = append(shown, limitation)
 		}
 	}
 	if len(shown) == 0 {
 		return summary
 	}
 	suffix := " (limitations: " + strings.Join(shown, "; ")
-	if extra := len(limitations) - len(shown); extra > 0 {
+	if extra := (nonEmpty - len(shown)) + priorExtra; extra > 0 {
 		suffix += fmt.Sprintf("; +%d more", extra)
 	}
 	suffix += ")"
