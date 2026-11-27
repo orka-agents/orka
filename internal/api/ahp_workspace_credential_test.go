@@ -28,12 +28,10 @@ import (
 	"github.com/orka-agents/orka/internal/ahphost"
 )
 
-// The helper is shell that git runs; run it here against a token file.
 func TestAHPGitCredentialHelper(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "github-token")
 	helper := strings.Replace(strings.TrimPrefix(ahpGitCredentialHelper, "!"), ahpGitTokenFile, file, 1)
 	run := func(action string) string {
-		// Git appends the action to a shell helper's command.
 		out, err := exec.Command("/bin/sh", "-c", helper+" "+action).Output()
 		require.NoError(t, err)
 		return string(out)
@@ -57,10 +55,6 @@ func TestAHPWorkspaceAsksGitHubOnlyThroughTheHelper(t *testing.T) {
 	require.Equal(t, "0", env["GIT_TERMINAL_PROMPT"])
 }
 
-// A second workspace request that arrives while the person's token is being
-// installed waits for that installation, and the token is fetched once.
-// Terminal output is redacted for a token before the workspace can read it,
-// and for the token it replaced.
 func TestAHPWorkspaceTokenIsKnownBeforeItIsWritten(t *testing.T) {
 	token := "first-token-0123456789"
 	b := &ahpBackend{now: time.Now, cfg: AHPBackendConfig{
@@ -83,7 +77,6 @@ func TestAHPWorkspaceTokenIsKnownBeforeItIsWritten(t *testing.T) {
 	w.provideCredential(context.Background(), principal, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "pod-2"}})
 	require.Equal(t, []string{"first-token-0123456789", "second-token-0123456789"}, known)
 
-	// Writes that fail never make output forget the token still installed.
 	w.writeToken = func(context.Context, *corev1.Pod, string) error { return errors.New("exec failed") }
 	for i, next := range []string{"third-token-0123456789", "fourth-token-0123456789"} {
 		token = next
@@ -93,9 +86,6 @@ func TestAHPWorkspaceTokenIsKnownBeforeItIsWritten(t *testing.T) {
 		w.tokensFor(principal.UserKey))
 }
 
-// A workspace an earlier run of this server gave a token is redacted for it
-// before anything in it is shown, and is not shown while the token cannot be
-// read.
 func TestAHPWorkspaceRecoversTheTokenAnEarlierRunInstalled(t *testing.T) {
 	b := &ahpBackend{now: time.Now, cfg: AHPBackendConfig{
 		RepositoryCredential: func(context.Context, string, string, string) (string, error) { return "", nil },
@@ -125,7 +115,6 @@ func TestAHPWorkspaceRecoversTheTokenAnEarlierRunInstalled(t *testing.T) {
 	require.Equal(t, []string{"earlier-token-0123456789"}, w.tokensFor(principal.UserKey))
 	require.Equal(t, "the [REDACTED] here", string(ahpRedactWholeTokens([]byte("the earlier-token-0123456789 here"), w.tokensFor(principal.UserKey))))
 
-	// A server that provides no tokens still learns one an earlier run gave.
 	w.b = &ahpBackend{now: time.Now}
 	w.recovered = nil
 	w.tokens = nil
@@ -133,9 +122,6 @@ func TestAHPWorkspaceRecoversTheTokenAnEarlierRunInstalled(t *testing.T) {
 	require.Equal(t, []string{"earlier-token-0123456789"}, w.tokensFor(principal.UserKey))
 }
 
-// Output stays redacted for a replaced token for a day after it was last
-// given, never for the token given last, and for at most
-// ahpTokenRedactionMax tokens.
 func TestAHPWorkspaceTokenHistoryIsBounded(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	w := &ahpWorkspaces{b: &ahpBackend{now: func() time.Time { return now }}}
@@ -157,8 +143,6 @@ func TestAHPWorkspaceTokenHistoryIsBounded(t *testing.T) {
 	require.Equal(t, fmt.Sprintf("rotated-token-%04d", ahpTokenRedactionMax+4), tokens[len(tokens)-1], "the token given last stays")
 }
 
-// A token the person no longer holds that cannot be removed from their
-// workspace is tried again on the next request, not counted as removed.
 func TestAHPWorkspaceRetriesATokenItCouldNotRemove(t *testing.T) {
 	b := &ahpBackend{now: time.Now, cfg: AHPBackendConfig{
 		RepositoryCredential: func(context.Context, string, string, string) (string, error) {
@@ -221,10 +205,8 @@ func TestAHPWorkspaceCredentialInstallsOnceWhileRequestsOverlap(t *testing.T) {
 	<-second
 	require.Equal(t, int32(1), fetches.Load(), "the waiting request used the finished installation")
 
-	// A request whose own context ends stops waiting.
 	w.writeToken = func(ctx context.Context, _ *corev1.Pod, _ string) error { <-ctx.Done(); return ctx.Err() }
 	w.provided = nil
-	// The test's context ends the blocked installation when the test does.
 	go w.provideCredential(t.Context(), principal, pod)
 	require.Eventually(t, func() bool { w.mu.Lock(); defer w.mu.Unlock(); return w.providing[principal.UserKey] != nil },
 		time.Second, 10*time.Millisecond)

@@ -111,8 +111,6 @@ func TestExecutionWorkspaceCoreAdmissionPrecedesAdapterStatus(t *testing.T) {
 	if !workspaceHasCoreAdmission(current) {
 		t.Fatalf("core admission marker = %#v, want matching immutable bindings", current.Spec.CoreAdmission)
 	}
-	// controller-runtime's fake client does not simulate API-server generation
-	// increments for spec patches. Advance it to the generation core predicted.
 	current.Generation = current.Spec.CoreAdmission.AdmittedGeneration
 	if err := c.Update(context.Background(), current); err != nil {
 		t.Fatalf("simulate API generation increment: %v", err)

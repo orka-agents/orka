@@ -88,8 +88,6 @@ func TestSubstrateRouterTransportDisabledLeavesClientUnchanged(t *testing.T) {
 	var received http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { received = r.Header.Clone() }))
 	defer server.Close()
-	// Requests outside a trace pass through: background reconciles start no
-	// root trace per router call.
 	client := &http.Client{Transport: newSubstrateTracingTransport(http.DefaultTransport, true)}
 	response, err := client.Get(server.URL)
 	if err != nil {
@@ -176,7 +174,6 @@ func TestSubstrateGRPCClientPropagatesTraceWithoutRecordingMetadata(t *testing.T
 		t.Fatal("missing gRPC client span")
 	}
 
-	// A call outside a trace records no span and sends no trace context.
 	before := len(harness.Recorder.Ended())
 	if _, err := healthpb.NewHealthClient(conn).Check(context.Background(), &healthpb.HealthCheckRequest{}); err != nil {
 		t.Fatal(err)

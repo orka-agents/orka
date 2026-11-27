@@ -125,7 +125,6 @@ func TestUsagePaymentsCohortIncludesUnsuccessfulWork(t *testing.T) {
 		}
 		task := fmt.Sprintf("task-%d", i)
 		usageTask(t, s, "payments", work, task, phase, start)
-		// Follow-up usage can be later than the selected request-start month.
 		usageSample(t, s, "payments", task, task+"/call", 600000, start.Add(40*24*time.Hour))
 		if i <= 15 {
 			usagePR(t, s, "payments", work, i+100, i <= 10, start.Add(41*24*time.Hour))
@@ -152,8 +151,6 @@ func TestUsageSharedWorkAndCombinedTeamsDeduplicatePRs(t *testing.T) {
 	usageSample(t, s, "a", "task-two", "call-two", 200, start)
 	usagePR(t, s, "a", one, 10, true, start)
 	usagePR(t, s, "a", two, 10, true, start)
-	// A review after publication contributes once to the team and is shared
-	// in the work details, rather than copied onto each produced PR.
 	require.NoError(t, s.RegisterUsageTask(context.Background(), store.UsageTask{Namespace: "a", TaskUID: "review", TaskName: "review",
 		Repository: "org/repo", PRNumber: 10, Phase: "Succeeded", StartedAt: start}))
 	usageSample(t, s, "a", "review", "review-call", 300, start)
@@ -233,8 +230,6 @@ func TestUsageJournalReplayCleanupAndRestart(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 	s = NewStore(db, path)
-	// The event journal itself was cleaned up. The accounting identity still
-	// prevents replay of its final summary from charging the team twice.
 	_, _, err = orkaClient(t, s).AppendExecutionEventIfAbsent(context.Background(), final, "4/terminal_usage")
 	require.NoError(t, err)
 	require.Equal(t, int64(1500), get().Summary.TotalTokens)
@@ -262,8 +257,6 @@ func TestUsageEqualTimestampsPreserveJournalOrderAcrossTasks(t *testing.T) {
 		{"a-second", []int64{100, 150}},
 	} {
 		for i, count := range task.counts {
-			// Runtime sequence numbers restart for each prompt. Task IDs and
-			// decimal sequence strings do not encode the cross-prompt order.
 			content, err := json.Marshal(map[string]any{
 				"harnessV2": map[string]any{"taskUID": task.uid, "taskAttempt": 1, "promptID": "prompt-" + task.uid,
 					"runtimeSessionUID": "runtime-session", "runtimeSessionGeneration": 1, "sequence": i + 1},
@@ -403,10 +396,8 @@ func TestUsagePRRefreshStopsAfterConfirmedMerge(t *testing.T) {
 	usagePR(t, s, "a", work, 1, true, start)
 	usagePR(t, s, "a", work, 2, false, start)
 	usagePR(t, s, "a", work, 3, false, start)
-	// A newer failed observation does not erase the earlier confirmed merge.
 	require.NoError(t, s.RecordUsagePullRequest(t.Context(), store.UsagePullRequest{Namespace: "a", Repository: "org/repo",
 		Number: 1, State: "unknown", ObservedAt: start.Add(time.Minute)}))
-	// Closed PRs can reopen, so they still need refreshes.
 	require.NoError(t, s.RecordUsagePullRequest(t.Context(), store.UsagePullRequest{Namespace: "a", Repository: "org/repo",
 		Number: 3, GitHubID: "3", State: "closed", ClosedAt: &start, ObservedAt: start.Add(time.Minute)}))
 	links, err := s.ListUsagePullRequestLinks(t.Context(), "a", "monitor-uid", start.Add(10*time.Minute), 20)
@@ -416,7 +407,6 @@ func TestUsagePRRefreshStopsAfterConfirmedMerge(t *testing.T) {
 		numbers = append(numbers, link.Number)
 	}
 	require.ElementsMatch(t, []int64{2, 3}, numbers)
-	// Another team's observation does not establish this team's merge evidence.
 	other := usageWork(t, s, "b", 1, start)
 	usagePR(t, s, "b", other, 1, false, start)
 	links, err = s.ListUsagePullRequestLinks(t.Context(), "b", "monitor-uid", start.Add(10*time.Minute), 20)
@@ -492,8 +482,6 @@ func TestUsageRetentionSeparatesNamespaceGenerations(t *testing.T) {
 		}
 		require.NoError(t, s.RecordUsagePullRequest(t.Context(), pr))
 	}
-	// A new namespace's active review and open PR cannot keep old work alive,
-	// nor can its PR history inherit the predecessor's terminal merge.
 	require.NoError(t, s.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "team", NamespaceUID: "current-namespace",
 		TaskUID: "review", TaskName: "review", Repository: "org/repo", PRNumber: 12, Phase: "Running", StartedAt: old}))
 	links, err := s.ListUsagePullRequestLinks(t.Context(), "team", "monitor-current-namespace", time.Now().UTC(), 20)
@@ -585,7 +573,6 @@ func TestUsageSessionDeltasSurviveRetentionOfEarlierTasks(t *testing.T) {
 			ID: fmt.Sprint(i), CounterID: "conversation", Scope: store.UsageScopeSession, Source: store.UsageSourceAgent, InputTokens: new(sample.input), OutputTokens: new(int64(0)),
 			Status: sample.status, Complete: sample.complete, ObservedAt: start.Add(time.Duration(i) * time.Second)}))
 	}
-	// Empty ACP lifecycle measurements must not double the number of attempts.
 	require.NoError(t, s.RecordUsage(t.Context(), store.UsageObservation{Namespace: "a", TaskUID: "active", ID: "lifecycle", CounterID: "prompt", AttemptID: "a2", Scope: store.UsageScopeAttempt,
 		Source: store.UsageSourceAgent, Status: store.UsageStatusCancelled, ObservedAt: start.Add(5 * time.Second)}))
 	get := func() usage.Report {
@@ -679,7 +666,6 @@ func TestUsageTaskSnapshotsFollowObservationTime(t *testing.T) {
 					Phase: phases[i], StartedAt: start, PhaseObservedAt: start.Add(time.Duration(i) * time.Minute),
 				}
 				if i == 0 {
-					// The monitor's post-create snapshot supplies the work link.
 					snapshot.WorkID = work
 				}
 				require.NoError(t, s.RegisterUsageTask(t.Context(), snapshot))
@@ -702,7 +688,6 @@ func TestUsageTaskSnapshotsFollowObservationTime(t *testing.T) {
 					require.Equal(t, 1, report.Summary.UnfinishedWork)
 				}
 			}
-			// A stale nonterminal snapshot must not pin the completed cohort.
 			require.NoError(t, s.PruneUsage(t.Context(), time.Now().UTC().Add(-90*24*time.Hour)))
 			report := usageReport(t, s, []string{"a"}, start.Add(-time.Second), start.Add(time.Hour), time.Now().UTC())
 			require.Zero(t, report.Summary.WorkRequests)
@@ -816,8 +801,6 @@ func TestUsageLatePhaseDoesNotChangeEarlierReport(t *testing.T) {
 			asOf := time.Now().UTC()
 			original := usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), asOf)
 			require.Equal(t, tc.before.Phase, original.Works[0].Tasks[0].Phase)
-			// The next watch snapshot carries a rounded Kubernetes timestamp
-			// before asOf, although it reaches the store after this report.
 			register(tc.after)
 			replay := usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), asOf)
 			require.Equal(t, original, replay)
@@ -831,8 +814,6 @@ func TestUsageLatePhaseDoesNotChangeEarlierReport(t *testing.T) {
 			currentAt := time.Now().UTC()
 			current := usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), currentAt)
 			require.Equal(t, tc.after.Phase, current.Works[0].Tasks[0].Phase)
-			// Repeated observations preserve the first recorded time, and a
-			// late stale snapshot cannot regress either report.
 			register(tc.after)
 			register(tc.before)
 			require.Equal(t, original, usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), asOf))
@@ -857,20 +838,15 @@ func TestUsageLegacyPhaseHistoryKeepsItsOriginalVisibility(t *testing.T) {
 	asOf := start.Add(time.Minute)
 	original := usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), asOf)
 	require.Equal(t, "Running", original.Works[0].Tasks[0].Phase)
-	// Refreshing a row created before RecordedAt was introduced must not
-	// move its existing phase's visibility forward to the upgrade time.
 	legacy.PhaseObservedAt, legacy.PhaseAttempt = start, 1
 	require.NoError(t, s.RegisterUsageTask(t.Context(), legacy))
 	require.Equal(t, original, usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), asOf))
-	// New transitions on the same legacy Task follow the new visibility rule.
 	legacy.Phase, legacy.PhaseObservedAt = "Succeeded", start.Add(30*time.Second)
 	require.NoError(t, s.RegisterUsageTask(t.Context(), legacy))
 	require.Equal(t, original, usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), asOf))
 	require.Equal(t, "Succeeded", usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), time.Now().UTC()).Works[0].Tasks[0].Phase)
 }
 
-// Rows are found by session name as the controller reads it, without
-// surrounding space of any kind, and however many names are asked for.
 func TestUsageTasksInSessions(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -894,8 +870,6 @@ func TestUsageTasksInSessions(t *testing.T) {
 		found = append(found, task.TaskUID)
 	}
 	require.ElementsMatch(t, []string{"plain", "padded", "unicode-padded"}, found)
-	// A row whose name merely holds a wanted one is not read: this one would
-	// not decode.
 	_, err = s.db.ExecContext(ctx, `INSERT INTO usage_tasks(namespace, task_uid, task_name, started_at, data) VALUES (?, ?, ?, ?, ?)`,
 		"team", "superstring", "superstring", at.UnixNano(), `{"namespace":"team","taskUID":"superstring","sessionName":"ahp-one-3","startedAt":5}`)
 	require.NoError(t, err)
@@ -904,8 +878,6 @@ func TestUsageTasksInSessions(t *testing.T) {
 	require.Len(t, tasks, 3)
 	_, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, time.Time{}, 1)
 	require.ErrorIs(t, err, store.ErrUsageSelectionTooLarge)
-	// A turn that started after the cut-off is not read either: this one
-	// would not decode, and the lookup's limit does not count it.
 	_, err = s.db.ExecContext(ctx, `INSERT INTO usage_tasks(namespace, task_uid, task_name, started_at, data) VALUES (?, ?, ?, ?, ?)`,
 		"team", "later", "later", at.Add(time.Hour).UnixNano(), `{"namespace":"team","taskUID":"later","sessionName":"ahp-one","startedAt":5}`)
 	require.NoError(t, err)
@@ -914,13 +886,11 @@ func TestUsageTasksInSessions(t *testing.T) {
 	require.Len(t, tasks, 3)
 	_, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, time.Time{}, 100)
 	require.Error(t, err, "without a cut-off the later turn is read")
-	// The Unix epoch is a cut-off too, before every turn here.
 	tasks, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, time.Unix(0, 0), 100)
 	require.NoError(t, err)
 	require.Empty(t, tasks)
 	_, err = s.db.ExecContext(ctx, `DELETE FROM usage_tasks WHERE namespace = 'team' AND task_uid = 'later'`)
 	require.NoError(t, err)
-	// An earlier namespace of the same name stays out.
 	require.NoError(t, s.RegisterUsageTask(ctx, store.UsageTask{Namespace: "uids", NamespaceUID: "old", TaskUID: "old-turn", TaskName: "old-turn",
 		SessionName: "ahp-one", Phase: "Succeeded", StartedAt: at}))
 	require.NoError(t, s.RegisterUsageTask(ctx, store.UsageTask{Namespace: "uids", NamespaceUID: "new", TaskUID: "new-turn", TaskName: "new-turn",
@@ -931,7 +901,6 @@ func TestUsageTasksInSessions(t *testing.T) {
 	require.Equal(t, "new-turn", tasks[0].TaskUID)
 }
 
-// SQL trims a session name of exactly what strings.TrimSpace does.
 func TestUsageSpaceIsEveryUnicodeSpace(t *testing.T) {
 	for r := rune(0); r <= unicode.MaxRune; r++ {
 		if unicode.IsSpace(r) != strings.ContainsRune(usageSpace, r) {

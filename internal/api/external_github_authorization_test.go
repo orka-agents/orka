@@ -100,7 +100,6 @@ func TestExternalGitHubToolsRequireTaskCredentials(t *testing.T) {
 					if test.oidc || test.trusted {
 						wantToken, wantRepo = "fixture-global", "/repos/controller/private/"
 					}
-					// Do not include credential values in assertion failures.
 					require.True(t, req.Header.Get("Authorization") == "Bearer "+wantToken, "unexpected GitHub credential source")
 					require.True(t, strings.HasPrefix(req.URL.Path, wantRepo), "unexpected GitHub repository scope")
 				}

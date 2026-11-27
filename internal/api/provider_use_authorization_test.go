@@ -25,8 +25,6 @@ func enableProviderUseAuthorization(t *testing.T) {
 	t.Cleanup(func() { providerUseAuthorization.Store(previous) })
 }
 
-// providerUseClientset allows `use` on the listed namespace/name Providers,
-// allows every other review, and records the Provider use reviews it saw.
 func providerUseClientset(allowed ...string) (*kubefake.Clientset, *[]authorizationv1.ResourceAttributes) {
 	grants := map[string]bool{}
 	for _, key := range allowed {
@@ -92,7 +90,6 @@ func TestTaskCreateRequiresUseOnItsProvider(t *testing.T) {
 		providerUseTask(&corev1alpha1.ProviderReference{Name: "anthropic", Namespace: "models"}, nil)))
 	require.Equal(t, "models", (*seen)[0].Namespace, "a cross-namespace Provider is checked in its own namespace")
 
-	// A Task that runs its same-namespace Agent's Provider needs only Agent use.
 	none, seen := providerUseClientset()
 	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(), nil, none, user,
 		providerUseTask(nil, &corev1alpha1.AgentReference{Name: "reviewer"})))
@@ -118,9 +115,6 @@ func TestTaskCreateRefusesACrossNamespaceAgentsTaskRelativeProviders(t *testing.
 	}
 	all, _ := providerUseClientset("team-a/primary", "team-a/backup", "team-a/mine")
 
-	// The Agent's namespace-less Provider and its fallbacks would resolve in
-	// the Task's namespace and may change after this check, so the Task is
-	// refused even when the caller may use those Providers.
 	for name, a := range map[string]*corev1alpha1.Agent{
 		"relative primary": agent(&corev1alpha1.ProviderReference{Name: "primary"}),
 		"fallback":         agent(&corev1alpha1.ProviderReference{Name: "primary", Namespace: "models"}, "backup"),
@@ -130,16 +124,11 @@ func TestTaskCreateRefusesACrossNamespaceAgentsTaskRelativeProviders(t *testing.
 		})
 	}
 
-	// The Task's own Provider replaces the Agent's primary, so with no
-	// fallbacks nothing is taken from the remote Agent.
 	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(), providerUseReader(t, agent(&corev1alpha1.ProviderReference{Name: "primary"})), all, user,
 		providerUseTask(&corev1alpha1.ProviderReference{Name: "mine"}, agentRef)))
-	// An explicit namespace does not help: the Agent's namespace may be
-	// outside the policies that checked it.
 	requireForbidden(t, authorizeKubernetesTaskCreate(context.Background(),
 		providerUseReader(t, agent(&corev1alpha1.ProviderReference{Name: "primary", Namespace: "team-a"})), all, user, providerUseTask(nil, agentRef)))
 
-	// Without a reader, or without the Agent, nothing can be checked.
 	requireForbidden(t, authorizeKubernetesTaskCreate(context.Background(), nil, all, user, providerUseTask(nil, agentRef)))
 	requireForbidden(t, authorizeKubernetesTaskCreate(context.Background(), providerUseReader(t), all, user, providerUseTask(nil, agentRef)))
 }
@@ -188,7 +177,6 @@ func TestProviderUseFailsClosedWithoutAnIdentityOrClient(t *testing.T) {
 	requireForbidden(t, authorizeTaskProviderUse(context.Background(), nil, nil, &UserInfo{Username: "alice", AuthType: AuthTypeTokenReview}, task))
 	clientset, _ := providerUseClientset("team-a/anthropic")
 	requireForbidden(t, authorizeTaskProviderUse(context.Background(), nil, clientset, nil, task))
-	// An OIDC caller without an issuer and subject has no reviewable identity.
 	requireForbidden(t, authorizeTaskProviderUse(context.Background(), nil, clientset, &UserInfo{AuthType: AuthTypeOIDC, Username: "alice"}, task))
 }
 
@@ -218,14 +206,11 @@ func reviewedProviders(seen []authorizationv1.ResourceAttributes) []string {
 	return keys
 }
 
-// providerUseGrant is the grant the external authorization fixture's Provider needs.
 var providerUseGrant = authorizationv1.ResourceAttributes{
 	Namespace: "default", Group: corev1alpha1.GroupVersion.Group, Version: corev1alpha1.GroupVersion.Version,
 	Resource: providersResource, Verb: providerUseVerb, Name: "protected",
 }
 
-// newProviderUseFixture enables Provider use after NewServer, which sets it
-// from the fixture's configuration.
 func newProviderUseFixture(t *testing.T) *externalAuthorizationFixture {
 	t.Helper()
 	f := newExternalAuthorizationFixture(t)
@@ -288,21 +273,15 @@ func TestToolAgentWritesRequireProviderUse(t *testing.T) {
 	}
 	denied, _ := providerUseClientset()
 
-	// A caller who may read the Provider but not use it cannot bind an Agent
-	// to it through a chat tool, which writes with Orka's identity.
 	requireForbidden(t, authorizeToolAgentCreateProviderUse(context.Background(), denied, user, named("protected")))
 	allowed, _ := providerUseClientset("team-a/protected")
 	require.NoError(t, authorizeToolAgentCreateProviderUse(context.Background(), allowed, user, named("protected")))
 
-	// A create is checked in full even when a same-named Agent is stored: it
-	// could be deleted before the create lands.
 	stored := named("protected")
 	stored.UID, stored.ResourceVersion = "uid-1", "7"
 	reader := providerUseReader(t, stored)
 	requireForbidden(t, authorizeToolAgentCreateProviderUse(context.Background(), denied, user, named("protected")))
 
-	// An update of the stored version that keeps its Provider needs no grant;
-	// one that switches it, or that edits another version, does.
 	update := func(provider, uid, version string) *corev1alpha1.Agent {
 		a := named(provider)
 		a.UID, a.ResourceVersion = types.UID(uid), version
@@ -313,8 +292,6 @@ func TestToolAgentWritesRequireProviderUse(t *testing.T) {
 	requireForbidden(t, authorizeToolAgentUpdateProviderUse(context.Background(), reader, denied, user, update("protected", "uid-2", "1")))
 	requireForbidden(t, authorizeToolAgentUpdateProviderUse(context.Background(), nil, allowed, user, update("protected", "uid-1", "7")))
 
-	// Each compatibility profile checks the Agent tools it exposes. The
-	// Anthropic proxy exposes create_agent but not update_agent.
 	for _, profile := range []compatProxyToolContextProfile{openAICompatProxyToolContextProfile, anthropicCompatProxyToolContextProfile} {
 		toolCtx := newCompatProxyToolContext(compatProxyToolContextConfig{
 			Client: providerUseReader(t).(client.Client), KubeClient: denied, Namespace: "team-a", Profile: profile, UserInfo: user,

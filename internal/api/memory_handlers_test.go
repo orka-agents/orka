@@ -25,8 +25,6 @@ import (
 
 const memoryProposalTestUser = "system:serviceaccount:orka-system:jordan"
 
-// setupMemoryProposalApp serves review and apply as the given identity; nil
-// leaves the request without one.
 func setupMemoryProposalApp(t *testing.T, ui *UserInfo) (*fiber.App, *storageclient.Client) {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
@@ -92,7 +90,6 @@ func createMemoryProposalRequest(t *testing.T, app *fiber.App, body string) (int
 func TestReviewMemoryProposalRecordsSignedInIdentity(t *testing.T) {
 	for _, body := range []string{
 		`{"status":"accepted","reviewNote":"Matches the operations note."}`,
-		// Older CLIs always send the key; an empty value names no one.
 		`{"status":"accepted","reviewNote":"Matches the operations note.","reviewer":""}`,
 		`{"status":"accepted","reviewNote":"Matches the operations note.","reviewer":null}`,
 	} {
@@ -110,7 +107,6 @@ func TestReviewMemoryProposalRecordsSignedInIdentity(t *testing.T) {
 			require.Equal(t, memoryProposalTestUser, record["reviewer"])
 			require.Equal(t, "Matches the operations note.", record["reviewNote"])
 			require.NotEmpty(t, record["reviewedAt"])
-			// The review verb does not grant reading the proposal itself.
 			require.NotContains(t, record, "content")
 			require.NotContains(t, record, "title")
 
@@ -244,8 +240,6 @@ func TestCreateMemoryProposalRejectsClientDecision(t *testing.T) {
 }
 
 func TestCreateMemoryProposalStartsPending(t *testing.T) {
-	// Older clients send every key, so empty decision fields and an explicit
-	// pending status still create an ordinary pending proposal.
 	for _, body := range []string{
 		`{"namespace":"default","type":"memory","title":"Dock 4 returns"}`,
 		`{"namespace":"default","type":"memory","title":"Dock 4 returns","status":"pending","reviewer":"","appliedBy":"","appliedMemoryId":""}`,

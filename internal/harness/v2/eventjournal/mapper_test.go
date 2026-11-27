@@ -160,7 +160,6 @@ func TestMapUsagePreservesCacheFieldPresence(t *testing.T) {
 			if err := json.Unmarshal(wire, &usage); err != nil {
 				t.Fatal(err)
 			}
-			// Runtime and journal persistence may re-encode the protocol payload.
 			encoded, err := json.Marshal(usage)
 			if err != nil {
 				t.Fatal(err)
@@ -912,7 +911,6 @@ func TestMapperJournalRedactsCredentialUsingTwoIdenticalHistoricalCopies(t *test
 	if err != nil || !isNew || appended == nil {
 		t.Fatalf("append completing fragments: new=%t err=%v", isNew, err)
 	}
-	// The first event's title and summary each contribute one s to password.
 	if appended.Summary != executionevents.ExecutionEventRedactedValue ||
 		appended.ContentText != executionevents.ExecutionEventRedactedValue {
 		t.Fatal("identical stored copies completed a credential across event history")
@@ -947,8 +945,6 @@ func TestMapperJournalCountsInProgressPlanCopiesInHistory(t *testing.T) {
 	if err != nil || !isNew || appended == nil {
 		t.Fatalf("append completing fields: new=%t err=%v", isNew, err)
 	}
-	// Two title copies, two kind copies, and all three historical a copies
-	// together reach the token redactor's minimum length.
 	if appended.Summary != executionevents.ExecutionEventRedactedValue ||
 		appended.ToolName != executionevents.ExecutionEventRedactedValue {
 		t.Fatal("third historical plan copy completed a public credential")

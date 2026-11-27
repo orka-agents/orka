@@ -18,10 +18,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// runFirstPromptThenAwaitAdapterExit creates session-1, completes prompt-1
-// against a helper that exits right after answering, waits for that exit, and
-// returns the session state to Idle the way completed workspace validation
-// would.
 func runFirstPromptThenAwaitAdapterExit(t *testing.T, mode string) (*Server, Config, harnessv2.CreateRuntimeSessionRequest, *sessionState) {
 	t.Helper()
 	return runFirstPromptThenAwaitAdapterExitWith(t, mode, nil)
@@ -103,10 +99,6 @@ func TestSupervisorResumesIdleAdapterInPlace(t *testing.T) {
 	}
 }
 
-// An agent may call the model while session/resume reconnects it (Claude Agent
-// ACP 0.89.1 sends one request). The restart runs before the next prompt gets
-// provider access, so the proxy refuses that call rather than spending one of
-// the prompt's turns on it.
 func TestSupervisorRefusesModelCallsDuringIdleAdapterResume(t *testing.T) {
 	server, cfg, create, state := runFirstPromptThenAwaitAdapterExit(t, adapterResumeModelCallMode)
 	next := testSecondPromptRequest(t, cfg, create.Metadata.Fence)
@@ -167,15 +159,12 @@ func assertSupervisorRetiresUnresumableAdapter(t *testing.T, mode string) {
 	if state.runtime.AdapterRestarts() != 0 {
 		t.Fatalf("adapter restarts = %d, want 0", state.runtime.AdapterRestarts())
 	}
-	// The poisoned session is retired by the supervisor's own cleanup; the
-	// controller recreates a fresh generation from the canonical transcript.
 	awaitSessionRetired(t, server, create)
 	server.mu.Lock()
 	_, resident := server.sessions[create.RuntimeSessionID]
 	_, tombstoned := server.tombstones[create.Metadata.Fence.RuntimeSessionUID]
 	server.mu.Unlock()
 	if resident && !tombstoned {
-		// Cleanup may still be in flight; it must at least have been scheduled.
 		server.mu.Lock()
 		scheduled := state.drainCleanupScheduled || state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned
 		server.mu.Unlock()
@@ -185,8 +174,6 @@ func assertSupervisorRetiresUnresumableAdapter(t *testing.T, mode string) {
 	}
 }
 
-// awaitSessionRetired waits until the supervisor has poisoned, is deleting,
-// or has dropped the session create made.
 func awaitSessionRetired(t *testing.T, server *Server, create harnessv2.CreateRuntimeSessionRequest) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -208,11 +195,6 @@ func awaitSessionRetired(t *testing.T, server *Server, create harnessv2.CreateRu
 	}
 }
 
-// Creation validates the workspace once, but the agent can write it between
-// prompts. An idle adapter restart must re-run that check before launching a
-// replacement, and retire the session rather than start the provider over
-// configuration that creation would have refused. This includes OpenCode's
-// own configuration folders, which live in the agent-writable session tree.
 func TestSupervisorRevalidatesWorkspaceBeforeIdleAdapterRelaunch(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
@@ -276,10 +258,6 @@ func assertRelaunchRefusesWorkspaceChange(t *testing.T, write func(*testing.T, a
 	awaitSessionRetired(t, server, create)
 }
 
-// Operator commands run as the session child. An idle adapter restart must
-// close operator admission and wait for every admitted operation to finish
-// before it checks the workspace, so no operator can change what the
-// replacement loads between the check and the launch.
 func TestSupervisorQuiescesOperatorsBeforeIdleAdapterRelaunch(t *testing.T) {
 	var (
 		server      *Server
@@ -293,8 +271,6 @@ func TestSupervisorQuiescesOperatorsBeforeIdleAdapterRelaunch(t *testing.T) {
 	)
 	server, cfg, create, state := runFirstPromptThenAwaitAdapterExitWith(t, adapterResumeMode, func(s *Server) {
 		s.cfg.Provider.ValidateWorkspace = func(paths acp.SessionPaths) error {
-			// Creation validates before the session is published; only the
-			// relaunch check observes operator state.
 			if validations.Add(1) == 2 {
 				server.mu.Lock()
 				current := server.sessions[create.RuntimeSessionID]
@@ -306,9 +282,6 @@ func TestSupervisorQuiescesOperatorsBeforeIdleAdapterRelaunch(t *testing.T) {
 			return validateOpenCodeSession(paths)
 		}
 	})
-	// An operator operation is running when the next prompt arrives. Its
-	// handler releases the registration once the operation is killed, as
-	// finishOperation does.
 	process := newFakeOperatorProcess()
 	server.mu.Lock()
 	if state.operators == nil {

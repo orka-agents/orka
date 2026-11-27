@@ -166,8 +166,6 @@ func TestRuntimeFabricListsHonorContinuationTokens(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			// Limited lists must be served by the uncached API reader: the
-			// cache cannot resume from a continue token.
 			baseClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 			recordingClient := &runtimeListRecordingClient{Client: baseClient}
 			handlers := NewHandlers(HandlersConfig{Client: listFailingClient{Client: baseClient}, APIReader: recordingClient})

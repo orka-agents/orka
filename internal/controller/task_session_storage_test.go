@@ -13,9 +13,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// lossySessionStore fails transcript appends in order: ErrOutcomeUnknown
-// after committing, as a lost response would, and any other error without
-// reaching the store.
 type lossySessionStore struct {
 	*sqlite.Store
 	appendErrs []error
@@ -37,8 +34,6 @@ func (s *lossySessionStore) AppendMessagesWithLock(
 	return err
 }
 
-// A session Task whose transcript the store has not accepted yet, or may have
-// saved, keeps the Session and is completed again; the turn is appended once.
 func TestCompleteTaskRetriesASessionAppendTheStoreHasNotAccepted(t *testing.T) {
 	ctx := context.Background()
 	task := &corev1alpha1.Task{
@@ -91,8 +86,6 @@ func TestCompleteTaskRetriesASessionAppendTheStoreHasNotAccepted(t *testing.T) {
 	requireSession(false, 1)
 }
 
-// Appending a Task's turn again succeeds without duplicating it, and adds a
-// response that was not available when the turn was first appended.
 func TestSessionAppendOfATaskTurnCanBeRepeated(t *testing.T) {
 	ctx := context.Background()
 	task := &corev1alpha1.Task{
@@ -125,7 +118,6 @@ func TestSessionAppendOfATaskTurnCanBeRepeated(t *testing.T) {
 		}
 	}
 
-	// The first append finds no result yet and stores only the prompt.
 	if err := r.SessionManager.AppendMessages(ctx, task, r.ResultStore); err != nil {
 		t.Fatalf("first append: %v", err)
 	}

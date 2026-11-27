@@ -20,8 +20,6 @@ func TestSessionRuntimeCleanupRetiresPreviousControllerEpoch(t *testing.T) {
 		_, projection := sessionRuntimeCleanupTurnProjection(t, fixture, task)
 		projections[task.Name] = bytes.Clone(projection.Payload)
 	}
-	// A restored credential has a newer resourceVersion than the admitted
-	// Task, with a passing conformance snapshot persisted before takeover.
 	rotateExternalRuntimeCredentials(t, fixture, true)
 	persistSessionCleanupAuthFixture(t, fixture)
 	epochs, stop := startACPRecoveryEpochManager(t, fixture.ctx, fixture.controlStore, "session-cleanup-successor")
@@ -36,8 +34,6 @@ func TestSessionRuntimeCleanupRetiresPreviousControllerEpoch(t *testing.T) {
 	if err := fixture.client.Status().Update(fixture.ctx, runtime); err != nil {
 		t.Fatal(err)
 	}
-	// Recovery can advance mutable Task status while the immutable terminal
-	// projection still owns the resident session on the original runtime boot.
 	for _, task := range tasks {
 		current := &corev1alpha1.Task{}
 		if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(task), current); err != nil {

@@ -12,20 +12,11 @@ import (
 )
 
 const (
-	// DefaultRuntimePoolDesiredReplicas keeps an idle pool scaled to zero until
-	// durable demand is present.
-	DefaultRuntimePoolDesiredReplicas int32 = 0
-	// DefaultRuntimePoolMaxResidentSessions is the first-release per-pool
-	// resident-session limit.
-	DefaultRuntimePoolMaxResidentSessions int32 = 10
-	// DefaultRuntimePoolMaxRunningPrompts is the first-release per-pool prompt
-	// concurrency limit.
-	DefaultRuntimePoolMaxRunningPrompts int32 = 4
-	// DefaultRuntimePoolColdStartTimeoutSeconds bounds a 0 -> 1 pool startup.
+	DefaultRuntimePoolDesiredReplicas         int32 = 0
+	DefaultRuntimePoolMaxResidentSessions     int32 = 10
+	DefaultRuntimePoolMaxRunningPrompts       int32 = 4
 	DefaultRuntimePoolColdStartTimeoutSeconds int32 = 120
-	// MaxRuntimePoolCapacityReservations bounds the durable reservation list in
-	// RuntimePool status. RuntimePool capacity is itself limited to 1000.
-	MaxRuntimePoolCapacityReservations = 1000
+	MaxRuntimePoolCapacityReservations              = 1000
 )
 
 // RuntimePoolProtocolVersion is the controller-to-supervisor protocol profile.
@@ -33,7 +24,6 @@ const (
 type RuntimePoolProtocolVersion string
 
 const (
-	// RuntimePoolProtocolHarnessV2 is the ACP session-centric harness contract.
 	RuntimePoolProtocolHarnessV2 RuntimePoolProtocolVersion = "orka.harness.v2"
 )
 
@@ -66,65 +56,30 @@ const (
 )
 
 const (
-	// RuntimePoolConditionAdmissionReady reports whether new RuntimeSessions may
-	// be admitted without violating lifecycle, fencing, or capacity rules.
-	RuntimePoolConditionAdmissionReady = "AdmissionReady"
-	// RuntimePoolConditionPodSecurityReady reports whether the runtime Pod passes
-	// the selected namespace's Pod Security admission requirements.
+	RuntimePoolConditionAdmissionReady   = "AdmissionReady"
 	RuntimePoolConditionPodSecurityReady = "PodSecurityReady"
-	// RuntimePoolConditionQuotaReady reports whether quota permits the pool's
-	// controller-owned resources.
-	RuntimePoolConditionQuotaReady = "QuotaReady"
-	// RuntimePoolConditionSchedulingReady reports whether the selected runtime
-	// Pod can be scheduled.
-	RuntimePoolConditionSchedulingReady = "SchedulingReady"
-	// RuntimePoolConditionRolloutReady reports whether the immutable runtime
-	// profile has been installed without version skew.
-	RuntimePoolConditionRolloutReady = "RolloutReady"
-	// RuntimePoolConditionWorkerEviction reports a graceful termination of the
-	// worker hosting an execution-workspace runtime (an infrastructure upgrade
-	// roll, node drain, or Spot reclaim) and how the controller is handling it.
-	// It is absent until an eviction is observed.
-	RuntimePoolConditionWorkerEviction = "WorkerEviction"
-	// RuntimePoolConditionTelemetryReady reports whether a native execution-
-	// workspace runtime receives every supervisor telemetry signal the
-	// controller exports. It is set only when telemetry is enabled.
-	RuntimePoolConditionTelemetryReady = "TelemetryReady"
+	RuntimePoolConditionQuotaReady       = "QuotaReady"
+	RuntimePoolConditionSchedulingReady  = "SchedulingReady"
+	RuntimePoolConditionRolloutReady     = "RolloutReady"
+	RuntimePoolConditionWorkerEviction   = "WorkerEviction"
+	RuntimePoolConditionTelemetryReady   = "TelemetryReady"
 )
 
 const (
-	RuntimePoolReasonAdmissionClosed     = "AdmissionClosed"
-	RuntimePoolReasonAtCapacity          = "AtCapacity"
-	RuntimePoolReasonPodSecurityRejected = "PodSecurityRejected"
-	RuntimePoolReasonQuotaRejected       = "QuotaRejected"
-	RuntimePoolReasonSchedulingFailed    = "SchedulingFailed"
-	RuntimePoolReasonRolloutFailed       = "RolloutFailed"
-	RuntimePoolReasonRuntimeAmbiguous    = "RuntimeAmbiguous"
-	// RuntimePoolReasonToolboxUnavailable reports that a declared toolbox could
-	// not be bound into the runtime Pod. Tasks waiting on the pool fail with the
-	// same reason instead of waiting for a rollout that cannot complete.
-	RuntimePoolReasonToolboxUnavailable = "ToolboxUnavailable"
-	// RuntimePoolReasonTelemetryProjected: every exported telemetry signal is
-	// configured on the runtime.
-	RuntimePoolReasonTelemetryProjected = "TelemetryProjected"
-	// RuntimePoolReasonNativeEnvironmentLimit: supervisor metrics, or all
-	// supervisor telemetry, were left out so the runtime fits the native
-	// backend's per-container environment limit.
-	RuntimePoolReasonNativeEnvironmentLimit = "NativeEnvironmentLimit"
-	// RuntimePoolReasonEvictionDraining: admission is closed and the runtime is
-	// draining toward a data-only suspension before the eviction window ends.
-	RuntimePoolReasonEvictionDraining = "EvictionDraining"
-	// RuntimePoolReasonEvictionSuspended: the evicted runtime was suspended with
-	// its data and resumes on a new worker.
-	RuntimePoolReasonEvictionSuspended = "EvictionSuspended"
-	// RuntimePoolReasonEvictionDeadlineExceeded: the runtime did not drain before
-	// the eviction window ended. Suspension is never authorized afterward; the
-	// instance is lost, its last checkpoint is retained, and uncertain work is
-	// never replayed.
+	RuntimePoolReasonAdmissionClosed          = "AdmissionClosed"
+	RuntimePoolReasonAtCapacity               = "AtCapacity"
+	RuntimePoolReasonPodSecurityRejected      = "PodSecurityRejected"
+	RuntimePoolReasonQuotaRejected            = "QuotaRejected"
+	RuntimePoolReasonSchedulingFailed         = "SchedulingFailed"
+	RuntimePoolReasonRolloutFailed            = "RolloutFailed"
+	RuntimePoolReasonRuntimeAmbiguous         = "RuntimeAmbiguous"
+	RuntimePoolReasonToolboxUnavailable       = "ToolboxUnavailable"
+	RuntimePoolReasonTelemetryProjected       = "TelemetryProjected"
+	RuntimePoolReasonNativeEnvironmentLimit   = "NativeEnvironmentLimit"
+	RuntimePoolReasonEvictionDraining         = "EvictionDraining"
+	RuntimePoolReasonEvictionSuspended        = "EvictionSuspended"
 	RuntimePoolReasonEvictionDeadlineExceeded = "EvictionDeadlineExceeded"
-	// RuntimePoolReasonEvictionNotSuspendable: the workspace class cannot
-	// preserve data across an eviction, so the instance is lost with its worker.
-	RuntimePoolReasonEvictionNotSuspendable = "EvictionNotSuspendable"
+	RuntimePoolReasonEvictionNotSuspendable   = "EvictionNotSuspendable"
 )
 
 // RuntimePoolTrustDomain identifies the logical same-trust-domain boundary

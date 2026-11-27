@@ -607,8 +607,6 @@ func TestVerifiedSnapshotWorkspaceBindingRejectsTamperedIdentity(t *testing.T) {
 		t.Fatalf("valid frozen binding rejected: %v", err)
 	}
 
-	// A stale digest fails first; recompute a valid digest over the tampered
-	// session key so the immutable Task-identity check is what rejects it.
 	tamperedSession := valid
 	tamperedSession.SessionKey = "task:another-task-uid"
 	recomputed, err := acpWorkspaceBindingDigest(&ACPRuntimeWorkspaceBinding{
@@ -688,8 +686,6 @@ func TestVerifiedSnapshotWorkspaceBindingAcceptsLegacyClassOnDetachDigest(t *tes
 	}
 }
 
-// Legacy workspace metadata preserves the frozen cleanup namespace even when
-// new dispatch is rejected after mutable controller configuration drifts.
 func TestQueueACPRuntimeTaskKeepsFrozenExternalWorkspaceNamespace(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -753,8 +749,6 @@ func TestQueueACPRuntimeTaskKeepsFrozenExternalWorkspaceNamespace(t *testing.T) 
 	}
 	acknowledgeTestACPWorkspaceAttachment(t, reconciler, workspace)
 
-	// The current flag aliases the native template namespace. The original
-	// namespace remains pinned while the legacy dispatch gate rejects new pools.
 	reconciler.ACPRuntimeNamespace = acpTestSubstrateNamespace
 	if err := reconciler.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
 		t.Fatal(err)
@@ -777,9 +771,6 @@ func TestQueueACPRuntimeTaskKeepsFrozenExternalWorkspaceNamespace(t *testing.T) 
 	}
 }
 
-// The post-materialization handshake repeats every admission and attachment
-// gate through the uncached reader. A lifecycle transition between workspace
-// readiness and pool creation must abort the pool before prompt dispatch.
 func TestVerifyACPWorkspaceReadyForPool(t *testing.T) {
 	t.Parallel()
 	scheme := runtime.NewScheme()
@@ -837,8 +828,6 @@ func TestVerifyACPWorkspaceReadyForPool(t *testing.T) {
 		t.Fatalf("ready workspace must pass the handshake: %v", err)
 	}
 
-	// Finalization between readiness and pool creation is one form of the
-	// same withdrawn-handshake race.
 	if err := c.Delete(ctx, workspace); err != nil {
 		t.Fatalf("delete workspace: %v", err)
 	}
@@ -1136,9 +1125,6 @@ func TestReapIdlePoolsUsesFrozenWorkspaceIdleTimeoutForScaleDown(t *testing.T) {
 	}
 }
 
-// The idle reaper must never destroy quarantine evidence: a workspace the
-// detach-timeout settlement deliberately preserved stays even when its
-// linked pool idles at Stopped past the TTL.
 func TestReapIdlePoolsPreservesQuarantinedWorkspaces(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -1399,7 +1385,6 @@ func TestProjectACPExecutionWorkspaceStatusTransitions(t *testing.T) {
 		t.Fatalf("terminal projection = %q/%q, want Released/WorkspaceReleased", task.Status.ExecutionWorkspace.Phase, task.Status.ExecutionWorkspace.Reason)
 	}
 
-	// A Failed projection is never overridden.
 	task.Status.ExecutionWorkspace.Phase = corev1alpha1.ExecutionWorkspacePhaseFailed
 	task.Status.ExecutionWorkspace.Reason = corev1alpha1.ExecutionWorkspaceReasonValidationFailed
 	if err := reconciler.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
@@ -1410,11 +1395,6 @@ func TestProjectACPExecutionWorkspaceStatusTransitions(t *testing.T) {
 	}
 }
 
-// A resumed lineage asserts a committed durable checkpoint only when a
-// RuntimeSession actually committed one before the suspension: a first Task
-// cancelled before session creation validly suspends a volume that never held
-// a checkpoint, and its continuation must materialize fresh instead of
-// failing closed forever over data that never existed.
 func TestTaskExpectsDurableResumeRequiresCommittedSession(t *testing.T) {
 	scheme := bindingTestScheme(t)
 	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
@@ -1441,8 +1421,6 @@ func TestTaskExpectsDurableResumeRequiresCommittedSession(t *testing.T) {
 		t.Fatal("a lineage with no committed durable session must not assert a checkpoint")
 	}
 
-	// Session creation records the synchronous durable commit with its
-	// generation; the floor only ever advances.
 	if err := dispatcher.markLinkedWorkspaceDurableSessionCommitted(ctx, task, 3); err != nil {
 		t.Fatalf("record durable session commit: %v", err)
 	}
@@ -1454,8 +1432,6 @@ func TestTaskExpectsDurableResumeRequiresCommittedSession(t *testing.T) {
 		t.Fatalf("expects=%v floor=%d, want an asserted checkpoint at generation 3", expects, floor)
 	}
 
-	// The stamp is monotonic and pinned to the workspace incarnation: an
-	// older generation never regresses the floor.
 	if err := dispatcher.markLinkedWorkspaceDurableSessionCommitted(ctx, task, 2); err != nil {
 		t.Fatalf("repeat commit record: %v", err)
 	}
@@ -1468,8 +1444,6 @@ func TestTaskExpectsDurableResumeRequiresCommittedSession(t *testing.T) {
 		t.Fatalf("a different incarnation must not inherit the lineage assertion (expects=%v err=%v)", expects, err)
 	}
 
-	// Corrupt or zero generation records must fail dispatch instead of
-	// disabling the stale-snapshot floor.
 	task.Annotations[acpExecutionWorkspaceUIDAnnotation] = string(workspace.UID)
 	for _, recorded := range []string{"not-a-generation", "0"} {
 		if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, workspace); err != nil {
@@ -1524,10 +1498,6 @@ func TestCheckpointRestoreRequiresDataBeforeDestinationLineageExists(t *testing.
 	}
 }
 
-// The attachment-epoch projection must claim only an epoch the adapter is
-// actually enforcing: the requested spec epoch and the enforced status epoch
-// deliberately diverge while attachment is pending and after max-lifetime
-// enforcement clears the enforced epoch.
 func TestProjectACPClassAttachmentIdentityRequiresAcknowledgedEpoch(t *testing.T) {
 	scheme := bindingTestScheme(t)
 	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
@@ -1553,7 +1523,6 @@ func TestProjectACPClassAttachmentIdentityRequiresAcknowledgedEpoch(t *testing.T
 	reconciler := &TaskReconciler{Client: kubeClient, Scheme: scheme}
 	ctx := context.Background()
 
-	// Pending attachment: the adapter has not acknowledged the epoch yet.
 	next := &corev1alpha1.ExecutionWorkspaceStatus{}
 	if err := reconciler.projectACPClassAttachmentIdentity(ctx, task, next); err != nil {
 		t.Fatalf("project pending attachment identity: %v", err)
@@ -1562,7 +1531,6 @@ func TestProjectACPClassAttachmentIdentityRequiresAcknowledgedEpoch(t *testing.T
 		t.Fatalf("unacknowledged attachment projected epoch %d; the Task may only claim an enforced epoch", next.AttachedEpoch)
 	}
 
-	// The adapter acknowledged exactly this epoch.
 	current := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
 		t.Fatalf("read workspace: %v", err)
@@ -1580,9 +1548,6 @@ func TestProjectACPClassAttachmentIdentityRequiresAcknowledgedEpoch(t *testing.T
 	}
 }
 
-// Settlement completion refreshes the Released projection: the terminal
-// transition runs before revocation, so without the refresh the status would
-// permanently claim state Attached and the pre-revocation epoch.
 func TestRefreshACPReleasedWorkspaceProjectionClearsAttachment(t *testing.T) {
 	scheme := bindingTestScheme(t)
 	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {
@@ -1615,9 +1580,6 @@ func TestRefreshACPReleasedWorkspaceProjectionClearsAttachment(t *testing.T) {
 		t.Fatalf("refreshed projection = %+v, want the revoked epoch cleared and the live workspace state", task.Status.ExecutionWorkspace)
 	}
 
-	// A workspace held only by its cleanup finalizer still serves cached
-	// pre-delete status; the refresh must not freeze that stale state into
-	// the released Task.
 	deleting := workspace.DeepCopy()
 	deleting.Name = "acp-ws-refresh-deleting"
 	deleting.UID = types.UID("ws-refresh-deleting-uid")
@@ -1640,8 +1602,6 @@ func TestRefreshACPReleasedWorkspaceProjectionClearsAttachment(t *testing.T) {
 		t.Fatalf("deleting-workspace projection = %+v, want no copied state", task.Status.ExecutionWorkspace)
 	}
 
-	// A deleted workspace leaves no state claim even while the informer cache
-	// still serves the pre-delete Ready object.
 	staleWorkspace := workspace.DeepCopy()
 	staleWorkspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
 	task.Labels[acpExecutionWorkspaceLinkLabel] = workspace.Name
@@ -1670,9 +1630,6 @@ func TestRefreshACPReleasedWorkspaceProjectionClearsAttachment(t *testing.T) {
 	}
 }
 
-// A failed suspension preserves no checkpoint: the idle reaper must be able
-// to reclaim the stopped pool while a genuinely suspended (or suspending)
-// workspace stays deliberately retained.
 func TestReapIdlePoolsReclaimsFailedSuspensions(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -1755,10 +1712,6 @@ func TestReapIdlePoolsReclaimsFailedSuspensions(t *testing.T) {
 	}
 }
 
-// A transient workspace read failure during the class-identity projection
-// must fail the phase transition instead of persisting a projection stripped
-// of ClassRef/WorkspaceRef/State/AttachedEpoch: the advanced phase would
-// never retry the dropped identity.
 func TestProjectACPExecutionWorkspaceStatusRetriesOnIdentityReadFailure(t *testing.T) {
 	scheme := bindingTestScheme(t)
 	if err := workspacev1alpha1.AddToScheme(scheme); err != nil {

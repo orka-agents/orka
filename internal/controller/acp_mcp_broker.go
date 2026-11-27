@@ -46,7 +46,7 @@ type ACPMCPAuthenticatedTask struct {
 	UID          string
 	ParentTaskID string
 	AgentName    string
-	AgentUID     string // frozen by the Task's execution binding, if any
+	AgentUID     string
 	SessionName  string
 	Deadline     time.Time
 }
@@ -63,13 +63,10 @@ func ACPMCPAuthenticatedTaskFromContext(ctx context.Context) (ACPMCPAuthenticate
 }
 
 type ACPMCPBrokerCredentials struct {
-	ControllerBearerToken string
-	CapabilitySecret      []byte
-	ExpectedFence         harnessv2.Fence
-	RuntimeProfile        harnessv2.RuntimeProfile
-	// ExpectedMCPConfiguration freezes the exact prompt-scoped tool and
-	// approval policy for external runtimes. RuntimePool callers leave it nil
-	// because their controller-owned supervisor receives the same policy.
+	ControllerBearerToken    string
+	CapabilitySecret         []byte
+	ExpectedFence            harnessv2.Fence
+	RuntimeProfile           harnessv2.RuntimeProfile
 	ExpectedMCPConfiguration *harnessv2.MCPPolicyConfiguration
 	ControllerFence          store.ControllerEpochFence
 	Task                     ACPMCPAuthenticatedTask
@@ -79,9 +76,6 @@ type ACPMCPBrokerCredentialResolver interface {
 	ResolveACPMCPBrokerCredentials(context.Context, harnessv2.MCPBrokerCallRequest) (ACPMCPBrokerCredentials, error)
 }
 
-// ACPMCPBrokerPreAuthenticator resolves and verifies the controller bearer
-// from the non-secret pool identity carried in request headers, so the broker
-// can reject unauthenticated callers before consuming their request bodies.
 type ACPMCPBrokerPreAuthenticator interface {
 	PreAuthenticateACPMCPBroker(ctx context.Context, poolNamespace, poolUID, authorizationHeader string) error
 }
@@ -124,50 +118,21 @@ type RegistryACPMCPToolExecutor struct {
 	OutboundAccess          outboundaccess.Resolver
 	TransactionExchange     *workerexecutor.TransactionExchangeConfig
 	ContextFactory          func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
-	// SubstrateMCPRouter reaches Substrate MCP actors in-process with the
-	// manager's router identity, the same path the Orka API MCP proxy uses.
-	// Nil makes brokered Substrate MCP Tools fail closed.
-	SubstrateMCPRouter *workerexecutor.SubstrateMCPRouter
+	SubstrateMCPRouter      *workerexecutor.SubstrateMCPRouter
 
-	// EnforceTransactionCredentialAuth mirrors the controller-wide context-token
-	// authorization enforcement mode. Custom-Tool executions always bind the
-	// authenticated Task's transaction authority; this flag gates only its
-	// Secret-credential authorization.
 	EnforceTransactionCredentialAuth bool
-	// ConnectorReadScopes lists the transaction scopes that let a Task
-	// created by a delegated context token describe its requester's linked
-	// accounts (list_connections), matching the API's connector routes.
-	ConnectorReadScopes []string
-	// TransactionCredentialReadScopes lists the transaction scopes that
-	// authorize Secret-backed outbound credentials, matching the scopes the
-	// controller stamps into worker Jobs.
-	TransactionCredentialReadScopes []string
-	// AgentExecutionSnapshots supplies the frozen Connection bindings for
-	// connection-mode outbound access. Nil leaves connector-backed tools
-	// failing closed.
-	AgentExecutionSnapshots store.AgentExecutionSnapshotStore
-	// Connections resolves the requester's linked-account credential for
-	// catalog built-in tools frozen with a link. Nil leaves such tools
-	// failing closed.
-	Connections outboundaccess.ConnectionCredentialSource
+	ConnectorReadScopes              []string
+	TransactionCredentialReadScopes  []string
+	AgentExecutionSnapshots          store.AgentExecutionSnapshotStore
+	Connections                      outboundaccess.ConnectionCredentialSource
 }
 
-// acpMCPConnectionDigester is implemented by executors that can name the
-// frozen Connection behind a connector-backed tool for audit records.
 type acpMCPConnectionDigester interface {
 	ConnectionDigest(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) (string, error)
 }
 
-// ConnectionDigest returns a non-secret digest of the frozen Connection
-// identity behind a brokered custom tool, or "" when the tool is not
-// connector-backed. A read that fails is an error, never a silent "not
-// connector-backed": the effect record must carry the binding it promises,
-// and its request digest must not depend on transient read availability.
 func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) (string, error) {
 	if descriptor.Source == harnessv2.MCPToolSourceBrokeredBuiltin {
-		// A catalog built-in runs in the broker only under the link frozen
-		// for it. Without one it can never run, so the call fails here,
-		// before an approval or effect record is made for it.
 		if _, linked := connectors.BuiltinConnectorToolClass(descriptor.Name); !linked {
 			return "", nil
 		}
@@ -188,7 +153,6 @@ func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, reques
 	if e.Reader == nil {
 		return "", errors.New("connector digest resolution requires a reader")
 	}
-	// A forwarding write tool acts under its forwarding Tool's binding.
 	name := customACPMCPToolResource(descriptor)
 	infos, err := connectorToolsFor(ctx, e.Reader, e.Registry, request.Namespace, []string{name})
 	if err != nil {
@@ -196,10 +160,6 @@ func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, reques
 	}
 	info, ok := infos[name]
 	if !ok {
-		// Not connector-backed as read now. If the Task froze a Connection
-		// for this Tool's policy, it was connection mode at dispatch and
-		// has since been retargeted; that drift never executes under the
-		// policy's new credentials.
 		return "", e.refuseConnectorClassificationDrift(ctx, request, name)
 	}
 	frozen, err := e.taskFrozenConnections(ctx, request)
@@ -210,31 +170,18 @@ func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, reques
 	if digest == "" {
 		return "", fmt.Errorf("connector tool %q has no Connection frozen for policy %q", descriptor.Name, info.PolicyName)
 	}
-	// The binding names the injection configuration too (the Tool spec and
-	// the policy's credential output), so an approval or effect record is
-	// tied to the configuration in force when it was made and a changed
-	// policy is detected when the call is revalidated.
 	return connectorBindingDigest(digest, info.SpecDigest), nil
 }
 
-// taskFrozenConnections loads the frozen Connection bindings of the
-// authenticated ACP Task behind request.
 func (e RegistryACPMCPToolExecutor) taskFrozenConnections(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (map[string]outboundaccess.FrozenConnection, error) {
 	_, frozen, _, err := e.taskConnectionAuthority(ctx, request)
 	return frozen, err
 }
 
-// brokerConnectorReadAuthorizer applies the connector-read scope boundary
-// to a Task created by a delegated context token: under enforcement, a
-// transaction whose scopes lack every connector-read scope may not list
-// the requester's linked accounts. A Task without a transaction (a person
-// or ServiceAccount created it directly) is not narrowed.
 func brokerConnectorReadAuthorizer(transaction *corev1alpha1.TaskTransaction, readScopes []string, enforce bool) func() *tools.ChatToolError {
 	if !enforce || transaction == nil || len(readScopes) == 0 {
 		return nil
 	}
-	// Scopes falls back to the legacy space-separated Scope, as the
-	// transaction-authority binder reads it.
 	scopes := transaction.Scopes
 	if len(scopes) == 0 {
 		scopes = strings.Fields(transaction.Scope)
@@ -253,9 +200,6 @@ func brokerConnectorReadAuthorizer(transaction *corev1alpha1.TaskTransaction, re
 	}
 }
 
-// taskConnectionAuthority loads the authenticated ACP Task behind request
-// and returns its requester together with the Connection bindings frozen
-// into its execution snapshot.
 func (e RegistryACPMCPToolExecutor) taskConnectionAuthority(ctx context.Context, request harnessv2.MCPBrokerCallRequest) (*corev1alpha1.RequestedBy, map[string]outboundaccess.FrozenConnection, *corev1alpha1.TaskTransaction, error) {
 	if e.AgentExecutionSnapshots == nil {
 		return nil, nil, nil, errors.New("connector digest resolution requires execution snapshots")
@@ -278,8 +222,6 @@ func (e RegistryACPMCPToolExecutor) taskConnectionAuthority(ctx context.Context,
 	if err := bindFrozenConnections(ctx, e.Reader, e.AgentExecutionSnapshots, task, executor); err != nil {
 		return nil, nil, nil, err
 	}
-	// Only a requester the controller key sealed for this Task is handed
-	// to tools; an unverified spec.requestedBy is nobody.
 	verified, err := requesterProvenanceVerified(ctx, e.Reader, task)
 	if err != nil {
 		return nil, nil, nil, err
@@ -291,10 +233,6 @@ func (e RegistryACPMCPToolExecutor) taskConnectionAuthority(ctx context.Context,
 	return requester, executor.FrozenConnections(), task.Spec.Transaction.DeepCopy(), nil
 }
 
-// refuseConnectorClassificationDrift returns an error when the named Tool's
-// policy has a Connection frozen in the Task's snapshot although the policy
-// is no longer connection mode. A Tool without a policy, or whose policy
-// was never frozen, is simply not connector-backed.
 func (e RegistryACPMCPToolExecutor) refuseConnectorClassificationDrift(ctx context.Context, request harnessv2.MCPBrokerCallRequest, toolName string) error {
 	tool := &corev1alpha1.Tool{}
 	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: toolName}, tool); err != nil {
@@ -316,8 +254,6 @@ func (e RegistryACPMCPToolExecutor) refuseConnectorClassificationDrift(ctx conte
 	return connectorClassificationDrift(frozen, tool)
 }
 
-// connectorClassificationDrift is the check itself: a frozen Connection for
-// a policy that no longer classifies the Tool as connector-backed.
 func connectorClassificationDrift(frozen map[string]outboundaccess.FrozenConnection, tool *corev1alpha1.Tool) error {
 	if tool == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.OutboundAccessPolicyRef == nil {
 		return nil
@@ -329,10 +265,6 @@ func connectorClassificationDrift(frozen map[string]outboundaccess.FrozenConnect
 	return nil
 }
 
-// connectorPolicyPin classifies tool against its live policy and returns the
-// policy identity execution must resolve under, or a drift error when the
-// Task froze a Connection for a policy that is no longer connection mode.
-// A Tool that is not connector-backed (and was not at dispatch) pins nothing.
 func connectorPolicyPin(ctx context.Context, reader client.Reader, registry *tools.Registry, frozen map[string]outboundaccess.FrozenConnection, tool *corev1alpha1.Tool) (string, *outboundaccess.PolicyIdentity, error) {
 	if tool == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.OutboundAccessPolicyRef == nil {
 		return "", nil, nil
@@ -348,13 +280,6 @@ func connectorPolicyPin(ctx context.Context, reader client.Reader, registry *too
 	return info.PolicyName, &outboundaccess.PolicyIdentity{UID: info.PolicyUID, Generation: info.PolicyGeneration}, nil
 }
 
-// forwardedWriteKeptResult returns the form of a forwarded write's result
-// that its effect record keeps. The record is an ExternalEffect status that
-// anyone who can read the resource sees, and any write can answer with a
-// secret: an action (POST) such as listKeys or listClusterUserCredential
-// returns keys or a kubeconfig, and a PUT of a function key echoes the key.
-// So no answer is kept: the record keeps a note with its status, and a
-// redelivery that joins it gets that note.
 func forwardedWriteKeptResult(descriptor harnessv2.MCPToolDescriptor, result json.RawMessage) json.RawMessage {
 	if descriptor.Forward == nil || !descriptor.Forward.Write || mcpToolResultIsError(result) {
 		return result
@@ -364,8 +289,6 @@ func forwardedWriteKeptResult(descriptor harnessv2.MCPToolDescriptor, result jso
 	if response, err := harnessv2.DecodeMCPForwardResponse(result); err == nil {
 		status = "status " + strconv.Itoa(response.Status)
 		if azureRetryableStatus(response.Status) {
-			// A throttled or failing write keeps its status and delay, so a
-			// replay still tells the client to retry, as Azure did.
 			keptStatus = response.Status
 			if after := response.Headers["Retry-After"]; after != "" {
 				headers["Retry-After"] = after
@@ -392,8 +315,6 @@ func forwardedWriteKeptResult(descriptor harnessv2.MCPToolDescriptor, result jso
 	return kept
 }
 
-// azureRetryableStatus reports whether the Azure SDK retries a write that
-// got status, so a replay of it must keep that status.
 func azureRetryableStatus(status int) bool {
 	switch status {
 	case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError,
@@ -403,9 +324,6 @@ func azureRetryableStatus(status int) bool {
 	return false
 }
 
-// maskForwardedWriteArguments returns a forwarded write's arguments with
-// every value in its body masked, keeping the body's shape and field names,
-// for an approval preview. Arguments that do not decode keep no body.
 func maskForwardedWriteArguments(arguments json.RawMessage) json.RawMessage {
 	request, err := harnessv2.DecodeMCPForwardRequest(arguments)
 	if err != nil {
@@ -437,9 +355,6 @@ func maskForwardedWriteArguments(arguments json.RawMessage) json.RawMessage {
 	return masked
 }
 
-// maskForwardedQuery masks every query value of a forwarded write for an
-// approval preview except the API version, keeping the parameter names: a
-// value such as a signature can be a secret.
 func maskForwardedQuery(query string) string {
 	if query == "" {
 		return ""
@@ -458,13 +373,6 @@ func maskForwardedQuery(query string) string {
 	return strings.Join(parameters, "&")
 }
 
-// azurePreviewSchemas lists, per Resource Manager resource type, the
-// request-body paths a PUT or PATCH of that resource carries that only size,
-// place, or version it and never a secret, each with the JSON type its
-// value must have to be shown. Paths start at the body's root; "*" stands
-// for any array element. A write to any other resource type, and every
-// action (POST), whose body is the action's own parameters, keeps every
-// value masked.
 var azurePreviewSchemas = func() map[string]map[string]azurePreviewKind {
 	pool := "mode:s ostype:s ossku:s orchestratorversion:s count:n vmsize:s enableautoscaling:b mincount:n maxcount:n"
 	schemas := map[string]string{
@@ -486,7 +394,6 @@ var azurePreviewSchemas = func() map[string]map[string]azurePreviewKind {
 	return out
 }()
 
-// azurePreviewKind is the JSON type a shown preview value must have.
 type azurePreviewKind int
 
 const (
@@ -495,10 +402,8 @@ const (
 	azurePreviewBool
 )
 
-// azureResourceGroupType names a resource group path in azurePreviewSchemas.
 const azureResourceGroupType = "resourcegroups"
 
-// prefixed returns each space-separated field of fields with prefix.
 func prefixed(prefix, fields string) string {
 	var out []string
 	for field := range strings.FieldsSeq(fields) {
@@ -507,10 +412,6 @@ func prefixed(prefix, fields string) string {
 	return strings.Join(out, " ")
 }
 
-// azureResourceType returns the lowercase resource type a Resource Manager
-// path names the resource itself of, such as
-// "microsoft.containerservice/managedclusters", or "" for an action or
-// collection path.
 func azureResourceType(path string) string {
 	segments := strings.Split(strings.Trim(strings.ToLower(path), "/"), "/")
 	if len(segments) == 4 && segments[0] == "subscriptions" && segments[2] == azureResourceGroupType {
@@ -523,7 +424,6 @@ func azureResourceType(path string) string {
 		}
 	}
 	rest := segments[providers+1:]
-	// A namespace, then type/name pairs: an odd tail is an action or a list.
 	if providers < 0 || len(rest) < 3 || len(rest)%2 == 0 {
 		return ""
 	}
@@ -534,21 +434,10 @@ func azureResourceType(path string) string {
 	return strings.Join(resourceTypes, "/")
 }
 
-// maxAzurePreviewString bounds a shown string value.
 const maxAzurePreviewString = 64
 
-// azurePreviewText is what a shown string value may contain: the letters,
-// digits, and separators of Azure locations, SKU and size names, and
-// versions, such as "westus2", "Standard_D2s_v3", or "1.30.3". Anything else
-// in a shown field is masked like an unknown field.
 var azurePreviewText = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._ -]*$`)
 
-// maskJSONValues masks a decoded JSON value for an approval preview: a value
-// at one of shown (path names it from the body's root) is shown when it has
-// the type shown expects and is not a long string; every other value is
-// masked, so a secret sent in a sizing field of the wrong type stays
-// hidden. A key that is empty or holds a separator or the wildcard could
-// pose as another path, so it, and everything under it, never matches.
 func maskJSONValues(value any, path string, shown map[string]azurePreviewKind) any {
 	child := func(segment string) string {
 		if path == "" {
@@ -578,9 +467,6 @@ func maskJSONValues(value any, path string, shown map[string]azurePreviewKind) a
 	return "[masked]"
 }
 
-// azurePreviewShows reports whether a preview may show value as kind: a
-// short string of sizing-value text as a string, a number as a number, a
-// boolean as a boolean.
 func azurePreviewShows(kind azurePreviewKind, value any) bool {
 	switch typed := value.(type) {
 	case string:
@@ -593,15 +479,11 @@ func azurePreviewShows(kind azurePreviewKind, value any) bool {
 	return false
 }
 
-// connectorBindingDigest combines the frozen Connection identity digest with
-// the dispatch digest of the Tool and its policy.
 func connectorBindingDigest(connectionDigest, specDigest string) string {
 	sum := sha256.Sum256([]byte(connectionDigest + "\x00" + specDigest))
 	return hex.EncodeToString(sum[:])
 }
 
-// ValidateACPMCPTool checks configuration drift before spending an approval.
-// ExecuteACPMCPTool repeats this check at the custom Tool execution boundary.
 func (e RegistryACPMCPToolExecutor) ValidateACPMCPTool(ctx context.Context, request harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) error {
 	if descriptor.Source != harnessv2.MCPToolSourceBrokeredCustom {
 		return nil
@@ -616,8 +498,6 @@ func (e RegistryACPMCPToolExecutor) ValidateACPMCPTool(ctx context.Context, requ
 	return matchCurrentCustomACPMCPTool(tool, descriptor, request.Authorization.ApprovalPolicy)
 }
 
-// customACPMCPToolResource names the Tool behind a custom descriptor: a
-// forwarding write tool is derived from its forwarding Tool.
 func customACPMCPToolResource(descriptor harnessv2.MCPToolDescriptor) string {
 	if descriptor.Forward != nil && descriptor.Forward.Write {
 		return harnessv2.MCPForwardToolResource(descriptor.Name)
@@ -625,9 +505,6 @@ func customACPMCPToolResource(descriptor harnessv2.MCPToolDescriptor) string {
 	return descriptor.Name
 }
 
-// matchCurrentCustomACPMCPTool refuses a call whose Tool no longer describes
-// the descriptor the prompt was authorized with, or a forwarded write the
-// Tool now requires approval for although the prompt's policy does not.
 func matchCurrentCustomACPMCPTool(tool *corev1alpha1.Tool, descriptor harnessv2.MCPToolDescriptor, approval harnessv2.MCPApprovalPolicy) error {
 	current, err := customACPMCPToolDescriptor(tool)
 	if err == nil && descriptor.Forward != nil && descriptor.Forward.Write {
@@ -655,26 +532,17 @@ func (e RegistryACPMCPToolExecutor) ExecuteACPMCPTool(
 	call, err := e.prepareACPMCPTool(ctx, request, descriptor)
 	if err != nil {
 		if descriptor.Forward != nil && descriptor.Forward.Write {
-			// Preparation sends nothing, so a forwarded write refused here
-			// is reported as refused, never as possibly applied.
 			return nil, &tools.NoEffectError{Summary: "The tool refused the request before sending it.", Err: err}
 		}
 		return nil, err
 	}
 	result, err := call(ctx)
-	// A call answered directly gets the refusal as its tool result; only
-	// approval settlement needs to know it had no effect.
 	if refusal, ok := errors.AsType[*acpMCPRefusedWithoutEffect](err); ok {
 		return refusal.Result, nil
 	}
 	return result, err
 }
 
-// acpMCPRefusedWithoutEffect is a tool call Orka refused before any request
-// left, such as for a requester link found missing or unusable. It carries
-// the tool result the agent gets, and its code and reason for approval
-// settlement, which records the call as failed without effect. It is set
-// only by Orka's own refusal, never inferred from a tool's response.
 type acpMCPRefusedWithoutEffect struct {
 	Result json.RawMessage
 	Code   string
@@ -683,10 +551,6 @@ type acpMCPRefusedWithoutEffect struct {
 
 func (e *acpMCPRefusedWithoutEffect) Error() string { return e.Reason }
 
-// Prepare the local executor without invoking a tool. Approval calls perform
-// these reads before starting their execution budget, then revalidate authority
-// before invoking the returned call exactly once.
-//
 //nolint:gocyclo // Tool preparation enforces every frozen-binding and policy check before execution.
 func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 	ctx context.Context,
@@ -704,8 +568,6 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 			return nil, fmt.Errorf("MCP tool %q is not registered", descriptor.Name)
 		}
 		_, linkedBuiltin := connectors.BuiltinConnectorToolClass(descriptor.Name)
-		// Tools that act for or describe the person need the Task's verified
-		// requester; the catalog built-ins also need the frozen binding.
 		needsRequester := linkedBuiltin || descriptor.Name == tools.ListConnectionsToolName
 		var toolContext *tools.ToolContext
 		if e.ContextFactory != nil {
@@ -723,11 +585,6 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 				if copy.Tenant == "" {
 					copy.Tenant = request.Namespace
 				}
-				// A catalog built-in runs under the requester's linked
-				// account when the Task froze one for it. The binding is
-				// read here, before the call, so a snapshot that cannot be
-				// loaded is a preparation failure and never a silent run
-				// on the Task's own credentials.
 				if needsRequester {
 					requester, frozen, transaction, err := e.taskConnectionAuthority(ctx, request)
 					if err != nil {
@@ -738,11 +595,6 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 						copy.AuthorizeConnectorRead = brokerConnectorReadAuthorizer(transaction, e.ConnectorReadScopes, e.EnforceTransactionCredentialAuth)
 					}
 					if linkedBuiltin {
-						// The linked token is scoped by the current Task's
-						// workspace, so the Task is the authenticated one,
-						// never whatever name (or none) the factory
-						// supplied: without it no Task scope would be
-						// checked at all.
 						authenticated, _ := ACPMCPAuthenticatedTaskFromContext(ctx)
 						if copy.TaskID != "" && copy.TaskID != authenticated.Name {
 							return nil, fmt.Errorf("built-in tool %q: the tool context names task %q, not the authenticated task", descriptor.Name, copy.TaskID)
@@ -756,9 +608,6 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 				toolContext = &copy
 			}
 		}
-		// A catalog built-in reaches the broker only through the link;
-		// without the authenticated context that carries the binding it
-		// would fall through to the tool's own credential path.
 		if linkedBuiltin && (toolContext == nil || toolContext.LinkedAccounts == nil) {
 			return nil, fmt.Errorf("built-in tool %q runs only under the requester's linked account, and no authenticated task context is available", descriptor.Name)
 		}
@@ -766,10 +615,6 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 			if toolContext != nil {
 				callCtx = tools.WithToolContext(callCtx, toolContext)
 			}
-			// The linked credential is refreshed to stay valid for the
-			// catalog's bound on the call, so the whole call is held to that
-			// bound: a multi-page read that ran longer could outlive the
-			// token partway through.
 			if timeout, bounded := connectors.BuiltinConnectorToolTimeout(descriptor.Name); linkedBuiltin && bounded {
 				var cancel context.CancelFunc
 				callCtx, cancel = context.WithTimeout(callCtx, timeout)
@@ -781,8 +626,6 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		if e.Reader == nil || e.KubeClient == nil {
 			return nil, fmt.Errorf("custom MCP tool executor is not configured")
 		}
-		// Mark only failed reads as recoverable preparation failures.
-		// Descriptor and Task authority mismatches remain definitive.
 		e.Reader = acpMCPAuthorityReader{e.Reader}
 		tool := &corev1alpha1.Tool{}
 		resource := customACPMCPToolResource(descriptor)
@@ -798,8 +641,6 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		if descriptor.Forward != nil {
 			executor.AllowForwarding()
 			if descriptor.Forward.Write {
-				// The write tool resolves its credential as a write, so a
-				// linked account must allow writes.
 				tool = tool.DeepCopy()
 				tool.Spec.BrokeredToolClass = corev1alpha1.AgentRuntimeBrokeredToolClassWrite
 			}
@@ -811,11 +652,6 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		} else if bindErr := e.bindTaskTransactionAuthority(ctx, request, executor); bindErr != nil {
 			return nil, bindErr
 		}
-		// The policy this call is classified under is the one it resolves
-		// under: a policy retargeted after dispatch (no longer connection
-		// mode while the Task froze a Connection for it) is refused, and a
-		// policy replaced or edited before the request is refused by the
-		// resolver.
 		policyName, identity, pinErr := connectorPolicyPin(ctx, e.Reader, e.Registry, executor.FrozenConnections(), tool)
 		if pinErr != nil {
 			return nil, pinErr
@@ -840,12 +676,6 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 	}, nil
 }
 
-// customToolNoEffectError marks a custom Tool failure that provably had no
-// effect: the executor marks every send of the tool request, so an error
-// without that mark stopped before the request left, and a 4xx other than
-// 408 answering the original request (not a followed redirect) is a refusal.
-// Upstream bodies stay out of the summary. Failures the executor delivers as
-// tool results and all other errors are unchanged.
 func customToolNoEffectError(err error) error {
 	if err == nil {
 		return nil
@@ -867,17 +697,12 @@ func acpMCPToolExecutionResult(ctx context.Context, descriptor harnessv2.MCPTool
 	if err != nil {
 		if rejection, ok := errors.AsType[*tools.GatewayReplyRejection](err); ok &&
 			descriptor.Source == harnessv2.MCPToolSourceBrokeredBuiltin && descriptor.Name == "reply_in_conversation" {
-			// Definitive admission rejection is a safe tool result, not an
-			// ambiguous external effect. Post-call authority checks still apply.
 			return json.Marshal(struct {
 				IsError bool   `json:"isError"`
 				Error   string `json:"error"`
 			}{true, rejection.Error()})
 		}
 		if argErr, ok := errors.AsType[*tools.ToolArgumentError](err); ok {
-			// The registry rejected the arguments before the tool ran, so the
-			// call had no effect and the agent can resend it. The message names
-			// only the field and JSON types.
 			return json.Marshal(struct {
 				IsError bool   `json:"isError"`
 				Code    string `json:"code"`
@@ -885,9 +710,6 @@ func acpMCPToolExecutionResult(ctx context.Context, descriptor harnessv2.MCPTool
 			}{true, "invalid_arguments", argErr.Error()})
 		}
 		if required, ok := errors.AsType[*outboundaccess.ConnectionRequiredError](err); ok {
-			// The requester's link is missing or unusable, so nothing was
-			// sent. The reason is Orka's own text naming the provider and the
-			// fix, safe for the agent to relay and for the log.
 			log.FromContext(ctx).Info("ACP MCP tool call refused: the requester's linked account is unavailable",
 				"tool", descriptor.Name, "provider", required.Provider, "kind", required.Kind, "reason", required.Error())
 			result, err := json.Marshal(struct {
@@ -901,15 +723,9 @@ func acpMCPToolExecutionResult(ctx context.Context, descriptor harnessv2.MCPTool
 			return result, &acpMCPRefusedWithoutEffect{Result: result, Code: harnessv2.MCPToolErrorCodeConnectionRequired, Reason: required.Error()}
 		}
 		_, executionFailed := errors.AsType[workerexecutor.ToolExecutionError](err)
-		// A read-only Tool may reach its own request deadline while the
-		// enclosing prompt is still active. Preparation failures never carry
-		// the attempt marker; consequential timeouts retain unknown outcomes.
 		readTimedOut := descriptor.Effect == harnessv2.MCPToolEffectReadOnly && ctx.Err() == nil &&
 			workerexecutor.ToolRequestWasAttempted(err) && errors.Is(err, context.DeadlineExceeded)
 		if executionFailed || readTimedOut {
-			// Keep upstream bodies out of the ACP process. The broker still
-			// checks prompt cancellation and authority before committing this
-			// result, including consequential-operation replay receipts.
 			return json.RawMessage(`{"isError":true,"code":"tool_execution_failed","error":"MCP tool execution failed"}`), nil
 		}
 		return nil, err
@@ -928,14 +744,6 @@ func acpMCPToolExecutionResult(ctx context.Context, descriptor harnessv2.MCPTool
 	return raw, nil
 }
 
-// bindTaskTransactionAuthority initializes the per-request custom-Tool
-// executor with the authenticated Task's transaction and credential authority,
-// mirroring the worker Job environment the controller stamps for per-Task
-// execution (setTransactionCredentialAuthorizationEnv/addTransactionEnvVars
-// plus the owner-referenced transaction-token Secret mount). Transaction
-// tokens/scopes are bound in every mode; only Secret-credential authorization
-// is gated by EnforceTransactionCredentialAuth. Missing Task authority always
-// fails closed.
 func (e RegistryACPMCPToolExecutor) bindTaskTransactionAuthority(
 	ctx context.Context,
 	request harnessv2.MCPBrokerCallRequest,
@@ -967,8 +775,6 @@ func (e RegistryACPMCPToolExecutor) bindTaskTransactionAuthority(
 type ACPMCPBrokerDependencies struct {
 	TaskProvenanceProtected bool
 	GatewayService          *gatewayruntime.Service
-	// ConnectorReadScopes mirrors the API's connector-read scope list for
-	// list_connections on Tasks created by delegated context tokens.
 	ConnectorReadScopes     []string
 	Reader                  client.Reader
 	Epochs                  *ControllerEpochManager
@@ -982,16 +788,9 @@ type ACPMCPBrokerDependencies struct {
 	OutboundAccess          outboundaccess.Resolver
 	TransactionExchange     *workerexecutor.TransactionExchangeConfig
 	ContextFactory          func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
-	// SubstrateMCPRouter is the manager's in-process router client for
-	// Substrate MCP actor Tools; see RegistryACPMCPToolExecutor.
-	SubstrateMCPRouter *workerexecutor.SubstrateMCPRouter
-	// Connections resolves linked-account credentials for catalog
-	// built-in tools; see RegistryACPMCPToolExecutor.Connections.
-	Connections outboundaccess.ConnectionCredentialSource
+	SubstrateMCPRouter      *workerexecutor.SubstrateMCPRouter
+	Connections             outboundaccess.ConnectionCredentialSource
 
-	// EnforceTransactionCredentialAuth and TransactionCredentialReadScopes bind
-	// brokered custom-Tool executions to the authenticated Task's transaction
-	// authority; see RegistryACPMCPToolExecutor.
 	EnforceTransactionCredentialAuth bool
 	TransactionCredentialReadScopes  []string
 }
@@ -1040,15 +839,14 @@ func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBr
 }
 
 type ACPMCPBroker struct {
-	Credentials     ACPMCPBrokerCredentialResolver
-	Prompts         ACPMCPPromptAuthorizer
-	Executor        ACPMCPToolExecutor
-	Effects         store.ExternalEffectStore
-	EpochMutations  store.ControllerEpochMutationStore
-	MaxBodyBytes    int64
-	ApprovalEvents  store.DeduplicatingExecutionEventStore
-	ApprovalSecrets kubernetes.Interface
-	// Tests may shorten these bounds; production uses the shared v2 limits.
+	Credentials          ACPMCPBrokerCredentialResolver
+	Prompts              ACPMCPPromptAuthorizer
+	Executor             ACPMCPToolExecutor
+	Effects              store.ExternalEffectStore
+	EpochMutations       store.ControllerEpochMutationStore
+	MaxBodyBytes         int64
+	ApprovalEvents       store.DeduplicatingExecutionEventStore
+	ApprovalSecrets      kubernetes.Interface
 	ApprovalWaitTimeout  time.Duration
 	ApprovalPollInterval time.Duration
 }
@@ -1070,11 +868,6 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeACPMCPError(w, http.StatusServiceUnavailable, "MCP broker is unavailable")
 		return
 	}
-	// Authenticate the controller bearer against the pool identity carried in
-	// non-secret headers before reading the body, so an untrusted Pod cannot
-	// occupy request handlers by drip-feeding chunked bodies without knowing a
-	// bearer. Resolvers that do not support header pre-authentication (test
-	// fakes) fall through to the post-decode bearer check below.
 	if preAuth, ok := b.Credentials.(ACPMCPBrokerPreAuthenticator); ok {
 		poolNamespace := r.Header.Get(harnessv2.MCPBrokerPoolNamespaceHeader)
 		poolUID := r.Header.Get(harnessv2.MCPBrokerPoolUIDHeader)
@@ -1107,8 +900,6 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeACPMCPError(w, http.StatusBadRequest, "invalid MCP broker request")
 		return
 	}
-	// The body must match the pre-authenticated pool identity so a caller
-	// cannot pre-authenticate as one pool and act as another.
 	if _, ok := b.Credentials.(ACPMCPBrokerPreAuthenticator); ok {
 		if request.Namespace != r.Header.Get(harnessv2.MCPBrokerPoolNamespaceHeader) ||
 			string(request.Metadata.Fence.RuntimePoolUID) != r.Header.Get(harnessv2.MCPBrokerPoolUIDHeader) {
@@ -1134,9 +925,6 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeACPMCPError(w, http.StatusGone, "MCP broker policy is stale")
 		return
 	}
-	// Verify with a fresh timestamp: credential resolution above performs
-	// Kubernetes I/O, and a capability that expired while it ran must not be
-	// accepted against the stale pre-resolution clock.
 	if err := harnessv2.VerifyOperationCapability(
 		credentials.CapabilitySecret, r.Header.Get(harnessv2.OperationCapabilityHeader), request.Metadata, true, time.Now().UTC(),
 	); err != nil {
@@ -1184,22 +972,17 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if digester, ok := b.Executor.(acpMCPConnectionDigester); ok {
 			digest, digestErr := digester.ConnectionDigest(promptCtx, request, descriptor)
 			if digestErr != nil {
-				// The effect must carry the binding it promises; a call that
-				// cannot name its Connection is refused before reservation.
 				writeACPMCPError(w, http.StatusBadGateway, "MCP tool connection binding is unavailable")
 				return
 			}
 			if digest != "" {
-				// Audit which person's link a consequential call acted under.
 				effectRequest["connection"] = digest
 			}
 		}
 		run, execute := runExternalEffectWithReplay[json.RawMessage], call
 		var live json.RawMessage
 		if descriptor.Forward != nil && descriptor.Forward.Write {
-			// A forwarded POST or PATCH need not be idempotent.
 			run = runExternalEffectOnceWithReplay[json.RawMessage]
-			// The caller gets the answer; the record keeps what it may.
 			execute = func(ctx context.Context) (json.RawMessage, error) {
 				answer, callErr := call(ctx)
 				if callErr != nil {
@@ -1214,13 +997,9 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			result = live
 		}
 		if errors.Is(err, errExternalEffectAlreadyStarted) {
-			// Another delivery claimed it and may have sent it. Leave its
-			// record to that delivery or to reconciliation.
 			result, err = json.RawMessage(`{"isError":true,"code":"tool_outcome_unknown","error":"The tool may have run. Do not repeat it automatically."}`), nil
 		}
 		if noEffect, ok := errors.AsType[*tools.NoEffectError](err); ok && descriptor.Forward != nil && descriptor.Forward.Write {
-			// A forwarded write refused before it was sent is a definite
-			// failure, as on the approval path, not an unknown outcome.
 			failure := acpApprovalResult("", acpApprovalCodeNoEffect, acpApprovalFailureSummary(noEffect.Summary))
 			settleCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
 			if settleErr := settleExternalEffectStore(settleCtx, b.Effects, credentials.ControllerFence, identity, store.ExternalEffectFailed, failure); settleErr == nil {
@@ -1251,11 +1030,6 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeACPMCPJSON(w, http.StatusOK, response)
 }
 
-// The runtime can issue its first tool call before the Accepted event reaches
-// the durable store or while that store is temporarily unavailable. Keep that
-// approval call parked under its live prompt lease and original operation
-// deadline. No review or executable call is admitted until the ordinary
-// authorizer observes the accepted attempt.
 func (b *ACPMCPBroker) authorizeMCPPromptAdmission(ctx context.Context, request harnessv2.MCPBrokerCallRequest) error {
 	if !request.Authorization.ApprovalPolicy.Requires(request.Call.ToolName) {
 		return b.Prompts.AuthorizeACPMCPPrompt(ctx, request)
@@ -1286,13 +1060,6 @@ func (b *ACPMCPBroker) authorizeMCPPromptAdmission(ctx context.Context, request 
 	}
 }
 
-// watchPromptAuthority stops in-flight tools when their durable prompt settles
-// or disappears. Fiber's HTTP adapter cancels its request context only when the
-// server shuts down, so a supervisor disconnect alone cannot stop downstream
-// work. Check the current attempt rather than the request's original lease
-// expiry, which a running prompt may legitimately renew during a long tool call.
-// Approval waiters tolerate temporary read failures; approved execution installs
-// its own strict watcher before any tool can start.
 func (b *ACPMCPBroker) watchPromptAuthority(ctx context.Context, request harnessv2.MCPBrokerCallRequest, allowUnavailable bool) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -1317,8 +1084,6 @@ func (b *ACPMCPBroker) watchPromptAuthority(ctx context.Context, request harness
 	}()
 	return ctx, func() {
 		cancel()
-		// The adapter reuses its request context after the handler returns.
-		// Join the authority check before releasing that context.
 		<-done
 	}
 }
@@ -1368,8 +1133,6 @@ func (a DurableACPMCPPromptAuthorizer) AuthorizeACPMCPPrompt(ctx context.Context
 	}
 	approvalRequired := request.Authorization.ApprovalPolicy.Requires(request.Call.ToolName)
 	if approvalRequired {
-		// Local revocation is definitive even when durable authority cannot be
-		// read. Check again after I/O before granting any authority.
 		if err := a.PromptLeases.authorize(request); err != nil {
 			return err
 		}
@@ -1410,9 +1173,6 @@ type KubernetesACPMCPBrokerCredentialResolver struct {
 
 var errACPMCPRuntimePoolNotFound = errors.New("runtime pool active instance was not found")
 
-// PreAuthenticateACPMCPBroker resolves the runtime's controller bearer from
-// the non-secret namespace + pool UID headers and constant-time compares it to
-// the presented Authorization header, before any request body is read.
 func (r KubernetesACPMCPBrokerCredentialResolver) PreAuthenticateACPMCPBroker(
 	ctx context.Context,
 	poolNamespace, poolUID, authorizationHeader string,
@@ -1816,8 +1576,6 @@ func findACPMCPTaskExecution(
 	if execution == nil {
 		return nil, nil, fmt.Errorf("active MCP task was not found")
 	}
-	// A recorded cancel request stops new calls at once; the Cancelled phase
-	// follows only when the Task is next reconciled.
 	_, cancelRequested := task.Annotations[labels.AnnotationCancelRequested]
 	if !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled || cancelRequested {
 		return nil, nil, errACPMCPTaskCancelled
@@ -1882,12 +1640,6 @@ func runtimePoolACPMCPAuthMaterial(
 	return bearer, capability, nil
 }
 
-// resolveRuntimePoolAuthSecret resolves the exact controller-auth Secret for
-// one RuntimePool epoch. Provider-workspace pools bind their unpredictable
-// Secret name and immutable UID on the RuntimePool; label-only discovery is
-// intentionally forbidden for those pools. Deployment-backed pools retain
-// epoch selection because their deterministic mounted Secret predates the
-// private binding contract.
 func resolveRuntimePoolAuthSecret(
 	ctx context.Context,
 	reader client.Reader,
@@ -1940,15 +1692,9 @@ func resolveRuntimePoolAuthSecret(
 	}); err != nil {
 		return nil, err
 	}
-	// During graceful epoch replacement both the draining instance's Secret
-	// and the next epoch's Secret exist; select the one mounted by the pool's
-	// exact active instance instead of requiring one Secret globally.
 	return runtimePoolAuthSecretForEpoch(secrets.Items, epoch)
 }
 
-// runtimePoolAuthSecretForEpoch selects the auth Secret bound to the given
-// controller epoch (name suffix auth-e<epoch>) from the pool's labeled
-// Secrets.
 func runtimePoolAuthSecretForEpoch(secrets []corev1.Secret, epoch int64) (*corev1.Secret, error) {
 	matched := runtimePoolAuthSecretsForEpoch(secrets, epoch)
 	if len(matched) != 1 {

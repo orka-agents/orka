@@ -67,8 +67,6 @@ func TestRepositoryMonitorControllerCreatedPullRequestChecksFreshScope(t *testin
 				if err := f.r.Store.UpsertMonitorItem(t.Context(), item); err != nil {
 					t.Fatal(err)
 				}
-				// An existing PR item can already participate in background polling.
-				// Its recent inventory keeps this test focused on the new handoff.
 				if err := f.r.Store.CreateMonitorRun(t.Context(), &store.MonitorRun{ID: "prior-pr", MonitorNamespace: f.monitor.Namespace, MonitorName: f.monitor.Name, Trigger: "manual", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 142, Phase: repositoryMonitorRunPhaseSucceeded, StartedAt: time.Now()}); err != nil {
 					t.Fatal(err)
 				}
@@ -181,7 +179,6 @@ func newRepositoryMonitorCreatedPRSeedFixture(t *testing.T, enabled, suspended b
 	if err := db.SaveResult(t.Context(), task.Namespace, task.Name, result); err != nil {
 		t.Fatal(err)
 	}
-	// PR discovery must use a fresh read, even if its head changed after delivery.
 	markRepositoryMonitorTestTaskDelivered(t, t.Context(), cl, task.Name, task.Spec.Workspace.PushBranch, "delivered-head")
 	return f
 }

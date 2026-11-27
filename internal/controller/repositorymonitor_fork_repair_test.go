@@ -64,7 +64,6 @@ func newRepositoryMonitorForkRepairTestReconciler(t *testing.T, name, body strin
 	original := server.Config.Handler
 	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if strings.HasSuffix(req.URL.Path, "/check-runs") {
-			// The base commit passes, so the failure is the pull request's own.
 			conclusion := "success"
 			if strings.Contains(req.URL.Path, "/commits/head31/") {
 				conclusion = "failure"
@@ -161,7 +160,6 @@ func TestRepositoryMonitorForkPullRequestFixCommand(t *testing.T) {
 			}
 			assertRepositoryMonitorForkRepairTask(t, ctx, cl, monitor, jobs[0].TaskName)
 
-			// The delivery receipt must name the fork as its publication repository.
 			markRepositoryMonitorTestTaskDelivered(t, ctx, cl, jobs[0].TaskName, "main", "pushed31")
 			if _, err := reconciler.ingestCompletedRepositoryMonitorRepairTasks(ctx, monitor); err != nil {
 				t.Fatalf("ingestCompletedRepositoryMonitorRepairTasks() error = %v", err)
@@ -183,7 +181,6 @@ func TestRepositoryMonitorAutomaticallyRepairsWritableFork(t *testing.T) {
 	if err := reconciler.Store.CreateMonitorRun(ctx, &store.MonitorRun{ID: "run-fork-auto-31", MonitorNamespace: "default", MonitorName: monitor.Name, Trigger: "pull_request_event", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 31, TargetSHA: "head31", Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now().Add(-time.Minute)}); err != nil {
 		t.Fatalf("CreateMonitorRun() error = %v", err)
 	}
-	// The first reconciliation queues the policy command; the second runs it.
 	for range 2 {
 		if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}}); err != nil {
 			t.Fatalf("Reconcile() error = %v", err)
@@ -204,7 +201,6 @@ func TestRepositoryMonitorReadinessRefreshTracksMaintainerEdits(t *testing.T) {
 	for _, canModify := range []bool{true, false} {
 		server := newRepositoryMonitorSinglePullRequestServerWithBodyAndAuth(t, 31, repositoryMonitorForkPullRequestBody(canModify), "Bearer forge-token")
 		reconciler := &RepositoryMonitorReconciler{}
-		// The stale snapshot names the fork before a rename.
 		stale := repositoryMonitorPullRequest{Number: 31, MaintainerCanModify: !canModify, HeadBranch: "old", HeadRepo: "contributor/old-orka", HeadRepoURL: "https://github.com/contributor/old-orka.git"}
 		pr, err := reconciler.refreshRepositoryMonitorReadinessPullRequest(context.Background(), stale, server.URL+"/repos/orka-agents/orka", "forge-token")
 		server.Close()

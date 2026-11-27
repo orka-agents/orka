@@ -119,15 +119,8 @@ func (r *workspaceCoreCleanup) ensureLinkedRuntimePoolDeleted(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (bool, bool, error) {
-	// Cleanup is proven by absence of reverse-linked pools, never by the
-	// mutable annotation alone: a lost or stale annotation value must not
-	// let core finalize the workspace while provider resources remain live.
 	gone := true
 	foreign := false
-	// Absence is proven through the uncached reader: a pool created moments
-	// before workspace deletion can be invisible to the informer cache, and a
-	// cached miss must never let core finalize the workspace while the pool
-	// and its physical workspace remain live.
 	reader := uncachedReader(r.APIReader, r.Client)
 	linked := func(pool *corev1alpha1.RuntimePool) bool {
 		if !runtimePoolHasExternalWorkspace(pool) || workspace.UID == "" {
@@ -146,17 +139,10 @@ func (r *workspaceCoreCleanup) ensureLinkedRuntimePoolDeleted(
 		case err != nil:
 			return false, false, err
 		case !linked(pool):
-			// The mutable name link is not ownership: only the controller-
-			// stamped incarnation pin and immutable workspaceRef prove this
-			// pool serves exactly this workspace. A pool without them is foreign
-			// and never deleted.
 			foreign = true
 		default:
 			gone = false
 			if pool.DeletionTimestamp.IsZero() {
-				// UID+resourceVersion preconditions: a concurrent pool update
-				// after this read turns the delete into a retried conflict
-				// instead of removing a pool whose linkage just changed.
 				if err := r.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); err != nil &&
 					!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 					return false, false, err
@@ -175,8 +161,6 @@ func (r *workspaceCoreCleanup) ensureLinkedRuntimePoolDeleted(
 			continue
 		}
 		if !linked(pool) {
-			// Visible metadata is not an immutable reverse link: refuse to
-			// delete it and hold the finalizer fail-closed.
 			foreign = true
 			continue
 		}

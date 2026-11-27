@@ -27,8 +27,6 @@ import (
 	"github.com/orka-agents/orka/internal/taskwait"
 )
 
-// ParkUntilToolName is the brokered tool an ACP agent calls to end its turn
-// and release runtime capacity until an external event arrives.
 const ParkUntilToolName = "park_until"
 
 const (
@@ -36,24 +34,16 @@ const (
 	parkKindTasks    = "tasks"
 	parkKindTimer    = "timer"
 
-	// maxParkTimerDuration bounds a backoff timer. The Task deadline bounds it too.
 	maxParkTimerDuration       = 24 * time.Hour
 	parkStatusConflictAttempts = 4
 )
 
-// ParkUntilTool records a data-only park for the authenticated ACP turn. The
-// turn ends normally; once it settles Succeeded the controller releases its
-// runtime capacity and later starts a continuation Task on the same Session.
-// No process memory is kept, and the parked prompt is never sent again.
 type ParkUntilTool struct{}
 
-// NewParkUntilTool creates the brokered park_until tool.
 func NewParkUntilTool() *ParkUntilTool { return &ParkUntilTool{} }
 
-// Name returns the tool name.
 func (t *ParkUntilTool) Name() string { return ParkUntilToolName }
 
-// Description returns the tool description.
 func (t *ParkUntilTool) Description() string {
 	return "Park this turn until an external event arrives, releasing your runtime while you wait. " +
 		"After calling this, finish your turn immediately with a short status message and make no further tool calls. " +
@@ -62,7 +52,6 @@ func (t *ParkUntilTool) Description() string {
 		"uncommitted in-memory state are not. Approval here is a sign-off checkpoint only: approval-required tools still need their own approval."
 }
 
-// Parameters returns the JSON schema.
 func (t *ParkUntilTool) Parameters() json.RawMessage {
 	return json.RawMessage(fmt.Sprintf(`{
 		"type": "object",
@@ -85,7 +74,6 @@ type parkUntilArgs struct {
 	Timeout  string   `json:"timeout,omitempty"`
 }
 
-// ParkUntilResult is the tool response.
 type ParkUntilResult struct {
 	Status      string `json:"status"`
 	Kind        string `json:"kind"`
@@ -95,8 +83,6 @@ type ParkUntilResult struct {
 	Instruction string `json:"instruction"`
 }
 
-// Execute records the wait on the authenticated Task.
-//
 //nolint:gocyclo // Argument, identity, eligibility, and per-kind validation fail closed in one place.
 func (t *ParkUntilTool) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
 	toolCtx := GetToolContext(ctx)
@@ -198,9 +184,6 @@ func (t *ParkUntilTool) Execute(ctx context.Context, raw json.RawMessage) (strin
 	return parkUntilResponse(recorded)
 }
 
-// parkReason validates the agent's reason in characters, as the schema and
-// the Task status field count them, and bounds the redacted value persisted
-// in status: redaction placeholders can be longer than what they replace.
 func parkReason(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -238,7 +221,6 @@ func (t *ParkUntilTool) kindInputs(
 	now, deadline time.Time,
 ) ([]string, []string, *time.Time, error) {
 	switch kind {
-	// Fields that belong to another kind are ignored.
 	case corev1alpha1.TaskWaitKindApproval:
 		if toolCtx.ExecutionEvents == nil {
 			return nil, nil, nil, fmt.Errorf("parked approvals require execution event storage")
@@ -266,8 +248,6 @@ func (t *ParkUntilTool) kindInputs(
 		if len(names) == 0 || len(names) > corev1alpha1.MaxTaskWaitReferences {
 			return nil, nil, nil, fmt.Errorf("kind=tasks requires between 1 and %d child task names", corev1alpha1.MaxTaskWaitReferences)
 		}
-		// Record each authorized child's UID so the wait never follows a
-		// same-named Task created after this one is deleted.
 		uids := make([]string, 0, len(names))
 		for _, name := range names {
 			child := &corev1alpha1.Task{}
@@ -291,9 +271,6 @@ func (t *ParkUntilTool) kindInputs(
 	}
 }
 
-// recordParkRequest stores the wait on the exact turn. An exact replay of the
-// same tool call returns the recorded wait; a second, different request in
-// the same turn is rejected.
 func recordParkRequest(
 	ctx context.Context,
 	toolCtx *ToolContext,

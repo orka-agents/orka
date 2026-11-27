@@ -254,9 +254,6 @@ func TestTaskSoulBindingAuthority(t *testing.T) {
 	require.False(t, response.Allowed)
 }
 
-// A soul-only binding freezes the execution inputs but leaves control fields
-// mutable, so an autonomous soul Task can still be paused. An ACP execution
-// binding keeps the whole spec frozen.
 func TestTaskSoulBindingLeavesControlFieldsMutable(t *testing.T) {
 	validator := newTestTaskExecutionAuthorityValidator(t)
 	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

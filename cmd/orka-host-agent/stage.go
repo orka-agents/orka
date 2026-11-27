@@ -16,11 +16,6 @@ import (
 	"strings"
 )
 
-// stage prepares what the host container takes from Orka's image. It copies
-// the connection token from its Secret mount into the memory-backed volume
-// only the host mounts, and copies this binary into a volume the host mounts
-// read-only, so the host can run "orka-host-agent init". It runs as an init
-// container as the host's uid, so host images need no tools.
 func stage(args []string) error {
 	flags := flag.NewFlagSet("stage", flag.ContinueOnError)
 	tokenFrom := flags.String("token-from", "", "the connection token file to copy")
@@ -51,7 +46,6 @@ func stageToken(from, to string) error {
 	if len(token) > maxTokenBytes || strings.TrimSpace(string(token)) == "" {
 		return fmt.Errorf("%s does not hold a connection token", from)
 	}
-	// A token the host has not consumed yet is read-only; replace it.
 	return replaceFile(to, 0o440, func(target io.Writer) error {
 		_, err := target.Write(token)
 		return err
@@ -74,8 +68,6 @@ func stageAgent(to string) error {
 	})
 }
 
-// replaceFile writes a new file at path with mode, replacing one an earlier
-// run of the init container left behind.
 func replaceFile(path string, mode fs.FileMode, write func(io.Writer) error) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("replace %s: %w", path, err)

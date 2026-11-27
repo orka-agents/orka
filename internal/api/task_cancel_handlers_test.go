@@ -186,13 +186,11 @@ func TestCancelSessionHidesGatewayOwnedSessions(t *testing.T) {
 func TestCancelSessionCancelsAChatCreatedTurn(t *testing.T) {
 	chatTurn := cancelTestTask("chat-turn", corev1alpha1.TaskPhaseRunning, "")
 	chatTurn.Labels = map[string]string{labels.LabelChatSession: "conversation"}
-	// create_ai_task sets both: the conversation label and a continuity Session.
 	withContinuity := cancelTestTask("chat-turn-with-continuity", corev1alpha1.TaskPhaseRunning, "continuity")
 	withContinuity.Labels = map[string]string{labels.LabelChatSession: "conversation"}
 	mislabeled := cancelTestTask("mislabeled", corev1alpha1.TaskPhaseRunning, "")
 	mislabeled.Labels = map[string]string{labels.LabelChatSession: "task-session"}
 	h, app := setupCancelTest(t, chatTurn, withContinuity, mislabeled)
-	// Stopping a turn reads Session metadata, never the transcript.
 	sessions := &metadataOnlySessionStore{SessionStore: h.sessionStore, typeReader: h.sessionStore.(transcriptSessionTypeReader)}
 	h.sessionStore = sessions
 	for name, sessionType := range map[string]string{"conversation": store.SessionTypeChat, "task-session": "task", "continuity": "task"} {
@@ -212,7 +210,6 @@ func TestCancelSessionCancelsAChatCreatedTurn(t *testing.T) {
 	if sessions.getCalls != 0 {
 		t.Fatalf("GetSession calls = %d, want the metadata-only lookup", sessions.getCalls)
 	}
-	// The chat label names a Session only when that Session is a chat.
 	if resp, _ := postCancel(t, app, "/sessions/task-session/cancel", ""); resp.StatusCode != http.StatusConflict {
 		t.Fatalf("a chat label on a task Session: status = %d, want 409", resp.StatusCode)
 	}
@@ -221,9 +218,6 @@ func TestCancelSessionCancelsAChatCreatedTurn(t *testing.T) {
 	}
 }
 
-// TestCancelSessionSkipsTurnsOfAnEarlierIncarnation covers a chat deleted and
-// recreated under its name while a Task of the old chat still runs: stopping
-// the new chat's turn cancels only Tasks pinned to its own incarnation.
 func TestCancelSessionSkipsTurnsOfAnEarlierIncarnation(t *testing.T) {
 	current := cancelTestTask("current-turn", corev1alpha1.TaskPhaseRunning, "")
 	earlier := cancelTestTask("earlier-turn", corev1alpha1.TaskPhaseRunning, "")
@@ -259,7 +253,6 @@ func TestCancelSessionSkipsTurnsOfAnEarlierIncarnation(t *testing.T) {
 	}
 }
 
-// creationFailingSessionStore cannot read a Session's creation time.
 type creationFailingSessionStore struct {
 	store.SessionStore
 	typeReader transcriptSessionTypeReader
@@ -274,10 +267,6 @@ func (s creationFailingSessionStore) GetSessionCreatedAt(context.Context, string
 	return time.Time{}, s.err
 }
 
-// TestCancelSessionRefusesWithoutTheChatIncarnation covers a creation-time
-// read that fails or finds the Session gone: without the incarnation the
-// cancel cannot tell the chat's Tasks from an earlier chat's, so it cancels
-// none.
 func TestCancelSessionRefusesWithoutTheChatIncarnation(t *testing.T) {
 	for name, tc := range map[string]struct {
 		err    error
@@ -317,7 +306,6 @@ func TestCancelSessionStopsAnInFlightChatRequest(t *testing.T) {
 		t.Fatalf("an idle chat Session: status = %d, want 409", resp.StatusCode)
 	}
 
-	// A chat request that has not started a Task yet still counts as a turn.
 	reservation, err := chat.reserveActiveChat("default", "conversation")
 	if err != nil {
 		t.Fatal(err)
@@ -337,7 +325,6 @@ func TestCancelSessionStopsAnInFlightChatRequest(t *testing.T) {
 	default:
 		t.Fatal("the chat request was not cancelled")
 	}
-	// The reservation is released, so the Session accepts the next message.
 	next, err := chat.reserveActiveChat("default", "conversation")
 	if err != nil {
 		t.Fatalf("next message: %v", err)
@@ -345,9 +332,6 @@ func TestCancelSessionStopsAnInFlightChatRequest(t *testing.T) {
 	chat.finishActiveChatReservation(next, nil)
 }
 
-// TestCancelSessionKeepsASessionItsFirstTurnCreated covers a cancel that stops
-// the first turn of a new chat Session: a disconnected client's empty Session
-// is deleted, but a cancelled one is kept, so the caller can still read it.
 func TestCancelSessionKeepsASessionItsFirstTurnCreated(t *testing.T) {
 	h, app := setupCancelTest(t)
 	committer, ok := h.sessionStore.(store.SessionTurnCommitter)
@@ -377,8 +361,6 @@ func TestCancelSessionKeepsASessionItsFirstTurnCreated(t *testing.T) {
 	}
 }
 
-// blockingTurnCommitter holds ReleaseChatTurn until released, so a test can
-// order a turn that is already ending against a cancel.
 type blockingTurnCommitter struct {
 	store.SessionTurnCommitter
 	entered chan bool
@@ -391,10 +373,6 @@ func (c blockingTurnCommitter) ReleaseChatTurn(ctx context.Context, namespace, n
 	return c.SessionTurnCommitter.ReleaseChatTurn(ctx, namespace, name, turnID, deleteEmptyCreatedSession)
 }
 
-// TestCancelSessionReportsASessionItsEndingTurnDiscarded covers the race in
-// which a first turn that is already ending decides to discard its empty
-// Session before a cancel could keep it: the cancel then answers 404, never
-// a success for a Session that is gone.
 func TestCancelSessionReportsASessionItsEndingTurnDiscarded(t *testing.T) {
 	h, app := setupCancelTest(t)
 	committer, ok := h.sessionStore.(store.SessionTurnCommitter)
@@ -412,7 +390,7 @@ func TestCancelSessionReportsASessionItsEndingTurnDiscarded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go handle.finish() // the turn ends on its own, as after a disconnect
+	go handle.finish()
 	if discard := <-blocking.entered; !discard {
 		t.Fatal("an ending first turn should discard its empty Session")
 	}
@@ -425,7 +403,6 @@ func TestCancelSessionReportsASessionItsEndingTurnDiscarded(t *testing.T) {
 		resp, body := postCancel(t, app, "/sessions/ending/cancel", "")
 		cancelled <- outcome{resp.StatusCode, body}
 	}()
-	// Let the cancel reach the turn, then let the discard finish.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		chat.activeChatsMu.Lock()
@@ -443,8 +420,6 @@ func TestCancelSessionReportsASessionItsEndingTurnDiscarded(t *testing.T) {
 	}
 }
 
-// staleCacheClient lists from a cache that has not seen the newest Tasks, and
-// runs onPatch before each patch.
 type staleCacheClient struct {
 	client.Client
 	onPatch func()
@@ -464,9 +439,6 @@ func (c staleCacheClient) Patch(ctx context.Context, obj client.Object, patch cl
 	return c.Client.Patch(ctx, obj, patch, opts...)
 }
 
-// A chat request that created a Task just before it was stopped: the Task is
-// found although the cache has not seen it, and no next message can start
-// until it is cancelled.
 func TestCancelSessionCancelsTheStoppedChatTurnsTaskBeforeTheNextMessage(t *testing.T) {
 	created := cancelTestTask("just-created", corev1alpha1.TaskPhasePending, "")
 	created.Labels = map[string]string{labels.LabelChatSession: "conversation"}
@@ -567,8 +539,6 @@ func TestOverlappingIdleCancelsReportNoRunningTurn(t *testing.T) {
 	chat.finishActiveChatReservation(next, nil)
 }
 
-// phantomListReader lists Tasks that are gone or replaced by the time they
-// are read.
 type phantomListReader struct {
 	client.Reader
 	phantoms []corev1alpha1.Task
@@ -606,8 +576,6 @@ func TestCancelSessionSkipsTasksDeletedOrReplacedSinceTheList(t *testing.T) {
 	}
 }
 
-// chatTask is a running Task the chat "conversation" created; its
-// chat-session-namespace label, when set, names the chat's namespace.
 func chatTask(namespace, name, chatNamespace string) *corev1alpha1.Task {
 	task := cancelTestTask(name, corev1alpha1.TaskPhaseRunning, "")
 	task.Namespace = namespace
@@ -628,17 +596,12 @@ func cancelAnnotationIn(t *testing.T, h *Handlers, namespace, name string) (stri
 	return value, ok
 }
 
-// A chat Task is tied to a Session by its chat's namespace as well as the
-// conversation name, and a chat may have created it in another namespace.
 func TestCancelSessionMatchesChatTasksByTheChatsNamespace(t *testing.T) {
 	h, app := setupCancelTest(t,
 		chatTask("default", "same-namespace", "default"),
 		chatTask("default", "legacy-same-namespace", ""),
-		// Created in this namespace by a chat of the same name in another one.
 		chatTask("default", "other-chats-task", "elsewhere"),
-		// Created in another namespace by this chat.
 		chatTask("elsewhere", "created-elsewhere", "default"),
-		// Another namespace's own chat of the same name.
 		chatTask("elsewhere", "elsewhere-chat", ""),
 	)
 	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: "conversation", SessionType: store.SessionTypeChat}); err != nil {
@@ -664,8 +627,6 @@ func TestCancelSessionMatchesChatTasksByTheChatsNamespace(t *testing.T) {
 	}
 }
 
-// With a watch namespace the API acts in no other namespace, so a chat Task
-// elsewhere is not looked for.
 func TestCancelSessionStaysInTheWatchNamespace(t *testing.T) {
 	h, app := setupCancelTest(t,
 		chatTask("default", "same-namespace", "default"),
@@ -683,10 +644,6 @@ func TestCancelSessionStaysInTheWatchNamespace(t *testing.T) {
 	}
 }
 
-// A chat Task in another namespace is cancelled only with tasks/cancel in
-// that namespace; the route authorized the Session's namespace alone. A
-// denial cancels none of the Session's Tasks, including those in its own
-// namespace.
 func TestCancelSessionAuthorizesChatTasksInOtherNamespaces(t *testing.T) {
 	for _, allow := range []bool{false, true} {
 		h, app := setupTestHandlersWithObjects(
@@ -729,8 +686,6 @@ func TestCancelSessionAuthorizesChatTasksInOtherNamespaces(t *testing.T) {
 	}
 }
 
-// A context token whose Task type covers only some of a Session's Tasks
-// cancels none of them, whatever order they are listed in.
 func TestCancelSessionChecksEveryTaskAgainstAContextTokenFirst(t *testing.T) {
 	agentTask := chatTask("default", "agent-turn", "default")
 	aiTask := chatTask("default", "ai-turn", "default")
@@ -762,8 +717,6 @@ func TestCancelSessionChecksEveryTaskAgainstAContextTokenFirst(t *testing.T) {
 	}
 }
 
-// A Session cancel the caller is refused for one of its Tasks stops no chat
-// turn: the Tasks are authorized before the active request is stopped.
 func TestRefusedSessionCancelLeavesTheActiveChatRunning(t *testing.T) {
 	aiTask := chatTask("default", "ai-turn", "default")
 	aiTask.Spec.Type = corev1alpha1.TaskTypeAI
@@ -803,17 +756,12 @@ func TestRefusedSessionCancelLeavesTheActiveChatRunning(t *testing.T) {
 	}
 }
 
-// newCronTemplate is a scheduled Task the controller has not yet moved to
-// Scheduled: a cron template still, whatever its phase.
 func newCronTemplate(name string, phase corev1alpha1.TaskPhase) *corev1alpha1.Task {
 	task := cancelTestTask(name, phase, "")
 	task.Spec.Schedule = "*/5 * * * *"
 	return task
 }
 
-// TestCancelMessageStaysWithinTheStatusLimit covers a caller with a very
-// long name: the cancel request it records stays within the bound, ends on a
-// whole character, and keeps the caller first.
 func TestCancelMessageStaysWithinTheStatusLimit(t *testing.T) {
 	long := strings.Repeat("é", 400)
 	message := cancelMessage(&UserInfo{Username: long}, strings.Repeat("r", 500))

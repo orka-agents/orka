@@ -12,23 +12,11 @@ import (
 	"strings"
 )
 
-// ControllerRelay sends a Provider's requests through the Orka controller,
-// which authenticates them to the Provider itself. The worker never holds
-// the Provider's credential: it authenticates to the relay with Token, its
-// own ServiceAccount token, which it already presents to the controller.
 type ControllerRelay struct {
-	// URL is the relay endpoint for one Provider slot of one Task.
-	URL string
-	// Token returns the worker's ServiceAccount token for the relay.
+	URL   string
 	Token BearerTokenSource
 }
 
-// NewControllerRelayHTTPClient returns a client for an SDK configured with
-// the Provider's own baseURL. Each request must be for that base URL; the
-// client sends it to the relay instead, with the path below the base URL and
-// the query unchanged, so the controller forwards exactly what the SDK
-// built. It drops any API key header, sends the relay token as the bearer,
-// and never follows a redirect.
 func NewControllerRelayHTTPClient(baseURL string, relay *ControllerRelay) (*http.Client, error) {
 	if relay == nil || relay.Token == nil {
 		return nil, errors.New("a controller relay needs a URL and a token source")
@@ -37,8 +25,6 @@ func NewControllerRelayHTTPClient(baseURL string, relay *ControllerRelay) (*http
 	if err != nil {
 		return nil, err
 	}
-	// A keyless Provider's baseURL is its resource's origin: the Azure SDK
-	// would place any path after /openai, outside the Provider's endpoint.
 	base, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || strings.Trim(base.EscapedPath(), "/") != "" || base.RawQuery != "" || base.Fragment != "" {
 		return nil, errors.New("a relayed Provider's baseURL must be the resource's origin, without a path or query")

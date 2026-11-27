@@ -25,7 +25,6 @@ describe('TaskStatusBadge', () => {
     render(<TaskStatusBadge phase={phase} />)
     const dot = screen.getByTestId('status-dot')
     expect(dot.className).toContain(dotClass)
-    // No legacy template pastel survives.
     expect(dot.className).not.toMatch(/bg-(yellow|blue|green|red)-(100|800|900)/)
   })
 
@@ -38,7 +37,6 @@ describe('TaskStatusBadge', () => {
   it('falls back to Pending style for unknown phase', () => {
     render(<TaskStatusBadge phase="Unknown" />)
     expect(screen.getByText('Unknown')).toBeInTheDocument()
-    // Unknown phases inherit the Pending dot color.
     expect(screen.getByTestId('status-dot').className).toContain('bg-status-pending')
   })
 })

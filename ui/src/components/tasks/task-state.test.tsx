@@ -31,7 +31,6 @@ describe('task state flags', () => {
     const parked = { kind: 'Approval', state: 'Waiting', references: ['ap-1'] }
     expect(isWaitingForApproval(task({ status: { phase: 'Succeeded', wait: parked } }))).toBe(true)
     expect(isWaitingForApproval(task({ status: { phase: 'Succeeded', wait: { ...parked, state: 'Requested' } } }))).toBe(true)
-    // A requested wait after a failed turn is abandoned, and a resumed one is settled.
     expect(isWaitingForApproval(task({ status: { phase: 'Failed', wait: { ...parked, state: 'Requested' } } }))).toBe(false)
     expect(isWaitingForApproval(task({ status: { phase: 'Succeeded', wait: { ...parked, state: 'Resumed' } } }))).toBe(false)
     expect(isWaitingForApproval(task({ metadata: { deletionTimestamp: '2026-10-14T00:00:00Z' }, status: { phase: 'Succeeded', wait: parked } }))).toBe(false)

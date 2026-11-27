@@ -43,8 +43,6 @@ import (
 
 var log = logf.Log.WithName("api-server")
 
-// ControllerEpochFenceSource exposes the controller's current durable fence to
-// internal broker authorization paths.
 type ControllerEpochFenceSource interface {
 	CurrentFence(context.Context) (store.ControllerEpochFence, error)
 }
@@ -53,9 +51,6 @@ type ControllerEpochReader interface {
 	GetControllerEpochFence(context.Context, string) (store.ControllerEpochFence, error)
 }
 
-// ControllerEpochStoreFenceSource reads the current fence directly from the
-// durable epoch store. Unlike ControllerEpochManager, it is safe for API
-// handlers on non-leader replicas because it has no leader-readiness barrier.
 type ControllerEpochStoreFenceSource struct {
 	epochs ControllerEpochReader
 }
@@ -71,7 +66,6 @@ func (s *ControllerEpochStoreFenceSource) CurrentFence(ctx context.Context) (sto
 	return s.epochs.GetControllerEpochFence(ctx, store.DefaultControllerEpochName)
 }
 
-// ServerConfig holds configuration for the API server
 type ServerConfig struct {
 	Port                      int
 	WatchNamespace            string
@@ -92,64 +86,37 @@ type ServerConfig struct {
 	ExternalEffects           store.ExternalEffectIdentityReader
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
-	// MemoryConsolidationStore records memory consolidation runs (ADR 0051).
-	MemoryConsolidationStore store.MemoryConsolidationStore
-	SecurityStore            store.SecurityStore
-	RepositoryMonitorStore   store.RepositoryMonitorStore
-	ExecutionEventStore      store.ExecutionEventStore
-	GatewayEventStore        store.GatewayEventStore
-	GatewayDeliveryStore     store.GatewayDeliveryStore
-	GatewayService           *gatewayruntime.Service
-	HealthChecker            store.HealthChecker
-	Clientset                kubernetes.Interface
-	APIReader                client.Reader
-	TaskProvenanceProtected  bool
-	ControllerEpochs         ControllerEpochFenceSource
-	E2EPromptFaultEnabled    bool
-	Connectors               ConnectorConfig
-	ConnectorTools           ConnectorToolExecutionConfig
-	// GitHubSignIn signs people in with GitHub and issues Orka sessions.
-	GitHubSignIn GitHubSignInConfig
-	// AHP serves the Agent Host Protocol at /ahp and its token routes; nil
-	// leaves /ahp unrouted and the token routes answering 501.
-	AHP *ahphost.Host
-	// AHPBackend, with AHP, serves Orka's built-in runtimes as AHP agents.
-	AHPBackend *AHPBackendConfig
-	// LiveEvents carries running Tasks' events from the ACP dispatcher to live
-	// event streams and the AHP backend; nil disables them.
-	LiveEvents *liveevents.Broker
-	// RESTConfig lets the API server run commands in AHP workspaces.
-	RESTConfig *rest.Config
-	// OperatorAccess configures `orka task exec` / `orka task cp`.
-	OperatorAccess OperatorAccessConfig
-	// SubstrateMCPProxy enables POST/DELETE /api/v1/tools/:name/mcp for
-	// Substrate MCP actor Tools through the manager's router identity.
-	SubstrateMCPProxy SubstrateMCPProxyConfig
-	// DashboardEnabled mirrors --dashboard-enabled: only then does the API
-	// port serve the embedded web dashboard and answer unrouted non-API
-	// paths with its index page.
-	DashboardEnabled bool
-	// MCP configures the control-plane MCP endpoint (--mcp-server-enabled).
-	MCP MCPServerConfig
-	// AgentUseAuthorization mirrors --agent-use-authorization-enabled: API
-	// callers then need the `use` verb on every Agent a Task, RepositoryScan,
-	// or RepositoryMonitor they create or edit names.
-	AgentUseAuthorization bool
-	// ProviderUseAuthorization mirrors --provider-use-authorization-enabled:
-	// API callers then need the `use` verb on every Provider a Task or Agent
-	// they create or edit newly names, and on every Provider a chat request
-	// resolves.
-	ProviderUseAuthorization bool
-	// TaskWebhookKeys publishes Task webhook verification keys at
-	// TaskWebhookJWKSPath. Nil serves an empty key set.
-	TaskWebhookKeys taskwebhook.KeySource
-	// AgentIdentityAudit serves redacted agent-identity-audit records via GET /api/v1/audit/identity.
-	AgentIdentityAudit outboundaccess.AgentIdentityAuditReader
+	MemoryConsolidationStore  store.MemoryConsolidationStore
+	SecurityStore             store.SecurityStore
+	RepositoryMonitorStore    store.RepositoryMonitorStore
+	ExecutionEventStore       store.ExecutionEventStore
+	GatewayEventStore         store.GatewayEventStore
+	GatewayDeliveryStore      store.GatewayDeliveryStore
+	GatewayService            *gatewayruntime.Service
+	HealthChecker             store.HealthChecker
+	Clientset                 kubernetes.Interface
+	APIReader                 client.Reader
+	TaskProvenanceProtected   bool
+	ControllerEpochs          ControllerEpochFenceSource
+	E2EPromptFaultEnabled     bool
+	Connectors                ConnectorConfig
+	ConnectorTools            ConnectorToolExecutionConfig
+	GitHubSignIn              GitHubSignInConfig
+	AHP                       *ahphost.Host
+	AHPBackend                *AHPBackendConfig
+	LiveEvents                *liveevents.Broker
+	RESTConfig                *rest.Config
+	OperatorAccess            OperatorAccessConfig
+	SubstrateMCPProxy         SubstrateMCPProxyConfig
+	DashboardEnabled          bool
+	MCP                       MCPServerConfig
+	AgentUseAuthorization     bool
+	ProviderUseAuthorization  bool
+	TaskWebhookKeys           taskwebhook.KeySource
+	AgentIdentityAudit        outboundaccess.AgentIdentityAuditReader
 }
 
-// Server is the REST API server
 type Server struct {
-	// ahpBackend is the AHP session backend, when AHP serves sessions.
 	ahpBackend          *ahpBackend
 	app                 *fiber.App
 	client              client.Client
@@ -173,11 +140,9 @@ type Server struct {
 
 	memoryConsolidationStore store.MemoryConsolidationStore
 
-	// substrateMCPProxyWriteTimeout bounds each MCP proxy response write.
 	substrateMCPProxyWriteTimeout time.Duration
 }
 
-// NewServer creates a new API server
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
 	config.Chat.ExecutionMode = config.ExecutionMode
 	config.Chat.DashboardEnabled = config.DashboardEnabled
@@ -239,6 +204,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		OIDCEnabled:               config.OIDC.Enabled(),
 		OIDCIssuer:                config.OIDC.Issuer,
 		OIDCAudience:              config.OIDC.Audience,
+		OIDCScopes:                config.OIDC.Scopes,
 		AHP:                       config.AHP,
 		SubstrateMCPProxy:         config.SubstrateMCPProxy,
 		AgentIdentityAudit:        config.AgentIdentityAudit,
@@ -293,24 +259,13 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 	if isGatewayIngressPath(path) {
 		return fasthttp.RequestConfig{MaxRequestBodySize: protocol.MaxHTTPBodyBytes}
 	}
-	// Use Fiber's fasthttp path semantics for the streaming exemption, including
-	// fragment handling. net/url would retain a literal '#' in the path and
-	// leave a routed native import without its bounded read deadline.
 	var nativeURI fasthttp.URI
 	if nativeURI.Parse(header.Host(), header.RequestURI()) == nil && isNativeSessionImportPath(string(nativeURI.PathOriginal())) {
 		return fasthttp.RequestConfig{MaxRequestBodySize: harnessv2.NativeSessionJSONLimit(nativeSessionMaxBytes), ReadTimeout: 30 * time.Second}
 	}
-	// Internal broker endpoints authorize against per-pool secrets that are
-	// only resolvable from the request body, so unauthenticated peers cannot
-	// be rejected on headers alone. Bound both the body size and the full
-	// request read so a Pod-local peer cannot hold controller connections
-	// open by dripping chunked bodies.
 	if strings.HasPrefix(path, "/internal/v2/acp/") {
 		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
 	}
-	// The provider relay reads the worker's body before taking a relay slot,
-	// and streams the Provider's answer back. Bound both the upload and the
-	// worker's read of the answer, which a context deadline cannot interrupt.
 	if isProviderRelayPath(path) {
 		return fasthttp.RequestConfig{
 			MaxRequestBodySize: providerRelayMaxRequestBytes,
@@ -318,8 +273,6 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 			WriteTimeout:       providerRelayTimeout,
 		}
 	}
-	// The MCP handler reads its body before taking a concurrency permit;
-	// bound that read so stalled uploads only cost their own connection.
 	var mcpURI fasthttp.URI
 	if mcpURI.Parse(header.Host(), header.RequestURI()) == nil && isMCPEndpointPath(string(mcpURI.PathOriginal())) {
 		return fasthttp.RequestConfig{MaxRequestBodySize: mcpMaxRequestBytes, ReadTimeout: mcpRequestReadTimeout}
@@ -327,26 +280,17 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 	return fasthttp.RequestConfig{}
 }
 
-// requestConfig bounds writes on the Responses and MCP proxy routes as well as
-// provider and Actor work.
-// A context deadline cannot interrupt a socket blocked by a client that stops
-// reading. fasthttp applies and clears this deadline for each keep-alive request.
 func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 	if isOperatorFileUpload(header) {
 		return fasthttp.RequestConfig{MaxRequestBodySize: int(operatoraccess.MaxFileBytes), ReadTimeout: 10 * time.Minute}
 	}
 	if isOperatorFileDownload(header) {
-		// The streamed copy-out body is bounded like its supervisor transfer;
-		// a client that stops reading cannot pin the response and its audit.
 		return fasthttp.RequestConfig{WriteTimeout: operatorFileTransferTimeout}
 	}
 	config := requestBodyConfigWithNativeSessionLimit(header, s.handlers.nativeSessionMaxBytes)
-	// Fiber routes on fasthttp PathOriginal, including its fragment handling.
-	// net/url's request-target parsing differs for a literal '#' character.
 	var uri fasthttp.URI
 	if header.IsPost() && uri.Parse(header.Host(), header.RequestURI()) == nil &&
 		bytes.EqualFold(bytes.TrimRight(uri.PathOriginal(), "/"), []byte("/openai/v1/responses")) {
-		// Allow a bounded grace period to deliver the terminal timeout event.
 		config.WriteTimeout = s.openaiHandler.config.MaxDuration + time.Second
 	}
 	if isSubstrateMCPProxyRoute(header) {
@@ -359,14 +303,10 @@ func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestC
 	return config
 }
 
-// isOperatorFileUpload matches PUT /api/v1/tasks/{task}/files, whose bounded
-// body is streamed to the runtime supervisor.
 func isOperatorFileUpload(header *fasthttp.RequestHeader) bool {
 	return string(header.Method()) == fiber.MethodPut && isOperatorFilesPath(header)
 }
 
-// isOperatorFileDownload matches GET /api/v1/tasks/{task}/files, whose body is
-// streamed from the runtime supervisor.
 func isOperatorFileDownload(header *fasthttp.RequestHeader) bool {
 	return string(header.Method()) == fiber.MethodGet && isOperatorFilesPath(header)
 }
@@ -376,43 +316,30 @@ func isOperatorFilesPath(header *fasthttp.RequestHeader) bool {
 	if uri.Parse(header.Host(), header.RequestURI()) != nil {
 		return false
 	}
-	// Fiber routes case-insensitively, so this must match every spelling the
-	// upload route accepts.
 	parts := strings.Split(strings.Trim(string(uri.PathOriginal()), "/"), "/")
 	return len(parts) == 5 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
 		strings.EqualFold(parts[2], externalToolTaskResource) && strings.EqualFold(parts[4], "files")
 }
 
-// isGatewayIngressPath matches /api/v1/gateways/{gateway}/{channel}/events,
-// the adapter ingress route with its own bounded request configuration and
-// streaming body reader.
 func isGatewayIngressPath(path string) bool {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	return len(parts) == 6 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
 		strings.EqualFold(parts[2], "gateways") && strings.EqualFold(parts[5], "events")
 }
 
-// setupMiddleware configures middleware for the server
 func (s *Server) setupMiddleware() {
-	// Outermost, so it runs after every handler and middleware has returned.
 	s.app.Use(drainUnreadRequestBody)
 
-	// Recovery middleware
 	s.app.Use(recover.New())
 
-	// Before anything reads the request context: an MCP wait's REST replays
-	// end with the wait.
 	if s.config.MCP.Enabled {
 		s.app.Use(adoptMCPReplayDeadline)
 	}
 
-	// Request ID middleware
 	s.app.Use(requestid.New())
 
-	// Tracing middleware (after request ID so spans include it)
 	s.app.Use(NewTracingMiddleware())
 
-	// CORS middleware
 	allowedOrigins := os.Getenv("ORKA_CORS_ALLOWED_ORIGINS")
 	if allowedOrigins == "" {
 		allowedOrigins = "*"
@@ -425,16 +352,19 @@ func (s *Server) setupMiddleware() {
 	if s.config.MCP.Enabled {
 		allowHeaders = append(allowHeaders, mcpCORSHeaders...)
 	}
+	var exposeHeaders []string
+	if _, _, mcpOAuth := mcpOAuthMetadata(s.config.MCP, s.config.OIDC); mcpOAuth {
+		exposeHeaders = []string{fiber.HeaderWWWAuthenticate}
+	}
 	s.app.Use(cors.New(cors.Config{
-		AllowOrigins: origins,
-		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders: allowHeaders,
+		AllowOrigins:  origins,
+		AllowMethods:  []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
+		AllowHeaders:  allowHeaders,
+		ExposeHeaders: exposeHeaders,
 	}))
 
-	// Logging middleware
 	s.app.Use(NewLoggingMiddleware())
 
-	// Metrics middleware
 	s.app.Use(NewMetricsMiddleware())
 
 }
@@ -461,41 +391,30 @@ func allowedCORSHeaders(contextTokens ContextTokenConfig) []string {
 	return headers
 }
 
-// setupRoutes configures the API routes
 func (s *Server) setupRoutes() {
-	// The ACP artifact transport must be installed before other routes so large
-	// capability-bound uploads remain streamed while ordinary API bodies retain
-	// the historical bounded request limit.
 	s.installACPArtifactTransport()
 	s.installACPArtifactAuthorizationBroker()
 	s.installACPE2EPromptWriteFaultRecorder()
 
-	// Health endpoints
 	s.app.Get("/healthz", s.handlers.Healthz)
 	s.app.Get("/readyz", s.handlers.Readyz)
 
-	// Task webhook receivers fetch verification keys without credentials.
 	s.app.Get(TaskWebhookJWKSPath, s.taskWebhookJWKS)
 
-	// Gateway ingress uses the Gateway-bound inbound bearer Secret rather than user/OIDC auth.
+	mcpMetadata, mcpChallenge, mcpOAuth := mcpOAuthMetadata(s.config.MCP, s.config.OIDC)
+	if mcpOAuth {
+		s.app.Get(mcpProtectedResourceMetadataPath, serveMCPProtectedResourceMetadata(mcpMetadata))
+	}
 	s.app.Post("/api/v1/gateways/:namespace/:name/events", s.handlers.HandleGatewayEvent)
 
-	// GitHub webhooks use HMAC verification instead of Kubernetes/OIDC bearer auth.
 	s.app.Post("/webhooks/github", s.handlers.HandleGitHubWebhook)
 
-	// The connector OAuth callback arrives from the provider through the
-	// person's browser without an Orka bearer token. The signed single-use
-	// state and the sealed PKCE verifier authenticate it instead.
 	s.app.Get(connectors.CallbackPath, s.handlers.ConnectionCallback)
 
-	// The AHP endpoint authenticates its own connection tokens before the
-	// WebSocket upgrade, so it sits outside the bearer-auth group.
 	if s.config.AHP != nil {
 		s.app.Get(ahpEndpointPath, ahpEndpoint(s.config.AHP))
 	}
 
-	// GitHub sign-in: clients read how to sign in, and trade a GitHub token
-	// for a session, before they hold any Orka credential.
 	s.app.Get("/api/v1/auth/config", s.handlers.GetAuthConfig)
 	s.app.Post("/api/v1/auth/github", s.handlers.SignInWithGitHub)
 
@@ -505,10 +424,8 @@ func (s *Server) setupRoutes() {
 	}
 	externalAuth := NewAuthMiddleware(s.client, authConfig)
 
-	// API v1 group
 	api := s.externalAPIGroup("/api/v1", externalAuth)
 
-	// Task endpoints
 	api.Post("/tasks", s.handlers.CreateTask)
 	api.Get("/tasks", s.handlers.ListTasks)
 	api.Get("/tasks/:id", s.handlers.ahpTaskPrivate(s.handlers.GetTask))
@@ -519,7 +436,6 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks/:id/stream", s.handlers.ahpTaskPrivate(s.handlers.StreamTaskEvents))
 	api.Get("/tasks/:id/trace", s.handlers.ahpTaskPrivate(s.handlers.GetTaskTrace))
 	api.Get("/tasks/:id/approvals", s.handlers.ahpTaskPrivate(s.handlers.ListTaskApprovals))
-	// Cross-Task attention read models, computed on read for one namespace.
 	api.Get("/attention", s.handlers.ListAttention)
 	api.Get("/approvals", s.handlers.ListPendingApprovals)
 	api.Get("/audit/identity", s.handlers.ListAgentIdentityAudit)
@@ -531,16 +447,10 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks/:id/children", s.handlers.ahpTaskPrivate(s.handlers.GetTaskChildren))
 	api.Get("/tasks/:id/artifacts", s.handlers.ahpTaskPrivate(s.handlers.ListTaskArtifacts))
 	api.Get("/tasks/:id/artifacts/:filename", s.handlers.ahpTaskPrivate(s.handlers.DownloadTaskArtifact))
-	// Operator workspace debugging. Disabled unless --operator-workspace-access-enabled;
-	// each call also needs the class opt-in and the dedicated tasks/exec or
-	// tasks/files permission.
-	// Their audit envelope precedes route authorization so dedicated
-	// permission denials are audited too. An AHP turn's Task stays private.
 	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationExec)).Get("/tasks/:id/exec", s.handlers.ahpTaskPrivate(s.HandleOperatorExec))
 	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationCopyOut)).Get("/tasks/:id/files", s.handlers.ahpTaskPrivate(s.HandleOperatorFileDownload))
 	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationCopyIn)).Put("/tasks/:id/files", s.handlers.ahpTaskPrivate(s.HandleOperatorFileUpload))
 
-	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)
 	api.Get("/sessions/:id", s.handlers.ahpSessionPrivate(s.handlers.GetSession))
 	api.Get("/sessions/:id/native", s.handlers.ahpSessionPrivate(s.handlers.ExportNativeSession))
@@ -550,7 +460,6 @@ func (s *Server) setupRoutes() {
 	api.Delete("/sessions/:id", s.handlers.ahpSessionPrivate(s.handlers.DeleteSession))
 	api.Post("/sessions/:id/cancel", s.handlers.ahpSessionPrivate(s.handlers.CancelSession))
 
-	// Generic gateway operator endpoints.
 	api.Get("/gatewayclasses", s.handlers.ListGatewayClasses)
 	api.Get("/gatewayclasses/:name", s.handlers.GetGatewayClass)
 	api.Get("/gateways", s.handlers.ListGateways)
@@ -563,7 +472,6 @@ func (s *Server) setupRoutes() {
 	api.Get("/gateway-deliveries/:id", s.handlers.GetGatewayDelivery)
 	api.Post("/gateway-deliveries/:id/retry", s.handlers.RetryGatewayDelivery)
 
-	// Memory endpoints
 	api.Get("/memories", s.handlers.ListMemories)
 	api.Post("/memories", s.handlers.CreateMemory)
 	api.Get("/memories/:id", s.handlers.GetMemory)
@@ -578,7 +486,6 @@ func (s *Server) setupRoutes() {
 	api.Post("/memory-proposals/:id/apply", s.handlers.ApplyMemoryProposal)
 	api.Post("/memory-proposals/:id/archive", s.handlers.ArchiveMemoryProposal)
 
-	// Provider endpoints
 	api.Get("/usage", s.handlers.GetUsageReport)
 	api.Get("/usage/work/:id", s.handlers.GetUsageWork)
 	api.Get("/usage/other/:category", s.handlers.GetUsageOther)
@@ -589,18 +496,14 @@ func (s *Server) setupRoutes() {
 	api.Put("/providers/:name", s.handlers.UpdateProvider)
 	api.Delete("/providers/:name", s.handlers.DeleteProvider)
 
-	// Tool endpoints
 	api.Get("/tools", s.handlers.ListTools)
 	api.Post("/tools", s.handlers.CreateTool)
 	api.Get("/tools/:name", s.handlers.GetTool)
 	api.Put("/tools/:name", s.handlers.UpdateTool)
 	api.Delete("/tools/:name", s.handlers.DeleteTool)
-	// Substrate MCP actors are reachable only through this authenticated
-	// proxy; the manager is the router's sole allowlisted client.
 	api.Post("/tools/:name/mcp", s.handlers.ProxySubstrateMCPTool)
 	api.Delete("/tools/:name/mcp", s.handlers.ProxySubstrateMCPTool)
 
-	// Runtime fabric endpoints
 	api.Get("/runtime-pools", s.handlers.ListRuntimePools)
 	api.Get("/runtime-pools/:name", s.handlers.GetRuntimePool)
 	api.Get("/agent-runtimes", s.handlers.ListAgentRuntimes)
@@ -609,7 +512,6 @@ func (s *Server) setupRoutes() {
 	api.Put("/agent-runtimes/:name", s.handlers.UpdateAgentRuntime)
 	api.Delete("/agent-runtimes/:name", s.handlers.DeleteAgentRuntime)
 
-	// Agent endpoints
 	api.Post("/agents", s.handlers.CreateAgent)
 	api.Get("/agents", s.handlers.ListAgents)
 	api.Get("/agents/:name", s.handlers.GetAgent)
@@ -618,7 +520,6 @@ func (s *Server) setupRoutes() {
 	api.Put("/agents/:name/spec", s.handlers.UpdateAgentSpec)
 	api.Delete("/agents/:name", s.handlers.DeleteAgent)
 
-	// Skills endpoints
 	api.Post("/skills", s.handlers.CreateSkill)
 	api.Get("/skills", s.handlers.ListSkills)
 	api.Get("/skills/:name", s.handlers.GetSkill)
@@ -626,7 +527,6 @@ func (s *Server) setupRoutes() {
 	api.Put("/skills/:name", s.handlers.UpdateSkill)
 	api.Delete("/skills/:name", s.handlers.DeleteSkill)
 
-	// Security endpoints
 	api.Post("/security/repositories", s.handlers.CreateRepositoryScan)
 	api.Get("/security/repositories", s.handlers.ListRepositoryScans)
 	api.Get("/security/repositories/:name", s.handlers.GetRepositoryScan)
@@ -649,7 +549,6 @@ func (s *Server) setupRoutes() {
 	api.Get("/security/findings/:id/patches", s.handlers.ListSecurityPatchProposals)
 	api.Post("/security/findings/:id/pull-request", s.handlers.CreateSecurityPullRequest)
 
-	// Repository monitor endpoints
 	api.Post("/monitors/repositories", s.handlers.CreateRepositoryMonitor)
 	api.Get("/monitors/repositories", s.handlers.ListRepositoryMonitors)
 	api.Get("/monitors/repositories/:name", s.handlers.GetRepositoryMonitor)
@@ -672,19 +571,15 @@ func (s *Server) setupRoutes() {
 	api.Get("/monitors/mutations/:id", s.handlers.GetRepositoryMonitorGitHubMutation)
 	api.Get("/monitors/events", s.handlers.ListRepositoryMonitorEvents)
 
-	// Substrate actor-pool endpoints
 	api.Get("/substrate-actor-pools", s.handlers.ListSubstrateActorPools)
 	api.Post("/substrate-actor-pools", s.handlers.CreateSubstrateActorPool)
 	api.Get("/substrate-actor-pools/:name", s.handlers.GetSubstrateActorPool)
 	api.Put("/substrate-actor-pools/:name", s.handlers.UpdateSubstrateActorPool)
 	api.Delete("/substrate-actor-pools/:name", s.handlers.DeleteSubstrateActorPool)
 
-	// Auth validation endpoints
 	api.Get("/auth/validate", s.handleAuthValidate)
 	api.Get("/auth/whoami", s.handleAuthWhoAmI)
 
-	// Connector catalog and per-person Connections. Every handler re-checks
-	// that the caller is a verified human identity and owns the Connection.
 	api.Get("/connectors", s.handlers.ListConnectors)
 	api.Get("/connections", s.handlers.ListConnections)
 	api.Post("/connections", s.handlers.CreateConnection)
@@ -701,45 +596,35 @@ func (s *Server) setupRoutes() {
 	api.Post("/agent-hosts/invites", s.handlers.CreateInvite)
 	api.Get("/agent-hosts/invites/:id", s.handlers.GetInvite)
 
-	// AHP connection tokens. Every handler re-checks that the caller is a
-	// verified human identity and owns the token.
 	api.Post("/ahp-tokens", s.handlers.CreateAHPToken)
 	api.Get("/ahp-tokens", s.handlers.ListAHPTokens)
 	api.Delete("/ahp-tokens/:id", s.handlers.RevokeAHPToken)
 
-	// Reference endpoints (for dropdowns)
 	api.Get("/secrets", s.handlers.ListSecretNames)
 
-	// Chat endpoints
 	if s.config.Chat.Enabled {
 		api.Post("/chat", s.chatHandler.HandleChat)
 		api.Get("/chat/config", s.chatHandler.HandleChatConfig)
 		api.Delete("/chat/:sessionId", s.chatHandler.HandleCancelChat)
 	}
 
-	// OpenAI-compatible API (under /openai/v1, separate from /api/v1)
-	// This allows OpenAI-compatible clients to use Orka as a custom provider.
 	oai := s.externalAPIGroup("/openai/v1", externalAuth)
 	oai.Post("/chat/completions", s.openaiHandler.HandleChatCompletions)
 	oai.Post("/responses", s.openaiHandler.HandleResponses)
 	oai.Get("/models", s.openaiHandler.HandleListModels)
 
-	// Anthropic-compatible API
 	anthropic := s.externalAPIGroup("/anthropic/v1", externalAuth)
 	anthropic.Post("/messages", s.anthropicHandler.HandleMessages)
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
-	// Control-plane MCP endpoint. The route only authenticates; each tool
-	// replays its REST route in process, which authorizes it.
 	if s.config.MCP.Enabled {
 		app := s.app
 		s.mcpServer = newMCPServer(func(ctx *fasthttp.RequestCtx) { app.Server().Handler(ctx) }, s.config.MCP)
 		s.mcpServer.replayHeaders = mcpReplayHeaders(s.config.ContextTokens)
-		mcp := s.externalAPIGroup(mcpEndpointPath, externalAuth)
+		mcp := s.externalAPIGroup(mcpEndpointPath, withMCPBearerChallenge(externalAuth, mcpChallenge))
 		mcp.Post("", s.mcpServer.Handle)
 	}
 
-	// Internal API for worker communication.
 	if s.hasInternalStores() {
 		s.internalHandlers = NewInternalHandlers(
 			s.ResultStore,
@@ -762,19 +647,12 @@ func (s *Server) setupRoutes() {
 			},
 		)
 		internal := s.app.Group("/internal/v1")
-		// Optional origin bootstrap must distinguish a TokenReview backend outage
-		// from an invalid token. Register before the default auth middleware so no
-		// other internal or public route changes its authentication error contract.
 		internal.Get("/tasks/:namespace/:taskName/gateway-messages/origin",
 			NewAuthMiddleware(s.client, AuthConfig{ReportTokenReviewUnavailable: true}),
 			s.internalHandlers.GetGatewayReplyOrigin)
 		internal.Use(NewAuthMiddleware(s.client))
 		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
-		// Native workers run connector-backed tools here; the person's token
-		// never leaves the controller.
 		internal.Post("/tasks/:namespace/:taskName/connector-tools/:tool", s.internalHandlers.ExecuteConnectorTool)
-		// AI workers reach keyless Providers here; the Provider identity's
-		// token never leaves the controller.
 		internal.All("/tasks/:namespace/:taskName/providers/:slot/*", s.internalHandlers.RelayProviderRequest)
 		internal.Post("/tasks/:namespace/:taskName/gateway-messages", s.internalHandlers.SubmitGatewayMessage)
 		internal.Post("/tasks/:namespace/:taskName/children/:child/requester-stamp", s.internalHandlers.SealChildRequesterStamp)
@@ -819,7 +697,6 @@ func (s *Server) hasInternalStores() bool {
 		s.config.GatewayService != nil
 }
 
-// Start starts the API server
 func (s *Server) Start(ctx context.Context) error {
 	addr := fmt.Sprintf(":%d", s.config.Port)
 	log.Info("starting API server", "address", addr)
@@ -827,14 +704,12 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.ahpBackend != nil {
 		go s.ahpBackend.workspaces.collectIdle(ctx)
 	}
-	// Start server in a goroutine
 	errCh := make(chan error, 1)
 	go func() {
 		if err := s.app.Listen(addr); err != nil {
 			errCh <- err
 		}
 	}()
-	// Wait for shutdown signal or error
 	select {
 	case <-ctx.Done():
 		log.Info("shutting down API server")
@@ -844,17 +719,8 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
-// apiPathRoots are the request path roots served by an API rather than by the
-// dashboard. A 404 under one of them is a routing answer the caller needs to
-// see, not a client-side route for the SPA to resolve. Lower case and without
-// a trailing slash, matched against a normalized path: see routeLookupPath.
 var apiPathRoots = []string{"/api", "/openai", "/anthropic", "/internal", "/webhooks", "/.well-known", mcpEndpointPath}
 
-// routeLookupPath normalizes path the way the router matches it. Fiber is
-// case-insensitive and non-strict about a trailing slash by default, so
-// /OPENAI/v1/chat/completions and /openai/v1/chat/completions/ both reach the
-// registered handler. Unrouted paths have to be classified the same way, or a
-// caller gets a different answer for a spelling the router treats as identical.
 func routeLookupPath(path string) string {
 	folded := strings.ToLower(path)
 	for len(folded) > 1 && strings.HasSuffix(folded, "/") {
@@ -863,14 +729,8 @@ func routeLookupPath(path string) string {
 	return folded
 }
 
-// staticAssetRoot holds the hashed build output. A missing file under it is a
-// stale or mistyped chunk reference: answering with index.html would hand the
-// browser HTML where it expects JavaScript or CSS, so it stays a 404.
 const staticAssetRoot = "/assets"
 
-// spaFallbackEligible reports whether a 404 for path is served as the SPA
-// index page instead of a JSON error. Telemetry middleware uses the same
-// predicate so the recorded status matches what the client receives.
 func spaFallbackEligible(path string) bool {
 	folded := routeLookupPath(path)
 	underRoot := func(root string) bool { return folded == root || strings.HasPrefix(folded, root+"/") }
@@ -880,25 +740,6 @@ func spaFallbackEligible(path string) bool {
 	return folded != "/healthz" && folded != "/readyz"
 }
 
-// customErrorHandler handles errors returned by handlers and produces a
-// consistent JSON envelope for all main API endpoints.
-//
-// Error response format contract:
-//
-//   - Main API (/api/...): {"error": {"code": <HTTP status>, "message": "..."}}
-//     Handlers return fiber.NewError(code, msg) which is caught here.
-//
-//   - OpenAI-compatible proxy (/v1/...): follows the OpenAI error spec:
-//     {"error": {"message": "...", "type": "...", "param": ..., "code": ...}}
-//     These endpoints format errors directly and do NOT use this handler.
-//
-//   - Anthropic-compatible proxy (/anthropic/...): follows the Anthropic error spec:
-//     {"type": "error", "error": {"type": "...", "message": "..."}}
-//     These endpoints format errors directly and do NOT use this handler.
-//
-//   - Chat tool results (internal): {"success": false, "error": "...", "errorType": "...", "suggestion": "..."}
-//     This is an internal format between the tool executor and the chat loop,
-//     embedded in LLM messages. It is NOT a user-facing API error response.
 func customErrorHandler(c fiber.Ctx, err error) error {
 	code := fiber.StatusInternalServerError
 	message := "Internal Server Error"
@@ -913,18 +754,14 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 	if code == fiber.StatusServiceUnavailable && len(c.Response().Header.Peek(fiber.HeaderRetryAfter)) == 0 {
 		c.Set(fiber.HeaderRetryAfter, serviceUnavailableRetryAfterSeconds)
 	}
-	// Every error body is JSON or the SPA page; neither may be sniffed.
 	c.Set(fiber.HeaderXContentTypeOptions, "nosniff")
 
-	// For 404s on non-API paths, serve the SPA index.html
 	if code == fiber.StatusNotFound && dashboardServed(c) && spaFallbackEligible(c.Path()) {
 		if page, ok := embeddedSPAIndexPage(); ok {
 			return page.send(c)
 		}
 	}
 
-	// Callers of the compatibility APIs are provider SDKs that parse only that
-	// provider's error envelope, so an unrouted path answers in its format.
 	if code == fiber.StatusNotFound {
 		if handled, resp := compatRouteNotFound(c); handled {
 			return resp
@@ -939,27 +776,17 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 	})
 }
 
-// unsupportedCompatRoutes names endpoints of the emulated provider APIs that
-// Orka deliberately does not serve, and the supported route to use instead.
-// Keys are lower case and looked up with a folded path.
-// Saying so costs a client one line in its log rather than a parse failure
-// several frames from the cause.
 var unsupportedCompatRoutes = map[string]string{
 	"/openai/v1/conversations": "saved conversations are not supported; use /openai/v1/responses with store:false and client-owned history",
 }
 
-// compatRouteNotFound answers an unrouted compatibility-API path in the error
-// format that API's clients expect. It reports whether it handled the path.
 func compatRouteNotFound(c fiber.Ctx) (bool, error) {
 	path := routeLookupPath(c.Path())
 	status := fiber.StatusNotFound
 
 	message, unsupported := unsupportedCompatRoutes[path]
 	if unsupported {
-		// The endpoint is a real part of the emulated API and this server does
-		// not implement it, which is 501 rather than "no such route".
 		status = fiber.StatusNotImplemented
-		// Provider SDKs should not retry this permanent failure.
 		c.Set("X-Should-Retry", "false")
 	} else {
 		message = fmt.Sprintf("unknown path %s", path)

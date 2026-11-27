@@ -27,7 +27,6 @@ func TestFS_ContainsIndexHTML(t *testing.T) {
 		t.Fatalf("FS() error = %v", err)
 	}
 
-	// The dist/ directory should contain at least index.html
 	f, err := fsys.Open("index.html")
 	if err != nil {
 		t.Fatalf("Open(index.html) error = %v", err)
@@ -57,7 +56,6 @@ func TestFS_ReadDir(t *testing.T) {
 		t.Error("expected at least one entry in dist/")
 	}
 
-	// Verify index.html is among entries
 	found := false
 	for _, e := range entries {
 		if e.Name() == "index.html" {

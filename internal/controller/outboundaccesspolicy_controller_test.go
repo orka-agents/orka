@@ -831,8 +831,6 @@ func TestToolReconcilerRejectsOutboundAccessPolicyOnSubstrateMCPTool(t *testing.
 			MCP:  &corev1alpha1.MCPToolServer{SubstrateActor: &corev1alpha1.SubstrateMCPActor{}},
 		},
 	}
-	// Substrate MCP actors are reached only through the Orka MCP proxy, so a
-	// caller-resolved outbound credential or gateway route can never apply.
 	for _, endpoint := range []string{"", "https://actor.example.test/mcp", "/api/v1/tools/mcp/mcp?namespace=tenant"} {
 		tool.Status.Endpoint = endpoint
 		if err := reconciler.validateToolHTTPAuth(context.Background(), tool); err == nil || !strings.Contains(err.Error(), "do not support outboundAccessPolicyRef") {
@@ -886,14 +884,10 @@ func TestOutboundAccessPolicyReconcilerReportsACappedDelegationAge(t *testing.T)
 	}
 }
 
-// A TokenRequest for the AI worker's own ServiceAccount can bind the token to
-// any Pod that runs as it, including another Task's worker Pod, so the
-// controller never grants one and revokes a grant left from earlier releases.
 func TestOutboundAccessPolicyReconcilerRevokesTokenRequestForAIWorkerServiceAccount(t *testing.T) {
 	scheme := outboundPolicyControllerTestScheme(t)
 	policy := controllerServiceAccountPolicy("worker-token", testAIWorkerServiceAccountName)
 	policy.Finalizers = []string{outboundTokenRequestRBACFinalizer}
-	// Externally managed, so unlabeled: refused by the configured name alone.
 	worker := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: testAIWorkerServiceAccountName, Namespace: policy.Namespace}}
 	reconciler := &OutboundAccessPolicyReconciler{
 		Scheme:                     scheme,

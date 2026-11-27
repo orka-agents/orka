@@ -625,8 +625,6 @@ func advanceACPSessionTestEpoch(t *testing.T, s *sqlite.Store, holder string) st
 	return store.ControllerEpochFence{Name: next.Name, Epoch: next.Epoch, HolderID: next.HolderID}
 }
 
-// acpSessionTestStores is the SQLite duplicate control implementation used as
-// every continuity store. A sealedTestStore also seals native state.
 type acpSessionTestStores interface {
 	store.SessionControlStore
 	store.SessionStore

@@ -45,13 +45,11 @@ const (
 	defaultCodeExecLocalMaxProcesses = int64(1024)
 )
 
-// denyPattern pairs a compiled regex with a human-readable description
 type denyPattern struct {
 	re   *regexp.Regexp
 	desc string
 }
 
-// defaultDenyPatterns blocks dangerous shell commands in bash/sh execution
 var defaultDenyPatterns = []denyPattern{
 	{regexp.MustCompile(`\brm\s+-[rf]{1,2}\b`), "destructive rm command"},
 	{regexp.MustCompile(`\bdel\s+/[fq]\b`), "destructive del command"},
@@ -63,13 +61,10 @@ var defaultDenyPatterns = []denyPattern{
 	{regexp.MustCompile(`:\(\)\s*\{.*\};\s*:`), "fork bomb"},
 }
 
-// CodeExecutor is the execution backend used by CodeExecTool. Kubernetes,
-// in-process, and unsupported backends all implement it.
 type CodeExecutor interface {
 	Execute(ctx context.Context, req CodeExecutionRequest) CodeExecResult
 }
 
-// CodeExecutionRequest contains a validated code execution request for a backend.
 type CodeExecutionRequest struct {
 	Backend          string
 	Language         string
@@ -86,7 +81,6 @@ type CodeExecutionRequest struct {
 	InputHash        string
 }
 
-// CodeExecTool implements code execution functionality.
 type CodeExecTool struct {
 	workDir          string
 	timeout          time.Duration
@@ -97,14 +91,12 @@ type CodeExecTool struct {
 	outputLimitBytes int64
 }
 
-// CodeExecArgs are the arguments for the code execution tool.
 type CodeExecArgs struct {
 	Language string `json:"language"`
 	Code     string `json:"code"`
-	Timeout  *int   `json:"timeout,omitempty"` // Timeout in seconds; nil when omitted
+	Timeout  *int   `json:"timeout,omitempty"`
 }
 
-// CodeExecResult represents the execution result.
 type CodeExecResult struct {
 	Output          string `json:"output"`
 	Error           string `json:"error,omitempty"`
@@ -114,14 +106,12 @@ type CodeExecResult struct {
 	ErrorTruncated  bool   `json:"error_truncated,omitempty"`
 }
 
-// InProcessCodeExecutor runs code on the current worker host with local process hardening.
 type InProcessCodeExecutor struct{}
 
 type unsupportedCodeExecutor struct {
 	backend string
 }
 
-// NewCodeExecTool creates a new code execution tool.
 func NewCodeExecTool() *CodeExecTool {
 	workDir := os.Getenv(workerenv.WorkDir)
 	if workDir == "" {
@@ -339,17 +329,14 @@ func normalizeCodeExecBackend(backend string) string {
 	}
 }
 
-// Name returns the tool name.
 func (t *CodeExecTool) Name() string {
 	return codeExecToolName
 }
 
-// Description returns the tool description.
 func (t *CodeExecTool) Description() string {
 	return "Execute code in a sandboxed environment. Supports Python, JavaScript (Node.js), and Bash."
 }
 
-// Parameters returns the JSON Schema for parameters.
 func (t *CodeExecTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -375,7 +362,6 @@ func (t *CodeExecTool) Parameters() json.RawMessage {
 	}`)
 }
 
-// Execute runs the code.
 func (t *CodeExecTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var execArgs CodeExecArgs
 	if err := json.Unmarshal(args, &execArgs); err != nil {
@@ -459,7 +445,6 @@ func (t *CodeExecTool) codeExecOutputLimitBytes() int64 {
 	return defaultCodeExecOutputLimitBytes
 }
 
-// Execute runs the request with the in-process backend.
 func (e *InProcessCodeExecutor) Execute(ctx context.Context, req CodeExecutionRequest) CodeExecResult {
 	start := time.Now()
 	result := CodeExecResult{ExitCode: -1}
@@ -518,7 +503,6 @@ func (e *unsupportedCodeExecutor) Execute(ctx context.Context, req CodeExecution
 	return result
 }
 
-// executePython executes Python code.
 func (e *InProcessCodeExecutor) executePython(ctx context.Context, req CodeExecutionRequest) CodeExecResult {
 	tmpPath, result, ok := writeCodeExecTempFile(req.WorkDir, "script-*.py", req.Code, 0600)
 	if !ok {
@@ -530,7 +514,6 @@ func (e *InProcessCodeExecutor) executePython(ctx context.Context, req CodeExecu
 	return e.runCommand(ctx, cmd, req.WorkDir, req.OutputLimitBytes)
 }
 
-// executeNode executes JavaScript code.
 func (e *InProcessCodeExecutor) executeNode(ctx context.Context, req CodeExecutionRequest) CodeExecResult {
 	tmpPath, result, ok := writeCodeExecTempFile(req.WorkDir, "script-*.js", req.Code, 0600)
 	if !ok {
@@ -542,7 +525,6 @@ func (e *InProcessCodeExecutor) executeNode(ctx context.Context, req CodeExecuti
 	return e.runCommand(ctx, cmd, req.WorkDir, req.OutputLimitBytes)
 }
 
-// executeShell executes Bash or POSIX shell code.
 func (e *InProcessCodeExecutor) executeShell(ctx context.Context, req CodeExecutionRequest) CodeExecResult {
 	if msg := checkDenyPatterns(req.Code, req.DenyPatterns); msg != "" {
 		return CodeExecResult{Error: msg, ExitCode: -1}
@@ -941,9 +923,7 @@ func auditCodeExec(ctx context.Context, req CodeExecutionRequest, result CodeExe
 	logger.Info("code_exec audit", keysAndValues...)
 }
 
-// Ensure CodeExecTool implements Tool.
 var _ Tool = (*CodeExecTool)(nil)
 
-// Ensure executor implementations satisfy CodeExecutor.
 var _ CodeExecutor = (*InProcessCodeExecutor)(nil)
 var _ CodeExecutor = (*unsupportedCodeExecutor)(nil)

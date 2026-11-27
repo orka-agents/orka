@@ -47,8 +47,6 @@ func TestSearchTranscriptRespectsHistoryBounds(t *testing.T) {
 			require.NoError(t, h.k8sClient.Update(t.Context(), task))
 			boundedSession := task.Spec.SessionRef.Name
 
-			// Another tree member's unbounded reference must not widen the
-			// restricted session, regardless of the Task list order.
 			for _, name := range []string{"a-unbounded", "z-unbounded"} {
 				duplicate := internalCallerAuthTaskObject(name, name+"-uid", "", "coordinator", boundedSession)
 				require.NoError(t, h.k8sClient.Create(t.Context(), duplicate))

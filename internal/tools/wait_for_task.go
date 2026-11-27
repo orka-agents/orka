@@ -17,7 +17,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// WaitForTaskTool waits for a single task to complete.
 type WaitForTaskTool struct{}
 
 func (t *WaitForTaskTool) Name() string { return waitForTaskToolName }

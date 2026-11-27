@@ -325,8 +325,6 @@ func TestHandlers_CreateTaskRejectsClasslessWorkspace(t *testing.T) {
 	require.Empty(t, tasks.Items)
 }
 
-// A consolidation run's grants are reviewed for the caller's canonical
-// identity, never for a display name an OIDC caller may choose.
 func TestAuthorizeTaskMemoryConsolidationReviewsTheCanonicalIdentity(t *testing.T) {
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "consolidate", Namespace: "default"},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI,

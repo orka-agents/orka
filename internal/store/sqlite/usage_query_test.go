@@ -35,13 +35,10 @@ func TestUsageLoadSelectsCohortAndPreservesCounterHistory(t *testing.T) {
 			InputTokens: new(sample.count), OutputTokens: new(int64(0)), Model: "session-model", Status: sample.status,
 			Complete: sample.status == store.UsageStatusCompleted, ObservedAt: sample.at}))
 	}
-	// A model used by a delegated Task selects every member of the work.
 	require.NoError(t, s.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "a", TaskUID: "delegated", TaskName: "delegated",
 		ParentTaskUID: "selected", Phase: "Succeeded", StartedAt: start.Add(3 * time.Minute)}))
 	usageSample(t, s, "a", "delegated", "delegated-call", 20, start.Add(4*time.Minute))
 	usagePR(t, s, "a", work, 12, true, start.Add(24*time.Hour))
-	// A shared review starts outside the selected activity period, but belongs
-	// to the original issue cohort through its verified publication link.
 	require.NoError(t, s.RegisterUsageTask(t.Context(), store.UsageTask{Namespace: "a", TaskUID: "shared", TaskName: "shared",
 		Repository: "org/repo", PRNumber: 12, Phase: "Succeeded", StartedAt: start.Add(4 * time.Hour)}))
 	usageSample(t, s, "a", "shared", "shared-call", 35, start.Add(5*time.Hour))
@@ -52,7 +49,6 @@ func TestUsageLoadSelectsCohortAndPreservesCounterHistory(t *testing.T) {
 	otherTeam := usageWork(t, s, "b", 2, start)
 	usageTask(t, s, "b", otherTeam, "selected", "Succeeded", start)
 	usageSample(t, s, "b", "selected", "other-team", 1000, start)
-	// Unrelated history must not be decoded for a small date/model selection.
 	require.NoError(t, s.withTaskDataTransaction(t.Context(), func(ctx context.Context) error {
 		for i := range 2000 {
 			id := fmt.Sprint("unrelated-", i)
@@ -87,8 +83,6 @@ func TestUsageLoadSelectsCohortAndPreservesCounterHistory(t *testing.T) {
 			selected.Repository, selected.Kind, selected.Model = tc.repository, tc.kind, tc.model
 			selected.WorkID = tc.workID
 			if selected.WorkID != "" {
-				// Detail requests default to all retained history. Earlier work
-				// metadata is needed for baselines, but is not itself selected.
 				selected.From = time.Unix(0, 0).UTC()
 				selected.MaxRecords = 32
 			}
@@ -152,8 +146,6 @@ func TestUsageLoadExcludesFuturePRLinksBeforeRecordLimit(t *testing.T) {
 				require.NoError(t, s.RecordUsagePullRequest(t.Context(), store.UsagePullRequest{Namespace: "team", Repository: "org/repo",
 					Number: 42, State: "open", ObservedAt: start}))
 			}
-			// A detail selection keeps the shared Task out of the separate
-			// activity-period arm, so only the publication link can select it.
 			filter := store.UsageFilter{Namespaces: []string{"team"}, WorkID: work, Model: tc.model, AsOf: asOf, MaxRecords: 1}
 			before, err := s.LoadUsage(t.Context(), filter)
 			require.NoError(t, err)
@@ -249,8 +241,6 @@ func TestUsageLoadPRLinkLegacyTimestamps(t *testing.T) {
 			work := usageWork(t, s, "team", 1, asOf.Add(-time.Hour))
 			require.NoError(t, s.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: "team", WorkID: work, Repository: "org/repo",
 				Number: 42, Origin: store.UsagePRCreated, EvidenceID: "publication", LinkedAt: asOf}))
-			// Recreate JSON from older databases, including missing fields that
-			// the current writer always supplies.
 			if tc.timestamp == "" {
 				_, err := s.db.ExecContext(t.Context(), `UPDATE usage_pr_links SET data = json_remove(data, '$.linkedAt')`)
 				require.NoError(t, err)
@@ -323,7 +313,6 @@ func TestUsageNamespaceFilterPreservesOnlyOwnedCounterHistory(t *testing.T) {
 				MonitorName: "monitor", MonitorUID: "monitor-" + uid, Repository: "org/repo", Kind: "issue", Number: number, StartedAt: at}))
 			task := fmt.Sprintf("%s-task-%d", uid, number)
 			usageTask(t, s, "team", work, task, "Succeeded", at)
-			// The same runtime counter name exists in each namespace generation.
 			for i, count := range []int64{100 * (number - 1), 100 * number} {
 				status := store.UsageStatusStarted
 				if i == 1 {
@@ -349,8 +338,6 @@ func TestUsageNamespaceFilterPreservesOnlyOwnedCounterHistory(t *testing.T) {
 		From: start, Until: start.Add(time.Hour), AsOf: start.Add(24 * time.Hour), Model: "session-model"}
 	data, err := s.LoadUsage(t.Context(), filter)
 	require.NoError(t, err)
-	// The earlier Task is retained as a baseline; the shared review remains in
-	// the cohort even though it uses another model and starts outside the range.
 	require.Len(t, data.Works, 2)
 	require.Len(t, data.Tasks, 3)
 	require.Len(t, data.Observations, 5)
@@ -378,7 +365,7 @@ func TestUsageLoadBoundsPRRefreshHistoryWithoutChangingOutcomes(t *testing.T) {
 		Number: 42, Origin: store.UsagePRCreated, EvidenceID: "publication", LinkedAt: start}))
 	pr := store.UsagePullRequest{Namespace: "team", NamespaceUID: "current-namespace", Repository: "org/repo", Number: 42,
 		GitHubID: "42", State: "open", Ready: true, HeadSHA: "head"}
-	const observations = 26000 // A PR open for roughly 90 days at five-minute refresh intervals.
+	const observations = 26000
 	require.NoError(t, s.withTaskDataTransaction(t.Context(), func(ctx context.Context) error {
 		for i := range observations {
 			pr.ObservedAt = start.Add(time.Duration(i) * 5 * time.Minute)
@@ -394,8 +381,6 @@ func TestUsageLoadBoundsPRRefreshHistoryWithoutChangingOutcomes(t *testing.T) {
 	require.NoError(t, s.RecordUsagePullRequest(t.Context(), pr))
 	pr.State, pr.MergedAt, pr.ObservedAt = "unknown", nil, lastOpen.Add(25*time.Minute)
 	require.NoError(t, s.RecordUsagePullRequest(t.Context(), pr))
-	// A newer observation from a replaced namespace must not hide this
-	// namespace's latest state or its confirmed merge.
 	pr.NamespaceUID, pr.State, pr.Ready, pr.ObservedAt = "old-namespace", "open", true, lastOpen.Add(26*time.Minute)
 	require.NoError(t, s.RecordUsagePullRequest(t.Context(), pr))
 	for _, tc := range []struct {

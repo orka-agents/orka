@@ -83,8 +83,6 @@ func TestACPDispatcherRestartIsolatesAndRetriesBlockedArchives(t *testing.T) {
 			if !reflect.DeepEqual(before, captureArchivedSessionEvidence(t, fixture, cleanup, tasks)) {
 				t.Fatal("isolated recovery changed durable evidence or terminal Task status")
 			}
-			// Model a transient read failure clearing without restarting the
-			// dispatcher. The ordinary scan must complete the blocked epoch.
 			broken.err = nil
 			var listed corev1alpha1.TaskList
 			if err := fixture.client.List(fixture.ctx, &listed); err != nil {
@@ -209,10 +207,6 @@ func TestACPDispatcherStartupStillRejectsGlobalListFailure(t *testing.T) {
 	}
 }
 
-// A dispatcher that starts while the installation is held for storage
-// recovery waits for the release instead of failing the manager, which would
-// restart the controller into the same hold. It dispatches nothing while
-// held, and dispatches once the hold is released.
 func TestACPDispatcherStartWaitsForAnInstallationHold(t *testing.T) {
 	fixture := newExternalACPDispatchFixture(t)
 	queued := fixture.queueTask(t, "queued-during-hold", "queued-during-hold-uid", "prompt queued during the hold", nil)
@@ -274,21 +268,13 @@ func TestACPDispatcherStartWaitsForAnInstallationHold(t *testing.T) {
 	}
 }
 
-// A hold raised while the dispatcher runs stops dispatch without logging a
-// failed scan on every tick, and dispatch resumes once it is released.
 func TestACPDispatcherWaitsQuietlyForAHoldRaisedWhileItRuns(t *testing.T) {
-	// Two Tasks are dispatched, which needs more time under the race
-	// detector than the single-dispatch fixture default.
 	fixture := newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(),
 		externalACPDispatchFixtureOptions{contextTimeout: time.Minute})
 	watchClient, ok := fixture.client.(client.WithWatch)
 	if !ok {
 		t.Fatal("fixture client lacks watches")
 	}
-	// A Task queued before the hold reaches a dispatcher scan only after
-	// the hold is raised, as a scan that starts just after the hold does.
-	// Each scan lists the Tasks once, so heldScans counts the scans that
-	// started under the hold.
 	const queuedName = "queued-before-hold"
 	var hideQueued atomic.Bool
 	var heldScans atomic.Int32
@@ -369,7 +355,6 @@ func TestACPDispatcherWaitsQuietlyForAHoldRaisedWhileItRuns(t *testing.T) {
 	})
 	t.Cleanup(fixture.epochs.clearHold)
 	hideQueued.Store(false)
-	// Five scans started under the hold means at least four ended at it.
 	held := func() []string {
 		logMu.Lock()
 		defer logMu.Unlock()

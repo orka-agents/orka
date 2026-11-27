@@ -42,7 +42,6 @@ func TestPostReviewCommentTool_Metadata(t *testing.T) {
 		t.Error("parameters should not be empty")
 	}
 
-	// Verify schema has required fields
 	var schema map[string]any
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("failed to parse parameters schema: %v", err)
@@ -95,7 +94,6 @@ func TestPostReviewCommentTool_Success(t *testing.T) {
 		if body[githubReviewEventField] != reviewEventApprove {
 			t.Errorf("unexpected event: %v", body[githubReviewEventField])
 		}
-		// Verify comments are present
 		comments, ok := body["comments"].([]any)
 		if !ok || len(comments) != 1 {
 			t.Errorf("expected 1 comment, got %v", body["comments"])
@@ -353,7 +351,6 @@ func TestPostReviewCommentTool_WithoutComments(t *testing.T) {
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
 
-		// Verify comments are NOT present in the payload
 		if _, ok := body["comments"]; ok {
 			t.Error("expected comments to be omitted when empty")
 		}

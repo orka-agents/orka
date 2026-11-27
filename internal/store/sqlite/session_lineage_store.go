@@ -16,10 +16,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// ProjectSessionLineage implements store.SessionLineageStore. Kubernetes has
-// already established the authoritative lineage and mutation Lease before
-// this idempotent payload projection runs. A conflicting row is an integrity
-// failure to repair explicitly, never a SQLite decision about Session owner.
 func (s *Store) ProjectSessionLineage(ctx context.Context, lineage store.SessionLineage) (*store.SessionLineage, error) {
 	return writeOperation(ctx, s, "ProjectSessionLineage", nil, func(ctx context.Context) (*store.SessionLineage, error) {
 		return s.projectSessionLineageWrite(ctx, lineage)
@@ -71,7 +67,6 @@ func (s *Store) projectSessionLineageWrite(ctx context.Context, lineage store.Se
 	return &result, nil
 }
 
-// GetSessionLineage implements store.SessionLineageStore.
 func (s *Store) GetSessionLineage(ctx context.Context, namespace, sessionName string) (*store.SessionLineage, error) {
 	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(sessionName) == "" {
 		return nil, store.ValidationErrorf("session lineage namespace and session name are required")
@@ -109,8 +104,6 @@ func scanSessionLineage(row sessionLineageScanner) (*store.SessionLineage, error
 	return &lineage, nil
 }
 
-// sessionLineageProjectionMismatch reports any immutable difference between
-// the Kubernetes-authoritative record and its SQLite payload projection.
 func sessionLineageProjectionMismatch(existing *store.SessionLineage, lineage store.SessionLineage) string {
 	switch {
 	case existing.ContractVersion != lineage.ContractVersion:

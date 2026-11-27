@@ -104,7 +104,6 @@ func TestListArtifactsEmpty(t *testing.T) {
 		t.Fatalf("ListArtifacts: %v", err)
 	}
 	if list == nil {
-		// Implementation returns nil for empty; accept nil or empty slice.
 		list = []store.ArtifactMetadata{}
 	}
 	if len(list) != 0 {
@@ -127,13 +126,11 @@ func TestDeleteArtifacts(t *testing.T) {
 		t.Fatalf("DeleteArtifacts: %v", err)
 	}
 
-	// Get should return ErrNotFound
 	_, _, err := s.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "a.txt"})
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("GetArtifact after delete: expected ErrNotFound, got %v", err)
 	}
 
-	// List should return empty
 	list, err := s.ListArtifacts(ctx, store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"})
 	if err != nil {
 		t.Fatalf("ListArtifacts after delete: %v", err)
@@ -168,7 +165,6 @@ func TestSaveArtifactOverwrite(t *testing.T) {
 		t.Errorf("contentType = %q, want %q", gotCT, newCT)
 	}
 
-	// Should still be only one artifact in the list
 	list, err := s.ListArtifacts(ctx, store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"})
 	if err != nil {
 		t.Fatalf("ListArtifacts: %v", err)
@@ -182,20 +178,17 @@ func TestSaveArtifactSizeLimit(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Exactly at the limit (10MB) should succeed
 	atLimit := make([]byte, 10<<20)
 	if err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "big.bin", ContentType: "application/octet-stream", Data: atLimit}); err != nil {
 		t.Fatalf("SaveArtifact at 10MB limit: %v", err)
 	}
 
-	// Over the limit (10MB + 1) should fail
 	overLimit := make([]byte, 10<<20+1)
 	err := s.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "toobig.bin", ContentType: "application/octet-stream", Data: overLimit})
 	if err == nil {
 		t.Fatal("expected error for artifact exceeding 10MB, got nil")
 	}
 
-	// The over-limit artifact should not be stored
 	_, _, err = s.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task1"}, Filename: "toobig.bin"})
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("over-limit artifact should not exist, got err: %v", err)
@@ -213,7 +206,6 @@ func TestArtifactIsolation(t *testing.T) {
 		t.Fatalf("SaveArtifact task-b: %v", err)
 	}
 
-	// task-a should see its own data
 	data, _, err := s.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task-a"}, Filename: "shared.txt"})
 	if err != nil {
 		t.Fatalf("GetArtifact task-a: %v", err)
@@ -222,7 +214,6 @@ func TestArtifactIsolation(t *testing.T) {
 		t.Errorf("task-a data = %q, want %q", data, "from task-a")
 	}
 
-	// task-b should see its own data
 	data, _, err = s.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "ns1", TaskName: "task-b"}, Filename: "shared.txt"})
 	if err != nil {
 		t.Fatalf("GetArtifact task-b: %v", err)
@@ -231,7 +222,6 @@ func TestArtifactIsolation(t *testing.T) {
 		t.Errorf("task-b data = %q, want %q", data, "from task-b")
 	}
 
-	// List for task-a should only have 1 artifact
 	listA, err := s.ListArtifacts(ctx, store.ArtifactOwner{Namespace: "ns1", TaskName: "task-a"})
 	if err != nil {
 		t.Fatalf("ListArtifacts task-a: %v", err)
@@ -240,7 +230,6 @@ func TestArtifactIsolation(t *testing.T) {
 		t.Errorf("task-a: got %d artifacts, want 1", len(listA))
 	}
 
-	// Deleting task-a's artifacts should not affect task-b
 	if err := s.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: "ns1", TaskName: "task-a"}); err != nil {
 		t.Fatalf("DeleteArtifacts task-a: %v", err)
 	}

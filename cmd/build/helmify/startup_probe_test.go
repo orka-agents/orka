@@ -109,8 +109,6 @@ func TestControllerStartupProbeReusedValues(t *testing.T) {
 			if tc.settings != nil {
 				controller["startupProbe"] = tc.settings
 			}
-			// --reuse-values replaces the new chart defaults with the old
-			// release's coalesced values; a values overlay would merge them.
 			retained, err := yaml.Marshal(values)
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(filepath.Join(chartDir, "values.yaml"), retained, 0o600))

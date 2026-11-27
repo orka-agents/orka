@@ -9,7 +9,6 @@ package v1alpha1
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 const (
-	// ContractVersionV1 is the provider-neutral adapter contract implemented by Orka.
 	ContractVersionV1 = "orka.gateway.v1"
 )
 

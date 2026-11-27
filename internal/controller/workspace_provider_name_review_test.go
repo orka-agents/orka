@@ -47,7 +47,6 @@ func checkProviderNameWorkspaceAdmission(t *testing.T, c client.Client, w *works
 	t.Helper()
 	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(w)}
 	r := &ExecutionWorkspaceReconciler{Client: c, APIReader: c, RESTMapper: mapper}
-	// Already-published Ready conditions must not bypass live validation.
 	for range 4 {
 		if _, err := r.Reconcile(t.Context(), request); err != nil {
 			t.Fatal(err)
@@ -172,7 +171,6 @@ func TestUnsupportedWorkspaceProviderNameDoesNotBlockExistingCleanup(t *testing.
 	if admitted := workspaceprovider.FindCondition(got.Status.Conditions, string(workspace.ConditionWorkspaceAdmitted)); admitted == nil || admitted.Status != metav1.ConditionTrue {
 		t.Fatalf("existing exact cleanup binding was rejected: %#v", admitted)
 	}
-	// Registration finalization is likewise independent of new admission.
 	provider.Finalizers = []string{executionWorkspaceProviderFinalizer}
 	isolated := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).WithObjects(provider).Build()
 	if err := isolated.Delete(t.Context(), provider); err != nil {

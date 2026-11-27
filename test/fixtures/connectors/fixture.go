@@ -1,10 +1,3 @@
-// Package connectorsfixture is the deterministic stand-in for everything the
-// connectors E2E needs outside Orka: an OIDC issuer that signs in a person, an
-// OAuth provider that consents, issues short-lived tokens, refreshes and
-// revokes them, a resource API that only honours those tokens, and an
-// OpenAI-compatible model that drives a read, an approval-gated write, and a
-// second read. Never expose it as a real service.
-//
 //nolint:goconst,lll // Keep the fixed OAuth, JSON, and model wire fixtures readable.
 package connectorsfixture
 
@@ -28,27 +21,18 @@ import (
 	"time"
 )
 
-// Config sets the fixture's identities.
 type Config struct {
-	// Issuer is the exact OIDC issuer URL Orka is configured with.
-	Issuer string
-	// Audience is the OIDC audience Orka expects.
-	Audience string
-	// ClientID and ClientSecret are the OAuth client Orka registers.
-	ClientID     string
-	ClientSecret string
-	// AccessTokenTTL bounds every issued access token; short so refresh
-	// happens within one Task.
-	AccessTokenTTL time.Duration
-	// ModelCredential is the bearer the model endpoint expects.
+	Issuer          string
+	Audience        string
+	ClientID        string
+	ClientSecret    string
+	AccessTokenTTL  time.Duration
 	ModelCredential string
 	Now             func() time.Time
 }
 
-// signingAlgorithm is the only JWT algorithm the fixture signs with.
 const signingAlgorithm = "RS256"
 
-// Fixture is the shared state behind both listeners.
 type Fixture struct {
 	cfg Config
 	key *rsa.PrivateKey
@@ -57,7 +41,7 @@ type Fixture struct {
 	mu       sync.Mutex
 	codes    map[string]authorizationCode
 	tokens   map[string]issuedToken
-	refresh  map[string]string // refresh token -> access token it pairs with
+	refresh  map[string]string
 	revoked  []string
 	counters Counters
 }
@@ -75,33 +59,25 @@ type issuedToken struct {
 	refresh string
 }
 
-// Counters is the observable state assertions read.
 type Counters struct {
-	Authorizations   int      `json:"authorizations"`
-	CodeExchanges    int      `json:"codeExchanges"`
-	Refreshes        int      `json:"refreshes"`
-	Revocations      int      `json:"revocations"`
-	Reads            int      `json:"reads"`
-	Writes           int      `json:"writes"`
-	Rejected         int      `json:"rejected"`
-	DistinctBearers  int      `json:"distinctBearers"`
-	ModelTurns       int      `json:"modelTurns"`
-	LastWriteTitle   string   `json:"lastWriteTitle"`
-	BearerDigests    []string `json:"-"`
-	TokensIssued     int      `json:"tokensIssued"`
-	RevokedRefreshes int      `json:"revokedRefreshes"`
-	// LastAuthorizedScope is the scope set of the last authorization a
-	// code was issued for, sorted and space-separated, so the lane can
-	// assert that Orka asked for exactly what the mode needs.
-	LastAuthorizedScope string `json:"lastAuthorizedScope"`
+	Authorizations      int      `json:"authorizations"`
+	CodeExchanges       int      `json:"codeExchanges"`
+	Refreshes           int      `json:"refreshes"`
+	Revocations         int      `json:"revocations"`
+	Reads               int      `json:"reads"`
+	Writes              int      `json:"writes"`
+	Rejected            int      `json:"rejected"`
+	DistinctBearers     int      `json:"distinctBearers"`
+	ModelTurns          int      `json:"modelTurns"`
+	LastWriteTitle      string   `json:"lastWriteTitle"`
+	BearerDigests       []string `json:"-"`
+	TokensIssued        int      `json:"tokensIssued"`
+	RevokedRefreshes    int      `json:"revokedRefreshes"`
+	LastAuthorizedScope string   `json:"lastAuthorizedScope"`
 }
 
-// knownScopes are the only scopes the fixture provider offers; an
-// authorization asking for anything else is refused rather than granted.
 var knownScopes = map[string]struct{}{"items:read": {}, "items:write": {}}
 
-// normalizedScopes returns a space-separated scope sorted and without
-// duplicates, and whether every entry is a scope the fixture offers.
 func normalizedScopes(scope string) (string, bool) {
 	fields := strings.Fields(scope)
 	slices.Sort(fields)
@@ -114,7 +90,6 @@ func normalizedScopes(scope string) (string, bool) {
 	return strings.Join(fields, " "), true
 }
 
-// New builds a fixture with a fresh signing key.
 func New(cfg Config) (*Fixture, error) {
 	if cfg.Issuer == "" || cfg.Audience == "" || cfg.ClientID == "" || cfg.ClientSecret == "" ||
 		cfg.ModelCredential == "" {
@@ -136,8 +111,6 @@ func New(cfg Config) (*Fixture, error) {
 	}, nil
 }
 
-// PlainHandler serves what may travel over plain HTTP inside the cluster:
-// the OIDC issuer, the model, and the observable state.
 func (f *Fixture) PlainHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -150,8 +123,6 @@ func (f *Fixture) PlainHandler() http.Handler {
 	return mux
 }
 
-// TLSHandler serves what Orka only talks to over HTTPS: the OAuth provider
-// and the resource API the linked token is used against.
 func (f *Fixture) TLSHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /oauth/authorize", f.authorize)
@@ -161,8 +132,6 @@ func (f *Fixture) TLSHandler() http.Handler {
 	mux.HandleFunc("POST /api/items", f.writeItem)
 	return mux
 }
-
-// ---- OIDC issuer ----
 
 func (f *Fixture) discovery(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -180,8 +149,6 @@ func (f *Fixture) jwks(w http.ResponseWriter, _ *http.Request) {
 	}}})
 }
 
-// mint signs a token for the requested subject. It is the fixture's stand-in
-// for a person signing in; nothing authenticates the call.
 func (f *Fixture) mint(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Subject string `json:"subject"`
@@ -218,16 +185,12 @@ func (f *Fixture) sign(claims map[string]any) (string, error) {
 	return signing + "." + base64.RawURLEncoding.EncodeToString(signature), nil
 }
 
-// ---- OAuth provider ----
-
 func (f *Fixture) authorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if q.Get("client_id") != f.cfg.ClientID || q.Get("response_type") != "code" || q.Get("redirect_uri") == "" || q.Get("state") == "" {
 		http.Error(w, "invalid authorize request", http.StatusBadRequest)
 		return
 	}
-	// PKCE S256 is the advertised flow; an authorization without it must
-	// fail the lane rather than silently issue a code.
 	if strings.TrimSpace(q.Get("code_challenge")) == "" || q.Get("code_challenge_method") != "S256" {
 		http.Error(w, "code_challenge with code_challenge_method=S256 is required", http.StatusBadRequest)
 		return
@@ -246,8 +209,6 @@ func (f *Fixture) authorize(w http.ResponseWriter, r *http.Request) {
 	case q.Get("fixture_decision") == "deny":
 		target.Set("error", "access_denied")
 	case !known:
-		// RFC 6749 §4.1.2.1: a consent that asks for a privilege the
-		// provider does not offer fails instead of being granted.
 		target.Set("error", "invalid_scope")
 	default:
 		code := randomToken(24)
@@ -341,12 +302,6 @@ func (f *Fixture) revoke(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// ---- resource API ----
-
-// bearerAccepted reports whether the request carries a live access token
-// and returns that token's granted scope. The resource API enforces the
-// scope, so a consent that stopped asking for items:write would fail the
-// lane's write rather than pass unnoticed.
 func (f *Fixture) bearerAccepted(r *http.Request) (string, bool) {
 	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if bearer == "" || bearer == r.Header.Get("Authorization") {
@@ -372,12 +327,10 @@ func (f *Fixture) bearerAccepted(r *http.Request) (string, bool) {
 	return issued.scope, true
 }
 
-// hasScope reports whether a space-separated granted scope carries want.
 func hasScope(granted, want string) bool {
 	return slices.Contains(strings.Fields(granted), want)
 }
 
-// scopeRefused records a bearer that is live but not granted the scope.
 func (f *Fixture) scopeRefused(w http.ResponseWriter, want string) {
 	f.mu.Lock()
 	f.counters.Rejected++
@@ -429,7 +382,6 @@ func (f *Fixture) state(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, f.counters)
 }
 
-// Snapshot returns the counters for in-process tests.
 func (f *Fixture) Snapshot() Counters {
 	f.mu.Lock()
 	defer f.mu.Unlock()

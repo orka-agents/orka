@@ -28,13 +28,11 @@ import (
 )
 
 const (
-	// skillContentSizeWarning is the threshold above which a warning condition is set
-	skillContentSizeWarning = 10 * 1024 // 10KB
+	skillContentSizeWarning = 10 * 1024
 )
 
 const skillPhaseReady = "Ready"
 
-// SkillReconciler reconciles a Skill object
 type SkillReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -44,8 +42,6 @@ type SkillReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=skills/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=skills/finalizers,verbs=update
 
-// Reconcile validates the Skill content, computes a content hash,
-// and updates the Skill's status accordingly.
 func (r *SkillReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -59,16 +55,13 @@ func (r *SkillReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	logger.Info("Reconciling Skill", "skill", skill.Name)
 
-	// Validate the skill
 	if err := r.validateSkill(skill); err != nil {
 		logger.Error(err, "Skill validation failed")
 		return r.updateStatus(ctx, skill, "Error", "", err.Error())
 	}
 
-	// Compute content hash
 	contentHash := r.computeContentHash(skill)
 
-	// Check for content size warning
 	contentSize := len(skill.Spec.Content.Inline)
 	for _, v := range skill.Spec.Content.Files {
 		contentSize += len(v)
@@ -78,7 +71,6 @@ func (r *SkillReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	return r.updateStatus(ctx, skill, skillPhaseReady, contentHash, "")
 }
 
-// validateSkill validates the Skill spec.
 func (r *SkillReconciler) validateSkill(skill *corev1alpha1.Skill) error {
 	if skill.Spec.Description == "" {
 		return fmt.Errorf("description is required")
@@ -95,9 +87,6 @@ func (r *SkillReconciler) validateSkill(skill *corev1alpha1.Skill) error {
 	return nil
 }
 
-// computeContentHash computes a SHA-256 hash of all skill content. Each field is
-// length-prefixed so that moving bytes between the inline content, a file path
-// and a file's content always changes the hash.
 func (r *SkillReconciler) computeContentHash(skill *corev1alpha1.Skill) string {
 	h := sha256.New()
 	writeField := func(s string) {
@@ -117,7 +106,6 @@ func (r *SkillReconciler) computeContentHash(skill *corev1alpha1.Skill) string {
 	return fmt.Sprintf("sha256:%x", h.Sum(nil))
 }
 
-// setContentSizeCondition updates content-size warning status.
 func (r *SkillReconciler) setContentSizeCondition(skill *corev1alpha1.Skill, size int) {
 	condition := metav1.Condition{
 		Type:               "ContentSizeWarning",
@@ -136,7 +124,6 @@ func (r *SkillReconciler) setContentSizeCondition(skill *corev1alpha1.Skill, siz
 	meta.SetStatusCondition(&skill.Status.Conditions, condition)
 }
 
-// updateStatus updates the Skill status and conditions.
 func (r *SkillReconciler) updateStatus(ctx context.Context, skill *corev1alpha1.Skill, phase, contentHash, errMsg string) (ctrl.Result, error) {
 	original := skill.Status.DeepCopy()
 
@@ -173,7 +160,6 @@ func (r *SkillReconciler) updateStatus(ctx context.Context, skill *corev1alpha1.
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
 func (r *SkillReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Skill{}).

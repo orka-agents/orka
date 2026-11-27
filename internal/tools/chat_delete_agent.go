@@ -16,7 +16,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// ChatDeleteAgentTool deletes an Agent CRD (chat version).
 type ChatDeleteAgentTool struct{}
 
 func (t *ChatDeleteAgentTool) Name() string { return deleteAgentToolName }

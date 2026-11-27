@@ -15,10 +15,6 @@ import (
 
 const defaultAgentIdentityAuditRingSize = 1000
 
-// AgentIdentityAuditRecord is the redacted, safe-to-expose record of one
-// identity-backed outbound call (issued or refused). It carries the same
-// schema as the structured agent-identity-audit log line and never contains
-// tokens, headers, bodies, full URLs, or raw error text.
 type AgentIdentityAuditRecord struct {
 	Timestamp        time.Time `json:"timestamp"`
 	Event            string    `json:"event"`
@@ -43,7 +39,6 @@ type AgentIdentityAuditRecord struct {
 	Requester        string    `json:"requester,omitempty"`
 }
 
-// AgentIdentityAuditFilter selects matching AgentIdentityAuditRecords.
 type AgentIdentityAuditFilter struct {
 	Namespace string
 	TaskUID   string
@@ -52,26 +47,20 @@ type AgentIdentityAuditFilter struct {
 	Limit     int
 }
 
-// AgentIdentityAuditSink receives redacted identity-use records for querying.
 type AgentIdentityAuditSink interface {
 	Record(record AgentIdentityAuditRecord)
 }
 
-// AgentIdentityAuditReader queries redacted identity-use records.
 type AgentIdentityAuditReader interface {
 	List(filter AgentIdentityAuditFilter) []AgentIdentityAuditRecord
 }
 
-// AgentIdentityAuditBuffer is a bounded in-memory ring buffer of redacted
-// identity-use records, safe for concurrent writes and queries.
 type AgentIdentityAuditBuffer struct {
 	mu      sync.RWMutex
 	maxSize int
 	records []AgentIdentityAuditRecord
 }
 
-// NewAgentIdentityAuditBuffer creates a ring buffer holding up to maxSize
-// records (defaulting to defaultAgentIdentityAuditRingSize when <= 0).
 func NewAgentIdentityAuditBuffer(maxSize int) *AgentIdentityAuditBuffer {
 	if maxSize <= 0 {
 		maxSize = defaultAgentIdentityAuditRingSize
@@ -82,8 +71,6 @@ func NewAgentIdentityAuditBuffer(maxSize int) *AgentIdentityAuditBuffer {
 	}
 }
 
-// Record appends one redacted identity-use record, evicting the oldest entry
-// when the buffer is full.
 func (b *AgentIdentityAuditBuffer) Record(record AgentIdentityAuditRecord) {
 	if b == nil {
 		return
@@ -98,8 +85,6 @@ func (b *AgentIdentityAuditBuffer) Record(record AgentIdentityAuditRecord) {
 	b.records = append(b.records, record)
 }
 
-// List returns matching records ordered newest-first. A zero Limit defaults to
-// 100; a negative Limit returns all retained matching records.
 func (b *AgentIdentityAuditBuffer) List(filter AgentIdentityAuditFilter) []AgentIdentityAuditRecord {
 	if b == nil {
 		return []AgentIdentityAuditRecord{}

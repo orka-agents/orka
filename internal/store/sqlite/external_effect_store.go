@@ -14,7 +14,6 @@ import (
 
 var _ store.ExternalEffectStore = (*Store)(nil)
 
-// ReserveExternalEffect creates or returns a durable same-digest effect identity.
 func (s *Store) ReserveExternalEffect(ctx context.Context, request store.ReserveExternalEffectRequest) (*store.ExternalEffect, error) {
 	request.Identity.Kind = strings.TrimSpace(request.Identity.Kind)
 	request.Identity.Namespace = strings.TrimSpace(request.Identity.Namespace)
@@ -82,7 +81,6 @@ func (s *Store) ReserveExternalEffect(ctx context.Context, request store.Reserve
 	return &effect, nil
 }
 
-// GetExternalEffect returns one durable external-effect record.
 func (s *Store) GetExternalEffect(ctx context.Context, id string) (*store.ExternalEffect, error) {
 	id = strings.TrimSpace(id)
 	if err := store.ValidateControlIdentifier("external effect ID", id); err != nil {
@@ -95,8 +93,6 @@ func (s *Store) GetExternalEffect(ctx context.Context, id string) (*store.Extern
 	return &effect, nil
 }
 
-// GetExternalEffectByIdentity resolves one exact durable external-effect
-// identity and rejects any impossible identity mismatch.
 func (s *Store) GetExternalEffectByIdentity(ctx context.Context, identity store.ExternalEffectIdentity) (*store.ExternalEffect, error) {
 	identity.Kind = strings.TrimSpace(identity.Kind)
 	identity.Namespace = strings.TrimSpace(identity.Namespace)
@@ -119,9 +115,6 @@ func (s *Store) GetExternalEffectByIdentity(ctx context.Context, identity store.
 	return effect, nil
 }
 
-// TransitionExternalEffect applies an exact version/state/epoch CAS. Terminal
-// same-response retries are idempotent; request-digest mismatch always conflicts.
-//
 //nolint:gocyclo // State, lease, digest, and terminal-response invariants are validated together.
 func (s *Store) TransitionExternalEffect(ctx context.Context, transition store.ExternalEffectTransition) (*store.ExternalEffect, error) {
 	transition.ID = strings.TrimSpace(transition.ID)

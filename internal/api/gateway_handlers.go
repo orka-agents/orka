@@ -34,7 +34,6 @@ const (
 	gatewayVerbUpdate = "update"
 )
 
-// HandleGatewayEvent accepts one adapter-authenticated normalized event.
 func (h *Handlers) HandleGatewayEvent(c fiber.Ctx) error {
 	if h.gatewayService == nil {
 		c.RequestCtx().SetConnectionClose()
@@ -46,9 +45,6 @@ func (h *Handlers) HandleGatewayEvent(c fiber.Ctx) error {
 		return err
 	}
 	limiterKey := c.IP()
-	// This limiter intentionally runs before body parsing, authentication, and duplicate lookup.
-	// Letting retries bypass it would give unauthenticated sources a datastore-backed oracle and
-	// reopen the pre-auth resource-exhaustion path; a throttled duplicate may safely retry later.
 	if h.gatewayIngressLimiter != nil && !h.gatewayIngressLimiter.Allow(limiterKey, time.Now()) {
 		c.RequestCtx().SetConnectionClose()
 		return fiber.NewError(fiber.StatusTooManyRequests, "gateway ingress rate limit exceeded")
@@ -65,8 +61,6 @@ func (h *Handlers) HandleGatewayEvent(c fiber.Ctx) error {
 			return fiber.NewError(httpErr.Code, httpErr.Message)
 		}
 		if errors.Is(err, store.ErrOutcomeUnknown) {
-			// Admission deduplicates by Gateway UID and externalEventId, so
-			// retrying the same event is safe even if the first write committed.
 			return fiber.NewError(fiber.StatusServiceUnavailable, "gateway admission outcome is unknown; retry the same event")
 		}
 		if temporary := temporaryStorageHTTPError(err); temporary != nil {
@@ -110,7 +104,6 @@ func readGatewayIngressBody(c fiber.Ctx) ([]byte, error) {
 	return body, nil
 }
 
-// ListGatewayClasses lists cluster-scoped adapter profiles.
 func (h *Handlers) ListGatewayClasses(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "listGatewayClasses", h.contextTokenAuthorization.GatewayReadScopes); err != nil {
 		return err
@@ -129,7 +122,6 @@ func (h *Handlers) ListGatewayClasses(c fiber.Ctx) error {
 	return c.JSON(ListResponse{Items: list.Items, Metadata: ListMeta{Continue: list.Continue, RemainingItemCount: list.RemainingItemCount}})
 }
 
-// GetGatewayClass gets one cluster-scoped adapter profile.
 func (h *Handlers) GetGatewayClass(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "getGatewayClass", h.contextTokenAuthorization.GatewayReadScopes); err != nil {
 		return err
@@ -147,7 +139,6 @@ func (h *Handlers) GetGatewayClass(c fiber.Ctx) error {
 	return c.JSON(object)
 }
 
-// ListGateways lists namespaced adapter instances.
 func (h *Handlers) ListGateways(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
@@ -170,7 +161,6 @@ func (h *Handlers) ListGateways(c fiber.Ctx) error {
 	return c.JSON(ListResponse{Items: list.Items, Metadata: ListMeta{Continue: list.Continue, RemainingItemCount: list.RemainingItemCount}})
 }
 
-// GetGateway gets one namespaced adapter instance.
 func (h *Handlers) GetGateway(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
@@ -192,7 +182,6 @@ func (h *Handlers) GetGateway(c fiber.Ctx) error {
 	return c.JSON(object)
 }
 
-// ListGatewayBindings lists namespaced semantic bindings.
 func (h *Handlers) ListGatewayBindings(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
@@ -215,7 +204,6 @@ func (h *Handlers) ListGatewayBindings(c fiber.Ctx) error {
 	return c.JSON(ListResponse{Items: list.Items, Metadata: ListMeta{Continue: list.Continue, RemainingItemCount: list.RemainingItemCount}})
 }
 
-// GetGatewayBinding gets one namespaced semantic binding.
 func (h *Handlers) GetGatewayBinding(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
@@ -237,7 +225,6 @@ func (h *Handlers) GetGatewayBinding(c fiber.Ctx) error {
 	return c.JSON(object)
 }
 
-// ListGatewayEvents lists normalized durable ingress records.
 func (h *Handlers) ListGatewayEvents(c fiber.Ctx) error {
 	if h.gatewayEventStore == nil {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "gateway event store is unavailable")
@@ -296,7 +283,6 @@ func (h *Handlers) ListGatewayEvents(c fiber.Ctx) error {
 	return c.JSON(ListResponse{Items: events, Metadata: ListMeta{Continue: next}})
 }
 
-// GetGatewayEvent gets one normalized ingress record.
 func (h *Handlers) GetGatewayEvent(c fiber.Ctx) error {
 	if h.gatewayEventStore == nil {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "gateway event store is unavailable")
@@ -325,7 +311,6 @@ func (h *Handlers) GetGatewayEvent(c fiber.Ctx) error {
 	return c.JSON(event)
 }
 
-// ListGatewayDeliveries lists durable outbox records.
 func (h *Handlers) ListGatewayDeliveries(c fiber.Ctx) error {
 	if h.gatewayDeliveryStore == nil {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "gateway delivery store is unavailable")
@@ -384,7 +369,6 @@ func (h *Handlers) ListGatewayDeliveries(c fiber.Ctx) error {
 	return c.JSON(ListResponse{Items: deliveries, Metadata: ListMeta{Continue: next}})
 }
 
-// GetGatewayDelivery gets one durable outbox record.
 func (h *Handlers) GetGatewayDelivery(c fiber.Ctx) error {
 	if h.gatewayDeliveryStore == nil {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "gateway delivery store is unavailable")
@@ -413,7 +397,6 @@ func (h *Handlers) GetGatewayDelivery(c fiber.Ctx) error {
 	return c.JSON(delivery)
 }
 
-// RetryGatewayDelivery manually requeues one dead-lettered delivery.
 func (h *Handlers) RetryGatewayDelivery(c fiber.Ctx) error {
 	if h.gatewayService == nil {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "gateway delivery service is unavailable")
@@ -464,18 +447,10 @@ func (i gatewayCurrentIdentity) matches(namespaceUID, gatewayUID string) bool {
 	return i.NamespaceUID != "" && i.GatewayUID != "" && i.NamespaceUID == namespaceUID && i.GatewayUID == gatewayUID
 }
 
-// listGatewayPage serves one page of gateway resources. Gateway reads prefer
-// the uncached API reader, which pages natively. When only the cached client
-// is configured, a limited request is served as one unlimited cached list
-// (the cache truncates at Limit and stamps an unusable continue sentinel) and
-// continue tokens are rejected, so a cache-backed fallback never presents a
-// truncated collection as complete behind an empty cursor.
 func (h *Handlers) listGatewayPage(ctx context.Context, list client.ObjectList, opts client.ListOptions, what string) error {
 	switch {
 	case h.apiReader != nil:
 		if err := h.apiReader.List(ctx, list, &opts); err != nil {
-			// An expired or malformed continue token is the caller's
-			// cursor problem (410/400), not a server failure.
 			return listPageError(what, err)
 		}
 	case h.client == nil:
@@ -489,7 +464,6 @@ func (h *Handlers) listGatewayPage(ctx context.Context, list client.ObjectList, 
 		}
 		list.SetRemainingItemCount(nil)
 	}
-	// Defense in depth: the cache sentinel must never reach a client.
 	list.SetContinue(NormalizeListContinue(list.GetContinue()))
 	return nil
 }
@@ -614,8 +588,6 @@ func paginateGatewayDeliveries(deliveries []store.GatewayDelivery, limit int) ([
 	})
 }
 
-// paginateGatewayList truncates items to limit and returns the cursor of the
-// last returned item when more remain.
 func paginateGatewayList[T any](items []T, limit int, cursorOf func(T) string) ([]T, string) {
 	if limit <= 0 || limit > MaxLimit {
 		limit = MaxLimit

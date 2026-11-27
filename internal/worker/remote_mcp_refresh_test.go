@@ -81,8 +81,6 @@ func TestRemoteMCPConfiguredTimeoutOverridesInheritedClientTimeout(t *testing.T)
 		t.Run(map[bool]string{true: "discovery", false: "invocation"}[discovery], func(t *testing.T) {
 			f := &remoteProtocolFixture{intercept: func(_ http.ResponseWriter, _ *http.Request, method string) bool {
 				if method == "initialize" {
-					// Bounded real HTTP proof: outlast the inherited timeout without
-					// making the test wait for the executor's production 30 seconds.
 					time.Sleep(30 * time.Millisecond)
 				}
 				return false

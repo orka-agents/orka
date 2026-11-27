@@ -13,10 +13,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// ValidateOpenCodeAgentSpec validates the managed OpenCode runtime configuration
-// of an Agent classified orka.harness.v2. An Agent that omits the selector is
-// classified by the controller's execution mode before planning, which applies
-// these rules to the effective Agent.
 func ValidateOpenCodeAgentSpec(agent *corev1alpha1.Agent) error {
 	if agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeOpencode {
 		return nil

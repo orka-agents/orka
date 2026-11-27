@@ -453,13 +453,6 @@ func createPromptAttemptInStateForSettlementTest(
 	return nil
 }
 
-// TestTerminalProjectionExecutionRoundTripsReclamationValidation proves the
-// standalone failure, delivery-failure, and post-execution-cancellation
-// projection constructors preserve the complete frozen execution identity:
-// each classification is built through terminalProjectionExecution and must
-// round-trip taskterminal.ValidateRestoredProjection against the Task it was
-// built from, exactly as Kubernetes composite-store reclamation revalidates
-// it before retiring the source PromptAttempt.
 func TestTerminalProjectionExecutionRoundTripsReclamationValidation(t *testing.T) {
 	transition := metav1.NewTime(time.Date(2026, 8, 12, 9, 30, 0, 0, time.UTC))
 	frozen := &corev1alpha1.TaskExecutionStatus{
@@ -485,7 +478,6 @@ func TestTerminalProjectionExecutionRoundTripsReclamationValidation(t *testing.T
 		delivery       corev1alpha1.TaskDeliveryStatus
 	}{
 		{
-			// failTaskWithProjection: sessionless prompt failure after RuntimeSession binding.
 			name: "prompt failure", state: corev1alpha1.TaskExecutionStateFailed,
 			outcome: corev1alpha1.TaskExecutionOutcomeFailed, reason: "PromptFailed", message: "prompt failed",
 			phase: corev1alpha1.TaskPhaseFailed, executionState: store.PromptExecutionFailed,
@@ -495,7 +487,6 @@ func TestTerminalProjectionExecutionRoundTripsReclamationValidation(t *testing.T
 			},
 		},
 		{
-			// failTaskWithProjection: sessionless prompt cancellation after RuntimeSession binding.
 			name: "prompt cancellation", state: corev1alpha1.TaskExecutionStateCancelled,
 			outcome: corev1alpha1.TaskExecutionOutcomeCancelled, reason: "Cancelled", message: "prompt cancelled",
 			phase: corev1alpha1.TaskPhaseCancelled, executionState: store.PromptExecutionCancelled,
@@ -505,7 +496,6 @@ func TestTerminalProjectionExecutionRoundTripsReclamationValidation(t *testing.T
 			},
 		},
 		{
-			// failTaskForDelivery: execution succeeded, publication failed.
 			name: "delivery failure", state: corev1alpha1.TaskExecutionStateSucceeded,
 			outcome: corev1alpha1.TaskExecutionOutcomeSucceeded, reason: "", message: "",
 			phase: corev1alpha1.TaskPhaseFailed, executionState: store.PromptExecutionSucceeded,
@@ -515,7 +505,6 @@ func TestTerminalProjectionExecutionRoundTripsReclamationValidation(t *testing.T
 			},
 		},
 		{
-			// cancelTaskAfterExecution: execution succeeded, publication cancelled before push.
 			name: "post-execution cancellation", state: corev1alpha1.TaskExecutionStateSucceeded,
 			outcome: corev1alpha1.TaskExecutionOutcomeSucceeded, reason: "", message: "",
 			phase: corev1alpha1.TaskPhaseCancelled, executionState: store.PromptExecutionSucceeded,
@@ -565,8 +554,6 @@ func TestTerminalProjectionExecutionRoundTripsReclamationValidation(t *testing.T
 				t.Fatalf("terminal projection failed reclamation validation: %v", err)
 			}
 
-			// The pre-fix sparse payload omitted the frozen runtime identity and
-			// must keep failing closed at reclamation.
 			sparse, err := json.Marshal(taskTerminalProjection{
 				Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: frozen.Attempt,
 				Phase: tt.phase, Message: tt.message, Delivery: task.Status.Delivery,

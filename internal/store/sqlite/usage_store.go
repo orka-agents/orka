@@ -127,8 +127,6 @@ func (s *Store) registerUsageTaskWrite(ctx context.Context, task store.UsageTask
 }
 
 func recordUsageTaskPhase(task *store.UsageTask) {
-	// Capture visibility while holding the same transaction lock as report
-	// reads. Kubernetes lifecycle timestamps may be rounded or arrive late.
 	recordedAt := time.Now().UTC()
 	at := task.PhaseObservedAt
 	if at.IsZero() {
@@ -140,15 +138,10 @@ func recordUsageTaskPhase(task *store.UsageTask) {
 	}) {
 		task.PhaseHistory = append(task.PhaseHistory, state)
 	}
-	// Monitor and Task-controller writes can arrive in either order. Retain
-	// distinct observations even for repeated phases, so a late observation
-	// between them cannot replace the newer state or corrupt an asOf report.
 	slices.SortStableFunc(task.PhaseHistory, func(a, b store.UsageTaskPhase) int {
 		if order := cmp.Compare(a.ObservedAt.Unix(), b.ObservedAt.Unix()); order != 0 {
 			return order
 		}
-		// Kubernetes timestamps have second precision. Within a second, use
-		// attempts and lifecycle order, with terminal states always last.
 		aOrder, bOrder := usageTaskPhaseOrder(a), usageTaskPhaseOrder(b)
 		if aOrder == usageTerminalPhaseOrder || bOrder == usageTerminalPhaseOrder {
 			if order := cmp.Compare(aOrder, bOrder); order != 0 {
@@ -172,7 +165,6 @@ func usageTaskPhaseOrder(state store.UsageTaskPhase) int {
 	switch state.Phase {
 	case "Pending":
 		if state.Attempt > 0 {
-			// Retrying Pending follows the attempt that just failed.
 			return 3
 		}
 		return 0
@@ -202,7 +194,6 @@ func mergeUsageTaskSnapshot(task *store.UsageTask, existing store.UsageTask) err
 	if existing.Requester != nil {
 		task.Requester = existing.Requester
 	}
-	// A Task once private stays so, whatever later happens to its labels.
 	task.AHPTurn = task.AHPTurn || existing.AHPTurn
 	task.StartedAt = existing.StartedAt
 	if task.WorkID == "" {
@@ -233,8 +224,6 @@ func (s *Store) RecordUsage(ctx context.Context, observation store.UsageObservat
 }
 
 func (s *Store) recordUsageWrite(ctx context.Context, observation store.UsageObservation) error {
-	// The Task lookup, the deduplicating insert and the replay comparison share
-	// one transaction, so retention cannot remove the observation between them.
 	return s.usageTransaction(ctx, func(ctx context.Context) error {
 		return recordUsage(ctx, s.taskDataExecutor(ctx), observation)
 	})
@@ -392,13 +381,10 @@ func (s *Store) LoadUsage(ctx context.Context, filter store.UsageFilter) (store.
 	return result, err
 }
 
-// ListTaskCounterObservations implements store.TaskUsageObservationReader.
 func (s *Store) ListTaskCounterObservations(ctx context.Context, namespace, taskUID string) ([]store.UsageObservation, error) {
 	return taskCounterObservations(ctx, s.taskDataExecutor(ctx), namespace, taskUID)
 }
 
-// taskCounterObservations reads, in one statement, every observation of the
-// counters a Task has observed, in accounting order.
 func taskCounterObservations(ctx context.Context, db taskDataExecutor, namespace, taskUID string) ([]store.UsageObservation, error) {
 	return readUsageRows[store.UsageObservation](ctx, db,
 		`SELECT data FROM usage_observations INDEXED BY idx_usage_observations_counter
@@ -409,10 +395,6 @@ func taskCounterObservations(ctx context.Context, db taskDataExecutor, namespace
 		namespace, namespace, taskUID)
 }
 
-// sqlControlAttemptTokens attributes one prompt attempt's usage for the
-// duplicate SQL control implementation, which finalizes turns without the
-// storage client. Totals beyond the exact reporting range stay out of the
-// Session counters rather than block finalization.
 func sqlControlAttemptTokens(ctx context.Context, db taskDataExecutor, namespace string, key store.SessionTurnKey) (int64, int64, error) {
 	observations, err := taskCounterObservations(ctx, db, namespace, key.TaskUID)
 	if err != nil {
@@ -456,8 +438,6 @@ func loadUsage(ctx context.Context, db taskDataExecutor, filter store.UsageFilte
 	return result, nil
 }
 
-// usageSpace holds every character unicode.IsSpace reports, for SQL's TRIM to
-// remove what strings.TrimSpace does.
 var usageSpace = func() string {
 	var space strings.Builder
 	write := func(lo, hi, stride uint32) {
@@ -467,7 +447,6 @@ var usageSpace = func() string {
 			}
 		}
 	}
-	// unicode.IsSpace is the Latin-1 spaces and the White_Space property.
 	write(0, unicode.MaxLatin1, 1)
 	for _, r := range unicode.White_Space.R16 {
 		write(uint32(r.Lo), uint32(r.Hi), uint32(r.Stride))
@@ -482,12 +461,6 @@ func (s *Store) ListUsageTasksInSessions(ctx context.Context, namespace, namespa
 	if len(sessions) == 0 {
 		return nil, nil
 	}
-	// Names compare as the controller reads them, without surrounding space
-	// of any kind: SQL trims every character strings.TrimSpace does, so only
-	// rows of a wanted session are read, and the comparison is made again
-	// here. A name that merely holds a wanted one is never decoded. The names
-	// travel as one JSON array, so the query keeps its shape however many
-	// there are.
 	wanted := map[string]bool{}
 	for _, session := range sessions {
 		wanted[session] = true
@@ -496,12 +469,6 @@ func (s *Store) ListUsageTasksInSessions(ctx context.Context, namespace, namespa
 	if err != nil {
 		return nil, err
 	}
-	// A Task that started after startedBy is outside the caller's period, and
-	// is left out before it is read: it does not count against limit, so
-	// decoding it would let a session's later turns push the lookup past the
-	// caller's budget. started_at is the start recorded when the row was
-	// first written, which later snapshots keep, so it is the decoded value.
-	// A zero startedBy sets no cut-off; the Unix epoch is a real one.
 	cutOff, startedByNano := !startedBy.IsZero(), int64(0)
 	if cutOff {
 		startedByNano = startedBy.UnixNano()
@@ -529,7 +496,6 @@ func (s *Store) ListUsageTasksInSessions(ctx context.Context, namespace, namespa
 		if !wanted[strings.TrimSpace(task.SessionName)] {
 			continue
 		}
-		// The same check, on the decoded value.
 		if !startedBy.IsZero() && task.StartedAt.After(startedBy) {
 			continue
 		}
@@ -553,17 +519,12 @@ func readUsageJSON(ctx context.Context, db taskDataExecutor, target any, query s
 	return nil
 }
 
-// utcUsageTimes converts the times in a usage record to UTC. Usage records are
-// stored as JSON, which keeps the zone a time was written in, so they are
-// normalized before they are stored and again when they are read, which also
-// covers rows written before this rule.
 func utcUsageTimes(record any) {
 	switch r := record.(type) {
 	case *store.UsageWorkRequest:
 		r.StartedAt = r.StartedAt.UTC()
 	case *store.UsageTask:
 		r.StartedAt, r.PhaseObservedAt = r.StartedAt.UTC(), r.PhaseObservedAt.UTC()
-		// The history may share its backing array with the caller's record.
 		r.PhaseHistory = slices.Clone(r.PhaseHistory)
 		for i := range r.PhaseHistory {
 			r.PhaseHistory[i].ObservedAt = r.PhaseHistory[i].ObservedAt.UTC()
@@ -601,9 +562,6 @@ func readUsageRows[T any](ctx context.Context, db taskDataExecutor, query string
 	return result, rows.Err()
 }
 
-// PruneUsage expires whole, inactive work cohorts. It never trims the early
-// attempts from a retained request. Cumulative counter baselines remain until
-// the counter itself expires, so retention cannot turn an old total into new usage.
 func (s *Store) PruneUsage(ctx context.Context, before time.Time) error {
 	return writeOperationErr(ctx, s, "PruneUsage", func(ctx context.Context) error {
 		return s.pruneUsageWrite(ctx, before)
@@ -613,8 +571,6 @@ func (s *Store) PruneUsage(ctx context.Context, before time.Time) error {
 func (s *Store) pruneUsageWrite(ctx context.Context, before time.Time) error {
 	return s.usageTransaction(ctx, func(ctx context.Context) error {
 		db := s.taskDataExecutor(ctx)
-		// A work remains active while any Task is nonterminal, a linked PR is
-		// open, or a recent model observation belongs to it.
 		_, err := db.ExecContext(ctx, `DELETE FROM usage_work_requests AS w WHERE started_at < ?
 		 AND NOT EXISTS (SELECT 1 FROM usage_tasks t WHERE t.namespace = w.namespace
 		   AND COALESCE(json_extract(t.data, '$.namespaceUID'), '') = COALESCE(json_extract(w.data, '$.namespaceUID'), '') AND

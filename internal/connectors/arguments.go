@@ -19,21 +19,10 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
-// ValidateToolArguments checks a tool call's arguments against the Tool's
-// declared JSON Schema before a person's credential is attached to the
-// request. The worker that produced the arguments is not trusted to have
-// honored the schema; the controller is the boundary.
 func ValidateToolArguments(parameters *apiextensionsv1.JSON, arguments json.RawMessage) error {
-	// An empty payload is the empty object, as the executor treats it, so a
-	// parameterless call is judged rather than refused as malformed.
 	if len(bytes.TrimSpace(arguments)) == 0 {
 		arguments = json.RawMessage(`{}`)
 	}
-	// Numbers decode as float64 on purpose: the schema library judges
-	// json.Number as a string, which would let "integer" constraints pass
-	// for any value. The raw arguments, not this decoded copy, are executed,
-	// so every number must survive that conversion exactly: a value the
-	// schema would judge after rounding is refused outright.
 	decoder := json.NewDecoder(bytes.NewReader(arguments))
 	var instance any
 	if err := decoder.Decode(&instance); err != nil {
@@ -51,9 +40,6 @@ func ValidateToolArguments(parameters *apiextensionsv1.JSON, arguments json.RawM
 	if parameters == nil || len(parameters.Raw) == 0 {
 		return nil
 	}
-	// The schema's own numbers (const, enum, bounds) decode through float64
-	// as well; a constraint that cannot be held exactly would be judged
-	// after rounding, so such a schema is refused outright.
 	if err := numbersExactlyRepresentable(parameters.Raw); err != nil {
 		return fmt.Errorf("tool parameter schema: %w", err)
 	}
@@ -71,10 +57,6 @@ func ValidateToolArguments(parameters *apiextensionsv1.JSON, arguments json.RawM
 	return nil
 }
 
-// numbersExactlyRepresentable walks a raw JSON document with exact numbers
-// and refuses any that a float64 cannot hold exactly, since both the schema
-// and the arguments are judged on float64 copies while the raw arguments are
-// what the provider receives.
 func numbersExactlyRepresentable(document json.RawMessage) error {
 	decoder := json.NewDecoder(bytes.NewReader(document))
 	decoder.UseNumber()
@@ -90,10 +72,6 @@ func numbersExactlyRepresentable(document json.RawMessage) error {
 			if !ok {
 				return fmt.Errorf("number %q is not a valid number", v.String())
 			}
-			// A literal is judged faithfully when the float64 it decodes to
-			// prints back (shortest round-trip form) as the same decimal
-			// value: 0.1 does, 9007199254740993 (which rounds to ...992)
-			// does not.
 			approx, err := v.Float64()
 			if err != nil {
 				return fmt.Errorf("number %q is not exactly representable and cannot be validated", v.String())

@@ -1,13 +1,5 @@
 // Copyright (c) 2026. MIT License - see LICENSE file for details.
 
-// Package fakeentra is a Microsoft Entra stand-in for the Agent identity and
-// keyless Provider E2Es. It plays the agent identity blueprint flow the
-// controller uses (a blueprint exchange token for one agent identity, then
-// that identity's own token for a resource) and serves a resource that accepts
-// only the tokens it issued. It also plays a workload identity's
-// client-credentials flow and serves an Azure OpenAI chat completions endpoint
-// that accepts only that identity's tokens. Everything is synthetic; no real
-// tenant is involved.
 package fakeentra
 
 import (
@@ -24,72 +16,49 @@ import (
 )
 
 const (
-	// ExchangeScope is the scope the blueprint requests an exchange token for.
-	ExchangeScope = "api://AzureADTokenExchange/.default"
-	// ProbePath is the resource endpoint that checks an Agent identity token.
-	ProbePath = "/resource/probe"
-	// ProbeOK starts the probe's answer to a token it issued for its resource.
-	ProbeOK = "AGENT_IDENTITY_PROBE_OK"
-	// ModelReplyPrefix starts every answer of the fake Azure OpenAI endpoint.
-	ModelReplyPrefix = "KEYLESS_PROVIDER_OK"
-	// DisabledErrorCode is the AADSTS code Entra returns for a disabled
-	// application, which a disabled agent identity is.
+	ExchangeScope     = "api://AzureADTokenExchange/.default"
+	ProbePath         = "/resource/probe"
+	ProbeOK           = "AGENT_IDENTITY_PROBE_OK"
+	ModelReplyPrefix  = "KEYLESS_PROVIDER_OK"
 	DisabledErrorCode = 7000112
 
 	jwtBearer = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 )
 
-// Config fixes the tenant the fake serves and what it trusts.
 type Config struct {
 	TenantID          string
 	BlueprintClientID string
-	// Assertion is the controller's federated credential the blueprint must
-	// present.
-	Assertion string
-	// Identities are the agent identities that are children of the blueprint.
-	Identities []string
-	// Resource is the resource the probe accepts tokens for.
-	Resource string
-	// TokenLifetime is the expires_in of every issued token.
-	TokenLifetime time.Duration
-	// Workloads are workload identity client IDs whose federated credential
-	// is Assertion.
-	Workloads []string
-	// ModelResource is the resource the Azure OpenAI endpoint accepts tokens
-	// for, such as https://ai.azure.com.
-	ModelResource string
+	Assertion         string
+	Identities        []string
+	Resource          string
+	TokenLifetime     time.Duration
+	Workloads         []string
+	ModelResource     string
 }
 
-// Request records one token request without its credentials.
 type Request struct {
-	Step     string `json:"step"`
-	ClientID string `json:"clientID"`
-	Identity string `json:"identity"`
-	Scope    string `json:"scope"`
-	// Error is the refusal code, empty when a token was issued.
+	Step      string `json:"step"`
+	ClientID  string `json:"clientID"`
+	Identity  string `json:"identity"`
+	Scope     string `json:"scope"`
 	Error     string `json:"error,omitempty"`
 	ErrorCode int    `json:"errorCode,omitempty"`
 }
 
-// Probe records one call to the resource.
 type Probe struct {
 	Authorized bool   `json:"authorized"`
 	Identity   string `json:"identity,omitempty"`
 	Resource   string `json:"resource,omitempty"`
 }
 
-// ModelCall records one call to the Azure OpenAI endpoint.
 type ModelCall struct {
 	Path       string `json:"path"`
 	Authorized bool   `json:"authorized"`
 	Identity   string `json:"identity,omitempty"`
-	// APIKey reports that the call carried an api-key header.
-	APIKey bool `json:"apiKey,omitempty"`
-	Stream bool `json:"stream,omitempty"`
+	APIKey     bool   `json:"apiKey,omitempty"`
+	Stream     bool   `json:"stream,omitempty"`
 }
 
-// State is what the fake has seen. Issued holds every token value it handed
-// out, so a test can prove none of them reached a model.
 type State struct {
 	Requests []Request   `json:"requests"`
 	Probes   []Probe     `json:"probes"`
@@ -99,7 +68,6 @@ type State struct {
 
 type appGrant struct{ identity, resource string }
 
-// Server is the fake. Create it with New.
 type Server struct {
 	cfg      Config
 	mu       sync.Mutex
@@ -109,7 +77,6 @@ type Server struct {
 	state    State
 }
 
-// New returns a fake for cfg.
 func New(cfg Config) *Server {
 	cfg.TenantID = strings.ToLower(cfg.TenantID)
 	cfg.BlueprintClientID = strings.ToLower(cfg.BlueprintClientID)
@@ -125,7 +92,6 @@ func New(cfg Config) *Server {
 	return &Server{cfg: cfg, exchange: map[string]string{}, app: map[string]appGrant{}, disabled: map[string]bool{}}
 }
 
-// Handler serves the token endpoint, the probe, and the fixture controls.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
@@ -222,8 +188,6 @@ func (s *Server) issue(w http.ResponseWriter, record Request, keep func(string))
 	})
 }
 
-// probe answers HEAD for the Tool health check and GET for a call. A GET is
-// served only with an app token this fake issued for its resource.
 func (s *Server) probe(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead {
 		w.WriteHeader(http.StatusOK)
@@ -247,9 +211,6 @@ func (s *Server) probe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"result": ProbeOK, "identity": grant.identity})
 }
 
-// modelCall checks a call to the Azure OpenAI endpoint and records it. It is
-// authorized only with a workload token this fake issued for ModelResource;
-// an agent identity's token for the same resource is refused.
 func (s *Server) modelCall(r *http.Request, stream bool) ModelCall {
 	token, bearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	s.mu.Lock()
@@ -260,15 +221,13 @@ func (s *Server) modelCall(r *http.Request, stream bool) ModelCall {
 		Authorized: ok && bearer && s.cfg.ModelResource != "" && grant.resource == s.cfg.ModelResource &&
 			slices.Contains(s.cfg.Workloads, grant.identity),
 		Identity: grant.identity,
-		// Any api-key header counts, even an empty first value.
-		APIKey: len(r.Header.Values("Api-Key")) > 0,
-		Stream: stream,
+		APIKey:   len(r.Header.Values("Api-Key")) > 0,
+		Stream:   stream,
 	}
 	s.state.Models = append(s.state.Models, call)
 	return call
 }
 
-// modelError is an Azure OpenAI error body.
 type modelError struct {
 	Error struct {
 		Code    string `json:"code"`
@@ -310,8 +269,6 @@ type chatCompletion struct {
 	Usage   *chatUsage   `json:"usage,omitempty"`
 }
 
-// chatCompletions answers with ModelReplyPrefix and the last user message,
-// as one JSON response or as a stream.
 func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Stream   bool `json:"stream"`
@@ -358,8 +315,6 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, "data: [DONE]\n\n")
 }
 
-// responses answers as an Azure deployment without the Responses API does,
-// so clients fall back to chat completions.
 func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	if call := s.modelCall(r, false); !call.Authorized || call.APIKey {
 		writeModelError(w, http.StatusUnauthorized, "PermissionDenied", "", "")

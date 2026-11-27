@@ -11,10 +11,6 @@ import (
 	"testing"
 )
 
-// Client-submitted Task metadata must never claim controller-owned keys: the
-// ACP workspace settlement marker and link label live under
-// acp.workspace.orka.ai/ and forging them would skip controller-owned
-// revocation and detach actions.
 func TestRejectReservedTaskMetadataPrefixes(t *testing.T) {
 	t.Parallel()
 	const reservedValue = "reserved-value"

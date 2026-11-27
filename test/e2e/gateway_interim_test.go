@@ -64,9 +64,6 @@ func gatewayE2ESetManagerArgs(name string, args []string) error {
 }
 
 func gatewayE2ENativeAgentManifest(name string) map[string]any {
-	// No runtime or workspace: the gateway must create an ordinary native Job
-	// without worker-image init entrypoints or external model credentials.
-	// Its SessionRef still requires the standard fetch-session init container.
 	return map[string]any{
 		"apiVersion": "core.orka.ai/v1alpha1", "kind": "Agent",
 		"metadata": map[string]any{"name": name, "namespace": namespace},
@@ -139,9 +136,6 @@ func gatewayE2EVerifyNativeMessage(baseURL, token, eventID, taskName string, cap
 		g.Expect(pod.Spec.Containers[0].Image).To(Equal(gatewayNativeWorkerRef))
 		g.Expect(pod.Spec.Containers[0].ImagePullPolicy).To(Equal(corev1.PullIfNotPresent))
 	}, time.Minute, time.Second).Should(Succeed())
-	// The test drives only fixture-local fences using Kubernetes exec. /worker
-	// authenticates origin and executes the production tool/client with the real
-	// Pod-bound projected token. This is not the production model/registration loop.
 	By("executing the content-only production reply tool and replay in the native fixture")
 	_, err = gatewayE2EWorkerCommand(pod.Name, "start")
 	Expect(err).NotTo(HaveOccurred())
@@ -200,8 +194,6 @@ func gatewayE2EVerifyNativeMessage(baseURL, token, eventID, taskName string, cap
 			want = 2
 		}
 		g.Expect(deliveries).To(HaveLen(want))
-		// The API is newest-first, not provider order. The active receipt/release
-		// fence above is the ordering proof; never infer send order from this list.
 		for _, delivery := range deliveries {
 			g.Expect(delivery.State).To(Equal(store.GatewayDeliveryDelivered))
 			if delivery.Kind == protocol.DeliveryKindFinal {

@@ -34,14 +34,8 @@ import (
 )
 
 const (
-	// RunValidationToolName is the brokered tool exposed only to controller-owned
-	// repository monitor review Tasks with a configured validation image.
-	RunValidationToolName = "run_validation"
-	// RepositoryValidationTimeout is the fixed execution timeout for repository
-	// validation Tasks.
-	RepositoryValidationTimeout = 45 * time.Minute
-	// RepositoryValidationWaitTimeout bounds each poll below runtime MCP request
-	// deadlines. The reviewer repeats polls until the validation Task is terminal.
+	RunValidationToolName           = "run_validation"
+	RepositoryValidationTimeout     = 45 * time.Minute
 	RepositoryValidationWaitTimeout = 30 * time.Second
 
 	repositoryValidationPurpose         = "repository-validation"
@@ -54,8 +48,6 @@ const (
 
 var repositoryValidationImagePattern = regexp.MustCompile(`^[^\s@]+@sha256:[a-f0-9]{64}$`)
 
-// ValidRepositoryValidationImage reports whether image satisfies the public
-// RepositoryMonitor validation-image contract.
 func ValidRepositoryValidationImage(image string) bool {
 	if len(image) > repositoryValidationMaxImage || !repositoryValidationImagePattern.MatchString(image) {
 		return false
@@ -68,9 +60,6 @@ func ValidRepositoryValidationImage(image string) bool {
 	return ok
 }
 
-// RunValidationTool creates one tightly scoped validation Task for a
-// controller-owned repository monitor review. The caller chooses the shell
-// command, while the controller fixes the image and exact source checkout.
 type RunValidationTool struct {
 	k8sClient client.Client
 }
@@ -269,9 +258,6 @@ func buildRepositoryValidationTask(parent *corev1alpha1.Task, monitor *corev1alp
 				labels.LabelGitHubNumber:      parent.Labels[labels.LabelGitHubNumber],
 			},
 			Annotations: annotations,
-			// The exact review incarnation owns its UID-versioned validation Task.
-			// Replacing or deleting the review therefore garbage-collects stale
-			// validation work instead of leaving it under the long-lived monitor.
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(parent, corev1alpha1.GroupVersion.WithKind("Task")),
 			},
@@ -345,9 +331,6 @@ func ensureRepositoryValidationCommandSecret(ctx context.Context, k8sClient clie
 	return nil
 }
 
-// RepositoryValidationTaskName returns the deterministic child Task name for
-// one exact review Task incarnation. Including the UID prevents a recreated
-// review with the same Kubernetes name from adopting an earlier validation.
 func RepositoryValidationTaskName(parent *corev1alpha1.Task) string {
 	if parent == nil {
 		return ""
@@ -378,8 +361,6 @@ func repositoryValidationTaskMatches(existing, expected *corev1alpha1.Task) bool
 	return repositoryValidationTaskSpecsEqual(existing.Spec, expected.Spec)
 }
 
-// RepositoryValidationTaskSpecMatches reports whether a validation Task has
-// the exact spec the run_validation tool would create for the review.
 func RepositoryValidationTaskSpecMatches(parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, validationTask *corev1alpha1.Task, image, headSHA string) bool {
 	if parent == nil || monitor == nil || validationTask == nil || parent.Spec.Workspace == nil {
 		return false

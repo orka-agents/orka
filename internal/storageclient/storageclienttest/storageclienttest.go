@@ -1,7 +1,3 @@
-// Package storageclienttest builds storage clients over the embedded SQLite
-// store for tests in other packages. The clients' writes carry the
-// controller epoch the dataset holds (see FollowDataset), so tests write
-// through the storage client without running the controller epoch manager.
 package storageclienttest
 
 import (
@@ -17,27 +13,18 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// Key is the snapshot key the clients activate.
 var Key = bytes.Repeat([]byte{0x5a}, storageclient.SnapshotKeyBytes)
 
-// TB is the part of testing.TB that Client uses.
 type TB interface {
 	Helper()
 	Fatalf(format string, args ...any)
 }
 
-// Store is the embedded store New wraps, such as *sqlite.Store.
 type Store interface {
 	storageclient.EmbeddedStore
 	SetNativeSessionFinalizationSealer(sealer store.NativeSessionFinalizationSealer)
 }
 
-// New wraps s in the storage client and activates Key, as controller
-// startup does with the configured key. The client's writes carry the
-// controller epoch s holds (see FollowDataset). It also installs the client
-// as the native session sealer of SQLite's duplicate SQL control
-// implementation, so tests that finalize turns through that path can carry
-// native state. Every client for one dataset must use the same key.
 func New(s Store) (*storageclient.Client, error) {
 	client, err := newFollowing(s)
 	if err != nil {
@@ -50,7 +37,6 @@ func New(s Store) (*storageclient.Client, error) {
 	return client, nil
 }
 
-// Client is New for a test, which it fails on error.
 func Client(t TB, s Store) *storageclient.Client {
 	t.Helper()
 	client, err := New(s)
@@ -60,33 +46,23 @@ func Client(t TB, s Store) *storageclient.Client {
 	return client
 }
 
-// Holder and Installation identify the controller epoch FollowDataset gives
-// a dataset that holds none.
 const (
 	Holder       = "storageclienttest-controller"
 	Installation = "storageclienttest-installation"
 )
 
-// Dataset is what FollowDataset needs from a provider.
 type Dataset interface {
 	storagev1.ProviderDescriber
 	storagev1.ControllerEpochMirror
 	storagev1.ControllerEpochAdvancer
 }
 
-// FollowDataset is a fence source that serves, for every contract, the
-// controller epoch the dataset holds when the write is issued, as a
-// controller that owns the dataset would. A dataset that holds no epoch is
-// given epoch 1 of Holder first, through SyncControllerEpochMirror, which
-// binds no installation, so a test can still advance it or synchronize it
-// itself.
 type FollowDataset struct {
 	Dataset Dataset
 
 	mu sync.Mutex
 }
 
-// WriteFence implements storageclient.FenceSource.
 func (f *FollowDataset) WriteFence(ctx context.Context, _ string) (string, storagev1.ControllerEpochFence, error) {
 	info, err := f.Dataset.Describe(ctx)
 	if err != nil {
@@ -109,7 +85,6 @@ func (f *FollowDataset) WriteFence(ctx context.Context, _ string) (string, stora
 	}, nil
 }
 
-// InitialEpoch is the epoch FollowDataset gives a dataset that holds none.
 func InitialEpoch() storagev1.ControllerEpoch {
 	acquired := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	return storagev1.ControllerEpoch{
@@ -119,9 +94,6 @@ func InitialEpoch() storagev1.ControllerEpoch {
 	}
 }
 
-// NewEmbedded returns a storage client over backend whose writes carry the
-// controller epoch the dataset holds (see FollowDataset). It activates no
-// snapshot key.
 func NewEmbedded(t testing.TB, backend storageclient.EmbeddedStore) *storageclient.Client {
 	t.Helper()
 	client, err := newFollowing(backend)

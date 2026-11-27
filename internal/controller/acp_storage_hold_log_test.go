@@ -14,7 +14,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// recoveryLog records the dispatcher's log lines.
 type recoveryLog struct {
 	mu    sync.Mutex
 	lines []string
@@ -40,8 +39,6 @@ func (l *recoveryLog) count(message string) int {
 	return n
 }
 
-// The scheduled stale recovery that runs every dispatch interval reports a
-// held Task once, when the hold is placed, rather than on every pass.
 func TestScheduledRecoveryDoesNotLogAnUnchangedHoldEveryPass(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -57,7 +54,6 @@ func TestScheduledRecoveryDoesNotLogAnUnchangedHoldEveryPass(t *testing.T) {
 			t.Fatal(err)
 		}
 		fixture.dispatcher.scheduleStaleAttemptRecoveries(ctx, []corev1alpha1.Task{*latest}, fixture.fence)
-		// The scheduled pass holds the mutex until it finishes.
 		fixture.dispatcher.staleRecoveryMu.Lock()
 		fixture.dispatcher.staleRecoveryMu.Unlock() //nolint:staticcheck // Waits for the scheduled pass.
 	}

@@ -36,10 +36,6 @@ const (
 	agentHostReasonProviderConflict = "AgentHostProviderConflict"
 )
 
-// AgentHostProvisioner gives each person who links the agent-host provider
-// their own AgentHost, named after their GitHub login (ADR 0036), and records
-// their provider. The AgentHost reconciler feeds and stops them, and nothing
-// deletes one when its Connection goes.
 type AgentHostProvisioner struct {
 	client.Client
 	HostCredentials AgentHostCredentials
@@ -47,19 +43,15 @@ type AgentHostProvisioner struct {
 	Recorder        events.EventRecorder
 }
 
-// Reconcile implements reconcile.Reconciler.
 func (r *AgentHostProvisioner) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	connection := &corev1alpha1.Connection{}
 	if err := r.Get(ctx, req.NamespacedName, connection); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	// Only the person's canonical link may provision or identify their host.
 	subject := connection.Spec.Subject
 	if connection.Name != connectors.ConnectionName(connection.Spec.ProviderRef.Name, subject.Issuer, subject.Subject) {
 		return ctrl.Result{}, nil
 	}
-	// Retained hosts need their full provider name before the Connection is
-	// removed, even if the link or provider no longer qualifies for a host.
 	hosts := &corev1alpha1.AgentHostList{}
 	if err := r.List(ctx, hosts, client.InNamespace(connection.Namespace)); err != nil {
 		return ctrl.Result{}, err
@@ -123,7 +115,6 @@ func (r *AgentHostProvisioner) Reconcile(ctx context.Context, req ctrl.Request) 
 		if !fedBy(existing, connection) {
 			r.event(connection, corev1.EventTypeWarning, agentHostReasonNameTaken,
 				fmt.Sprintf("AgentHost %q already exists and was not created for this link; no host was provisioned", host.Name))
-			// Deleting the other host enqueues nothing for this link.
 			return ctrl.Result{RequeueAfter: agentHostResync}, nil
 		}
 		return ctrl.Result{}, r.recordHostProvider(ctx, existing, connection.Spec.ProviderRef.Name)
@@ -135,7 +126,6 @@ func (r *AgentHostProvisioner) Reconcile(ctx context.Context, req ctrl.Request) 
 	return ctrl.Result{}, nil
 }
 
-// recordHostProvider also upgrades hosts created before the annotation existed.
 func (r *AgentHostProvisioner) recordHostProvider(ctx context.Context, host *corev1alpha1.AgentHost, provider string) error {
 	if host.Annotations[connectors.AgentHostProviderAnnotation] == provider {
 		return nil
@@ -145,12 +135,9 @@ func (r *AgentHostProvisioner) recordHostProvider(ctx context.Context, host *cor
 		host.Annotations = map[string]string{}
 	}
 	host.Annotations[connectors.AgentHostProviderAnnotation] = provider
-	// Do not patch a replacement host or overwrite concurrent metadata changes.
 	return r.Patch(ctx, host, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
-// providerConflict reports whether another provider in the namespace also
-// serves agent hosts; then none provisions, and each says so.
 func (r *AgentHostProvisioner) providerConflict(ctx context.Context, provider *corev1alpha1.ConnectorProvider) (bool, error) {
 	providers := &corev1alpha1.ConnectorProviderList{}
 	if err := r.List(ctx, providers, client.InNamespace(provider.Namespace)); err != nil {
@@ -178,21 +165,15 @@ func (r *AgentHostProvisioner) event(object client.Object, kind, reason, message
 	}
 }
 
-// agentHostNameFor names a person's host after their GitHub login. Managed
-// user logins carry an underscore, which a name cannot; it becomes a double
-// hyphen, which no GitHub login contains, so no two logins share a name.
 func agentHostNameFor(login string) string {
 	return "gh-" + strings.ReplaceAll(strings.ToLower(login), "_", "--")
 }
 
-// fedBy reports whether host takes its token from connection.
 func fedBy(host *corev1alpha1.AgentHost, connection *corev1alpha1.Connection) bool {
 	from := host.Spec.GitHubTokenFrom
 	return from != nil && from.ConnectionRef.Name == connection.Name
 }
 
-// SetupWithManager registers the provisioner. It runs only beside the
-// AgentHost reconciler, with connectors enabled.
 func (r *AgentHostProvisioner) SetupWithManager(mgr ctrl.Manager) error {
 	if r.HostCredentials == nil || r.GitHubAccounts == nil {
 		return errors.New("agent host provisioning needs connection credentials and a GitHub account reader")
@@ -200,9 +181,6 @@ func (r *AgentHostProvisioner) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Connection{}).
 		Named("agenthost-provisioner").
-		// A provider change can start or end a namespace's provider conflict,
-		// so it revisits every link there; a deleted host is provisioned
-		// again for its link.
 		Watches(&corev1alpha1.ConnectorProvider{}, handler.EnqueueRequestsFromMapFunc(r.connectionsIn)).
 		Watches(&corev1alpha1.AgentHost{}, handler.EnqueueRequestsFromMapFunc(hostConnection)).
 		Complete(r)

@@ -16,9 +16,6 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-// A Task a tool creates for an AHP turn carries the turn's work, so it is
-// marked a turn and stays as private as the turn; other parents' children are
-// not marked.
 func TestInheritTaskProvenanceKeepsAHPTurnChildrenPrivate(t *testing.T) {
 	ahpParent := parentTask()
 	ahpParent.Labels = map[string]string{labels.LabelAHPTurn: labels.LabelAHPTurnValue}
@@ -45,7 +42,6 @@ func TestInheritTaskProvenanceKeepsAHPTurnChildrenPrivate(t *testing.T) {
 	}
 }
 
-// delegate_task run by an AHP turn creates a child the API keeps private.
 func TestDelegateTaskToolMarksAnAHPTurnsChildATurn(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)

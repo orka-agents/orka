@@ -28,10 +28,6 @@ import (
 
 const anthropicErrorEnvelopeType = "error"
 
-// CompatRouter forwards model compatibility routes to independent,
-// namespace-scoped Orka installations. It authenticates ServiceAccount tokens;
-// the receiving installation reauthenticates the same token and authorizes the
-// route and each tool operation. It has no access to tenant resources or stores.
 type CompatRouter struct {
 	client                client.Client
 	routes                map[string]*url.URL
@@ -40,8 +36,6 @@ type CompatRouter struct {
 	responsesWriteTimeout time.Duration
 }
 
-// NewCompatRouter freezes the operator's namespace-to-installation allowlist.
-// Targets are API origins, without a path, credentials, query or fragment.
 func NewCompatRouter(c client.Client, namespaces map[string]string) (*CompatRouter, error) {
 	if c == nil || len(namespaces) == 0 {
 		return nil, fmt.Errorf("TokenReview client and at least one namespace route are required")
@@ -55,7 +49,6 @@ func NewCompatRouter(c client.Client, namespaces map[string]string) (*CompatRout
 		if err != nil || target.Hostname() == "" || (target.Scheme != "http" && target.Scheme != "https") ||
 			target.User != nil || (target.Path != "" && target.Path != "/") || target.RawPath != "" ||
 			target.RawQuery != "" || target.ForceQuery || target.Fragment != "" || target.Opaque != "" {
-			// Do not echo URLs: a rejected configuration may contain credentials.
 			return nil, fmt.Errorf("route for namespace %s must be an http(s) origin without credentials, path, query or fragment", namespace)
 		}
 		if port := target.Port(); port != "" {
@@ -68,8 +61,6 @@ func NewCompatRouter(c client.Client, namespaces map[string]string) (*CompatRout
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	// Destinations are explicitly configured services. Environment proxies must
-	// not receive caller credentials or change where these requests go.
 	transport.Proxy = nil
 	transport.DialContext = (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 	transport.TLSHandshakeTimeout = 5 * time.Second
@@ -81,15 +72,12 @@ func NewCompatRouter(c client.Client, namespaces map[string]string) (*CompatRout
 	return &CompatRouter{client: c, routes: routes, transport: transport, corsOrigins: strings.Split(origins, ","), responsesWriteTimeout: 30 * time.Second}, nil
 }
 
-// Close releases idle connections when the router shuts down.
 func (r *CompatRouter) Close() {
 	r.transport.CloseIdleConnections()
 }
 
 func (r *CompatRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	path := routeLookupPath(req.URL.Path)
-	// Credential-selected responses must never enter a shared cache, including
-	// when clients use x-api-key rather than Authorization.
 	w.Header().Set("Cache-Control", "private, no-store")
 	if req.Method == http.MethodGet && (path == "/healthz" || path == "/readyz") {
 		w.WriteHeader(http.StatusOK)
@@ -102,8 +90,6 @@ func (r *CompatRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeCompatRouterError(w, path, http.StatusNotFound, "unknown compatibility route")
 		return
 	}
-	// Other identity types retain their installation endpoint and namespace
-	// contracts. Never route using one credential and authorize using another.
 	if req.Header.Get(TransactionTokenHeaderName) != "" {
 		writeCompatRouterError(w, path, http.StatusUnauthorized, "use the installation endpoint for transaction tokens")
 		return
@@ -140,8 +126,6 @@ func (r *CompatRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeCompatRouterError(w, path, http.StatusForbidden, "namespace is not enabled at this endpoint")
 		return
 	}
-	// Also bind the receiving installation's namespace check. A misconfigured
-	// route cannot silently run the work in a different watched namespace.
 	query.Set("namespace", identity.Namespace)
 	if req.ContentLength > defaultAPIRequestBodyLimit {
 		writeCompatRouterError(w, path, http.StatusRequestEntityTooLarge, "request body is too large")
@@ -149,9 +133,6 @@ func (r *CompatRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	req.Body = http.MaxBytesReader(w, req.Body, defaultAPIRequestBodyLimit)
 	if path == "/openai/v1/responses" {
-		// Installations bound inference time, but cannot release this hop if
-		// its client stops reading after the upstream response is drained.
-		// Bound each downstream write, not time waiting for the installation.
 		ctx, cancel := context.WithCancel(req.Context())
 		defer cancel()
 		req = req.WithContext(ctx)
@@ -159,16 +140,13 @@ func (r *CompatRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	proxy := &httputil.ReverseProxy{
 		Transport:     r.transport,
-		FlushInterval: -1, // Forward SSE immediately, including terminal events.
+		FlushInterval: -1,
 		ErrorLog:      stdlog.New(io.Discard, "", 0),
 		Rewrite: func(p *httputil.ProxyRequest) {
 			p.SetURL(target)
 			p.Out.URL.Path = path
 			p.Out.URL.RawPath = ""
 			p.Out.URL.RawQuery = query.Encode()
-			// Only protocol headers cross the router. In particular, custom
-			// context-token headers, cookies and impersonation headers cannot
-			// override the credential that selected this namespace.
 			p.Out.Header = make(http.Header)
 			for _, name := range compatRouterRequestHeaders {
 				if values := p.In.Header.Values(name); len(values) != 0 {
@@ -181,8 +159,6 @@ func (r *CompatRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		ModifyResponse: func(response *http.Response) error {
 			response.Header.Set("Cache-Control", "private, no-store")
 			response.Header.Del("Expires")
-			// This listener owns its CORS policy; an installation must not widen
-			// it through headers copied by the reverse proxy.
 			for name := range response.Header {
 				if strings.HasPrefix(strings.ToLower(name), "access-control-") {
 					response.Header.Del(name)
@@ -204,8 +180,6 @@ func (r *CompatRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	proxy.ServeHTTP(w, req)
 	if bounded, ok := w.(*responsesDeadlineWriter); ok {
-		// Bound net/http's final headers, trailers and chunk terminator too.
-		// The server clears this deadline before reusing the connection.
 		if err := bounded.setDeadline(time.Now().Add(bounded.timeout)); err != nil {
 			panic(http.ErrAbortHandler)
 		}
@@ -222,8 +196,6 @@ func (w *responsesDeadlineWriter) Unwrap() http.ResponseWriter { return w.Respon
 
 func (w *responsesDeadlineWriter) setDeadline(deadline time.Time) error {
 	err := http.NewResponseController(w.ResponseWriter).SetWriteDeadline(deadline)
-	// In-memory response writers have no socket to bound. Native HTTP/1
-	// and HTTP/2 writers support deadlines, including through Unwrap.
 	if errors.Is(err, http.ErrNotSupported) {
 		return nil
 	}
@@ -255,7 +227,6 @@ func (w *responsesDeadlineWriter) FlushError() error {
 		err = w.setDeadline(time.Time{})
 	}
 	if err != nil {
-		// ReverseProxy may ignore Flush errors, so cancel its upstream read.
 		w.cancel()
 	}
 	return err

@@ -9,10 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestCopyInfoSharesNothing fills every reference field of ProviderInfo and
-// checks that copyInfo copies each one, so a field added later, such as a
-// pointer to a dataset binding, cannot leak a Describe change into the
-// provider's own report.
 func TestCopyInfoSharesNothing(t *testing.T) {
 	var info storagev1.ProviderInfo
 	value := reflect.ValueOf(&info).Elem()
@@ -24,8 +20,6 @@ func TestCopyInfoSharesNothing(t *testing.T) {
 			field.Set(reflect.MakeSlice(field.Type(), 1, 1))
 		case reflect.Pointer:
 			field.Set(reflect.New(field.Type().Elem()))
-			// copyInfo copies the value a pointer refers to, not what that
-			// value refers to in turn.
 			if elem := field.Type().Elem(); elem.Kind() == reflect.Struct {
 				requireNoReferences(t, name, elem)
 			}
@@ -47,8 +41,6 @@ func TestCopyInfoSharesNothing(t *testing.T) {
 	}
 }
 
-// requireNoReferences fails when the struct type typ holds a slice, pointer,
-// map or other reference that copyInfo would share.
 func requireNoReferences(t *testing.T, path string, typ reflect.Type) {
 	t.Helper()
 	for field := range typ.Fields() {
@@ -64,9 +56,6 @@ func requireNoReferences(t *testing.T, path string, typ reflect.Type) {
 	}
 }
 
-// TestMethodsOutsideTheCatalogMatchNoKindOrClass keeps the rule that a method
-// outside the storage method catalog matches no kind and no class. Every
-// provider method is in the catalog now, so no wrapper reaches that branch.
 func TestMethodsOutsideTheCatalogMatchNoKindOrClass(t *testing.T) {
 	allClasses := Match{Classes: []storagev1.CallClass{
 		storagev1.CallControl, storagev1.CallInteractive, storagev1.CallBackground, storagev1.CallStream, storagev1.CallBulk,

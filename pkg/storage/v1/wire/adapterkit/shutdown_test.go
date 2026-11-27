@@ -14,8 +14,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/adapterkit"
 )
 
-// When the shutdown grace period passes, Serve returns even while a handler
-// is still settling a commit with a longer settle timeout.
 func TestServeReturnsWhenTheShutdownGracePeriodPasses(t *testing.T) {
 	f := newFixture(t)
 	provider := newMemoryArtifacts()
@@ -23,7 +21,6 @@ func TestServeReturnsWhenTheShutdownGracePeriodPasses(t *testing.T) {
 	finished := make(chan struct{})
 	t.Cleanup(func() {
 		close(settling)
-		// Only a call that reached the provider has a handler to wait for.
 		select {
 		case <-entered:
 		default:
@@ -71,9 +68,6 @@ func TestServeReturnsWhenTheShutdownGracePeriodPasses(t *testing.T) {
 	}
 }
 
-// A forced stop closes every connection before Serve returns, including one
-// still in its TLS handshake, which the gRPC server's Stop would wait for
-// rather than close.
 func TestServeClosesHandshakingConnectionsOnAForcedStop(t *testing.T) {
 	f := newFixture(t)
 	config := f.bearerConfig(newMemoryArtifacts())
@@ -84,8 +78,6 @@ func TestServeClosesHandshakingConnectionsOnAForcedStop(t *testing.T) {
 	stalled, err := net.Dial("tcp", running.address)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = stalled.Close() })
-	// The connection never sends its ClientHello, so its handshake stays
-	// open until the gRPC server's connection timeout.
 	time.Sleep(50 * time.Millisecond)
 	running.stop()
 	select {

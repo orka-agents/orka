@@ -19,41 +19,24 @@ import (
 )
 
 const (
-	// sessionTokenPrefix starts every Orka session token, as the API issues
-	// them, so one passed with --token is treated as a session too.
-	sessionTokenPrefix = "orka_s_"
-	// tokenKindGitHubSession marks a configured token as an Orka session
-	// from orka login, which renews itself and belongs to one server.
+	sessionTokenPrefix     = "orka_s_"
 	tokenKindGitHubSession = "github-session"
-	// sessionRenewWindow is how long before its end a session renews.
-	sessionRenewWindow = 2 * time.Hour
-	// sessionRenewTimeout bounds one renewal, waiting for the config lock
-	// included.
-	sessionRenewTimeout = 30 * time.Second
-	// plainHTTPScheme carries sessions only to this machine.
-	plainHTTPScheme = "http"
-	httpsScheme     = "https"
-	cliLoginUse     = "login"
+	sessionRenewWindow     = 2 * time.Hour
+	sessionRenewTimeout    = 30 * time.Second
+	plainHTTPScheme        = "http"
+	httpsScheme            = "https"
+	cliLoginUse            = "login"
 )
 
-// noRedirectClient carries credentials: a redirect, from the server or a
-// proxy in front of it, would send them past the origin and transport checks,
-// so it is answered as it is instead of followed. It sends the sign-in calls,
-// each bounded to a minute.
 var noRedirectClient = &http.Client{
 	Timeout:       time.Minute,
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
-// sessionAPIClient sends a session's API calls, which follow no redirect
-// either. It sets no overall deadline, as the API client's default does
-// not: streamed logs and chat replies last as long as they run.
 var sessionAPIClient = &http.Client{
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
-// githubWebURL is GitHub's device-flow host, and githubPollFloor the shortest
-// wait between polls (zero is GitHub's own); tests change both.
 var (
 	githubWebURL    = "https://github.com"
 	githubPollFloor time.Duration
@@ -62,8 +45,9 @@ var (
 type authConfigView struct {
 	OIDC       *bool `json:"oidc"`
 	OIDCConfig *struct {
-		Issuer   string `json:"issuer"`
-		Audience string `json:"audience"`
+		Issuer   string   `json:"issuer"`
+		Audience string   `json:"audience"`
+		Scopes   []string `json:"scopes"`
 	} `json:"oidcConfig"`
 	GitHub *struct {
 		ClientID  string `json:"clientID"`
@@ -109,8 +93,6 @@ func newLoginCmd() *cobra.Command {
 			if options.GitHub.AgentHost && !noHost {
 				fmt.Fprintln(out, "Signing in starts your Copilot environment on Orka. Code running there can read your GitHub token.") //nolint:errcheck
 			}
-			// Said before the code is shown, while stopping keeps the
-			// saved token: logout clears the session and never restores it.
 			if saved := loadConfig(); saved.Token != "" && saved.TokenKind != tokenKindGitHubSession {
 				fmt.Fprintln(cmd.ErrOrStderr(), "Signing in replaces the token and namespace saved in your Orka config. "+ //nolint:errcheck
 					"Press Ctrl-C now to keep them; after signing in, pass them with --token and --namespace.")
@@ -130,8 +112,6 @@ func newLoginCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Without the disclosure above, no host may start: a host
-			// enabled while the code was pending is declined.
 			body, err := json.Marshal(map[string]any{
 				"accessToken": tokens.AccessToken, "refreshToken": tokens.RefreshToken, "expiresIn": tokens.ExpiresIn,
 				"noHost": noHost || !options.GitHub.AgentHost,
@@ -158,15 +138,11 @@ func newLoginCmd() *cobra.Command {
 			fmt.Fprintf(out, "Signed in to %s as %s.\n", server, session.Login) //nolint:errcheck
 			if !session.AgentHost {
 				if options.GitHub.AgentHost && !noHost {
-					// The server starts a host only for a token whose expiry
-					// GitHub confirmed through its refresh token.
 					fmt.Fprintln(out, "Orka started no Copilot environment: GitHub gave this sign-in no refresh token, so its token does not expire. "+ //nolint:errcheck
 						"Turn on user-token expiration in the GitHub App, then sign in again.")
 				}
 				return nil
 			}
-			// The new session goes only to its own server: never through a
-			// redirect.
 			hosts := client.NewWithNamespace(server, session.Token, session.Namespace)
 			hosts.HTTPClient = sessionAPIClient
 			return waitForAgentHost(ctx, cmd, hosts, session.Connection, agentHostReasonGitHubMembershipEnded, agentHostReasonGitHubTokenNeverExpires)
@@ -186,8 +162,6 @@ func newLogoutCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
-			// A renewal in flight would leave this the ended token while its
-			// successor stays live: logout waits for it and ends what is saved.
 			unlock, err := lockConfig(ctx)
 			if err != nil {
 				return fmt.Errorf("wait for a session renewal: %w", err)
@@ -223,11 +197,7 @@ func newLogoutCmd() *cobra.Command {
 	}
 }
 
-// loginServer is --server or the configured server. Sessions are bearer
-// credentials, so plain HTTP is refused except to this machine.
 func loginServer(cmd *cobra.Command) (string, error) {
-	// The same server every other command reaches: --server, ORKA_SERVER,
-	// then the config. A session signed in elsewhere would be withheld from it.
 	server := strings.TrimRight(strings.TrimSpace(configuredServer(cmd, loadConfig())), "/")
 	if server == "" {
 		return "", errors.New("pass --server, or set " + envServer + ", with your Orka address, such as https://orka.<tailnet>.ts.net")
@@ -261,8 +231,6 @@ func sessionServerAllowed(server string) error {
 	return fmt.Errorf("%s would carry your session in the clear; use https, or http only to localhost", server)
 }
 
-// configuredSession returns the configured session token for server, renewed
-// when it ends soon. A session is sent only to the server that issued it.
 func configuredSession(cmd *cobra.Command, server string, cfg orkaConfig) string {
 	if server == "" {
 		server = cfg.Server
@@ -275,9 +243,6 @@ func configuredSession(cmd *cobra.Command, server string, cfg orkaConfig) string
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sessionRenewTimeout)
 	defer cancel()
-	// The server renews a session once: another orka process renewing it
-	// at the same time would leave this one the ended token. Renewals take
-	// turns, and one that finds a successor saved meanwhile uses it.
 	unlock, err := lockConfig(ctx)
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Could not renew your Orka session (%v).\n", err) //nolint:errcheck
@@ -286,9 +251,6 @@ func configuredSession(cmd *cobra.Command, server string, cfg orkaConfig) string
 	defer unlock()
 	saved := loadConfig()
 	if !holdsSession(saved, cfg) {
-		// The session was replaced or ended meanwhile: nothing to renew.
-		// Another person's session saved meanwhile is theirs, never this
-		// command's.
 		return cfg.Token
 	}
 	cfg = saved
@@ -305,8 +267,6 @@ func configuredSession(cmd *cobra.Command, server string, cfg orkaConfig) string
 			err, cfg.TokenExpiresAt.Local().Format(time.Kitchen))
 		return cfg.Token
 	}
-	// The successor goes onto the config read under the lock: every config
-	// write takes it, so no change made meanwhile is undone.
 	expires := session.ExpiresAt
 	cfg.Token, cfg.TokenExpiresAt = session.Token, &expires
 	if err := saveConfig(cfg); err != nil {
@@ -315,18 +275,12 @@ func configuredSession(cmd *cobra.Command, server string, cfg orkaConfig) string
 	return session.Token
 }
 
-// holdsSession reports whether saved holds a session of the same person from
-// the same server as read: read's own, or its successor from a renewal. The
-// person is their GitHub user ID: another account may sign in meanwhile under
-// a login this person used before.
 func holdsSession(saved, read orkaConfig) bool {
 	return saved.TokenKind == tokenKindGitHubSession && saved.Token != "" &&
 		saved.SessionServer == read.SessionServer &&
 		read.SessionSubject != "" && saved.SessionSubject == read.SessionSubject
 }
 
-// sessionEndsSoon reports a session in its renewal window. One that already
-// ended is not renewed: the person signs in again.
 func sessionEndsSoon(cmd *cobra.Command, cfg orkaConfig) bool {
 	if cfg.TokenExpiresAt == nil {
 		return false
@@ -339,8 +293,6 @@ func sessionEndsSoon(cmd *cobra.Command, cfg orkaConfig) bool {
 	return left <= sessionRenewWindow
 }
 
-// plainJSON sends one JSON request outside the API client, for the sign-in
-// calls that precede or replace its credential.
 func plainJSON(ctx context.Context, method, target, token string, body []byte, into any) error {
 	var reader io.Reader
 	if body != nil {

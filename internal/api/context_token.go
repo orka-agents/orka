@@ -23,16 +23,12 @@ import (
 )
 
 const (
-	// AuthTypeContextToken identifies generic transaction/context token authentication.
 	AuthTypeContextToken = "contextToken"
 
-	// ContextTokenProfileTransactionToken identifies Orka's strict transaction-token profile.
 	ContextTokenProfileTransactionToken = transactiontoken.ProfileName
 
-	// TransactionTokenHeaderName is the default HTTP transaction-token header.
 	TransactionTokenHeaderName = transactiontoken.HeaderName
 
-	// TransactionTokenJWTType is the JWT typ header required by the profile.
 	TransactionTokenJWTType = transactiontoken.JWTType
 )
 
@@ -62,13 +58,11 @@ var contextTokenStringListAuthorizationClaims = [...]string{
 	"allowedModels",
 }
 
-// TokenHeaderConfig describes one HTTP header location from which a token can be extracted.
 type TokenHeaderConfig struct {
 	Name   string
 	Scheme string
 }
 
-// ContextTokenProfileConfig describes validation settings for a context-token profile.
 type ContextTokenProfileConfig struct {
 	Name           string
 	Issuer         string
@@ -79,17 +73,14 @@ type ContextTokenProfileConfig struct {
 	RequiredClaims []string
 }
 
-// ContextTokenConfig holds generic transaction/context token validation settings.
 type ContextTokenConfig struct {
 	Profiles []ContextTokenProfileConfig
 }
 
-// Enabled reports whether context-token authentication is configured.
 func (c ContextTokenConfig) Enabled() bool {
 	return len(c.Profiles) > 0
 }
 
-// ContextToken contains verified transaction/context token identity and metadata.
 type ContextToken struct {
 	Profile            string
 	Type               string
@@ -119,7 +110,6 @@ type contextTokenClaims struct {
 	RequesterContext   map[string]any `json:"rctx,omitempty"`
 }
 
-// NewContextTokenConfig builds context-token configuration for a named profile.
 func NewContextTokenConfig(profile, issuer, audience, jwksURL, headers string) (ContextTokenConfig, error) {
 	if strings.TrimSpace(profile) == "" {
 		if issuer != "" || audience != "" || jwksURL != "" || headers != "" {

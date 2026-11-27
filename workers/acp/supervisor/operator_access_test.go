@@ -43,9 +43,7 @@ type fakeOperatorProcess struct {
 	signals    []string
 	once       sync.Once
 	unkillable bool
-	// stuck models a leader in uninterruptible I/O: SIGKILL never makes it
-	// exit, so Wait never returns.
-	stuck bool
+	stuck      bool
 }
 
 func newFakeOperatorProcess() *fakeOperatorProcess {
@@ -133,8 +131,6 @@ func newOperatorTestServer(t *testing.T, state harnessv2.RuntimeSessionState, st
 	previous := operatorChildIdentity
 	operatorChildIdentity = func(*sessionState) (int, int) { return 20001, 20000 }
 	t.Cleanup(func() { operatorChildIdentity = previous })
-	// Outside Linux no tag can be proven free; the fixture's fake processes
-	// never hold one, and allocateTag still tracks the tags it hands out.
 	previousTagInUse := operatorTagInUse
 	operatorTagInUse = func(int) bool { return false }
 	t.Cleanup(func() { operatorTagInUse = previousTagInUse })
@@ -292,7 +288,6 @@ func TestOperatorExecStreamsStdinAndExitStatus(t *testing.T) {
 	process := newFakeOperatorProcess()
 	var launched operatorLaunch
 	go func() {
-		// Echo stdin to stdout until EOF, then exit 3.
 		_, _ = io.Copy(process.stdoutW, process.stdinR)
 		process.finish(3)
 	}()
@@ -332,7 +327,6 @@ func TestOperatorExecForwardsInterrupt(t *testing.T) {
 		signedOperatorExecHeaders(t, 2, operatoraccess.ExecOptions{Argv: []string{"sh"}}),
 		func(ctx context.Context, conn *websocket.Conn) {
 			_ = conn.Write(ctx, websocket.MessageBinary, operatoraccess.ControlFrame(operatoraccess.Control{Type: operatoraccess.ControlSignal, Signal: "INT"}))
-			// Disallowed signals are ignored.
 			_ = conn.Write(ctx, websocket.MessageBinary, operatoraccess.ControlFrame(operatoraccess.Control{Type: operatoraccess.ControlSignal, Signal: "STOP"}))
 		})
 	if result.status.ExitCode != 130 {
@@ -420,7 +414,6 @@ func TestOperatorExecIsKilledWhenTheSessionFreezes(t *testing.T) {
 		func(operatorLaunch) (operatorProcess, error) { close(started); return process, nil })
 	go func() {
 		<-started
-		// Wait until the process is bound, then settle the prompt.
 		for {
 			supervisor.mu.Lock()
 			state := supervisor.sessions[sessionID]
@@ -442,7 +435,6 @@ func TestOperatorExecIsKilledWhenTheSessionFreezes(t *testing.T) {
 	if !process.killed.Load() || result.status.ExitCode == 0 {
 		t.Fatalf("operator process survived the session freeze: %+v", result.status)
 	}
-	// The registration is removed only after the handler's proven cleanup.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		supervisor.mu.Lock()
@@ -482,7 +474,6 @@ func TestOperatorExecRefusedWhenSessionFreezesDuringStart(t *testing.T) {
 }
 
 func TestOperatorExecObservesControlsWhileStdinIsBlocked(t *testing.T) {
-	// The fake never reads stdin, so every stdin write blocks.
 	process := newFakeOperatorProcess()
 	_, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle,
 		func(operatorLaunch) (operatorProcess, error) { return process, nil })
@@ -499,9 +490,6 @@ func TestOperatorExecObservesControlsWhileStdinIsBlocked(t *testing.T) {
 	}
 }
 
-// An EOF that cannot be queued behind a full stdin queue overflows the
-// stream; the stdin writer must still end once the command's stdin unblocks
-// instead of waiting forever on a queue that is never closed.
 func TestOperatorStdinWriterEndsWhenEOFOverflowsTheQueue(t *testing.T) {
 	writers := func() int {
 		buffer := make([]byte, 1<<20)
@@ -514,8 +502,6 @@ func TestOperatorStdinWriterEndsWhenEOFOverflowsTheQueue(t *testing.T) {
 	result := runOperatorTestStream(t, operatorExecURL(server, sessionID),
 		signedOperatorExecHeaders(t, 2, operatoraccess.ExecOptions{Argv: []string{"sh"}, Stdin: true}),
 		func(ctx context.Context, conn *websocket.Conn) {
-			// The fake never reads stdin: the writer blocks on the first
-			// chunk, and the next 1024 fill the queue exactly.
 			_ = conn.Write(ctx, websocket.MessageBinary, operatoraccess.Frame(operatoraccess.ChannelStdin, []byte("x")))
 			time.Sleep(100 * time.Millisecond)
 			for range 1024 {
@@ -569,13 +555,10 @@ func TestOperatorQuiesceBarrierBlocksLaunchesAndKillsOperations(t *testing.T) {
 	if !supervisor.bindOperatorProcess(bound, running) {
 		t.Fatal("bind failed")
 	}
-	// The bound operation's handler finishes once its process is killed.
 	go func() {
 		_, _, _ = running.Wait()
 		supervisor.finishOperation(&operatorLease{target: bound, process: running})
 	}()
-	// The pending launch completes after the barrier started; it must be
-	// refused and its registration must survive until its cleanup finished.
 	late := newFakeOperatorProcess()
 	lateFinished := make(chan struct{})
 	go func() {
@@ -590,8 +573,6 @@ func TestOperatorQuiesceBarrierBlocksLaunchesAndKillsOperations(t *testing.T) {
 	if err := supervisor.quiesceOperators(state, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	// The registration is removed inside finishOperation, just before the
-	// goroutine closes lateFinished, so wait briefly instead of probing.
 	select {
 	case <-lateFinished:
 	case <-time.After(5 * time.Second):
@@ -603,7 +584,6 @@ func TestOperatorQuiesceBarrierBlocksLaunchesAndKillsOperations(t *testing.T) {
 	if _, status, _ := supervisor.operatorTargetFor(sessionID, metadata); status == 0 {
 		t.Fatal("admission must stay closed after the barrier")
 	}
-	// Returning to an admitting state reopens admission.
 	supervisor.mu.Lock()
 	setSessionState(state, harnessv2.RuntimeSessionStateValidating)
 	setSessionState(state, harnessv2.RuntimeSessionStateIdle)
@@ -651,8 +631,6 @@ func TestOperatorUnprovenCleanupFailsClosed(t *testing.T) {
 	}
 }
 
-// A leader that never exits after SIGKILL must not pin the handler: the exit
-// wait is bounded and cleanup fails the runtime closed, holding the operation.
 func TestOperatorExecLeaderStuckAfterKillFailsClosed(t *testing.T) {
 	previous := operatorLeaderExitGrace
 	operatorLeaderExitGrace = 100 * time.Millisecond
@@ -690,9 +668,6 @@ func TestOperatorExecLeaderStuckAfterKillFailsClosed(t *testing.T) {
 	}
 }
 
-// A forced stop other than the timeout (here the output limit) must not leave
-// a leader stuck after SIGKILL waiting out the full command timeout before
-// cleanup fails the runtime closed.
 func TestOperatorExecForcedStopBoundsAStuckLeader(t *testing.T) {
 	previous := operatorLeaderExitGrace
 	operatorLeaderExitGrace = 100 * time.Millisecond
@@ -737,9 +712,6 @@ func TestOperatorQuiesceFailsClosedOnStuckLaunch(t *testing.T) {
 	}
 }
 
-// Every teardown path applies the operator barrier before it accepts
-// termination proofs, so an admitted launch that never settles keeps the
-// session's resources instead of racing descendant cleanup.
 func TestOperatorBarrierPrecedesEveryTeardownPath(t *testing.T) {
 	admitStuckLaunch := func(t *testing.T) (*Server, harnessv2.RuntimeSessionID, *sessionState) {
 		t.Helper()
@@ -803,8 +775,6 @@ func TestOperatorBarrierPrecedesEveryTeardownPath(t *testing.T) {
 	})
 }
 
-// Refusal messages are relayed into orka-api audit records and Task Events,
-// so they never echo the operator's raw argv[0].
 func TestResolveOperatorCommandErrorsNeverEchoArgv0(t *testing.T) {
 	const secret = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
 	for _, argv0 := range []string{"TOKEN=" + secret, "/nonexistent/" + secret} {
@@ -834,9 +804,6 @@ func signedOperatorFileHeaders(t *testing.T, operationID string) http.Header {
 	return headers
 }
 
-// The file helper reopens the workspace by path while the child, which may own
-// the session root, is running; it is always given the workspace identity
-// recorded before the child started, and a session without one is refused.
 func TestOperatorFilesPassThePinnedWorkspaceIdentity(t *testing.T) {
 	launches := make(chan operatorLaunch, 1)
 	supervisor, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle, func(launch operatorLaunch) (operatorProcess, error) {
@@ -876,9 +843,6 @@ func TestOperatorFilesPassThePinnedWorkspaceIdentity(t *testing.T) {
 		t.Fatalf("helper argv = %q, want the workspace %s with identity %s", launch.Argv, state.paths.Workspace, want)
 	}
 
-	// The recorded numbers name the workspace only while its directory is
-	// held open. Once the hold is gone they may name any directory, so the
-	// session is refused again.
 	state.paths.ReleaseWorkspaceIdentity()
 	request, _ = http.NewRequest(http.MethodGet, filesURL(), nil)
 	request.Header = signedOperatorFileHeaders(t, "operator-copy-out-3")
@@ -892,9 +856,6 @@ func TestOperatorFilesPassThePinnedWorkspaceIdentity(t *testing.T) {
 	}
 }
 
-// A file helper stuck in uninterruptible I/O keeps its stdout open after an
-// unproven kill. The operation timeout must still unblock the handler so its
-// cleanup fails the runtime closed.
 func TestOperatorFileHelperStuckAfterKillFailsClosed(t *testing.T) {
 	previous := operatorFileTimeout
 	operatorFileTimeout = 200 * time.Millisecond
@@ -915,8 +876,6 @@ func TestOperatorFileHelperStuckAfterKillFailsClosed(t *testing.T) {
 	defer cancel()
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+path, nil)
 	request.Header = signedOperatorFileHeaders(t, "operator-copy-out-stuck")
-	// The response may race the expired write deadline; what matters is
-	// that the handler returns and its cleanup runs.
 	if response, err := http.DefaultClient.Do(request); err == nil {
 		_ = response.Body.Close()
 		if response.StatusCode != http.StatusBadGateway {
@@ -947,17 +906,12 @@ func TestOperatorFileHelperStuckAfterKillFailsClosed(t *testing.T) {
 	}
 }
 
-// Close quiesces each session once. A session that afterwards returns to an
-// admitting state (a workspace delta with no change returns it to Idle) must
-// not reopen operator access while teardown runs.
 func TestOperatorAccessStaysClosedOnceTheSupervisorTerminates(t *testing.T) {
 	supervisor, _, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle, nil)
 	state := supervisor.sessions[sessionID]
 	fence := operatorTestFence()
 	fence.RuntimeSessionUID, fence.RuntimeSessionGeneration = "session-uid", 2
 	metadata := harnessv2.MutationMetadata{Fence: fence}
-	// A launch admitted before Close is not revoked when Close skips the
-	// session (for example while its native capture is still running).
 	target, status, _ := supervisor.operatorTargetFor(sessionID, metadata)
 	if status != 0 {
 		t.Fatal("admission failed")
@@ -972,8 +926,6 @@ func TestOperatorAccessStaysClosedOnceTheSupervisorTerminates(t *testing.T) {
 	if err := supervisor.quiesceOperators(state, 50*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
-	// Close records no drain, so a later drain request must not move the
-	// lifecycle back to Draining and reopen admission.
 	for name, drain := range map[string]func(){
 		"BeginDrain": func() { supervisor.BeginDrain("late") },
 		"beginDrainLocked": func() {
@@ -996,8 +948,6 @@ func TestOperatorAccessStaysClosedOnceTheSupervisorTerminates(t *testing.T) {
 	}
 }
 
-// A client that disconnects mid-exec gets the whole operation killed, and the
-// operation's registration, concurrency slot, and tag group are released.
 func TestOperatorExecDisconnectKillsAndReleasesTheOperation(t *testing.T) {
 	process := newFakeOperatorProcess()
 	supervisor, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle,
@@ -1032,15 +982,9 @@ func TestOperatorExecDisconnectKillsAndReleasesTheOperation(t *testing.T) {
 	}
 }
 
-// A caller that stops reading blocks the exec relay's writes for up to their
-// 30s timeout. Revocation must not wait that out: the quiesce barrier ends the
-// caller stream, so the handler finishes its cleanup and releases the
-// registration within the barrier's deadline instead of poisoning a session
-// whose process was already contained.
 func TestOperatorQuiesceEndsAStreamBlockedOnItsCaller(t *testing.T) {
 	process := newFakeOperatorProcess()
 	go func() {
-		// Output until the process is killed; the caller never reads it.
 		chunk := []byte(strings.Repeat("x", 32<<10))
 		for {
 			if _, err := process.stdoutW.Write(chunk); err != nil {
@@ -1061,7 +1005,6 @@ func TestOperatorQuiesceEndsAStreamBlockedOnItsCaller(t *testing.T) {
 	}
 	defer conn.CloseNow() //nolint:errcheck
 	state := supervisor.sessions[sessionID]
-	// Let the relay fill the connection's buffers so its writes block.
 	waitFor := func(done func() bool, what string) {
 		t.Helper()
 		deadline := time.Now().Add(10 * time.Second)
@@ -1092,10 +1035,6 @@ func TestOperatorQuiesceEndsAStreamBlockedOnItsCaller(t *testing.T) {
 	}
 }
 
-// A quiet command's final status fits the socket buffers, so its handler
-// reaches the WebSocket close handshake, which waits up to five seconds for a
-// caller that never acknowledges it. The abort must end the transport under
-// that handshake, so a barrier shorter than the handshake still succeeds.
 func TestOperatorQuiesceEndsAnUnacknowledgedCloseHandshake(t *testing.T) {
 	process := newFakeOperatorProcess()
 	supervisor, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle,
@@ -1109,7 +1048,6 @@ func TestOperatorQuiesceEndsAnUnacknowledgedCloseHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The caller never reads, so it never answers the close frame.
 	defer conn.CloseNow() //nolint:errcheck
 	state := supervisor.sessions[sessionID]
 	deadline := time.Now().Add(10 * time.Second)
@@ -1134,9 +1072,6 @@ func TestOperatorQuiesceEndsAnUnacknowledgedCloseHandshake(t *testing.T) {
 	}
 }
 
-// When the file helper fails before reading its stdin, the handler must not
-// return while the upload copy still reads r.Body (or uses the response through
-// MaxBytesReader) for a client that keeps the body open.
 func TestOperatorUploadCopyEndsBeforeTheHandlerReturns(t *testing.T) {
 	process := newFakeOperatorProcess()
 	stdinDrained := make(chan struct{})
@@ -1170,7 +1105,6 @@ func TestOperatorUploadCopyEndsBeforeTheHandlerReturns(t *testing.T) {
 	}
 	defer conn.Close() //nolint:errcheck
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	// Declare 100 bytes but send only 3, holding the body open.
 	_, err = io.WriteString(conn, "PUT "+path+" HTTP/1.1\r\nHost: supervisor\r\nContent-Length: 100\r\n"+
 		"Authorization: Bearer "+operatorTestToken+"\r\n"+OperationCapabilityHeader+": "+capability+"\r\n"+
 		harnessv2.OperatorRequestHeader+": "+header+"\r\n\r\nabc")
@@ -1192,9 +1126,6 @@ func TestOperatorUploadCopyEndsBeforeTheHandlerReturns(t *testing.T) {
 	}
 }
 
-// Operator commands need a supplementary tag group that only a root supervisor
-// can assign, so a non-root (same-identity development) supervisor must not
-// advertise operator access.
 func TestOperatorAccessIsAdvertisedOnlyByRootBuiltInSupervisors(t *testing.T) {
 	previous := operatorAccessPlatform
 	t.Cleanup(func() { operatorAccessPlatform = previous })

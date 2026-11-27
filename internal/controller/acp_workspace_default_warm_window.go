@@ -21,38 +21,17 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// ADR 0057: a session-reused Substrate workspace whose profile sets no
-// spec.retention.suspendAfterDetach receives a controller default warm-detach
-// window when it is materialized. The default is frozen only into the new
-// workspace's annotations, with a source marker; it never enters a profile,
-// class, or binding hash, and an existing workspace is never backfilled with
-// it. Every ADR 0055 rule then applies to the frozen value unchanged.
-
 const (
-	// DefaultACPWorkspaceSuspendAfterDetach is the controller's default
-	// warm-detach window for new eligible workspaces (0 disables it by default;
-	// operators opt in via --acp-workspace-default-suspend-after-detach or a
-	// class annotation).
-	DefaultACPWorkspaceSuspendAfterDetach = time.Duration(0)
-	// ACPWorkspaceClassDefaultSuspendAfterDetachAnnotation on an
-	// ExecutionWorkspaceClass overrides the controller default for new
-	// workspaces of that class: a duration such as "10m", or "disabled".
+	DefaultACPWorkspaceSuspendAfterDetach                = time.Duration(0)
 	ACPWorkspaceClassDefaultSuspendAfterDetachAnnotation = "acp.workspace.orka.ai/default-suspend-after-detach"
-	// acpWorkspaceDefaultSuspendAfterDetachDisabled opts a class out.
-	acpWorkspaceDefaultSuspendAfterDetachDisabled = "disabled"
-	// acpWorkspaceSuspendAfterDetachSourceAnnotation records that the frozen
-	// window came from the controller default rather than the profile.
-	acpWorkspaceSuspendAfterDetachSourceAnnotation = "acp.workspace.orka.ai/suspend-after-detach-source"
-	// acpWorkspaceSuspendAfterDetachSourceDefault is its only value.
-	acpWorkspaceSuspendAfterDetachSourceDefault = "controller-default"
+	acpWorkspaceDefaultSuspendAfterDetachDisabled        = "disabled"
+	acpWorkspaceSuspendAfterDetachSourceAnnotation       = "acp.workspace.orka.ai/suspend-after-detach-source"
+	acpWorkspaceSuspendAfterDetachSourceDefault          = "controller-default"
 
 	substrateWorkspaceProfileGroup = "substrate.workspace.orka.ai"
 	substrateWorkspaceProfileKind  = "SubstrateWorkspaceProfile"
 )
 
-// ValidateACPWorkspaceDefaultSuspendAfterDetach checks the controller flag:
-// zero disables the controller default (class annotations still apply),
-// otherwise ADR 0055's bound applies.
 func ValidateACPWorkspaceDefaultSuspendAfterDetach(window time.Duration) error {
 	if window < 0 || window > maxACPWorkspaceSuspendAfterDetach {
 		return fmt.Errorf("the default warm-detach window must be 0 (disabled) or positive and at most %s", maxACPWorkspaceSuspendAfterDetach)
@@ -60,9 +39,6 @@ func ValidateACPWorkspaceDefaultSuspendAfterDetach(window time.Duration) error {
 	return nil
 }
 
-// acpWorkspaceDefaultSuspendAfterDetachEligible reports a binding whose new
-// workspace may receive the default: a session-reused external Substrate
-// class that allows Suspend with a DataOnly profile and sets no window itself.
 func acpWorkspaceDefaultSuspendAfterDetachEligible(binding *ACPRuntimeWorkspaceBinding) bool {
 	if binding == nil || binding.Class == nil {
 		return false
@@ -77,11 +53,6 @@ func acpWorkspaceDefaultSuspendAfterDetachEligible(binding *ACPRuntimeWorkspaceB
 		class.ParametersRef.Kind == substrateWorkspaceProfileKind
 }
 
-// resolveACPWorkspaceDefaultSuspendAfterDetach returns the default window for
-// a binding, or zero. classAnnotations are those of the exact frozen class. A
-// window that does not fit ADR 0055's bounds (at most one hour, shorter than
-// idleTimeout and maxLifetime) or an invalid class override disables the
-// default for the workspace instead of failing the Task.
 func resolveACPWorkspaceDefaultSuspendAfterDetach(
 	binding *ACPRuntimeWorkspaceBinding,
 	classAnnotations map[string]string,
@@ -121,16 +92,11 @@ func parseOptionalACPWorkspaceDuration(raw string) (time.Duration, error) {
 	return time.ParseDuration(raw)
 }
 
-// acpWorkspaceDefaultSuspendAfterDetachAnnotations returns the annotations
-// that freeze the default window into a workspace about to be created, or nil.
-// It reads the exact frozen class for its override; a class that is gone or
-// replaced gets no default, and other read errors retry the creation.
 func (r *TaskReconciler) acpWorkspaceDefaultSuspendAfterDetachAnnotations(
 	ctx context.Context,
 	namespace string,
 	binding *ACPRuntimeWorkspaceBinding,
 ) (map[string]string, error) {
-	// A zero controller default still lets a class annotation set a window.
 	if !acpWorkspaceDefaultSuspendAfterDetachEligible(binding) {
 		return nil, nil
 	}

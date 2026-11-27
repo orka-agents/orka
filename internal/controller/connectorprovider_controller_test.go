@@ -150,7 +150,6 @@ func TestConnectorProviderReconcilerConditions(t *testing.T) {
 			if strings.Contains(string(statusJSON), "s3cret-value") {
 				t.Fatalf("status leaked client secret: %s", statusJSON)
 			}
-			// A second reconcile with no changes must not rewrite status.
 			updates := 0
 			counting := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(updated).WithStatusSubresource(&corev1alpha1.ConnectorProvider{}).
 				WithRuntimeObjects(tt.objects...).
@@ -244,9 +243,6 @@ func TestConnectorProviderDeletionWaitsForConnections(t *testing.T) {
 		WithStatusSubresource(&corev1alpha1.ConnectorProvider{}).Build()
 	reconciler := &ConnectorProviderReconciler{Client: c, Scheme: scheme}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "github"}}
-	// A Connection still references the provider: deletion is held and the
-	// condition says why, so the tokens it holds can still be revoked
-	// against the issuing client at disconnect.
 	result, err := reconciler.Reconcile(context.Background(), request)
 	if err != nil || result.RequeueAfter == 0 {
 		t.Fatalf("held deletion: result = %+v err = %v", result, err)
@@ -259,8 +255,6 @@ func TestConnectorProviderDeletionWaitsForConnections(t *testing.T) {
 	if !controllerutil.ContainsFinalizer(held, ConnectorProviderConnectionsFinalizer) || accepted == nil || accepted.Reason != connectors.ReasonConnectionsRemain {
 		t.Fatalf("held provider = finalizers %v condition %+v", held.Finalizers, accepted)
 	}
-	// Once the last referencing Connection is gone the provider is released;
-	// a Connection to another provider does not hold it.
 	if err := c.Delete(context.Background(), connection); err != nil {
 		t.Fatal(err)
 	}

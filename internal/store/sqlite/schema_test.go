@@ -78,7 +78,6 @@ func TestNewDBRejectsIncompatibleSchemaWithoutChangingData(t *testing.T) {
 				require.ErrorContains(t, err, "unsupported SQLite schema")
 				require.Nil(t, rejected)
 
-				// Inspect the rejected file without invoking setup again.
 				raw, err := sql.Open("sqlite", dbPath)
 				require.NoError(t, err)
 				t.Cleanup(func() { _ = raw.Close() })
@@ -110,8 +109,6 @@ func TestNewDBAcceptsCurrentSchemaFormatting(t *testing.T) {
 	require.Equal(t, before, storedSchemaSQL(t, reopened))
 }
 
-// Version upgrades are unsupported: an installation predating native Session
-// storage must be rejected intact rather than silently converted at startup.
 func TestNewDBRejectsPreNativeSessionLayoutWithoutChangingData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pre-native.db")
 	legacy, err := sql.Open("sqlite", path)
@@ -182,7 +179,6 @@ func replaceSchemaObject(t *testing.T, db *sql.DB, name, old, replacement string
 	var kind, definition string
 	require.NoError(t, db.QueryRow(`SELECT type, sql FROM sqlite_schema WHERE name = ?`, name).Scan(&kind, &definition))
 	require.Contains(t, definition, old)
-	// Preserve the table's indexes so each case changes only the named rule.
 	rows, err := db.Query(`SELECT sql FROM sqlite_schema WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL`, name)
 	require.NoError(t, err)
 	var indexes []string

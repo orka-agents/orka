@@ -21,7 +21,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// namespaceReadCounter counts uncached Namespace reads.
 type namespaceReadCounter struct {
 	client.Reader
 	namespaces atomic.Int32
@@ -34,10 +33,6 @@ func (r *namespaceReadCounter) Get(ctx context.Context, key client.ObjectKey, ob
 	return r.Reader.Get(ctx, key, object, options...)
 }
 
-// A dispatched turn asks the exact runtime instance for its capabilities
-// once; the checks that read the response still gate the turn (see the next
-// test). TestACPDispatcherExecutesNoChangeTask counts the namespace reads of a
-// turn that records Session lineage.
 func TestACPDispatcherTurnAvoidsDuplicateRoundTrips(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -66,12 +61,9 @@ func TestACPDispatcherTurnAvoidsDuplicateRoundTrips(t *testing.T) {
 
 	current := fixture.currentTask(t, ctx)
 	require.Equal(t, corev1alpha1.TaskExecutionStateSucceeded, current.Status.Execution.State, "message: %s", current.Status.Execution.Message)
-	// Before this change a turn sent two capabilities requests.
 	require.Equal(t, int32(1), capabilities.Load(), "capabilities requests per dispatched turn")
 }
 
-// The reused capabilities response still gates the turn: a pool supervisor
-// without Agent session configuration support is requeued, not dispatched.
 func TestACPDispatcherReusedCapabilitiesStillGateTheTurn(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -31,7 +31,6 @@ func commandFailure(stage string, cfg workspace.SubstrateConfig, result *workspa
 	}
 	detail = redact.SensitiveText(detail)
 	detail = strings.NewReplacer("\r", `\r`, "\n", `\n`).Replace(detail)
-	// Redact before truncating so a boundary cannot expose a credential prefix.
 	if len(detail) > maxCommandFailureBytes {
 		detail = detail[:maxCommandFailureBytes] + " (truncated)"
 	}

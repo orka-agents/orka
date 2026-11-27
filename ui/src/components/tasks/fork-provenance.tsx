@@ -3,7 +3,6 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { GitFork, ArrowRight } from 'lucide-react'
 
-// Fork provenance annotation keys, mirroring internal/labels/labels.go.
 const ANNOTATION_FORK_SOURCE_TASK = 'orka.ai/fork-source-task'
 const ANNOTATION_FORK_SOURCE_SEQ = 'orka.ai/fork-source-seq'
 const ANNOTATION_FORK_CONTEXT_TRUNCATED = 'orka.ai/fork-context-truncated'
@@ -12,8 +11,6 @@ export interface ForkProvenanceProps {
   annotations?: Record<string, string>
 }
 
-// Shows where a forked task came from, when the fork annotations are present.
-// Renders nothing for tasks that were not created via fork.
 export function ForkProvenance({ annotations }: ForkProvenanceProps) {
   const sourceTask = annotations?.[ANNOTATION_FORK_SOURCE_TASK]
   if (!sourceTask) return null

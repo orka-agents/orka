@@ -24,12 +24,8 @@ var (
 	statusFile  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 )
 
-// reservedMountRoots hold the paths the controller mounts into host Pods.
 var reservedMountRoots = []string{"/run/orka", "/var/run/orka"}
 
-// ValidateTemplate re-checks the invariants the controller relies on. The CRD
-// enforces most of them too, which guards against objects admitted by an older
-// schema; the rest are ones a rendered Pod or NetworkPolicy would fail on.
 func ValidateTemplate(template *corev1alpha1.AgentHostTemplate) error {
 	spec := &template.Spec
 	if err := validateSettings(spec); err != nil {
@@ -136,7 +132,6 @@ func validateContainer(container *corev1alpha1.AgentHostContainer, names, scratc
 			return fmt.Errorf("container %q sets reserved variable %s", container.Name, env.Name)
 		}
 	}
-	// Host Pods declare no resource claims, so a container cannot use one.
 	if len(container.Resources.Claims) > 0 {
 		return fmt.Errorf("container %q may not use resource claims", container.Name)
 	}

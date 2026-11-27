@@ -38,7 +38,6 @@ type FindingValidationResult struct {
 	Dropped  []DroppedFindingDiagnostic
 }
 
-// ValidateFindingsV2 validates and partitions a v2 findings artifact.
 func ValidateFindingsV2(artifact FindingsV2Artifact, manifest ReviewContextManifest, opts FindingValidationOptions) FindingValidationResult {
 	result := FindingValidationResult{}
 	included := includedFileMap(manifest)
@@ -129,8 +128,6 @@ func normalizeFindingEnums(finding FindingsV2Finding) (FindingsV2Finding, string
 	}
 	finding.Severity = severity
 	finding.Confidence = confidence
-	// Roles only annotate locations, so an unknown role is dropped rather
-	// than costing the finding.
 	evidence := make([]FindingsV2EvidenceRef, len(finding.Evidence))
 	for i, ref := range finding.Evidence {
 		ref.Role = strings.ToLower(strings.TrimSpace(ref.Role))
@@ -161,10 +158,6 @@ func canonicalFindingConfidence(value string) (string, bool) {
 	}
 }
 
-// usableFindingEvidence keeps the evidence the review context can verify. A
-// reviewer that traces across the repository may cite one file the mapper did
-// not index; that citation is dropped, and the finding stays while at least
-// one verified citation remains.
 func usableFindingEvidence(
 	finding FindingsV2Finding,
 	included map[string]ReviewContextIncludedFile,
@@ -213,8 +206,6 @@ func validateFindingEvidence(
 			return "evidence line range is inverted"
 		}
 		if !isIncluded || !lineRangeIncluded(ref.StartLine, ref.EndLine, file.IncludedLineRanges) {
-			// A reference file was read from the workspace rather than
-			// excerpted, so only its line bounds can be checked.
 			if !isReference {
 				return "evidence line range is outside included review context"
 			}
@@ -333,7 +324,6 @@ func droppedFindingSample(finding FindingsV2Finding) map[string]string {
 	return sample
 }
 
-// ToFindingV2 converts a validated v2 finding to durable store shape.
 func ToFindingV2(
 	namespace string,
 	repositoryScan string,
@@ -395,8 +385,6 @@ func ToFindingV2(
 	}
 }
 
-// canonicalEvidenceRefs orders evidence by location, with test files last so
-// a finding's primary location is the code it is about.
 func canonicalEvidenceRefs(refs []FindingsV2EvidenceRef) []FindingsV2EvidenceRef {
 	out := append([]FindingsV2EvidenceRef{}, refs...)
 	sort.Slice(out, func(i, j int) bool {

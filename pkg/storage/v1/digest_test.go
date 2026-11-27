@@ -25,9 +25,6 @@ func requestDigest(t *testing.T, method string, request ...any) string {
 }
 
 func TestRequestDigestEncodingIsTheDocumentedOne(t *testing.T) {
-	// One string argument: the domain, the method, the argument count, then a
-	// string node (tag, length, bytes). Spelling the bytes out keeps the
-	// encoding from changing by accident.
 	var want bytes.Buffer
 	want.WriteString("orka.storage.v1 request digest 1\x00")
 	want.Write(binary.AppendUvarint(nil, uint64(len("SaveResult"))))
@@ -40,7 +37,6 @@ func TestRequestDigestEncodingIsTheDocumentedOne(t *testing.T) {
 	sum := sha256.Sum256(want.Bytes())
 	require.Equal(t, "sha256:"+hex.EncodeToString(sum[:]), requestDigest(t, "SaveResult", "ns", ""))
 
-	// A struct: present fields only, each as a name node and a value node.
 	type record struct {
 		Name    string
 		Skipped string
@@ -78,8 +74,6 @@ func TestRequestDigestEncodingIsTheDocumentedOne(t *testing.T) {
 	require.Equal(t, "sha256:"+hex.EncodeToString(sum[:]),
 		requestDigest(t, "M", record{Name: "x", Count: &zero, At: time.Unix(5, 7), N: -3}))
 
-	// The remaining node kinds: bool, unsigned, float, bytes, list, map and
-	// canonical JSON.
 	type kinds struct {
 		B    bool
 		U    uint32
@@ -132,7 +126,6 @@ func TestRequestDigestIsStable(t *testing.T) {
 		ID: "observation-1", Namespace: "tenant", TaskUID: "task-uid", InputTokens: &input, OutputTokens: &output,
 		ObservedAt: at, Status: "running",
 	})
-	// A changed value here means every stored receipt digest changed meaning.
 	require.Equal(t, "sha256:41667d5c039db43b4ad3aaa4014f31d414717abe72def3ef734bb8daaca302b1", digest)
 
 	nested := int64(0)
@@ -219,7 +212,6 @@ func TestRequestDigestEncodesTimesByInstant(t *testing.T) {
 	require.NotEqual(t, digest, requestDigest(t, "M", stamped{At: at.Add(time.Nanosecond)}), "nanoseconds count")
 	require.Equal(t, requestDigest(t, "M", stamped{}), requestDigest(t, "M", struct{}{}), "the zero time is zero")
 
-	// UnixNano is undefined outside 1678 to 2262; seconds and nanoseconds are not.
 	ancient := time.Date(1, time.January, 1, 0, 0, 0, 1, time.UTC)
 	require.NotEqual(t, requestDigest(t, "M", stamped{At: ancient}), requestDigest(t, "M", stamped{At: ancient.Add(time.Nanosecond)}))
 	future := time.Date(3000, time.January, 1, 0, 0, 0, 0, time.UTC)
@@ -249,9 +241,6 @@ func TestRequestDigestCanonicalizesDynamicValues(t *testing.T) {
 	require.Equal(t, requestDigest(t, "M", typed), requestDigest(t, "M", decoded),
 		"a typed value and its decoded JSON form digest the same")
 
-	// Raw tool-call arguments keep their numbers exactly as written: a copy
-	// decoded losslessly matches, and a float64 copy that changed a number's
-	// text fails closed instead of matching another request.
 	type toolCall struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`

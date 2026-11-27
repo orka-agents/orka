@@ -68,8 +68,6 @@ func TestPromptNotAcceptedFailsOnlyProvenIdleResumeRejection(t *testing.T) {
 			if retryableUnsentPromptCanRequeue(test.accepted, harnessv2.PromptStreamSummary{WriteEvidence: writeEvidence}, test.contextErr, rejection) {
 				t.Fatal("rejection authorized replay of a written HTTP request")
 			}
-			// A nil runtime client also proves the definitive rejection does not
-			// issue a cancellation when the caller deadline races the response.
 			if err := fixture.dispatcher.handlePromptStreamError(
 				fixture.ctx, nil, nil, "runtime-session", task, fixture.attemptID, fixture.fence,
 				harnessv2.Fence{}, journalState, test.accepted, writeEvidence, test.contextErr, rejection, nil,
@@ -142,8 +140,6 @@ func TestPromptNotAcceptedDeferredSessionFinalizationAllowsContinuation(t *testi
 	binding := ACPRuntimeSessionBinding{SessionUID: control.SessionUID, Generation: uint64(turn.Lease.Key.LeaseGeneration)}
 	dispatcher.setRuntimeSessionBinding(binding)
 	session := &acpTaskSession{Turn: turn, Binding: binding}
-	// Match executeReservedTask's existing deferred terminal reconciliation.
-	// The stream error branch need not duplicate Session finalization.
 	run := func() (retErr error) {
 		defer func() {
 			if err := dispatcher.reconcileUnfinalizedTaskSession(ctx, task, fence, session, retErr); retErr == nil {

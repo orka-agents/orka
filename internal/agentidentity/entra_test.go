@@ -25,14 +25,11 @@ import (
 
 const testControllerToken = "controller-sa-token"
 
-// fakeEntra records token requests and answers like the blueprint flow.
 type fakeEntra struct {
 	mu       sync.Mutex
 	requests []url.Values
 	paths    []string
 	refuse   bool
-	// disabled refuses only the identity's own requests, as Entra does for
-	// a disabled agent identity while still issuing the blueprint's token.
 	disabled string
 }
 
@@ -156,12 +153,6 @@ func TestEntraRefusalCarriesOnlyTheErrorCode(t *testing.T) {
 	}
 }
 
-// TestEntraRefusalNamesOnlyKnownErrorCodes covers an issuer or proxy that
-// puts arbitrary text in the OAuth error field: only a known code reaches the
-// returned error, which feeds Agent status and a metric label.
-// TestEntraUnreadableResponseIsAnOutage covers an authority proxy that
-// answers with HTML, or a truncated body: neither proves anything about the
-// identity, so the issuer counts as unavailable, not as refusing it.
 func TestEntraUnreadableResponseIsAnOutage(t *testing.T) {
 	for name, tc := range map[string]struct {
 		status int
@@ -232,8 +223,6 @@ func TestSourceRefusesAChangedIssuerInstanceAndOtherModes(t *testing.T) {
 	if _, err := source.AgentIdentityToken(context.Background(), delegated); err == nil {
 		t.Fatal("an unsupported mode must be refused")
 	}
-	// After a restart without Agent use enforcement, a Task bound earlier
-	// gets no token, and the issuer is not asked.
 	before := fake.count()
 	unenforced := &Source{Config: configuredConfig(), Entra: source.Entra}
 	unenforced.Config.AgentUseAuthorization = false
@@ -265,10 +254,6 @@ func TestSourceVerifyRequestsTheIdentitysOwnToken(t *testing.T) {
 	}
 }
 
-// A verification is fresh proof: a token the cache still holds, from an
-// earlier verification or a Tool call, never stands in for Entra's answer, so
-// an Agent edit right after cannot renew trust in an identity Entra has since
-// disabled.
 func TestSourceVerifyNeverAnswersFromTheTokenCache(t *testing.T) {
 	fake := &fakeEntra{}
 	now := time.Now()
@@ -429,8 +414,6 @@ func TestEntraUnavailabilityIsDistinctFromRefusal(t *testing.T) {
 	}
 }
 
-// blockingEntra answers every token request only once released, counting
-// requests.
 type blockingEntra struct {
 	mu       sync.Mutex
 	requests int
@@ -481,8 +464,6 @@ func TestEntraConcurrentMissesShareOneRequest(t *testing.T) {
 			results[n] <- outcome{token, err}
 		}()
 	}
-	// The cancelled caller leads: it starts the app-token flight and, inside
-	// it, the exchange-token flight, before anyone else asks.
 	start(0, cancelled)
 	<-joined
 	<-joined
@@ -523,9 +504,6 @@ func TestEntraCallerDeadlineWhileWaitingIsIssuerUnavailable(t *testing.T) {
 	}
 }
 
-// TestFileCredentialFailuresAreUnavailable covers a missing or empty projected
-// token: Entra was never asked, so verification must back off and retry
-// rather than keep a refusal of the identity.
 func TestFileCredentialFailuresAreUnavailable(t *testing.T) {
 	dir := t.TempDir()
 	empty := filepath.Join(dir, "empty")

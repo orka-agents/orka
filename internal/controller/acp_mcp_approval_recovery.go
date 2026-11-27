@@ -49,10 +49,6 @@ type acpMCPApprovalEffect struct {
 	resourceVersion string
 }
 
-// acpMCPApprovalReceiptOutcome interprets a saved tool response without granting
-// permission to repeat the call. Failed records prove the call had no effect:
-// a denial before execution, or an approved call that sent nothing or was
-// refused. A completed tool that returned an error has a Succeeded effect.
 func acpMCPApprovalReceiptOutcome(effect *store.ExternalEffect, approvalID string) (string, string, json.RawMessage, error) {
 	if effect == nil {
 		return "", "", nil, errors.New("approval receipt is invalid")
@@ -80,9 +76,6 @@ func acpMCPApprovalReceiptOutcome(effect *store.ExternalEffect, approvalID strin
 			return "", "", nil, errors.New("approval denial receipt is invalid")
 		}
 		if denial.ApprovalID == "" {
-			// A crash can precede the approval event. Recovery can still prove
-			// that an abandoned Pending effect never started, and bind its denial
-			// to the exact effect instead of inventing an approval identity.
 			id, err := effect.Identity.CanonicalID()
 			if err != nil || effect.Identity.Kind != acpMCPToolEffectKind || effect.ID != id ||
 				denial.ExternalEffectID != id || denial.Code != acpApprovalCodeStale || denial.Error != acpApprovalStaleMessage ||
@@ -109,8 +102,6 @@ func acpMCPApprovalReceiptOutcome(effect *store.ExternalEffect, approvalID strin
 	}
 }
 
-// Prefer the immutable Task binding for recovery discovery. Legacy labels only
-// select candidates; projection still verifies the complete approval binding.
 func mcpApprovalEffectTaskUID(effect *corev1alpha1.ExternalEffect) types.UID {
 	if effect.Spec.ApprovalTaskUID != "" {
 		return types.UID(effect.Spec.ApprovalTaskUID)
@@ -142,8 +133,6 @@ func mcpApprovalEffectSnapshot(effect *corev1alpha1.ExternalEffect) acpMCPApprov
 	}
 }
 
-// Recovery joins already-listed effects with safe approval bindings. It never
-// loads executable Secret contents or asks a stale runtime to redeliver a call.
 func (d *ACPDispatcher) reconcileMCPApprovalExecutions(
 	ctx context.Context,
 	fence store.ControllerEpochFence,
@@ -182,12 +171,7 @@ func (d *ACPDispatcher) reconcileMCPApprovalExecutions(
 		if err := d.reconcileMCPApprovalTask(ctx, fence, task, candidate.effects); err != nil {
 			return err
 		}
-		// Capture the sequence from before projection. A late stale event or
-		// our own append must invalidate the cache on the next scan, even if
-		// the terminal effect's version has not changed.
 		if candidate.pending {
-			// Expiry and durable prompt termination can change without an
-			// effect mutation or a Task event. Keep checking active reviews.
 			delete(d.approvalRecovery, key)
 		} else {
 			d.approvalRecovery[key] = acpMCPApprovalRecoveryProgress{fence: fence, versions: candidate.versions, eventSeq: seq}
@@ -248,8 +232,6 @@ func (d *ACPDispatcher) reconcileMCPApprovalTask(ctx context.Context, fence stor
 	if err != nil {
 		return err
 	}
-	// Index safe operation digests, but retain the exact durable identity for
-	// receipt verification and projection. Runtime operation IDs may be URLs.
 	byBinding := make(map[string]acpMCPApprovalEffect, len(effects))
 	for id, effect := range effects {
 		canonical, err := effect.Identity.CanonicalID()
@@ -288,9 +270,6 @@ func (d *ACPDispatcher) reconcileMCPApprovalTask(ctx context.Context, fence stor
 		if !abandoned {
 			continue
 		}
-		// Reserve succeeds before ApprovalRequested is appended. Settle a call
-		// in that gap only after proving its authority ended. A delayed request
-		// event can later join this receipt without loading its Secret.
 		if _, err := d.failMCPApprovalPending(ctx, fence, &effect.ExternalEffect, acpMCPAbandonedPendingReceipt(&effect.ExternalEffect)); err != nil &&
 			!errors.Is(err, store.ErrConflict) {
 			return err
@@ -372,15 +351,13 @@ func (d *ACPDispatcher) reconcileMCPApprovalExecution(
 		updated, err := d.failMCPApprovalPending(ctx, fence, effect, acpApprovalError(approval.ID, code))
 		if err != nil {
 			if errors.Is(err, store.ErrConflict) {
-				return nil // A concurrent execution claim or settlement wins.
+				return nil
 			}
 			return err
 		}
 		effect = updated
 	}
 	if mcpApprovalEffectOrphaned(effect, fence, time.Now().UTC()) {
-		// An old epoch cannot commit a result. Seal the uncertain outcome with
-		// the exact lease CAS; a crash here is repaired by the next scan.
 		updated, err := d.Store.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
 			ID: effect.ID, Fence: fence, ExpectedVersion: effect.Version,
 			ExpectedState: store.ExternalEffectInFlight, NewState: store.ExternalEffectOutcomeUnknown,
@@ -388,7 +365,7 @@ func (d *ACPDispatcher) reconcileMCPApprovalExecution(
 		})
 		if err != nil {
 			if errors.Is(err, store.ErrConflict) {
-				return nil // A concurrent settlement wins; reread it on the next scan.
+				return nil
 			}
 			return err
 		}
@@ -439,8 +416,6 @@ func (d *ACPDispatcher) projectMCPApprovalExecution(
 	return err
 }
 
-// mcpApprovalProjectionCurrent reports whether the approval's public
-// execution projection already reflects the recovered receipt.
 func mcpApprovalProjectionCurrent(approval approvals.Approval, outcome, reason string) bool {
 	return outcome == "" || (approval.ExecutionOutcome == outcome && approval.ExecutionReason == reason &&
 		mcpApprovalRecoveryDecisionType(approval, outcome, reason) == "")
@@ -462,11 +437,6 @@ func mcpApprovalRecoveryDecisionType(approval approvals.Approval, outcome, reaso
 	}
 }
 
-// Called only inside withRetainedMCPApproval, against its fresh fenced read of
-// the retained request and history. The decision and execution event commit
-// together in one grouped append. A terminal decision that a reviewer recorded
-// after that read refuses the group; the projection then reads again, and the
-// reviewer's decision remains authoritative.
 func (d *ACPDispatcher) appendMCPApprovalRecoveryOutcome(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -491,8 +461,6 @@ func (d *ACPDispatcher) appendMCPApprovalRecoveryOutcome(
 	if err != nil {
 		return nil, err
 	}
-	// Include the observed history position so a late stale writer cannot make
-	// an earlier dedupe key prevent the next scan from repairing its projection.
 	key := fmt.Sprintf("acp-approval:%s:recovery:%d:%d", approval.ID, version, lastSeq)
 	outcomeEvent := &store.ExecutionEvent{
 		Namespace: task.Namespace, StreamType: events.ExecutionEventStreamTypeTask, StreamID: task.Name,
@@ -513,8 +481,6 @@ func (d *ACPDispatcher) appendMCPApprovalRecoveryOutcome(
 	if !ok {
 		return nil, errors.New("approval recovery requires grouped execution events")
 	}
-	// Close an undecided review once its verified receipt proves that the
-	// action cannot start.
 	decision := &store.ExecutionEvent{
 		Namespace: task.Namespace, StreamType: events.ExecutionEventStreamTypeTask, StreamID: task.Name,
 		TaskName: task.Name, SessionName: source.SessionName, AgentName: source.AgentName,

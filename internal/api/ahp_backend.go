@@ -40,9 +40,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// The ACP session backend serves Orka's built-in agent runtimes over the Agent
-// Host Protocol. An AHP session is an Orka Session in the user's namespace;
-// each turn is an agent Task in that Session, run and governed like any other.
 const (
 	ahpBackendName = "orka"
 
@@ -65,26 +62,17 @@ const (
 	ahpGitCredentialSecretKey = defaultWorkspaceCredentialKey
 	ahpToolFallbackName       = "tool"
 
-	// ahpProjectRoot is where projects appear on this host: checkouts in the
-	// user's workspace when workspaces are enabled. Each turn's Task still
-	// clones the repository itself.
 	ahpProjectRoot = "/workspace/src"
 
 	ahpDefaultTurnTimeout = 2 * time.Hour
 	ahpMaxPromptBytes     = 256 << 10
 	ahpMaxProjects        = 200
-	// ahpPendingMax bounds the messages waiting on a session.
-	ahpPendingMax   = 10
-	ahpPendingIDMax = 128
+	ahpPendingMax         = 10
+	ahpPendingIDMax       = 128
 
-	// ahpAgentProvider is the one agent this backend offers. It offers every
-	// model the user may run and runs each on the runtime that serves it. Its
-	// id is copilot because some clients send only to an agent with that id.
 	ahpAgentProvider = corev1alpha1.AgentRuntimeCopilot
 )
 
-// The Copilot dialect: the extension keys and commands the GitHub Copilot app
-// and copilotd use on the wire for projects, plans and approvals.
 const (
 	ahpCopilotProjectManagementMeta  = "copilot.projectManagement"
 	ahpCopilotConfigKey              = "copilot"
@@ -95,8 +83,6 @@ const (
 	ahpExtensionSetSessionApproveAll = "extensions/setSessionApproveAll"
 )
 
-// ahpBuiltInRuntimes are the runtimes AHP sessions run on, in the order a
-// model several of them serve is offered and run.
 var ahpBuiltInRuntimes = []struct {
 	runtime corev1alpha1.AgentRuntimeType
 	name    string
@@ -107,7 +93,6 @@ var ahpBuiltInRuntimes = []struct {
 	{corev1alpha1.AgentRuntimeOpencode, "OpenCode"},
 }
 
-// ahpRuntimeName is a built-in runtime's short display name.
 func ahpRuntimeName(runtime corev1alpha1.AgentRuntimeType) string {
 	for _, r := range ahpBuiltInRuntimes {
 		if r.runtime == runtime {
@@ -117,34 +102,16 @@ func ahpRuntimeName(runtime corev1alpha1.AgentRuntimeType) string {
 	return string(runtime)
 }
 
-// AHPBackendConfig configures the ACP session backend.
 type AHPBackendConfig struct {
-	// GitCredentialSecret names a Secret in each user's namespace whose "token"
-	// key clones and publishes their repositories. When the Secret is absent,
-	// sessions clone public repositories read-only.
-	GitCredentialSecret string
-	// WorkspaceClass selects an ExecutionWorkspaceClass for session-scoped
-	// workspaces, so a session's files stay warm between turns. Empty uses
-	// the default path: every write turn publishes, and the next starts from it.
-	WorkspaceClass string
-	// TurnTimeout bounds each turn's Task.
-	TurnTimeout time.Duration
-	// WorkspaceNamespace and WorkspaceImage enable per-user workspaces:
-	// git checkouts of the user's projects and sessions, and terminals. The
-	// image must be digest-pinned and provide sh and git.
-	WorkspaceNamespace string
-	WorkspaceImage     string
-	// WorkspaceIdleTimeout is how long a workspace with no shells, no running
-	// turn and nothing unpushed stays after its last use. Zero keeps
-	// workspaces until their user's last session ends.
+	GitCredentialSecret  string
+	WorkspaceClass       string
+	TurnTimeout          time.Duration
+	WorkspaceNamespace   string
+	WorkspaceImage       string
 	WorkspaceIdleTimeout time.Duration
-	// RepositoryCredential returns a person's own github.com token, valid for
-	// at least AHPWorkspaceTokenHorizon, from their linked account, for their
-	// workspace's git reads. Nil keeps workspaces to public repositories.
 	RepositoryCredential func(ctx context.Context, namespace, issuer, subject string) (string, error)
 }
 
-// ahpApprovalDecider answers a held permission request as its requester.
 type ahpApprovalDecider func(ctx context.Context, ui *UserInfo, namespace, task, approvalID string, approve bool) error
 
 type ahpBackend struct {
@@ -155,64 +122,33 @@ type ahpBackend struct {
 	now     func() time.Time
 	gitHTTP *http.Client
 
-	// applyApprovalMode asks a Task to hold policy-allowed permission
-	// requests for its requester; decideApproval answers one.
-	applyApprovalMode func(task *corev1alpha1.Task, manual bool)
-	decideApproval    ahpApprovalDecider
-	// recheckToken reports whether a principal's connection token is still
-	// valid, before a message it sent earlier runs.
-	recheckToken func(context.Context, ahphost.Principal) error
-	// pendingAuth is who sent each waiting message, by user, session and
-	// message id. A message runs with its sender's authority only.
-	pendingAuth map[string]ahpPendingSender
-	// emitterFor delivers actions for a user with no connection, to settle
-	// turns a previous leader left running.
-	emitterFor func(ahphost.Principal) ahphost.Emitter
-	// updateTerminals republishes the user's terminal list after a shell exits.
-	updateTerminals func(context.Context, ahphost.Principal) error
-	// cancelBackoff paces the retries of a client's turn cancel, and
-	// modeBackoff those of storing an approval mode a client chose, which
-	// the connection's next action waits for.
+	applyApprovalMode          func(task *corev1alpha1.Task, manual bool)
+	decideApproval             ahpApprovalDecider
+	recheckToken               func(context.Context, ahphost.Principal) error
+	pendingAuth                map[string]ahpPendingSender
+	emitterFor                 func(ahphost.Principal) ahphost.Emitter
+	updateTerminals            func(context.Context, ahphost.Principal) error
 	cancelBackoff, modeBackoff wait.Backoff
-	// readWorkspace reads a root file URI in the user's running workspace;
-	// running is false when no workspace runs or the URI is not in one.
-	readWorkspace func(ctx context.Context, principal ahphost.Principal, uri string) (result ahptypes.ResourceReadResult, running bool, err error)
-	workspaces    *ahpWorkspaces
+	readWorkspace              func(ctx context.Context, principal ahphost.Principal, uri string) (result ahptypes.ResourceReadResult, running bool, err error)
+	workspaces                 *ahpWorkspaces
 
-	mu     sync.Mutex
-	turns  map[string]*ahpTurn
-	shells map[string]*ahpTerminal
-	// retired holds terminal URIs already used, so input queued for an ended
-	// terminal can never reach a new one on the same URI.
-	retired map[string]time.Time
-	// reserved holds a session's turn slot from the moment a message is
-	// admitted until its turn starts, so a second message cannot slip in.
-	reserved  map[string]time.Time
-	recovered map[string]bool
-	// lifecycle serializes, per user, what decides who owns workspace state:
-	// session branch claims, session disposal and terminal creation.
-	lifecycle map[string]*sync.Mutex
-	// changes serializes, per user, changes to session changesets.
-	changes map[string]*sync.Mutex
-	// releasing holds, per session changeset, contents released by a change
-	// that could not delete them, for the next change to retry.
-	releasing map[string]map[string]bool
-	// unshown holds, per session changeset, the files whose change could not
-	// be shown to clients, for the next change to show again.
-	unshown map[string]map[string]bool
-	// sessionRetry is the first wait before a session update the store
-	// refused is tried again; each next wait doubles, up to 32 times it.
-	// Zero is a second.
+	mu           sync.Mutex
+	turns        map[string]*ahpTurn
+	shells       map[string]*ahpTerminal
+	retired      map[string]time.Time
+	reserved     map[string]time.Time
+	recovered    map[string]bool
+	lifecycle    map[string]*sync.Mutex
+	changes      map[string]*sync.Mutex
+	releasing    map[string]map[string]bool
+	unshown      map[string]map[string]bool
 	sessionRetry time.Duration
 }
 
-// lockUser takes the user's lifecycle lock. It is never taken while mu is held.
 func (b *ahpBackend) lockUser(userKey string) func() {
 	return b.lockIn(&b.lifecycle, userKey)
 }
 
-// lockChanges takes the lock on the user's changesets. It is never taken
-// while mu is held.
 func (b *ahpBackend) lockChanges(userKey string) func() {
 	return b.lockIn(&b.changes, userKey)
 }
@@ -232,10 +168,8 @@ func (b *ahpBackend) lockIn(locks *map[string]*sync.Mutex, userKey string) func(
 	return lock.Unlock
 }
 
-// ahpReservationTTL frees a slot whose message the host never applied.
 const ahpReservationTTL = 30 * time.Second
 
-// reserveTurn claims a session's turn slot; false means a turn is running or starting.
 func (b *ahpBackend) reserveTurn(userKey, session string) bool {
 	key := ahpTurnKey(userKey, session)
 	b.mu.Lock()
@@ -271,9 +205,6 @@ func newAHPBackend(h *Handlers, s store.AHPStore, live *liveevents.Broker, cfg A
 	return b
 }
 
-// ahpApplyApprovalMode makes a manual-approval turn hold every permission
-// request Orka's policy would allow for the person to decide. Allow all
-// leaves the decision to policy.
 func ahpApplyApprovalMode(task *corev1alpha1.Task, manual bool) {
 	if !manual {
 		return
@@ -286,7 +217,6 @@ func ahpApplyApprovalMode(task *corev1alpha1.Task, manual bool) {
 
 func (b *ahpBackend) Name() string { return ahpBackendName }
 
-// ahpProject is a repository a user added to the host.
 type ahpProject struct {
 	ID            string    `json:"id"`
 	Name          string    `json:"name"`
@@ -297,7 +227,6 @@ type ahpProject struct {
 	CreatedAt     time.Time `json:"createdAt"`
 }
 
-// wire is a project as the Copilot dialect describes it.
 func (p ahpProject) wire() map[string]any {
 	project := map[string]any{
 		"id": p.ID, apiFieldName: p.Name, "path": p.Path, "git": true, "origin": "cloned",
@@ -309,80 +238,52 @@ func (p ahpProject) wire() map[string]any {
 	return project
 }
 
-// ahpSession is what the backend keeps about one AHP session.
 type ahpSession struct {
-	Session     string `json:"session"`
-	Chat        string `json:"chat"`
-	Changeset   string `json:"changeset"`
-	Namespace   string `json:"namespace"`
-	OrkaSession string `json:"orkaSession"`
-	ProjectID   string `json:"projectId"`
-	RepoURL     string `json:"repoUrl"`
-	BaseBranch  string `json:"baseBranch,omitempty"`
-	Runtime     string `json:"runtime"`
-	// Branch is where the session's turns publish; WorkDir is the session's
-	// working directory on the host.
-	Branch       string `json:"branch,omitempty"`
-	WorkDir      string `json:"workDir,omitempty"`
-	Agent        string `json:"agent,omitempty"`
-	Model        string `json:"model,omitempty"`
-	ApprovalMode string `json:"approvalMode"`
-	Turns        int    `json:"turns"`
-	// The running turn, if any. It survives a controller restart, so the
-	// turn can still be settled from its Task.
-	ActiveTurn string `json:"activeTurn,omitempty"`
-	ActiveTask string `json:"activeTask,omitempty"`
-	// ActiveTaskUID is the UID of the Task created under ActiveTask. A Task
-	// created later under the same name is not the turn's, and its events,
-	// approvals and result are never taken for the turn's.
-	ActiveTaskUID   string `json:"activeTaskUID,omitempty"`
-	ActiveStartedAt string `json:"activeStartedAt,omitempty"`
-	// Plan is the agent's latest plan, as a markdown checklist.
-	Plan string `json:"plan,omitempty"`
-	// Generation counts the Orka Sessions the session has used; a new one
-	// starts when the person switches models. SessionTurns counts the
-	// current one's turns, and SourceBranch is the branch its turns start
-	// from when it is not the base branch.
-	Generation   int    `json:"generation,omitempty"`
-	SessionTurns int    `json:"sessionTurns,omitempty"`
-	SourceBranch string `json:"sourceBranch,omitempty"`
-	// Published reports that a turn pushed to Branch, which then belongs to
-	// the current Orka Session.
-	Published bool `json:"published,omitempty"`
-	// History keeps the conversation's recent exchanges, bounded, so a new
-	// Orka Session can start with them as context.
-	History []ahpExchange `json:"history,omitempty"`
-	// Pending are the messages waiting for the running turn to end, steering
-	// messages first.
-	Pending []ahpPending `json:"pending,omitempty"`
+	Session         string        `json:"session"`
+	Chat            string        `json:"chat"`
+	Changeset       string        `json:"changeset"`
+	Namespace       string        `json:"namespace"`
+	OrkaSession     string        `json:"orkaSession"`
+	ProjectID       string        `json:"projectId"`
+	RepoURL         string        `json:"repoUrl"`
+	BaseBranch      string        `json:"baseBranch,omitempty"`
+	Runtime         string        `json:"runtime"`
+	Branch          string        `json:"branch,omitempty"`
+	WorkDir         string        `json:"workDir,omitempty"`
+	Agent           string        `json:"agent,omitempty"`
+	Model           string        `json:"model,omitempty"`
+	ApprovalMode    string        `json:"approvalMode"`
+	Turns           int           `json:"turns"`
+	ActiveTurn      string        `json:"activeTurn,omitempty"`
+	ActiveTask      string        `json:"activeTask,omitempty"`
+	ActiveTaskUID   string        `json:"activeTaskUID,omitempty"`
+	ActiveStartedAt string        `json:"activeStartedAt,omitempty"`
+	Plan            string        `json:"plan,omitempty"`
+	Generation      int           `json:"generation,omitempty"`
+	SessionTurns    int           `json:"sessionTurns,omitempty"`
+	SourceBranch    string        `json:"sourceBranch,omitempty"`
+	Published       bool          `json:"published,omitempty"`
+	History         []ahpExchange `json:"history,omitempty"`
+	Pending         []ahpPending  `json:"pending,omitempty"`
 }
 
-// ahpPending is a message sent while a turn runs. Orka's runtimes take no
-// input mid-turn, so every waiting message is queued; a steering message is
-// queued first.
 type ahpPending struct {
 	ID      string           `json:"id"`
 	Kind    string           `json:"kind"`
 	Message ahptypes.Message `json:"message"`
-	// Version names this version of the message: a replaced message gets a
-	// new one, so its sender can never be paired with another version.
-	Version string `json:"version,omitempty"`
+	Version string           `json:"version,omitempty"`
 }
 
-// ahpPendingSender is who sent one version of a waiting message.
 type ahpPendingSender struct {
 	principal ahphost.Principal
 	version   string
 }
 
-// ahpExchange is one message and the reply to it.
 type ahpExchange struct {
 	User  string `json:"user"`
 	Reply string `json:"reply,omitempty"`
 }
 
-// ahpPrincipalUserInfo is the person behind a connection: AHP tokens are
-// minted only for a person's own OIDC sign-in.
 func ahpPrincipalUserInfo(p ahphost.Principal) *UserInfo {
 	return &UserInfo{AuthType: AuthTypeOIDC, Issuer: p.Issuer, Subject: p.Subject, Username: p.Username, Namespace: p.Namespace}
 }
@@ -392,9 +293,6 @@ func ahpHash(parts ...string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ahpOrkaSessionName names the Orka Session a session uses for a generation.
-// The chat is new with every creation, so a URI created again after it was
-// disposed of never reaches the Orka Session and Tasks its earlier use kept.
 func ahpOrkaSessionName(userKey string, record ahpSession, generation int) string {
 	name := "ahp-" + ahpHash(userKey, record.Session, record.Chat)[:24]
 	if generation > 0 {
@@ -425,16 +323,12 @@ func (b *ahpBackend) putRecord(ctx context.Context, userKey, kind, key string, v
 	return b.store.PutAHPRecord(ctx, store.AHPRecord{UserKey: userKey, Kind: kind, Key: key, Value: raw, UpdatedAt: b.now().UTC()})
 }
 
-// ahpAgentChoice is an Orka Agent a user may run as one AHP model.
 type ahpAgentChoice struct {
 	Agent   string
 	Runtime corev1alpha1.AgentRuntimeType
 	Model   string
 }
 
-// agentChoices lists the built-in-runtime Agents in the user's namespace, one
-// per runtime and model, through Agents the person may use. Each turn's Task
-// is authorized again when it is created.
 func (b *ahpBackend) agentChoices(ctx context.Context, principal ahphost.Principal) ([]ahpAgentChoice, error) {
 	var agents corev1alpha1.AgentList
 	if err := b.h.client.List(ctx, &agents, client.InNamespace(principal.Namespace)); err != nil {
@@ -457,14 +351,9 @@ func (b *ahpBackend) agentChoices(ctx context.Context, principal ahphost.Princip
 		if seen[key] {
 			continue
 		}
-		// An Agent the controller found unusable, such as an OpenCode Agent
-		// without its model limits, would only fail every turn: its model is
-		// not offered until the Agent is fixed. One not yet checked is.
 		if meta.IsStatusConditionFalse(agent.Status.Conditions, "Ready") {
 			continue
 		}
-		// A model is offered only through an Agent the person may use, so
-		// one they cannot start a turn with is never shown as enabled.
 		if err := authorizeAgentUse(ctx, b.h.clientset, ahpPrincipalUserInfo(principal), agent.Namespace, agent.Name,
 			"AHPSession", ""); err != nil {
 			continue
@@ -475,39 +364,24 @@ func (b *ahpBackend) agentChoices(ctx context.Context, principal ahphost.Princip
 	return choices, nil
 }
 
-// hasSession reports whether the person has a session, as far as the store
-// can tell.
 func (b *ahpBackend) hasSession(ctx context.Context, principal ahphost.Principal) bool {
 	sessions, err := b.store.ListAHPRecords(ctx, principal.UserKey, ahpRecordSession)
 	return err == nil && len(sessions) > 0
 }
 
-// The host recovers a user's turns when they connect, not only once a client
-// lists agents.
 var _ ahphost.ConnectionPreparer = (*ahpBackend)(nil)
 
-// PrepareConnection settles, once per user, the turns a previous leader left
-// running, so a client that subscribes only to a session or chat sees them,
-// and the approvals they hold, live: listing agents alone recovered them.
 func (b *ahpBackend) PrepareConnection(ctx context.Context, principal ahphost.Principal) {
 	b.recoverTurns(ctx, principal)
 }
 
-// Agents lists one AHP agent offering every model the user has an Agent for,
-// each labelled with the runtime that runs it.
 func (b *ahpBackend) Agents(ctx context.Context, principal ahphost.Principal) ([]ahptypes.AgentInfo, error) {
-	// The host lists agents with its lock held, which recovery must not wait
-	// under. Connections recover first; this retries a recovery that failed.
 	b.mu.Lock()
 	recovered := b.recovered[principal.UserKey]
 	b.mu.Unlock()
 	if !recovered {
 		go b.recoverTurns(context.WithoutCancel(ctx), principal)
 	}
-	// Warming starts the workspace a first session or terminal needs. Without
-	// an idle timeout only a session's or shell's end removes it, so it is
-	// warmed then only for a person who has a session: one who only lists
-	// agents would otherwise keep a workspace, and its credentials, for good.
 	if b.cfg.WorkspaceIdleTimeout > 0 || b.hasSession(ctx, principal) {
 		b.workspaces.warm(principal)
 	}
@@ -515,15 +389,11 @@ func (b *ahpBackend) Agents(ctx context.Context, principal ahphost.Principal) ([
 	if err != nil {
 		return nil, err
 	}
-	// Every listed model passed the user's Agent authorization; clients may
-	// refuse to send to a model the host does not mark enabled.
 	enabled := ahptypes.PolicyStateEnabled
 	var models []ahptypes.SessionModelInfo
 	listed := map[string]bool{}
 	for _, runtime := range ahpBuiltInRuntimes {
 		for _, choice := range choices {
-			// A model several runtimes serve is offered once, on the first
-			// of them, which is where ahpChooseModel runs it.
 			if choice.Runtime != runtime.runtime || listed[choice.Model] {
 				continue
 			}
@@ -568,7 +438,6 @@ func ahpProjectsWire(projects []ahpProject) []map[string]any {
 	return wire
 }
 
-// RootExtensions advertises project management and lists the user's projects.
 func (b *ahpBackend) RootExtensions(ctx context.Context, principal ahphost.Principal) (map[string]json.RawMessage, map[string]json.RawMessage, error) {
 	projects, err := b.projects(ctx, principal.UserKey)
 	if err != nil {
@@ -581,8 +450,6 @@ func (b *ahpBackend) RootExtensions(ctx context.Context, principal ahphost.Princ
 	return map[string]json.RawMessage{ahpCopilotProjectManagementMeta: json.RawMessage(`{"available":true}`)}, config, nil
 }
 
-// backfillDefaultBranch records a project's default branch, if the project is
-// still stored and has none.
 func (b *ahpBackend) backfillDefaultBranch(ctx context.Context, userKey, id, branch string) {
 	unlock := b.lockUser(userKey)
 	defer unlock()
@@ -602,7 +469,6 @@ func ahpRootConfig(projects []ahpProject) (map[string]json.RawMessage, error) {
 	return map[string]json.RawMessage{ahpCopilotConfigKey: raw}, nil
 }
 
-// HandleExtension serves the project commands of the Copilot dialect.
 func (b *ahpBackend) HandleExtension(ctx context.Context, principal ahphost.Principal, method string, params json.RawMessage, emit ahphost.Emitter) (any, error) {
 	switch method {
 	case ahpExtensionListProjects:
@@ -611,10 +477,6 @@ func (b *ahpBackend) HandleExtension(ctx context.Context, principal ahphost.Prin
 			return nil, err
 		}
 		for i := range projects {
-			// Fill in a default branch an earlier lookup could not find. The
-			// lookup runs unlocked; the write, under the lock removal holds,
-			// changes only a project still stored, so a removal meanwhile
-			// stays removed.
 			if projects[i].DefaultBranch == "" {
 				if branch := b.defaultBranch(ctx, principal.Namespace, projects[i].URL); branch != "" {
 					projects[i].DefaultBranch = branch
@@ -668,8 +530,6 @@ func (b *ahpBackend) HandleExtension(ctx context.Context, principal ahphost.Prin
 	}
 }
 
-// removeProjectCommand serves extensions/removeProject. Removing a project
-// takes it off the list; its checkout stays.
 func (b *ahpBackend) removeProjectCommand(ctx context.Context, principal ahphost.Principal, params json.RawMessage, emit ahphost.Emitter) (any, error) {
 	var req struct {
 		ID              string `json:"id"`
@@ -695,8 +555,6 @@ func (b *ahpBackend) removeProjectCommand(ctx context.Context, principal ahphost
 	return map[string]any{"removed": removed}, nil
 }
 
-// setApproveAllCommand serves extensions/setSessionApproveAll, a client's
-// approve-all toggle for one session.
 func (b *ahpBackend) setApproveAllCommand(ctx context.Context, principal ahphost.Principal, params json.RawMessage, emit ahphost.Emitter) error {
 	var req struct {
 		Channel string `json:"channel"`
@@ -718,7 +576,6 @@ func (b *ahpBackend) setApproveAllCommand(ctx context.Context, principal ahphost
 	return b.setApprovalMode(ctx, principal.UserKey, record.Session, mode, emit, true)
 }
 
-// publishProjects shows the user's clients their current project list.
 func (b *ahpBackend) publishProjects(ctx context.Context, principal ahphost.Principal, emit ahphost.Emitter) error {
 	projects, err := b.projects(ctx, principal.UserKey)
 	if err != nil {
@@ -733,9 +590,6 @@ func (b *ahpBackend) publishProjects(ctx context.Context, principal ahphost.Prin
 	}})
 }
 
-// removeProject takes a project off the user's list and reports whether it
-// was there. A project a session still uses stays: its turns and worktree
-// need it. Sessions are created under the same lock.
 func (b *ahpBackend) removeProject(ctx context.Context, principal ahphost.Principal, id string) (bool, error) {
 	unlock := b.lockUser(principal.UserKey)
 	defer unlock()
@@ -758,8 +612,6 @@ func (b *ahpBackend) removeProject(ctx context.Context, principal ahphost.Princi
 	return true, b.store.DeleteAHPRecord(ctx, principal.UserKey, ahpRecordProject, id)
 }
 
-// addProject records a repository. Orka never clones it here: each turn's
-// Task clones it in its own workspace, with Orka's credentials.
 func (b *ahpBackend) addProject(ctx context.Context, principal ahphost.Principal, raw string) (ahpProject, error) {
 	repo, owner, name, err := ahpCanonicalRepository(raw)
 	if err != nil {
@@ -769,8 +621,6 @@ func (b *ahpBackend) addProject(ctx context.Context, principal ahphost.Principal
 	var existing ahpProject
 	if err := b.getRecord(ctx, principal.UserKey, ahpRecordProject, id, &existing); err == nil {
 		if existing.DefaultBranch == "" {
-			// Under the lock projects are removed with, and only if the
-			// project is still stored: one removed meanwhile stays removed.
 			if branch := b.defaultBranch(ctx, principal.Namespace, repo); branch != "" {
 				b.backfillDefaultBranch(ctx, principal.UserKey, id, branch)
 				existing.DefaultBranch = branch
@@ -784,9 +634,6 @@ func (b *ahpBackend) addProject(ctx context.Context, principal ahphost.Principal
 		ID: id, Name: name, Owner: owner, URL: repo, Path: path.Join(ahpProjectRoot, owner, name), CreatedAt: b.now().UTC(),
 		DefaultBranch: b.defaultBranch(ctx, principal.Namespace, repo),
 	}
-	// Sessions, worktrees and checkouts find a project by its path, which
-	// leaves out the host: a second repository on that path is refused, under
-	// the lock projects are removed and sessions created with.
 	unlock := b.lockUser(principal.UserKey)
 	defer unlock()
 	projects, err := b.projects(ctx, principal.UserKey)
@@ -807,8 +654,6 @@ func (b *ahpBackend) addProject(ctx context.Context, principal ahphost.Principal
 	return project, b.putRecord(ctx, principal.UserKey, ahpRecordProject, id, project)
 }
 
-// ahpCanonicalRepository accepts an https repository URL without credentials,
-// query or fragment and returns it without a trailing .git.
 func ahpCanonicalRepository(raw string) (repo, owner, name string, err error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme != connectorSchemeHTTPS || parsed.Host == "" || parsed.User != nil ||
@@ -821,8 +666,6 @@ func ahpCanonicalRepository(raw string) (repo, owner, name string, err error) {
 	}
 	owner, name = segments[0], strings.TrimSuffix(segments[1], ".git")
 	for _, part := range []string{owner, name} {
-		// An escaped ? or # decodes into the path; written back, git would read
-		// it as a query or fragment.
 		if part == "" || part == "." || part == ".." || strings.ContainsAny(part, `\ ?#`) {
 			return "", "", "", errors.New("the repository URL is not valid")
 		}
@@ -830,12 +673,8 @@ func ahpCanonicalRepository(raw string) (repo, owner, name string, err error) {
 	return fmt.Sprintf("https://%s/%s/%s", strings.ToLower(parsed.Host), owner, name), owner, name, nil
 }
 
-// ahpDirectoryURI is the file URI of a host path, escaped so that names with
-// #, ? or % survive a client's URI parser.
 func ahpDirectoryURI(dir string) string { return (&url.URL{Scheme: "file", Path: dir}).String() }
 
-// ahpURIPath is the host path a file URI names, unescaped. Anything that is
-// not a plain file URI names no path.
 func ahpURIPath(uri string) (string, bool) {
 	parsed, err := url.Parse(uri)
 	if err != nil || parsed.Scheme != "file" || parsed.Host != "" || parsed.User != nil ||
@@ -845,7 +684,6 @@ func ahpURIPath(uri string) (string, bool) {
 	return parsed.Path, true
 }
 
-// projectForDirectory finds the project a session's working directory names.
 func (b *ahpBackend) projectForDirectory(ctx context.Context, userKey string, dirs []string) (ahpProject, error) {
 	if len(dirs) == 0 {
 		return ahpProject{}, &ahphost.Rejection{Reason: "pick a project: sessions on Orka run in a repository"}
@@ -897,27 +735,18 @@ func ahpApprovalModeFrom(config map[string]json.RawMessage) (string, error) {
 	case ahpApprovalManual, ahpApprovalAllowAll:
 		return mode, nil
 	case "assisted":
-		// Orka has no model-reviewed approvals; ask the person instead.
 		return ahpApprovalManual, nil
 	default:
 		return "", fmt.Errorf("approvalMode %q is not supported", mode)
 	}
 }
 
-// CreateSession starts a session in one of the user's projects. Nothing runs
-// until the first message: that turn's Task creates the Orka Session.
 func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Principal, req ahphost.CreateSessionRequest, _ ahphost.Emitter) (*ahphost.CreatedSession, error) {
-	// This backend routes these schemes to a session's chat, changeset and
-	// file contents, so a session cannot be named with one.
 	for _, reserved := range []string{"ahp-chat:", "ahp-changeset:", ahpContentScheme, ahpTerminalScheme} {
 		if strings.HasPrefix(req.Session, reserved) {
 			return nil, &ahphost.Rejection{Reason: "the session URI uses a scheme reserved for another kind of channel"}
 		}
 	}
-	// One branch of a project belongs to one session: its worktree and its
-	// publications are that session's. The project lookup, the claim and the
-	// record are made under the user's lifecycle lock, which project removal
-	// also holds.
 	unlock := b.lockUser(principal.UserKey)
 	defer unlock()
 	project, err := b.projectForDirectory(ctx, principal.UserKey, req.WorkingDirectories)
@@ -935,15 +764,10 @@ func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Princi
 	if baseBranch == "" || !ahpValidBranch(baseBranch) {
 		baseBranch = project.DefaultBranch
 	}
-	// Turns publish to the branch the client named for the session, or to an
-	// Orka branch when it named none.
 	branch := ""
 	if raw, ok := req.Config[ahpConfigBranch]; ok {
 		_ = json.Unmarshal(raw, &branch)
 	}
-	// Git cannot hold a branch alongside one it is a prefix of, so a branch
-	// that clashes with the base, or with the default branch a workspace's
-	// clone holds, is replaced too.
 	if !ahpValidBranch(branch) || ahpBranchesClash(branch, baseBranch) ||
 		(b.workspaces.enabled() && ahpBranchesClash(branch, project.DefaultBranch)) {
 		branch = "orka/session-" + ahpRandomHex(8)
@@ -974,8 +798,6 @@ func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Princi
 		BaseBranch: baseBranch, Runtime: req.Provider, ApprovalMode: mode, Branch: branch, WorkDir: workDir,
 	}
 	record.OrkaSession = ahpOrkaSessionName(principal.UserKey, record, 0)
-	// The session record, which claims the branch and holds the project, is
-	// written last, so a failure leaves at most the chat's random-keyed record.
 	if err := b.putRecord(ctx, principal.UserKey, ahpRecordChat, chat, req.Session); err != nil {
 		return nil, err
 	}
@@ -984,8 +806,6 @@ func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Princi
 		return nil, err
 	}
 	if b.workspaces.enabled() {
-		// Clients run git in the session's working directory right away. A
-		// worktree that takes longer is finished before a terminal opens in it.
 		if pod, err := b.workspaces.ensure(ctx, principal, ahpWorkspaceStartWait); err == nil {
 			setupCtx, cancel := context.WithTimeout(ctx, ahpWorkspaceSetupWait)
 			_ = b.workspaces.ensureWorktree(setupCtx, principal, pod, project, record)
@@ -1016,12 +836,7 @@ func (b *ahpBackend) CreateSession(ctx context.Context, principal ahphost.Princi
 	}, nil
 }
 
-// DisposeSession cancels a running turn and forgets the session. The Orka
-// Session and its Tasks keep their history.
 func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Principal, session string) error {
-	// Nothing can claim the branch or start using the workspace until the
-	// worktree, the workspace decision and the records are settled; a session
-	// already disposed by another request is left alone.
 	unlock := b.lockUser(principal.UserKey)
 	defer unlock()
 	var record ahpSession
@@ -1031,8 +846,6 @@ func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Princ
 		}
 		return err
 	}
-	// A Task that may still run keeps its session: disposal fails and can be
-	// retried, rather than leave a Task nothing can cancel or follow.
 	if record.ActiveTask != "" {
 		if err := b.cancelTask(ctx, principal, record.Namespace, record.ActiveTask, record.ActiveTaskUID); err != nil {
 			return fmt.Errorf("cancel the session's running Task: %w", err)
@@ -1042,11 +855,6 @@ func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Princ
 		turn.stop()
 	}
 	if b.workspaces.enabled() {
-		// Remove the worktree while the session still holds its branch, so a
-		// new session cannot claim the branch and lose its files to this.
-		// Nothing goes that holds work found nowhere else. Terminals are the
-		// user's own and outlive sessions: while one runs, the worktree it may
-		// be in stays, and the workspace goes only with the last session.
 		sessions, err := b.store.ListAHPRecords(ctx, principal.UserKey, ahpRecordSession)
 		terminals := b.hasTerminals(principal.UserKey)
 		removed := err == nil && len(sessions) <= 1 && !terminals && b.workspaces.removeUnlessHoldsWork(ctx, principal)
@@ -1068,9 +876,6 @@ func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Princ
 	if err := b.store.DeleteAHPRecord(ctx, principal.UserKey, ahpRecordChat, record.Chat); err != nil {
 		return err
 	}
-	// Under b.mu, which every session update holds from its read to its
-	// write: one that read the record before this delete cannot write it back
-	// after.
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.releasing, hash)
@@ -1078,12 +883,6 @@ func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Princ
 	return b.store.DeleteAHPRecord(ctx, principal.UserKey, ahpRecordSession, session)
 }
 
-// cancelTask asks a Task to stop. A Task that is gone, being deleted or
-// already finished needs nothing; any other failure is returned, because the
-// Task may still be running. With a UID, only the Task created under it is
-// stopped: another created later under the name is not the turn's. The Task
-// is read from the API server: a cache that has not seen a Task just created
-// would report it gone.
 func (b *ahpBackend) cancelTask(ctx context.Context, principal ahphost.Principal, namespace, name, uid string) error {
 	task := &corev1alpha1.Task{}
 	if err := b.h.uncachedReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, task); err != nil {
@@ -1096,7 +895,6 @@ func (b *ahpBackend) cancelTask(ctx context.Context, principal ahphost.Principal
 		return nil
 	}
 	ui := ahpPrincipalUserInfo(principal)
-	// Only the person whose turn created the Task cancels it here.
 	if !ahpOwns(ui, task) {
 		return fiber.NewError(fiber.StatusForbidden, "only the Task's requester may cancel it")
 	}
@@ -1122,13 +920,6 @@ func (b *ahpBackend) sessionForChannel(ctx context.Context, userKey, channel str
 	return record, err
 }
 
-// resolveModel maps a turn's model to the Agent that runs it. An Orka Session
-// is bound to one runtime profile, so a session keeps its Agent until the
-// person picks another model; switching reports true and the turn moves the
-// session to a new Orka Session. When the session's Agent is no longer
-// offered, such as one the controller marked not Ready, another Agent that
-// offers the same model takes over the same way: the model is listed through
-// it, and choosing it must not lead back to the Agent that is gone.
 func (b *ahpBackend) resolveModel(ctx context.Context, principal ahphost.Principal, record ahpSession, model *ahptypes.ModelSelection) (ahpAgentChoice, bool, error) {
 	choices, err := b.agentChoices(ctx, principal)
 	if err != nil {
@@ -1157,9 +948,6 @@ func (b *ahpBackend) resolveModel(ctx context.Context, principal ahphost.Princip
 	return choice, record.Agent != "", nil
 }
 
-// ahpChooseModel picks the Agent for a model on a session's provider. The
-// offered agent runs a model on the first built-in runtime that serves it, as
-// Agents lists it; a session on another provider stays on that runtime.
 func ahpChooseModel(choices []ahpAgentChoice, provider, model string) (ahpAgentChoice, bool) {
 	for _, runtime := range ahpBuiltInRuntimes {
 		if provider != string(ahpAgentProvider) && string(runtime.runtime) != provider {
@@ -1174,8 +962,6 @@ func ahpChooseModel(choices []ahpAgentChoice, provider, model string) (ahpAgentC
 	return ahpAgentChoice{}, false
 }
 
-// AuthorizeClientAction admits the client actions this backend acts on and
-// the harmless view actions; anything else is rejected.
 func (b *ahpBackend) AuthorizeClientAction(ctx context.Context, principal ahphost.Principal, channel string, action ahptypes.StateAction) error {
 	if strings.HasPrefix(channel, ahpTerminalScheme) {
 		return b.authorizeTerminalAction(principal, channel, action)
@@ -1220,15 +1006,12 @@ func (b *ahpBackend) AuthorizeClientAction(ctx context.Context, principal ahphos
 	case *ahptypes.SessionTitleChangedAction, *ahptypes.SessionActiveClientSetAction, *ahptypes.SessionActiveClientRemovedAction,
 		*ahptypes.SessionIsReadChangedAction, *ahptypes.SessionIsArchivedChangedAction,
 		*ahptypes.ChatDraftChangedAction, *ahptypes.ChatIsReadChangedAction, *ahptypes.ChatIsArchivedChangedAction:
-		// View state only. Client-provided tools in an active client are never offered to agents.
 		return nil
 	default:
 		return &ahphost.Rejection{Reason: "not supported on this host"}
 	}
 }
 
-// authorizeMessage admits a message for the session's chat: one that starts a
-// turn now, or one that waits for the running turn to end.
 func (b *ahpBackend) authorizeMessage(ctx context.Context, principal ahphost.Principal, record ahpSession, action ahptypes.StateAction) error {
 	switch a := action.Value.(type) {
 	case *ahptypes.ChatTurnStartedAction:
@@ -1262,10 +1045,6 @@ func (b *ahpBackend) authorizeMessage(ctx context.Context, principal ahphost.Pri
 	}
 }
 
-// unqueue takes back a message the store would not queue. One it would have
-// replaced stays queued, with its sender, prior, and the client shows it
-// again; otherwise the client takes the message out of its queue. A sender
-// set since by another message is left alone.
 func (b *ahpBackend) unqueue(ctx context.Context, record ahpSession, a *ahptypes.ChatPendingMessageSetAction, key, version string,
 	prior ahpPendingSender, emit ahphost.Emitter) {
 	b.mu.Lock()
@@ -1296,9 +1075,6 @@ func (b *ahpBackend) unqueue(ctx context.Context, record ahpSession, a *ahptypes
 	_ = emit.Emit(ctx, record.Chat, actions...)
 }
 
-// cancelTurn cancels a session's turn a client cancelled. The action runs
-// after it was admitted: the turn may have ended since, and another started,
-// which it must not stop.
 func (b *ahpBackend) cancelTurn(ctx context.Context, principal ahphost.Principal, record ahpSession, turnID string) {
 	if record.ActiveTurn != turnID {
 		return
@@ -1312,8 +1088,6 @@ func (b *ahpBackend) cancelTurn(ctx context.Context, principal ahphost.Principal
 	b.keepCancelling(ctx, principal, record.Session, record.Namespace, record.ActiveTask, record.ActiveTaskUID)
 }
 
-// keepCancelling asks a cancelled turn's Task to stop through a passing
-// failure, off the action queue: the client already shows the turn cancelled.
 func (b *ahpBackend) keepCancelling(ctx context.Context, principal ahphost.Principal, session, namespace, task, uid string) {
 	go func() {
 		err := retry.OnError(b.cancelBackoff, func(error) bool { return true }, func() error {
@@ -1325,7 +1099,6 @@ func (b *ahpBackend) keepCancelling(ctx context.Context, principal ahphost.Princ
 	}()
 }
 
-// HandleClientAction runs what an admitted client action asks for.
 func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.Principal, channel string, action ahptypes.StateAction, emit ahphost.Emitter) {
 	if strings.HasPrefix(channel, ahpTerminalScheme) {
 		b.handleTerminalAction(principal, channel, action)
@@ -1341,7 +1114,6 @@ func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.P
 	case *ahptypes.ChatTurnCancelledAction:
 		b.cancelTurn(ctx, principal, record, a.TurnId)
 	case *ahptypes.ChatToolCallConfirmedAction:
-		// As for a cancel, the decision is for its own turn only.
 		if turn := b.activeTurn(principal.UserKey, record.Session); turn != nil && turn.id == a.TurnId {
 			turn.confirm(ctx, principal, a.ToolCallId, a.Approved)
 		}
@@ -1355,15 +1127,10 @@ func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.P
 		prior, replacing := b.pendingAuth[key]
 		b.pendingAuth[key] = ahpPendingSender{principal: principal, version: version}
 		b.mu.Unlock()
-		// Orka's runtimes take no input mid-turn, so a steering message is
-		// queued first instead, and shown so: it then appears once, when its
-		// turn starts, not also as input to the running turn.
 		steering := a.Kind == ahptypes.PendingMessageKindSteering
 		var order []string
 		full := false
 		err := b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
-			// The bound is checked again where the queue is written: messages
-			// from two connections can both be admitted below it.
 			if !slices.ContainsFunc(s.Pending, func(p ahpPending) bool { return p.ID == a.Id }) && len(s.Pending) >= ahpPendingMax {
 				full = true
 				return
@@ -1420,9 +1187,6 @@ func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.P
 		if err != nil {
 			return
 		}
-		// The client already shows the mode it chose. Store it through a
-		// passing failure; if it still cannot be stored, show the mode the
-		// session's turns run under, so no client shows one they do not.
 		err = retry.OnError(b.modeBackoff, func(error) bool { return true }, func() error {
 			return b.setApprovalMode(ctx, principal.UserKey, record.Session, mode, emit, false)
 		})
@@ -1442,9 +1206,6 @@ func (b *ahpBackend) HandleClientAction(ctx context.Context, principal ahphost.P
 	}
 }
 
-// setApprovalMode records a session's approval mode, which its next turn
-// uses, and shows it to the session's clients. A client that changed the
-// mode itself has already shown the selection.
 func (b *ahpBackend) setApprovalMode(ctx context.Context, userKey, session, mode string, emit ahphost.Emitter, showSelection bool) error {
 	if err := b.updateSession(ctx, userKey, session, func(s *ahpSession) { s.ApprovalMode = mode }); err != nil {
 		logSessionUpdate(err, session, "set the approval mode")
@@ -1460,8 +1221,6 @@ func (b *ahpBackend) setApprovalMode(ctx context.Context, userKey, session, mode
 	}})
 }
 
-// updateSession changes a stored session. A caller whose next step depends on
-// the change must check the error: the change happened only if it is nil.
 func (b *ahpBackend) updateSession(ctx context.Context, userKey, session string, mutate func(*ahpSession)) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -1473,9 +1232,6 @@ func (b *ahpBackend) updateSession(ctx context.Context, userKey, session string,
 	return b.putRecord(ctx, userKey, ahpRecordSession, session, record)
 }
 
-// updateSessionUntilDone applies a session update that must not be lost: while
-// the store refuses it, it is tried again in the background until it lands or
-// the session is gone. The returned channel closes once it has.
 func (b *ahpBackend) updateSessionUntilDone(ctx context.Context, userKey, session, what string, mutate func(*ahpSession)) <-chan struct{} {
 	done := make(chan struct{})
 	err := b.updateSession(ctx, userKey, session, mutate)
@@ -1496,34 +1252,23 @@ func (b *ahpBackend) updateSessionUntilDone(ctx context.Context, userKey, sessio
 	return done
 }
 
-// retryWait is the first wait before a refused session update is tried again.
 func (b *ahpBackend) retryWait() time.Duration { return cmp.Or(b.sessionRetry, time.Second) }
 
-// logSessionUpdate records a failed session update whose caller can go on.
 func logSessionUpdate(err error, session, what string) {
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		log.Error(err, "update AHP session", "session", session, "change", what)
 	}
 }
 
-// ahpFileContent is what a changeset serves for one file of a session.
 type ahpFileContent struct {
-	Path   string `json:"path"`
-	After  string `json:"after,omitempty"`
-	Before string `json:"before,omitempty"`
-	// Deleted marks a file the session removed: it has no after side.
-	Deleted bool `json:"deleted,omitempty"`
+	Path    string `json:"path"`
+	After   string `json:"after,omitempty"`
+	Before  string `json:"before,omitempty"`
+	Deleted bool   `json:"deleted,omitempty"`
 }
 
 const ahpContentScheme = "ahp-content:/"
 
-// ReadResource serves the before and after contents of the files in a
-// session's changeset, as the agent reported them. On the root channel a file
-// of the user's running workspace is read there, so what a terminal or a
-// followed branch changed since shows and a deleted file is gone. Otherwise
-// the session is found from the resource: a content URI names it, and a file
-// is served from the user's session that last changed it. Nothing is read
-// from this server's disk.
 func (b *ahpBackend) ReadResource(ctx context.Context, principal ahphost.Principal, session, channel, uri string) (ahptypes.ResourceReadResult, error) {
 	if session == "" {
 		if result, running, err := b.readWorkspace(ctx, principal, uri); running {
@@ -1547,7 +1292,6 @@ func (b *ahpBackend) ReadResource(ctx context.Context, principal ahphost.Princip
 		sessions = []string{session}
 	}
 	var found store.AHPRecord
-	// deleted reports that the newest change found removed the file.
 	ok, deleted := false, false
 	for _, candidate := range sessions {
 		hash := ahpHash(principal.UserKey, candidate)
@@ -1570,8 +1314,6 @@ func (b *ahpBackend) ReadResource(ctx context.Context, principal ahphost.Princip
 				continue
 			}
 			nonce, updated = file.After, fileRecord.UpdatedAt
-			// A removal is a change too: an older session's contents of a
-			// file a newer one deleted are not the file's.
 			if file.Deleted {
 				if !ok || updated.After(found.UpdatedAt) {
 					found, ok, deleted = store.AHPRecord{UpdatedAt: updated}, true, true
@@ -1599,8 +1341,6 @@ func (b *ahpBackend) ReadResource(ctx context.Context, principal ahphost.Princip
 	return ahptypes.ResourceReadResult{Data: string(found.Value), Encoding: ahptypes.ContentEncodingUtf8}, nil
 }
 
-// ResolveSessionConfig resolves a new session's configuration for the form a
-// client shows before creating it: the approval mode and the branches.
 func (b *ahpBackend) ResolveSessionConfig(ctx context.Context, principal ahphost.Principal, params ahptypes.ResolveSessionConfigParams) (ahptypes.ResolveSessionConfigResult, error) {
 	mode, err := ahpApprovalModeFrom(params.Config)
 	if err != nil {
@@ -1637,7 +1377,6 @@ func (b *ahpBackend) ResolveSessionConfig(ctx context.Context, principal ahphost
 	return ahptypes.ResolveSessionConfigResult{Schema: config.Schema, Values: config.Values}, nil
 }
 
-// gitCredential returns the user's repository credential, if configured.
 func (b *ahpBackend) gitCredential(ctx context.Context, namespace string) *corev1alpha1.WorkspaceCredentialReference {
 	if len(b.gitSecretToken(ctx, namespace)) == 0 {
 		return nil
@@ -1645,14 +1384,10 @@ func (b *ahpBackend) gitCredential(ctx context.Context, namespace string) *corev
 	return &corev1alpha1.WorkspaceCredentialReference{Name: b.cfg.GitCredentialSecret, Key: ahpGitCredentialSecretKey}
 }
 
-// gitSecretToken reads the token of the namespace's repository credential
-// Secret, or nothing when none is configured or it cannot be read.
 func (b *ahpBackend) gitSecretToken(ctx context.Context, namespace string) []byte {
 	if b.cfg.GitCredentialSecret == "" {
 		return nil
 	}
-	// Read Secrets uncached: the manager's cache must not start watching
-	// Secrets for this lookup.
 	var reader client.Reader = b.h.client
 	if b.h.apiReader != nil {
 		reader = b.h.apiReader

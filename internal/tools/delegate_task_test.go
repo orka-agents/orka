@@ -281,18 +281,16 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 				envOrkaCoordinationMaxDepth:      "3",
 			},
 			args:    json.RawMessage(`{"agent": "researcher", "prompt": "Research", "namespace": "other-ns"}`),
-			wantErr: true, // parent task not found in other-ns
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Set environment variables
 			for k, v := range tt.envVars {
 				t.Setenv(k, v)
 			}
 
-			// Create fake client with parent task and agent
 			k8sClient := newFakeClient(parentTask(), researcherAgent())
 			tool := NewDelegateTaskTool(k8sClient)
 
@@ -723,13 +721,11 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 		t.Fatalf("failed to unmarshal result: %v", err)
 	}
 
-	// Fetch the created child task to verify fields
 	taskList := &corev1alpha1.TaskList{}
 	if err := k8sClient.List(context.Background(), taskList); err != nil {
 		t.Fatalf("failed to list tasks: %v", err)
 	}
 
-	// Find the child task (not the parent)
 	var childTask *corev1alpha1.Task
 	for i := range taskList.Items {
 		if taskList.Items[i].Name != parentTaskName {
@@ -742,7 +738,6 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 		t.Fatal("child task not found")
 	}
 
-	// Verify labels
 	if childTask.Labels[labels.LabelParentTask] != labels.SelectorValue(parentTaskName) {
 		t.Errorf("label orka.ai/parent-task = %q, want %q", childTask.Labels[labels.LabelParentTask], labels.SelectorValue(parentTaskName))
 	}
@@ -753,7 +748,6 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 		t.Errorf("label orka.ai/delegated-agent = %q, want %q", childTask.Labels[labels.LabelDelegatedAgent], testResearcherAgentName)
 	}
 
-	// Verify annotations
 	if childTask.Annotations[labels.AnnotationParentTaskName] != parentTaskName {
 		t.Errorf("annotation orka.ai/parent-task-name = %q, want %q", childTask.Annotations[labels.AnnotationParentTaskName], parentTaskName)
 	}
@@ -771,7 +765,6 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 		t.Fatalf("delegated child trace parent was not propagated")
 	}
 
-	// Verify spec
 	if childTask.Spec.Type != corev1alpha1.TaskTypeAI {
 		t.Errorf("spec.type = %q, want %q", childTask.Spec.Type, corev1alpha1.TaskTypeAI)
 	}
@@ -786,7 +779,6 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	}
 	expectInheritedTaskProvenance(t, childTask)
 
-	// Verify owner reference
 	if len(childTask.OwnerReferences) != 1 {
 		t.Fatalf("expected 1 owner reference, got %d", len(childTask.OwnerReferences))
 	}
@@ -804,7 +796,6 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 		t.Errorf("ownerRef.BlockOwnerDeletion = %#v, want nil", ownerRef.BlockOwnerDeletion)
 	}
 
-	// Verify priority inherited from parent
 	if childTask.Spec.Priority == nil || *childTask.Spec.Priority != 500 {
 		t.Errorf("spec.priority = %v, want 500", childTask.Spec.Priority)
 	}
@@ -859,7 +850,6 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 		t.Errorf("status = %q, want %q", delegateResult.Status, GitHubPullRequestStatusCreated)
 	}
 
-	// Fetch the child task
 	taskList := &corev1alpha1.TaskList{}
 	if err := k8sClient.List(context.Background(), taskList); err != nil {
 		t.Fatalf("failed to list tasks: %v", err)
@@ -876,7 +866,6 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 		t.Fatal("child task not found")
 	}
 
-	// Verify task type is agent
 	if childTask.Spec.Type != corev1alpha1.TaskTypeAgent {
 		t.Errorf("spec.type = %q, want %q", childTask.Spec.Type, corev1alpha1.TaskTypeAgent)
 	}
@@ -884,7 +873,6 @@ func TestDelegateTaskTool_Execute_AgentType(t *testing.T) {
 		t.Fatalf("spec.ai = %#v, want nil for an explicit runtime Agent", childTask.Spec.AI)
 	}
 
-	// Verify agent runtime config
 	if childTask.Spec.AgentRuntime == nil {
 		t.Fatal("spec.agentRuntime is nil")
 	}
@@ -992,7 +980,6 @@ func TestDelegateTaskTool_Execute_AgentNotFound(t *testing.T) {
 	t.Setenv(envOrkaCoordinationAllowedAgents, "nonexistent-agent")
 	t.Setenv(envOrkaCoordinationMaxDepth, "3")
 
-	// No agent registered in the fake client
 	k8sClient := newFakeClient(parentTask())
 	tool := NewDelegateTaskTool(k8sClient)
 
@@ -1028,7 +1015,6 @@ func TestDelegateTaskTool_Execute_AgentTypeNoWorkspace(t *testing.T) {
 	k8sClient := newFakeClient(parentTask(), agentWithRuntime)
 	tool := NewDelegateTaskTool(k8sClient)
 
-	// No workspace, maxTurns, or allowBash args
 	args := json.RawMessage(`{"agent": "claude-coder", "prompt": "Fix bugs"}`)
 	_, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -1459,7 +1445,6 @@ func searchString(s, substr string) bool {
 }
 
 func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
-	// Create a prior task in the fake client
 	prior := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testPriorTaskName,
@@ -1511,7 +1496,6 @@ func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
 		t.Errorf("expected status 'created', got %q", delegateResult.Status)
 	}
 
-	// Verify the child task was created with PriorTaskRef
 	childTask := &corev1alpha1.Task{}
 	if err := fakeClient.Get(context.Background(), apitypes.NamespacedName{
 		Name: delegateResult.TaskName, Namespace: defaultNamespace,
@@ -1526,7 +1510,6 @@ func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
 		t.Errorf("expected PriorTaskRef.Name 'prior-task-1', got %q", childTask.Spec.PriorTaskRef.Name)
 	}
 
-	// Verify feedback was prepended to prompt
 	if !strings.Contains(childTask.Spec.Prompt, "FEEDBACK FROM REVIEW") {
 		t.Errorf("expected prompt to contain feedback, got %q", childTask.Spec.Prompt)
 	}
@@ -1534,7 +1517,6 @@ func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
 		t.Errorf("expected prompt to contain feedback text")
 	}
 
-	// Verify iteration labels
 	if childTask.Labels[labels.LabelIteration] != "2" {
 		t.Errorf("expected iteration=2, got %q", childTask.Labels[labels.LabelIteration])
 	}
@@ -1542,7 +1524,6 @@ func TestDelegateTaskTool_Execute_PriorTask(t *testing.T) {
 		t.Errorf("expected iteration-group=group-abc, got %q", childTask.Labels[labels.LabelIterationGroup])
 	}
 
-	// Verify workspace was copied from prior task
 	if childTask.Spec.Workspace == nil {
 		t.Fatal("expected workspace to be copied from prior task")
 	}
@@ -1575,7 +1556,6 @@ func TestDelegateTaskTool_Execute_FeedbackOnly(t *testing.T) {
 	var delegateResult DelegateTaskResult
 	_ = json.Unmarshal([]byte(result), &delegateResult)
 
-	// Verify the child task was created with feedback in prompt
 	childTask := &corev1alpha1.Task{}
 	_ = fakeClient.Get(context.Background(), apitypes.NamespacedName{
 		Name: delegateResult.TaskName, Namespace: defaultNamespace,
@@ -1587,7 +1567,6 @@ func TestDelegateTaskTool_Execute_FeedbackOnly(t *testing.T) {
 	if childTask.Spec.AI == nil || childTask.Spec.AI.Prompt != childTask.Spec.Prompt {
 		t.Fatalf("spec.ai = %#v, want feedback-adjusted prompt %q", childTask.Spec.AI, childTask.Spec.Prompt)
 	}
-	// PriorTaskRef should NOT be set
 	if childTask.Spec.PriorTaskRef != nil {
 		t.Errorf("expected PriorTaskRef to be nil when prior_task not specified")
 	}
@@ -1755,9 +1734,6 @@ func TestDelegateTaskTool_Execute_RepositoryFreeWorkspaceSkipsReadCredentialDisc
 	t.Setenv(envOrkaCoordinationAllowedAgents, "copilot-coder")
 	t.Setenv(envOrkaCoordinationMaxDepth, "3")
 
-	// The agent carries a discoverable secret, but the controller workspace
-	// preflight rejects readCredentialRef without gitRepo — auto-discovery must
-	// not doom a repository-free workspace.
 	agentWithRuntime := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "copilot-coder", Namespace: defaultNamespace},
 		Spec: corev1alpha1.AgentSpec{
@@ -1967,7 +1943,6 @@ func TestDelegateTaskTool_Execute_AutoRetry(t *testing.T) {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
-	// Fetch child task and verify annotations
 	childTask := &corev1alpha1.Task{}
 	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
 		Name: delegateResult.TaskName, Namespace: defaultNamespace,
@@ -1999,7 +1974,6 @@ func TestDelegateTaskTool_Execute_AutoRetryDefault(t *testing.T) {
 	k8sClient := newFakeClient(parentTask(), researcherAgent())
 	tool := NewDelegateTaskTool(k8sClient)
 
-	// auto_retry without max_retries should default to 2
 	args := json.RawMessage(`{"agent": "researcher", "prompt": "Do work", "auto_retry": true}`)
 	result, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -2051,7 +2025,6 @@ func TestDelegateTaskTool_Execute_NoAutoRetry(t *testing.T) {
 		t.Fatalf("get child task: %v", err)
 	}
 
-	// When auto_retry is not set, no retry annotations should be present
 	if _, ok := childTask.Annotations[labels.AnnotationAutoRetry]; ok {
 		t.Error("expected no auto-retry annotation when auto_retry is false")
 	}
@@ -2139,9 +2112,6 @@ func TestDelegateTaskToolExecuteStampsTraceContextAndSpanAttributes(t *testing.T
 	}
 }
 
-// A delegated child is handed to the seal hook exactly like the other
-// Task-creating tools, so a coordination child of a stamped parent is sealed
-// for connector use.
 func TestDelegateTaskToolSealsTheCreatedChild(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)

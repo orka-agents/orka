@@ -33,12 +33,10 @@ const (
 )
 
 type ACPRuntimePlan struct {
-	PoolName string
-	Image    string
-	Profile  harnessv2.RuntimeProfile
-	Digest   harnessv2.ProfileDigest
-	// Workspace, when set, binds the pool to an execution-workspace provider.
-	// It changes PoolName so workspace-backed sessions never share a plain pool.
+	PoolName  string
+	Image     string
+	Profile   harnessv2.RuntimeProfile
+	Digest    harnessv2.ProfileDigest
 	Workspace *ACPRuntimeWorkspaceBinding
 }
 
@@ -48,9 +46,6 @@ type acpRuntimeDeliverySelection struct {
 	requiredRuntimePoolUID types.UID
 }
 
-// validateACPRuntimePlanningAgent gates ACP planning on a complete built-in
-// runtime with an explicit orka.harness.v2 classification and a valid v2
-// OpenCode shape. A missing selector is never protocol evidence.
 func validateACPRuntimePlanningAgent(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
 	if task == nil || agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.Type == "" {
 		return fmt.Errorf("built-in agent runtime is required")
@@ -171,12 +166,6 @@ func PlanACPRuntimeWithConfiguration(
 	}, nil
 }
 
-// currentACPRuntimeDeliveryPlan validates the controller-owned runtime
-// artifacts and refreshes the derived plain-pool identity while preserving the
-// Task's immutable runtime profile. Workspace-backed pools keep their frozen
-// plan because rotating their physical workspace has separate lifecycle and
-// lineage requirements. A retired workspace image is usable only through an
-// exact preexisting pool, so the caller must preserve the creation decision.
 func currentACPRuntimeDeliveryPlan(plan ACPRuntimePlan, images ACPRuntimeImages) (acpRuntimeDeliverySelection, error) {
 	adapterDigests, image, err := acpRuntimeArtifacts(
 		corev1alpha1.AgentRuntimeType(strings.TrimSpace(plan.Profile.ProviderKind)),
@@ -271,9 +260,6 @@ func RuntimePoolProfileFromPlan(plan ACPRuntimePlan) corev1alpha1.RuntimePoolPro
 	}
 }
 
-// acpRuntimePoolWorkspaceMatchesPlan requires an exact match between the
-// pool's immutable execution-workspace binding and the frozen plan: plain
-// plans never bind to workspace-backed pools and vice versa.
 func acpRuntimePoolWorkspaceMatchesPlan(pool *corev1alpha1.RuntimePool, plan ACPRuntimePlan) bool {
 	if pool == nil {
 		return false
@@ -320,9 +306,6 @@ func effectiveACPWorkspaceIntent(task *corev1alpha1.Task) corev1alpha1.Workspace
 func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 	values := requestedACPAllowedTools(task, agent)
 	if injectsACPCoordinationTools(task, agent) {
-		// Materialize the implicit native grant before adding brokered tools.
-		// Appending to nil would otherwise replace native defaults with an
-		// allowlist containing only the injected messaging tools.
 		if values == nil && agent != nil && agent.Spec.Runtime != nil {
 			values = acp.BuiltInRuntimeNativeToolNames(string(agent.Spec.Runtime.Type))
 		}
@@ -333,8 +316,6 @@ func effectiveACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 
 var acpInjectedCoordinationTools = []string{"send_message", "check_messages"}
 
-// injectsACPCoordinationTools reports whether Orka adds the messaging tools
-// to a delegated child Task's allowlist.
 func injectsACPCoordinationTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
 	if task == nil {
 		return false
@@ -346,9 +327,6 @@ func injectsACPCoordinationTools(task *corev1alpha1.Task, agent *corev1alpha1.Ag
 	return delegatedChild && !disableCoordinationToolInjection && !runtimeRefAgent
 }
 
-// requestedACPAllowedTools resolves the tool allowlist a Task asks for from
-// its own override or the Agent defaults, before Orka injects coordination
-// tools. A nil result keeps the implicit full native grant.
 func requestedACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 	var values []string
 	if agent != nil && agent.Spec.Runtime != nil {
@@ -365,24 +343,12 @@ func requestedACPAllowedTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 	if taskRequestsReadOnlyAgent(task) && taskUsesReadOnlyAgentToolPreset(task) &&
 		agent != nil && agent.Spec.Runtime != nil {
 		brokered := repositoryMonitorReadOnlyBrokeredTools(task)
-		// Repository-monitor presets use Claude-style path-scoped names, which
-		// are not canonical provider-native descriptors, so translate the
-		// preset into the exact read-only surface each runtime can enforce.
 		switch agent.Spec.Runtime.Type {
 		case corev1alpha1.AgentRuntimeOpencode:
-			// OpenCode's Grep permission cannot carry the path-specific
-			// secret-file exclusions applied to Read, so it stays disabled.
 			values = []string{providerNativeToolRead, providerNativeToolGlob}
 		case corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
-			// Copilot exposes the same read-only trio; it has no LS tool, so
-			// the untranslated preset would be rejected as an invalid
-			// runtime profile.
 			values = []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead}
 		case corev1alpha1.AgentRuntimeCodex:
-			// Codex has no per-tool switches; this exact surface is enforced
-			// by the RuntimeSession boundary: elevation requests are rejected,
-			// file writes are supervisor-mediated, and the read-intent
-			// workspace delta classification fails any modifying turn.
 			values = []string{providerNativeToolGlob, providerNativeToolGrep, providerNativeToolRead}
 		}
 		values = append(values, brokered...)
@@ -465,8 +431,6 @@ func acpRuntimeArtifacts(runtime corev1alpha1.AgentRuntimeType, images ACPRuntim
 	return digests, strings.TrimSpace(image), nil
 }
 
-// ACPRuntimeImageAvailable reports whether a built-in runtime image is an
-// immutable, non-placeholder reference suitable for task admission and chat.
 func ACPRuntimeImageAvailable(image string) bool {
 	image = strings.TrimSpace(image)
 	if !digestPinnedImagePattern.MatchString(image) {

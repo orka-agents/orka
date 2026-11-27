@@ -70,10 +70,65 @@ export ORKA_TOKEN="$(kubectl -n orka-system create token orka-client --duration 
 kubectl -n orka-system port-forward svc/orka 8080:8080
 ```
 
-The endpoint does not implement MCP OAuth discovery; configure the header in your
-client. Requests with a browser `Origin` header must match `ORKA_CORS_ALLOWED_ORIGINS`
+MCP clients that support [MCP authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
+can instead sign in through your OIDC provider; see [Sign in with OAuth](#sign-in-with-oauth).
+Otherwise configure the header in your client. Requests with a browser `Origin` header must match `ORKA_CORS_ALLOWED_ORIGINS`
 when that allow-list is set. With the endpoint enabled, the CORS allow-list also accepts
 the `Mcp-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` request headers.
+
+## Sign in with OAuth
+
+When OIDC is configured (`--oidc-issuer`, `--oidc-audience`), give the endpoint's
+external URL and Orka tells MCP clients where to sign in:
+
+```bash
+--mcp-server-enabled
+--mcp-resource-url=https://orka.example.com/mcp   # or ORKA_MCP_RESOURCE_URL
+```
+
+Orka then serves OAuth protected-resource metadata
+([RFC 9728](https://www.rfc-editor.org/rfc/rfc9728)) at
+`/.well-known/oauth-protected-resource/mcp`, naming `--oidc-issuer` as the
+authorization server, and answers an unauthenticated `POST /mcp` with `401` and
+`WWW-Authenticate: Bearer resource_metadata="…", scope="…"`. The client finds your
+provider, signs you in with PKCE, and refreshes the token itself. Orka checks that token
+like any other OIDC token: issuer, signature, the `--oidc-audience` audience and the
+subject allow-list. Orka issues no tokens and registers no clients.
+
+- The URL must be the exact canonical URL clients use, with `https`, the path `/mcp`,
+  and no default port (`:443`). Loopback `http` (such as `http://localhost:8080/mcp`) is
+  also accepted as a nonstandard local-development mode, though strict RFC 9728 clients
+  require `https` and TLS certificate validation. Orka refuses to start if the URL is
+  invalid, or set without `--mcp-server-enabled` and OIDC.
+- `--oidc-scopes` (or `ORKA_OIDC_SCOPES`) sets the scopes clients request. The default is
+  `openid profile email offline_access`; add `groups` if your provider needs it to
+  include group claims. With Microsoft Entra ID, set `api.requestedAccessTokenVersion`
+  to `2` on the API app, register the advertised MCP URL (such as
+  `https://orka.example.com/mcp`) as its Application ID URI, add a delegated scope under
+  that URI (such as `https://orka.example.com/mcp/user_impersonation`), and configure
+  `--oidc-scopes="openid profile email offline_access https://orka.example.com/mcp/user_impersonation"`
+  so Entra matches the MCP client's `resource` parameter while issuing v2 tokens whose
+  `aud` is the API's client-ID GUID (`--oidc-audience`). When set, `orka auth login`
+  requests the same scopes.
+- The token's audience must be `--oidc-audience`. If your provider sets a token's
+  audience to the client ID that requested it, as Dex does, MCP clients must use the
+  installation's own public client, the one whose ID is `--oidc-audience`. Providers
+  that can add an API audience to any client's tokens also work with the client's own
+  registration.
+- Most self-hosted providers don't offer dynamic client registration, so configure the
+  client ID in the MCP client. In Claude Code:
+
+  ```bash
+  claude mcp add --transport http orka https://orka.example.com/mcp --client-id <oauth-client-id>
+  claude mcp login orka
+  ```
+
+  Use `--oidc-audience` as `<oauth-client-id>` when your provider sets a token's audience
+  to the requesting client ID (such as Dex), or the public MCP client app's ID when the
+  client and API are registered separately (such as Microsoft Entra ID). Add
+  `--callback-port <port>` when your provider only accepts registered redirect
+  URIs. A Dex public client with no `redirectURIs` accepts `http://localhost` on any
+  port, while listing any redirect URI replaces that rule with exact matches.
 
 ## Configure your client
 
@@ -135,6 +190,43 @@ In `.vscode/mcp.json`. VS Code prompts for the token once and stores it securely
 
 To use a transaction token instead, send `"Txn-Token": "<token>"` in `headers` and
 omit `Authorization`.
+
+### Use your Orka sign-in
+
+If you signed in with `orka auth login`, `orka auth token` prints your current token,
+refreshing it first when it is near expiry; see the
+[CLI reference](../reference/cli.md#sign-in-with-oidc). Claude Code can run it whenever it
+connects, so the header doesn't go stale:
+
+```json
+{
+  "mcpServers": {
+    "orka": {
+      "type": "http",
+      "url": "https://orka.example.com/mcp",
+      "headersHelper": "env -u ORKA_TOKEN orka auth token --server https://orka.example.com --format header-json"
+    }
+  }
+}
+```
+
+Name the same server the client connects to with `--server`: a sign-in saved for any
+other server is then refused, even after you later sign in elsewhere. Claude Code runs a
+project's `headersHelper` only once you trust the workspace and times out the helper after
+10 seconds, while Orka allows up to 30 seconds for an OIDC token refresh (including
+config-lock waits). If a refresh exceeds Claude Code's timeout, refresh the saved token
+outside Claude Code first and reconnect once it succeeds:
+
+```bash
+env -u ORKA_TOKEN orka auth token --server https://orka.example.com >/dev/null
+```
+
+For a client that reads the header from the environment, scope `ORKA_TOKEN` to that
+client's invocation rather than leaving it exported in your shell:
+`token="$(env -u ORKA_TOKEN orka auth token --server https://orka.example.com)" && ORKA_TOKEN="$token" <client>`.
+That copy doesn't refresh, and if `ORKA_TOKEN` stays exported in the shell, `orka auth token` prints
+it instead of your saved sign-in and bypasses its `--server` check; unset it before
+switching servers or when it expires.
 
 ## Tools
 

@@ -20,8 +20,6 @@ import (
 
 const conditionTypeACPArtifactsRetired = "ACPArtifactsRetired"
 
-// ACPPublicationReclaimer removes Publisher-local cache state after every
-// durable publication/session barrier for a deleting Task has settled.
 type ACPPublicationReclaimer interface {
 	ReclaimPublication(context.Context, publisherservice.PublicationReclaimRequest) (publisherservice.PublicationReclaimResponse, error)
 }
@@ -35,11 +33,6 @@ func (r *TaskReconciler) acpTaskDeletionReady(ctx context.Context, task *corev1a
 	return r.acpTaskCleanupReady(ctx, task, true)
 }
 
-// acpTaskCleanupReady always requires terminal control-plane settlement.
-// Workspace detach can produce runtime retirement receipts, so its preparatory
-// check precedes those receipts and Session archival. Final Task reclamation
-// still requires both through acpTaskDeletionReady.
-//
 //nolint:gocyclo // Keep durable settlement and final reclamation barriers in one fail-closed boundary.
 func (r *TaskReconciler) acpTaskCleanupReady(ctx context.Context, task *corev1alpha1.Task, requireDeletionReceipts bool) (bool, error) {
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || r.DurableControlStore == nil {
@@ -56,8 +49,6 @@ func (r *TaskReconciler) acpTaskCleanupReady(ctx context.Context, task *corev1al
 				if projection.State != store.OutboxProjectionDelivered {
 					return false, nil
 				}
-				// A queued timeout settled by the dispatcher already has a durable
-				// terminal projection, so keep the normal projected barriers below.
 			} else if !errors.Is(err, store.ErrNotFound) {
 				return false, err
 			} else {
@@ -66,9 +57,6 @@ func (r *TaskReconciler) acpTaskCleanupReady(ctx context.Context, task *corev1al
 				return !unsettled, effectErr
 			}
 		} else {
-			// A PromptAttempt is persisted before Task.status.execution. Continue to
-			// the authoritative reclamation preflight so it can either settle that
-			// unbound attempt or durably prove that no attempt ever existed.
 			publicationID := ""
 			if task.Status.Execution != nil {
 				publicationID = publicationIDForTaskUID(task, acpTaskControlUID(task))
@@ -92,8 +80,6 @@ func (r *TaskReconciler) acpTaskCleanupReady(ctx context.Context, task *corev1al
 	attempt, err := r.DurableControlStore.GetPromptAttempt(ctx, attemptID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			// The final attempt may already have been removed by a prepared
-			// reclamation. Let the store validate its durable marker on retry.
 			return r.acpTaskSessionDeletionReady(ctx, task, nil)
 		}
 		return false, err
@@ -167,9 +153,6 @@ func (r *TaskReconciler) acpTaskSessionDeletionReady(ctx context.Context, task *
 	if !bound {
 		return true, nil
 	}
-	// Runtime retirement precedes the Session archival transaction. Keep the
-	// Task's frozen cleanup authority until the archive is durable, so a
-	// crash between those steps can still resume the Session cleanup intent.
 	receipt, err := r.acpTaskSessionCleanupReceipt(ctx, task, attempt)
 	if errors.Is(err, store.ErrNotFound) {
 		return false, nil
@@ -210,8 +193,6 @@ func acpTaskRequiresAuthoritativeAttemptDiscovery(task *corev1alpha1.Task) bool 
 		task.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeNotRequested {
 		return false
 	}
-	// A queued timeout, or a cancellation while the class workspace was being
-	// attached, ends the Task before its execution status was projected.
 	return execution.State == corev1alpha1.TaskExecutionStateCancelled &&
 		execution.Outcome == corev1alpha1.TaskExecutionOutcomeCancelled &&
 		(execution.Reason == corev1alpha1.TaskExecutionReason("TaskTimeout") || execution.Reason == acpCancelledReason) &&
@@ -272,9 +253,6 @@ func (r *TaskReconciler) acpTaskTerminalProjectionID(
 		return standaloneTaskTerminalProjectionIDForUID(task.Namespace, acpTaskControlUID(task), task.Status.Execution.Attempt), nil
 	}
 	if attempt == nil {
-		// After reclamation removes the attempt, the Task's runtime incarnation
-		// generation cannot reconstruct its per-prompt mutation lease. The
-		// archived receipt still binds the exact attempt to its finalized turn.
 		receipt, err := r.acpTaskSessionCleanupReceipt(ctx, task, nil)
 		if err == nil {
 			return receipt.ProjectionID, nil
@@ -436,10 +414,6 @@ func (r *TaskReconciler) acpPublicationReclaimTargets(
 			return nil, false, publicationErr
 		}
 		if generation == 0 {
-			// Reclamation is ordered before durable Publication removal. A missing
-			// record therefore means no cache was ever created or an earlier
-			// reclaim completed; the current schema's initial generation is enough
-			// for the endpoint's already-absent idempotency check.
 			generation = acpPublicationGeneration
 		}
 		targets = append(targets, acpPublicationReclaimTarget{id: identity.PublicationID, generation: generation})
@@ -477,8 +451,6 @@ func (r *TaskReconciler) retireACPArtifactIdentities(ctx context.Context, task *
 	return r.retireACPTaskArtifactReferences(ctx, task)
 }
 
-// retireACPTaskArtifactReferences releases artifact capabilities after durable
-// settlement without reclaiming PromptAttempts or Session cleanup authority.
 func (r *TaskReconciler) retireACPTaskArtifactReferences(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || r.DurableControlStore == nil ||
 		task.Status.Execution == nil || r.ACPArtifactRetirer == nil ||
@@ -548,9 +520,6 @@ func (r *TaskReconciler) acpPromptAttemptReclamationRequest(
 					task.Status.Execution.RuntimeSessionUID != "" && task.Status.Execution.RuntimeSessionGeneration > 0
 			}
 			if attempt == nil && task.Spec.SessionRef != nil && !request.FinalContinuitySession {
-				// The prepared marker is authoritative after the final attempt has
-				// been reclaimed; the Task projection alone cannot reconstruct the
-				// frozen SessionTurn identity.
 				request.TerminalProjectionID = ""
 			} else {
 				projectionID, err := r.acpTaskTerminalProjectionID(ctx, task, attempt)

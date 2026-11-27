@@ -39,7 +39,6 @@ func setupTestApp(c client.Client) *fiber.App {
 }
 
 func TestNewAuthMiddleware_OIDCPreservesServiceAccountFallback(t *testing.T) {
-	// Clear cache to avoid interference.
 	tokenCache.Range(func(key, _ any) bool {
 		tokenCache.Delete(key)
 		return true
@@ -117,7 +116,7 @@ func TestNewAuthMiddleware_InvalidFormat(t *testing.T) {
 	app := setupTestApp(fakeClient)
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz") // Not Bearer
+	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
 
 	resp, err := app.Test(req)
 	if err != nil {
@@ -137,7 +136,7 @@ func TestNewAuthMiddleware_EmptyToken(t *testing.T) {
 	app := setupTestApp(fakeClient)
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set("Authorization", "Bearer ") // Empty token
+	req.Header.Set("Authorization", "Bearer ")
 
 	resp, err := app.Test(req)
 	if err != nil {
@@ -152,7 +151,6 @@ func TestNewAuthMiddleware_EmptyToken(t *testing.T) {
 func TestGetUserInfo_ValidContext(t *testing.T) {
 	app := fiber.New()
 	app.Get("/test", func(ctx fiber.Ctx) error {
-		// Set user info in context
 		userInfo := &UserInfo{
 			Username: "test-user",
 			UID:      "uid-123",
@@ -160,7 +158,6 @@ func TestGetUserInfo_ValidContext(t *testing.T) {
 		}
 		ctx.Locals(UserInfoContextKey, userInfo)
 
-		// Get user info
 		retrieved := GetUserInfo(ctx)
 		if retrieved == nil {
 			return fiber.NewError(fiber.StatusInternalServerError, "user info is nil")
@@ -191,7 +188,6 @@ func TestGetUserInfo_ValidContext(t *testing.T) {
 func TestGetUserInfo_NilContext(t *testing.T) {
 	app := fiber.New()
 	app.Get("/test", func(ctx fiber.Ctx) error {
-		// Don't set user info - should return nil
 		retrieved := GetUserInfo(ctx)
 		if retrieved != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, "expected nil user info")
@@ -213,10 +209,8 @@ func TestGetUserInfo_NilContext(t *testing.T) {
 func TestGetUserInfo_WrongType(t *testing.T) {
 	app := fiber.New()
 	app.Get("/test", func(ctx fiber.Ctx) error {
-		// Set wrong type in context
 		ctx.Locals(UserInfoContextKey, "not a UserInfo")
 
-		// Should return nil for wrong type
 		retrieved := GetUserInfo(ctx)
 		if retrieved != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, "expected nil for wrong type")
@@ -279,21 +273,18 @@ func TestGetTokenHash(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			hash := getTokenHash(tt.token)
 
-			// Verify it produces the correct SHA-256 hex digest
 			expected := sha256.Sum256([]byte(tt.token))
 			want := hex.EncodeToString(expected[:])
 			if hash != want {
 				t.Errorf("getTokenHash(%q) = %s, want %s", tt.token, hash, want)
 			}
 
-			// Verify determinism
 			if hash2 := getTokenHash(tt.token); hash2 != hash {
 				t.Errorf("getTokenHash not deterministic: %s != %s", hash, hash2)
 			}
 		})
 	}
 
-	// Different tokens produce different hashes
 	h1 := getTokenHash("token-a")
 	h2 := getTokenHash("token-b")
 	if h1 == h2 {
@@ -302,7 +293,6 @@ func TestGetTokenHash(t *testing.T) {
 }
 
 func TestValidateToken_Authenticated(t *testing.T) {
-	// Clear cache to avoid interference
 	tokenCache.Range(func(key, _ any) bool {
 		tokenCache.Delete(key)
 		return true
@@ -370,7 +360,6 @@ func TestValidateToken_CacheHit(t *testing.T) {
 		}).
 		Build()
 
-	// First call should hit the API
 	_, err := validateToken(context.Background(), fakeClient, "cache-token")
 	if err != nil {
 		t.Fatalf("first validateToken failed: %v", err)
@@ -379,7 +368,6 @@ func TestValidateToken_CacheHit(t *testing.T) {
 		t.Fatalf("expected 1 API call, got %d", callCount)
 	}
 
-	// Second call should use cache
 	userInfo, err := validateToken(context.Background(), fakeClient, "cache-token")
 	if err != nil {
 		t.Fatalf("second validateToken failed: %v", err)
@@ -641,10 +629,6 @@ func TestNewAuthMiddleware_OIDCAuthorizationFailureSkipsTokenReviewFallback(t *t
 	}
 }
 
-// TestNewAuthMiddleware_OIDCSubjectNotAllowedNamesTheSubject covers a person
-// who signed in but is not on the allow-list yet: the answer is 403 and names
-// their own subject, which an administrator needs in order to allow them. A
-// token that fails verification still gets the plain 401.
 func TestNewAuthMiddleware_OIDCSubjectNotAllowedNamesTheSubject(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	cfg := provider.config()
@@ -1003,7 +987,6 @@ func TestNewAuthMiddleware_BothHeadersPrefersAuthorization(t *testing.T) {
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
-					// Return different UIDs based on token to verify which was used
 					switch tr.Spec.Token {
 					case "bearer-token":
 						tr.Status.Authenticated = true

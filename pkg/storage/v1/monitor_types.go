@@ -4,7 +4,6 @@ import (
 	"time"
 )
 
-// RepositoryMonitorRecord stores normalized RepositoryMonitor metadata.
 type RepositoryMonitorRecord struct {
 	Namespace  string    `json:"namespace"`
 	Name       string    `json:"name"`
@@ -18,7 +17,6 @@ type RepositoryMonitorRecord struct {
 	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
-// MonitorRun represents one scheduled, manual, or exact-event repository monitor run.
 type MonitorRun struct {
 	ID               string     `json:"id"`
 	MonitorNamespace string     `json:"monitorNamespace"`
@@ -37,7 +35,6 @@ type MonitorRun struct {
 	Error            string     `json:"error,omitempty"`
 }
 
-// MonitorRunFilter constrains monitor run list queries.
 type MonitorRunFilter struct {
 	Namespace    string
 	MonitorName  string
@@ -51,7 +48,6 @@ type MonitorRunFilter struct {
 	Cursor       string
 }
 
-// MonitorItem stores the latest state for one monitored issue, pull request, or commit.
 type MonitorItem struct {
 	MonitorNamespace    string    `json:"monitorNamespace"`
 	MonitorName         string    `json:"monitorName"`
@@ -97,7 +93,6 @@ type MonitorItem struct {
 	LastSeenAt          time.Time `json:"lastSeenAt"`
 }
 
-// MonitorItemFilter constrains monitor item list queries.
 type MonitorItemFilter struct {
 	Namespace      string
 	MonitorName    string
@@ -111,7 +106,6 @@ type MonitorItemFilter struct {
 	Cursor         string
 }
 
-// WorkAction stores one durable workflow action/lease for monitor-owned automation.
 type WorkAction struct {
 	ID                   string     `json:"id"`
 	MonitorNamespace     string     `json:"monitorNamespace"`
@@ -144,14 +138,6 @@ type WorkAction struct {
 	CompletedAt          *time.Time `json:"completedAt,omitempty"`
 }
 
-// WorkAction statuses. An active status holds the action's dedupe key: among
-// the actions of one monitor that share a non-empty DedupeKey, at most one is
-// active. Every other status is finished: it holds no key and
-// [RepositoryMonitorStore.MarkWorkActionRetryPending] never reopens it.
-//
-//	queued → (leased →) running → succeeded | failed | blocked | cancelled
-//	retry_pending: a handoff that failed and waits to be retried
-//	completed: an action coalesced into another active action when created
 const (
 	WorkActionStatusQueued       = "queued"
 	WorkActionStatusLeased       = "leased"
@@ -164,12 +150,10 @@ const (
 	WorkActionStatusCompleted    = "completed"
 )
 
-// WorkActionActiveStatuses lists the active statuses, in lookup order.
 func WorkActionActiveStatuses() []string {
 	return []string{WorkActionStatusQueued, WorkActionStatusLeased, WorkActionStatusRunning, WorkActionStatusRetryPending}
 }
 
-// IsWorkActionActive reports whether status is an active status.
 func IsWorkActionActive(status string) bool {
 	switch status {
 	case WorkActionStatusQueued, WorkActionStatusLeased, WorkActionStatusRunning, WorkActionStatusRetryPending:
@@ -179,19 +163,14 @@ func IsWorkActionActive(status string) bool {
 	}
 }
 
-// MarkWorkActionRetryPendingRequest names the work action to park for a retry
-// and what to record on it.
 type MarkWorkActionRetryPendingRequest struct {
-	Namespace string
-	ID        string
-	// RunID, BlockedReason and Error replace the action's fields of the same
-	// names.
+	Namespace     string
+	ID            string
 	RunID         string
 	BlockedReason string
 	Error         string
 }
 
-// WorkActionFilter constrains workflow action list queries.
 type WorkActionFilter struct {
 	Namespace      string
 	MonitorName    string
@@ -209,7 +188,6 @@ type WorkActionFilter struct {
 	Cursor         string
 }
 
-// ImplementationJob tracks issue coding attempts and patch validation state.
 type ImplementationJob struct {
 	ID                string     `json:"id"`
 	MonitorNamespace  string     `json:"monitorNamespace"`
@@ -235,7 +213,6 @@ type ImplementationJob struct {
 	CompletedAt       *time.Time `json:"completedAt,omitempty"`
 }
 
-// ImplementationJobFilter constrains implementation job list queries.
 type ImplementationJobFilter struct {
 	Namespace                 string
 	MonitorName               string
@@ -249,7 +226,6 @@ type ImplementationJobFilter struct {
 	Cursor                    string
 }
 
-// GitHubMutationRecord stores one controller-owned GitHub write audit record.
 type GitHubMutationRecord struct {
 	ID                string     `json:"id"`
 	MonitorNamespace  string     `json:"monitorNamespace"`
@@ -274,11 +250,8 @@ type GitHubMutationRecord struct {
 	CreatedAt         time.Time  `json:"createdAt"`
 }
 
-// GitHubMutationRecordFilter constrains mutation audit list queries.
 type GitHubMutationRecordFilter struct {
-	Namespace string
-	// AllNamespaces explicitly enables controller-wide audit lookup. API lists
-	// remain namespace-scoped and must not accept this from client input.
+	Namespace     string
 	AllNamespaces bool
 	MonitorName   string
 	Operation     string
@@ -290,7 +263,6 @@ type GitHubMutationRecordFilter struct {
 	Cursor        string
 }
 
-// ActionRecord stores one generic typed result from an agent or deterministic controller action.
 type ActionRecord struct {
 	ID                string    `json:"id"`
 	MonitorNamespace  string    `json:"monitorNamespace"`
@@ -312,7 +284,6 @@ type ActionRecord struct {
 	CreatedAt         time.Time `json:"createdAt"`
 }
 
-// ActionRecordFilter constrains action record list queries.
 type ActionRecordFilter struct {
 	Namespace   string
 	MonitorName string
@@ -324,7 +295,6 @@ type ActionRecordFilter struct {
 	Cursor      string
 }
 
-// ReviewRecord stores one immutable typed review result.
 type ReviewRecord struct {
 	ID                      string    `json:"id"`
 	MonitorNamespace        string    `json:"monitorNamespace"`
@@ -354,7 +324,6 @@ type ReviewRecord struct {
 	CreatedAt               time.Time `json:"createdAt"`
 }
 
-// ReviewRecordFilter constrains review record list queries.
 type ReviewRecordFilter struct {
 	Namespace   string
 	MonitorName string
@@ -366,7 +335,6 @@ type ReviewRecordFilter struct {
 	Cursor      string
 }
 
-// ReviewPublishRecord stores one GitHub review publish attempt/outcome.
 type ReviewPublishRecord struct {
 	ID                 string    `json:"id"`
 	MonitorNamespace   string    `json:"monitorNamespace"`
@@ -389,7 +357,6 @@ type ReviewPublishRecord struct {
 	UpdatedAt          time.Time `json:"updatedAt"`
 }
 
-// ReviewPublishRecordFilter constrains review publish record list queries.
 type ReviewPublishRecordFilter struct {
 	Namespace      string
 	MonitorName    string
@@ -402,7 +369,6 @@ type ReviewPublishRecordFilter struct {
 	Cursor         string
 }
 
-// CommandEventFilter constrains command event list queries.
 type CommandEventFilter struct {
 	Namespace   string
 	MonitorName string
@@ -414,7 +380,6 @@ type CommandEventFilter struct {
 	Cursor      string
 }
 
-// CommandEvent stores one maintainer command intake event.
 type CommandEvent struct {
 	ID                  string     `json:"id"`
 	MonitorNamespace    string     `json:"monitorNamespace"`
@@ -445,7 +410,6 @@ type CommandEvent struct {
 	Error               string     `json:"error,omitempty"`
 }
 
-// RepairJob stores durable repair and automerge state.
 type RepairJob struct {
 	ID                 string     `json:"id"`
 	MonitorNamespace   string     `json:"monitorNamespace"`
@@ -471,7 +435,6 @@ type RepairJob struct {
 	CompletedAt        *time.Time `json:"completedAt,omitempty"`
 }
 
-// RepairJobFilter constrains repair job list queries.
 type RepairJobFilter struct {
 	Namespace   string
 	MonitorName string
@@ -483,7 +446,6 @@ type RepairJobFilter struct {
 	Cursor      string
 }
 
-// MonitorEvent stores an append-only monitor audit event.
 type MonitorEvent struct {
 	ID               string    `json:"id"`
 	MonitorNamespace string    `json:"monitorNamespace"`
@@ -499,7 +461,6 @@ type MonitorEvent struct {
 	CreatedAt        time.Time `json:"createdAt"`
 }
 
-// MonitorEventFilter constrains monitor event list queries.
 type MonitorEventFilter struct {
 	Namespace   string
 	ID          string

@@ -19,25 +19,11 @@ const (
 	repositoryMonitorFindingOutcomeFixed    = "fixed"
 )
 
-// repositoryMonitorReviewRounds describes a pull request's reviews as of a
-// new review of one head.
 type repositoryMonitorReviewRounds struct {
-	// SincePass counts the distinct heads reviewed since the last passed
-	// review, the new review's head included.
-	SincePass int
-	// PassedEarlier reports that the count ended at an earlier passed
-	// review, so the pull request has passed before.
+	SincePass     int
 	PassedEarlier bool
 }
 
-// repositoryMonitorReviewRoundsFor counts the pull request's reviewed heads
-// before a new review of headSHA is recorded. Only accepted reviews count;
-// failed, stale, and skipped ones do not, and several reviews of one head
-// count once. A passed review ends the count only while it is its head's
-// latest review: one that a later review of the same head (an exhaustive
-// pass or a review command) superseded did not leave the head passing. Nor
-// does an exhaustive pass whose chain never finished because a new head was
-// pushed first.
 func (r *RepositoryMonitorReconciler) repositoryMonitorReviewRoundsFor(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64, headSHA string) (repositoryMonitorReviewRounds, error) {
 	heads := map[string]struct{}{headSHA: {}}
 	cursor := ""
@@ -48,7 +34,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewRoundsFor(ctx conte
 		if err != nil {
 			return repositoryMonitorReviewRounds{}, err
 		}
-		// Records are newest first.
 		for i := range records {
 			verdict := strings.TrimSpace(records[i].Verdict)
 			if !repositoryMonitorReviewVerdictMarksHeadFresh(verdict) {
@@ -74,22 +59,15 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewRoundsFor(ctx conte
 	}
 }
 
-// repositoryMonitorMaxRoundsReached reports whether a needs_changes review
-// with these rounds reaches spec.review.maxRounds.
 func repositoryMonitorMaxRoundsReached(spec corev1alpha1.RepositoryMonitorSpec, rounds repositoryMonitorReviewRounds) bool {
 	limit := spec.Review.MaxRounds
 	return limit != nil && *limit > 0 && rounds.SincePass >= int(*limit)
 }
 
-// repositoryMonitorMaxRoundsNote explains a verdict raised by
-// spec.review.maxRounds in the review summary.
 func repositoryMonitorMaxRoundsNote(spec corev1alpha1.RepositoryMonitorSpec, rounds repositoryMonitorReviewRounds) string {
 	return fmt.Sprintf("Verdict raised from needs_changes to needs_human: %d heads of this pull request in a row were reviewed without passing, reaching spec.review.maxRounds (%d). Before fixing more findings, consider whether the approach should change.", rounds.SincePass, *spec.Review.MaxRounds)
 }
 
-// recordRepositoryMonitorReviewMetrics counts a newly stored review record
-// and its findings. Callers invoke it once, right after the record is
-// created, so a retried ingestion does not count the review again.
 func recordRepositoryMonitorReviewMetrics(plan repositoryMonitorReviewPlan, ledger []repositoryMonitorReviewFinding, record *store.ReviewRecord) {
 	metrics.RecordRepositoryMonitorReview(repositoryMonitorReviewMetricMode(plan.Mode), record.Verdict)
 	openBefore := map[string]struct{}{}
@@ -115,14 +93,6 @@ func recordRepositoryMonitorReviewMetrics(plan repositoryMonitorReviewPlan, ledg
 	}
 }
 
-// recordRepositoryMonitorRoundsToPassBestEffort records how many heads a
-// pull request needed before its first passed review. The pull request's
-// review_first_passed event marks it recorded, so a later pass of any head,
-// including a review command on an already passed head, is not counted
-// again. An earlier passed review that the round count ended at, such as one
-// recorded before the event existed, also means this is not the first pass.
-// A passed exhaustive pass that another pass will extend has not passed
-// yet. Metrics never fail ingestion: a lookup error skips the sample.
 func (r *RepositoryMonitorReconciler) recordRepositoryMonitorRoundsToPassBestEffort(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ReviewRecord, rounds repositoryMonitorReviewRounds) {
 	if record.Verdict != repositoryMonitorReviewVerdictPassed || rounds.SincePass <= 0 || rounds.PassedEarlier {
 		return
@@ -153,9 +123,6 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorRoundsToPassBestEff
 	metrics.RecordRepositoryMonitorReviewRoundsToPass(rounds.SincePass)
 }
 
-// repositoryMonitorReviewMetricMode bounds a review mode, which a rejected
-// review reads from Task metadata, to the review modes Orka creates so it is
-// safe as a metric label.
 func repositoryMonitorReviewMetricMode(mode string) string {
 	switch mode = strings.TrimSpace(mode); mode {
 	case repositoryMonitorReviewModeFull, repositoryMonitorReviewModeIncremental, repositoryMonitorReviewModeSameHead:
@@ -167,8 +134,6 @@ func repositoryMonitorReviewMetricMode(mode string) string {
 	}
 }
 
-// repositoryMonitorFindingMetricPriority bounds a reviewer-supplied priority
-// to the P0-P3 vocabulary so it is safe as a metric label.
 func repositoryMonitorFindingMetricPriority(priority string) string {
 	if _, ok := repositoryMonitorPriorityRank(priority); ok {
 		return strings.ToUpper(strings.TrimSpace(priority))

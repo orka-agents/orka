@@ -105,7 +105,6 @@ describe('RepositoryCreateForm', () => {
     expect(screen.getByText(/No agents are available in this namespace/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Register Repository' })).toBeDisabled()
 
-    // Only the orka-system agent with a runtime counts.
     expect(screen.getByText(/1 agent\(s\) with a runtime are available in/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Switch to orka-system' }))
 
@@ -179,7 +178,6 @@ describe('RepositoryCreateForm', () => {
       expect(trigger).toHaveClass('w-full', 'max-w-full')
       expect(within(trigger).getByText(longName).closest('span.truncate')).toHaveClass('min-w-0')
     }
-    // minmax(0, 1fr) on phones too, so the single column cannot grow to the name.
     expect(screen.getByRole('combobox', { name: 'Analysis Agent' }).closest('.grid')).toHaveClass('grid-cols-1', 'md:grid-cols-2')
   })
 

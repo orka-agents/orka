@@ -14,27 +14,20 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// StageProgress counts one scan run's Tasks for a single pipeline stage.
-// Counts come from the orka.ai/security-stage label and the Task phase,
-// never from Task names.
 type StageProgress struct {
-	Stage     string `json:"stage"`
-	Label     string `json:"label"`
-	Tasks     int    `json:"tasks"`
-	Pending   int    `json:"pending"`
-	Running   int    `json:"running"`
-	Succeeded int    `json:"succeeded"`
-	Failed    int    `json:"failed"`
-	Cancelled int    `json:"cancelled"`
-	// FailedTasks names the failed and cancelled Tasks so a reader can go
-	// straight to `orka task status <name>`.
+	Stage       string   `json:"stage"`
+	Label       string   `json:"label"`
+	Tasks       int      `json:"tasks"`
+	Pending     int      `json:"pending"`
+	Running     int      `json:"running"`
+	Succeeded   int      `json:"succeeded"`
+	Failed      int      `json:"failed"`
+	Cancelled   int      `json:"cancelled"`
 	FailedTasks []string `json:"failedTasks,omitempty"`
 }
 
-// ScanStageOrder is the pipeline order stages run in.
 var ScanStageOrder = []string{StageThreatModel, StageMapper, StageReview, StageValidation, StagePatch}
 
-// ScanStageLabel returns the plain-language name of a stage for people.
 func ScanStageLabel(stage string) string {
 	switch stage {
 	case StageThreatModel:
@@ -52,22 +45,14 @@ func ScanStageLabel(stage string) string {
 	}
 }
 
-// ScanRunOwnsTask reports whether a Task belongs to this scan run: it must
-// carry the run's ID label and be controlled by the RepositoryScan that
-// admitted the run. Labels alone are mutable and do not prove membership.
 func ScanRunOwnsTask(run *store.ScanRun, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task) bool {
 	return scanRunOwnsTask(run, scan, task)
 }
 
-// IsActiveScanRunPhase reports whether a scan run is still in progress.
 func IsActiveScanRunPhase(phase string) bool {
 	return activeScanRunPhase(strings.ToLower(strings.TrimSpace(phase)))
 }
 
-// ScanStageProgress groups a scan run's Tasks by stage in pipeline order and
-// counts each phase. Every known stage is present even with zero Tasks, so
-// a scan that has not reached a stage yet still shows it. Tasks whose stage
-// label is unknown are appended after the known stages under that label.
 func ScanStageProgress(tasks []corev1alpha1.Task) []StageProgress {
 	byStage := map[string]*StageProgress{}
 	order := make([]string, 0, len(ScanStageOrder))
@@ -100,7 +85,6 @@ func ScanStageProgress(tasks []corev1alpha1.Task) []StageProgress {
 			progress.Cancelled++
 			progress.FailedTasks = append(progress.FailedTasks, task.Name)
 		default:
-			// "", Pending, and Scheduled have not started yet.
 			progress.Pending++
 		}
 	}

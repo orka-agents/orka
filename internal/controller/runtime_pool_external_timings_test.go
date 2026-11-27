@@ -91,8 +91,6 @@ func TestExternalRuntimeStartPhases(t *testing.T) {
 		}
 	}
 
-	// A later sequence has no provision phase, and a DataPlaneReady report
-	// from before this sequence was published does not split the start.
 	w.Spec.Workload.Sequence = 2
 	w.Annotations[externalWorkloadPublishedAnnotation] = formatExternalRuntimeMilestone(2, published.Add(time.Minute))
 	got = phaseDurations(externalRuntimeStartPhases(pool, w, published.Add(time.Minute+4*time.Second)))
@@ -100,9 +98,6 @@ func TestExternalRuntimeStartPhases(t *testing.T) {
 		t.Fatalf("later sequence phases = %v", got)
 	}
 
-	// A condition time keeps whole seconds, so readiness in the publication's
-	// own second still splits the start, while readiness from an earlier second
-	// predates the sequence.
 	subsecond := published.Add(time.Minute + 700*time.Millisecond)
 	w.Annotations[externalWorkloadPublishedAnnotation] = formatExternalRuntimeMilestone(2, subsecond)
 	w.Status.Conditions[0].LastTransitionTime = metav1.NewTime(subsecond.Add(200 * time.Millisecond))
@@ -126,8 +121,6 @@ func TestExternalRuntimeStartPhases(t *testing.T) {
 		t.Fatalf("earlier-second readiness phases = %v", got)
 	}
 
-	// Readiness observed for an earlier generation can predate the sequence,
-	// even in the publication's own second.
 	w.Status.Conditions[0].LastTransitionTime = metav1.NewTime(subsecond.Truncate(time.Second))
 	w.Generation, w.Status.Conditions[0].ObservedGeneration = 4, 3
 	got = phaseDurations(externalRuntimeStartPhases(pool, w, subsecond.Add(3*time.Second)))
@@ -139,7 +132,6 @@ func TestExternalRuntimeStartPhases(t *testing.T) {
 		t.Fatalf("current-generation readiness phases = %v", got)
 	}
 
-	// A milestone from another sequence reports nothing.
 	w.Annotations[externalWorkloadPublishedAnnotation] = formatExternalRuntimeMilestone(1, published)
 	if phases := externalRuntimeStartPhases(pool, w, published.Add(time.Hour)); phases != nil {
 		t.Fatalf("stale milestone phases = %v", phases)
@@ -152,8 +144,7 @@ func TestExternalRuntimeStopPhases(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 			externalRuntimeStopRequestedAnnotation: formatExternalRuntimeMilestone(2, requested),
 			externalRetirementAuthorizedAnnotation: formatExternalRuntimeMilestone(2, requested.Add(4*time.Second)),
-			// Cold Suspend settlement stamps the detach after the drain ended.
-			acpWorkspaceLastDetachedAnnotation: requested.Add(5 * time.Second).Format(time.RFC3339Nano),
+			acpWorkspaceLastDetachedAnnotation:     requested.Add(5 * time.Second).Format(time.RFC3339Nano),
 		}},
 		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{Retirement: &workspacev1alpha1.WorkloadRetirement{Sequence: 2}},
 	}
@@ -168,13 +159,11 @@ func TestExternalRuntimeStopPhases(t *testing.T) {
 		}
 	}
 
-	// A detach before the stop began, as with a warm window, is not its start.
 	w.Annotations[acpWorkspaceLastDetachedAnnotation] = requested.Add(-time.Minute).Format(time.RFC3339Nano)
 	if got := phaseDurations(externalRuntimeStopPhases(w, requested.Add(10*time.Second))); got[externalRuntimePhaseDrain] != 4*time.Second {
 		t.Fatalf("warm-window phases = %v", got)
 	}
 
-	// Without a start for this sequence only the provider's part is known.
 	for _, raw := range []string{"", formatExternalRuntimeMilestone(1, requested), formatExternalRuntimeMilestone(2, requested.Add(5*time.Second))} {
 		w.Annotations[externalRuntimeStopRequestedAnnotation] = raw
 		got := phaseDurations(externalRuntimeStopPhases(w, requested.Add(10*time.Second)))
@@ -187,7 +176,6 @@ func TestExternalRuntimeStopPhases(t *testing.T) {
 func TestExternalRuntimeTimingReportsObserveRetirementStart(t *testing.T) {
 	var reports externalRuntimeTimingReports
 	at := time.Unix(3000, 0).UTC()
-	// A pool this process first sees already retiring has no known start.
 	reports.observeRetirement("restarted", 1, true, at)
 	reports.observeRetirement("restarted", 1, true, at.Add(time.Second))
 	if _, ok := reports.retirementRequested("restarted", 1); ok {
@@ -203,7 +191,6 @@ func TestExternalRuntimeTimingReportsObserveRetirementStart(t *testing.T) {
 	if _, ok := reports.retirementRequested("pool", 2); ok {
 		t.Fatal("another sequence shares the retirement start")
 	}
-	// A retirement that is cancelled before authorization starts afresh.
 	reports.observeRetirement("pool", 1, false, at.Add(3*time.Second))
 	if _, ok := reports.retirementRequested("pool", 1); ok {
 		t.Fatal("cancelled retirement kept its start")
@@ -212,7 +199,6 @@ func TestExternalRuntimeTimingReportsObserveRetirementStart(t *testing.T) {
 	if got, ok := reports.retirementRequested("pool", 1); !ok || !got.Equal(at.Add(4*time.Second)) {
 		t.Fatalf("later retirement start = %s, %v", got, ok)
 	}
-	// A new sequence retiring without a pass in between gets its own start.
 	reports.observeRetirement("pool", 2, true, at.Add(5*time.Second))
 	if got, ok := reports.retirementRequested("pool", 2); !ok || !got.Equal(at.Add(5*time.Second)) {
 		t.Fatalf("next sequence start = %s, %v", got, ok)
@@ -233,8 +219,6 @@ func TestStampExternalRuntimeStopRequestedOnlyOnFirstAuthorization(t *testing.T)
 	if w.Annotations[externalRuntimeStopRequestedAnnotation] != stamped {
 		t.Fatalf("stop start = %q", w.Annotations[externalRuntimeStopRequestedAnnotation])
 	}
-	// Deletion superseding a Suspend whose stop Core has not proven keeps the
-	// start of the one stop, even when the provider already reports Stopped.
 	previous := w.Spec.Retirement.DeepCopy()
 	w.Spec.Retirement.Action = workspacev1alpha1.WorkloadRetirementDelete
 	w.Status.Allocation = &workspacev1alpha1.AllocationObservation{Sequence: 3, State: workspacev1alpha1.AllocationStopped}
@@ -244,8 +228,6 @@ func TestStampExternalRuntimeStopRequestedOnlyOnFirstAuthorization(t *testing.T)
 	if w.Annotations[externalRuntimeStopRequestedAnnotation] != stamped {
 		t.Fatalf("unproven re-authorization stop start = %q", w.Annotations[externalRuntimeStopRequestedAnnotation])
 	}
-	// Once Core proved the Suspend's stop, a following Delete did not drain:
-	// whether the proof is a persisted Stopped status or one this process saw.
 	for _, prove := range []func(){
 		func() { pool.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopped },
 		func() {
@@ -261,7 +243,6 @@ func TestStampExternalRuntimeStopRequestedOnlyOnFirstAuthorization(t *testing.T)
 			t.Fatalf("re-authorization after the proven stop kept stop start %q", raw)
 		}
 	}
-	// An unknown start leaves no stale one behind.
 	w.Annotations[externalRuntimeStopRequestedAnnotation] = stamped
 	w.Spec.Retirement.Sequence = 4
 	r.stampExternalRuntimeStopRequested(w, nil, pool, requested.Add(time.Hour))
@@ -296,8 +277,6 @@ type runtimeTimingClock struct{ now time.Time }
 
 func (c *runtimeTimingClock) Now() time.Time { return c.now }
 
-// A real start and stop of an execution-workspace runtime stamp their
-// milestones in the writes Core already makes, and record each phase once.
 func TestExternalRuntimePoolRecordsStartAndStopPhases(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	clock := &runtimeTimingClock{now: time.Now().UTC()}
@@ -334,7 +313,6 @@ func TestExternalRuntimePoolRecordsStartAndStopPhases(t *testing.T) {
 		t.Fatalf("provider_materialization samples = %d", got)
 	}
 
-	// Drain and stop the instance.
 	current := runtimePoolTestGetPool(t, f.r, f.pool)
 	current.Spec.DesiredReplicas = 0
 	if err := f.r.Update(context.Background(), &current); err != nil {
@@ -398,10 +376,6 @@ func runtimeStoppedLines(lines []map[string]any) []map[string]any {
 	return stopped
 }
 
-// suspendFixtureToAuthorization serves a Suspend-capable runtime, scales its
-// pool to zero as a cleared attachment does, and drains it until Core
-// authorizes the Suspend. restart, when set, runs after the given number of
-// retiring passes to model a controller restart.
 func suspendFixtureToAuthorization(t *testing.T, f *externalRuntimePoolFixture, clock *runtimeTimingClock, ctx context.Context, restartAfter int) (*workspacev1alpha1.ExecutionWorkspace, corev1.Pod) {
 	t.Helper()
 	workspace := f.currentWorkspace(t)
@@ -433,8 +407,6 @@ func suspendFixtureToAuthorization(t *testing.T, f *externalRuntimePoolFixture, 
 	return workspace, pod
 }
 
-// settleSuspendedFixture models settlement suspending the workspace after the
-// authorization, as the cold Suspend path does, and the provider's stop.
 func settleSuspendedFixture(t *testing.T, f *externalRuntimePoolFixture, clock *runtimeTimingClock, ctx context.Context, pod corev1.Pod) {
 	t.Helper()
 	clock.now = clock.now.Add(time.Second)
@@ -468,8 +440,6 @@ func stopSuspendedFixture(t *testing.T, f *externalRuntimePoolFixture, clock *ru
 	}
 }
 
-// A Stopped write that fails after Core proved the stop is retried later; the
-// provider's retirement still ends at the first proof.
 func TestExternalRuntimePoolStopEndsAtFirstProofDespiteFailedWrite(t *testing.T) {
 	ctx, lines := captureRuntimeTimingLines(t)
 	f := newExternalRuntimePoolFixture(t)
@@ -503,9 +473,6 @@ func TestExternalRuntimePoolStopEndsAtFirstProofDespiteFailedWrite(t *testing.T)
 	}
 }
 
-// On the cold Suspend path settlement stamps last-detached-at after Core
-// authorized the Suspend. The drain is still measured, from the pool's first
-// retiring pass, and survives a restart after the authorization.
 func TestExternalRuntimePoolMeasuresColdSuspendDrain(t *testing.T) {
 	ctx, lines := captureRuntimeTimingLines(t)
 	f := newExternalRuntimePoolFixture(t)
@@ -517,7 +484,6 @@ func TestExternalRuntimePoolMeasuresColdSuspendDrain(t *testing.T) {
 	if requested, ok := parseExternalRuntimeMilestone(workspace.Annotations[externalRuntimeStopRequestedAnnotation], sequence); !ok || !requested.Equal(stopRequested) {
 		t.Fatalf("stop-requested milestone = %q, want %s", workspace.Annotations[externalRuntimeStopRequestedAnnotation], stopRequested)
 	}
-	// A restart after the authorization keeps the persisted start.
 	f.r.externalTimings = externalRuntimeTimingReports{}
 	stopSuspendedFixture(t, f, clock, ctx, pod)
 	workspace = f.currentWorkspace(t)
@@ -536,8 +502,6 @@ func TestExternalRuntimePoolMeasuresColdSuspendDrain(t *testing.T) {
 	}
 }
 
-// A controller that restarts while a retirement is under way does not know
-// when it began, so it reports only the provider's part of that stop.
 func TestExternalRuntimePoolOmitsDrainAfterRestartDuringRetirement(t *testing.T) {
 	ctx, lines := captureRuntimeTimingLines(t)
 	f := newExternalRuntimePoolFixture(t)
@@ -560,8 +524,6 @@ func TestExternalRuntimePoolOmitsDrainAfterRestartDuringRetirement(t *testing.T)
 	}
 }
 
-// The start and stop lines name only the pool, the path or action, and the
-// sequence, and are written once per transition.
 func TestObserveExternalRuntimeTransitionLogsOncePerTransition(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	clock := &runtimeTimingClock{now: time.Now().UTC()}
@@ -582,8 +544,6 @@ func TestObserveExternalRuntimeTransitionLogsOncePerTransition(t *testing.T) {
 	accepting := corev1alpha1.RuntimePoolStatus{AdmissionState: corev1alpha1.RuntimePoolAdmissionAccepting,
 		ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "instance-1"}}
 	f.r.observeExternalRuntimeTransition(ctx, &pool, closed, accepting)
-	// Re-admitting the same instance, for example after a degraded probe, is
-	// not a new start, and neither is a pass that stays admitted.
 	degraded := *closed.DeepCopy()
 	degraded.ActiveInstance = accepting.ActiveInstance.DeepCopy()
 	f.r.observeExternalRuntimeTransition(ctx, &pool, degraded, accepting)
@@ -618,8 +578,6 @@ func captureRuntimeTimingLines(t *testing.T) (context.Context, *[]map[string]any
 	return ctx, &lines
 }
 
-// A probe can record an instance while its supervisor still boots. Its first
-// admission is its start; a later readmission of the same instance is not.
 func TestObserveExternalRuntimeTransitionReportsBootedInstanceOnFirstAdmission(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	f.materialize(t)
@@ -637,8 +595,6 @@ func TestObserveExternalRuntimeTransitionReportsBootedInstanceOnFirstAdmission(t
 	}
 }
 
-// The reconcile's own workspace is reported even when a second read would
-// fail after the transition persisted.
 func TestObserveExternalRuntimeTransitionUsesReconciledWorkspace(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	workspace, _ := f.materialize(t)
@@ -659,8 +615,6 @@ func TestObserveExternalRuntimeTransitionUsesReconciledWorkspace(t *testing.T) {
 	}
 }
 
-// A pool that leaves Stopped after a transient failure and records Stopped
-// again for the same retirement does not report that stop twice.
 func TestObserveExternalRuntimeTransitionReportsEachRetirementOnce(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	clock := &runtimeTimingClock{now: time.Now().UTC()}
@@ -680,7 +634,6 @@ func TestObserveExternalRuntimeTransitionReportsEachRetirementOnce(t *testing.T)
 	if len(*lines) != 1 || (*lines)[0]["msg"] != externalRuntimeStoppedLogMessage || (*lines)[0]["providerRetirementMs"] != float64(4000) {
 		t.Fatalf("lines = %v, want one stop", *lines)
 	}
-	// A different retirement of the same sequence is a new stop.
 	workspace.Spec.Retirement.Action = workspacev1alpha1.WorkloadRetirementDelete
 	f.r.observeExternalRuntimeTransition(ctx, &pool, degraded, stopped)
 	if len(*lines) != 2 || (*lines)[1]["action"] != "delete" {
@@ -688,8 +641,6 @@ func TestObserveExternalRuntimeTransitionReportsEachRetirementOnce(t *testing.T)
 	}
 }
 
-// Deleting a running pool never records Stopped; releasing its finalizer
-// after the proven termination reports the stop.
 func TestExternalRuntimePoolDeletionRecordsStop(t *testing.T) {
 	ctx := context.Background()
 	f := newExternalRuntimePoolFixture(t)
@@ -738,8 +689,6 @@ func TestExternalRuntimePoolDeletionRecordsStop(t *testing.T) {
 	}
 }
 
-// When Core itself requests the retirement, here to retire an old runtime
-// fence, the drain starts at that request rather than at the next pass.
 func TestExternalRuntimePoolStartsDrainWhereCoreRequestsRetirement(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	clock := &runtimeTimingClock{now: time.Now().UTC()}

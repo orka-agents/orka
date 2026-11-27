@@ -78,8 +78,6 @@ func TestMCPProxyBrokeredApprovalWaitsForControllerResult(t *testing.T) {
 	default:
 	}
 
-	// Renewal keeps the same pending tool call alive. A queued expiry callback
-	// from the previous lease must not revoke the renewed authority.
 	session.mu.Lock()
 	oldLeaseVersion := session.leaseVersion
 	session.mu.Unlock()
@@ -171,8 +169,6 @@ func TestMCPProxyApprovalWaitStopsOnSettlementOrLeaseExpiry(t *testing.T) {
 			} else {
 				session.mu.Lock()
 				version := session.leaseVersion
-				// The callback must see genuinely expired absolute authority,
-				// not merely a manually fired timer for a still-live lease.
 				session.lease.ExpiresAt = time.Now().UTC()
 				session.mu.Unlock()
 				session.expire(authorization.PromptID, version)

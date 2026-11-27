@@ -11,9 +11,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// The raw policy's admission tests cover foreground finalization and forbidden
-// mutations. Helm must render the same rules with its release-specific trust
-// identities and watched namespace, or those guarantees do not reach Helm users.
 func TestStaticChartGatewayTaskProtectionMatchesCanonicalPolicy(t *testing.T) {
 	canonical, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "admission", "gateway_task_protection.yaml"))
 	require.NoError(t, err)

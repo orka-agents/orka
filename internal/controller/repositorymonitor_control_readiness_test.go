@@ -46,7 +46,6 @@ func TestRepositoryMonitorControlCommandPublishesReadinessBeforeCompletion(t *te
 				item.RepairState = repositoryMonitorRepairPhaseFailed
 				require.NoError(t, f.reconciler.Store.UpsertMonitorItem(t.Context(), item))
 			}
-			// Represent the published status from a previous workflow poll.
 			pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: item.HeadSHA, State: repositoryMonitorItemStateOpen, BaseBranch: repositoryMonitorTestDefaultBranch}
 			require.NoError(t, f.reconciler.reconcileRepositoryMonitorReadiness(t.Context(), f.monitor, &pr, item))
 			before := len(f.statuses)

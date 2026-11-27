@@ -22,9 +22,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// newAHPHost builds the AHP host behind --enable-ahp-api. The API server
-// registers the session backend once its handlers exist. admit refuses the
-// tokens of owners the API would no longer sign in.
 func newAHPHost(s store.AHPStore, maxTTL time.Duration, admit func(ahphost.Principal) error) (*ahphost.Host, error) {
 	backends, err := ahphost.NewRegistry()
 	if err != nil {
@@ -40,13 +37,10 @@ func newAHPHost(s store.AHPStore, maxTTL time.Duration, admit func(ahphost.Princ
 	if err != nil {
 		return nil, err
 	}
-	// Revoking a token closes every connection that uses it.
 	tokens.OnRevoke = host.CloseToken
 	return host, nil
 }
 
-// ahpBackendFor returns the ACP session backend configuration when the AHP
-// host is on. The backend runs turns through the harness-v2 ACP dispatcher.
 func ahpBackendFor(host *ahphost.Host, cfg api.AHPBackendConfig) *api.AHPBackendConfig {
 	if host == nil {
 		return nil
@@ -54,9 +48,6 @@ func ahpBackendFor(host *ahphost.Host, cfg api.AHPBackendConfig) *api.AHPBackend
 	return &cfg
 }
 
-// validateAHPSignIn refuses an AHP endpoint no one could use: tokens are
-// minted for, and admitted only while, the owner's OIDC sign-in holds, and an
-// OIDC sign-in is refused without a subject allowlist.
 func validateAHPSignIn(oidc api.OIDCConfig) error {
 	if !oidc.Enabled() {
 		return errors.New("--enable-ahp-api requires --oidc-issuer and --oidc-audience: AHP tokens belong to OIDC sign-ins")
@@ -68,10 +59,6 @@ func validateAHPSignIn(oidc api.OIDCConfig) error {
 	return nil
 }
 
-// validateAHPProvenance refuses an AHP endpoint whose privacy could be
-// forged: which person may read an AHP session is decided from the requester
-// its turns' Tasks record, which only Task provenance admission keeps direct
-// Task writers from setting.
 func validateAHPProvenance(provenanceProtected bool) error {
 	if !provenanceProtected {
 		return errors.New("--enable-ahp-api requires Task provenance admission (--task-provenance-admission-enabled or " +
@@ -81,8 +68,6 @@ func validateAHPProvenance(provenanceProtected bool) error {
 	return nil
 }
 
-// validateAHPWorkspaceClass refuses an AHP workspace class the controller
-// cannot dispatch: every turn would run in it, and every one be rejected.
 func validateAHPWorkspaceClass(class string, providerAPI, dispatch bool) error {
 	if strings.TrimSpace(class) != "" && (!providerAPI || !dispatch) {
 		return errors.New("--ahp-workspace-class requires --enable-workspace-provider-api and " +
@@ -94,9 +79,6 @@ func validateAHPWorkspaceClass(class string, providerAPI, dispatch bool) error {
 
 var ahpWorkspaceImageDigest = regexp.MustCompile(`^[^@\s]+@sha256:[a-f0-9]{64}$`)
 
-// validateAHPWorkspace checks the workspace settings before anything starts.
-// The workspace namespace gets the restricted Pod Security profile, which the
-// ACP runtime Pods cannot run under, so it never shares their namespace.
 func validateAHPWorkspace(cfg api.AHPBackendConfig, watchNamespace, controlNamespace, runtimeNamespace string) error {
 	if cfg.WorkspaceImage == "" {
 		return nil

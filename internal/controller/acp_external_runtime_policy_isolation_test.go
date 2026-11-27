@@ -113,8 +113,6 @@ func TestACPExternalConcurrentRegisteredPoliciesRemainIsolated(t *testing.T) {
 		seen[readName].arguments != `{"probe":true}` || seen[writeName].arguments != `{"probe":true}` {
 		t.Fatalf("overlapping Tool requests = %#v, reads=%d writes=%d", seen, reads.Load(), writes.Load())
 	}
-	// The two permitted Tool HTTP requests stay blocked while the same
-	// reconciler rejects both a narrower and a broader external Task policy.
 	for _, test := range []struct {
 		name    string
 		fixture *externalACPDispatchFixture
@@ -126,8 +124,6 @@ func TestACPExternalConcurrentRegisteredPoliciesRemainIsolated(t *testing.T) {
 		readerPrompt.calls.Load() != 1 || writerPrompt.calls.Load() != 1 || reads.Load() != 1 || writes.Load() != 1 {
 		t.Fatal("policy denial changed permitted demand or executed another Tool")
 	}
-	// Each prompt receives only its own real broker result. The runtime
-	// fixture supplies deterministic terminal events, with no model involved.
 	releaseCalls()
 	for _, pair := range []struct {
 		response <-chan *httptest.ResponseRecorder
@@ -214,9 +210,6 @@ func assertExternalPolicyMCPResult(t *testing.T, response *httptest.ResponseReco
 	}
 }
 
-// addExternalPolicyRuntime adds only a second runtime, Agent and auth fixture.
-// Both fixtures retain the same Kubernetes client, epoch manager, reconciler,
-// immutable snapshot store and dispatcher; no second controller is started.
 func addExternalPolicyRuntime(t *testing.T, shared *externalACPDispatchFixture, name string, policy corev1alpha1.AgentRuntimeMCPPolicySpec) *externalACPDispatchFixture {
 	t.Helper()
 	profile, governance, limits := testAgentRuntimeProfileClaimsAndLimits()
@@ -368,7 +361,6 @@ func holdExternalPolicyPrompt(t *testing.T, f *externalACPDispatchFixture) *held
 		}
 	}))
 	t.Cleanup(func() { close(held.abort); server.Close() })
-	// Rebind only fake setup objects, before any Task snapshot is frozen.
 	secret := &corev1.Secret{}
 	if err := f.client.Get(f.ctx, client.ObjectKey{Namespace: defaultNS, Name: f.runtime.Spec.ClientAuth.ControllerBearerTokenSecretRef.Name}, secret); err != nil {
 		t.Fatal(err)
@@ -408,14 +400,10 @@ func startExternalPolicyTask(t *testing.T, f *externalACPDispatchFixture, held *
 			return
 		default:
 		}
-		// Join dispatch even when an assertion fails while the prompt is held.
-		// Otherwise the fixture database could close before terminal delivery.
 		select {
 		case held.finish <- externalPolicyPromptResult{failed: true}:
 		default:
 		}
-		// The execution deadline is not a worker-completion signal. The
-		// dispatcher can still settle state after its context is canceled.
 		<-done
 	})
 	return queued, done
@@ -512,8 +500,6 @@ func startExternalPolicyMCPCall(t *testing.T, f *externalACPDispatchFixture, bro
 	}()
 	t.Cleanup(func() {
 		cancel()
-		// Effect settlement can outlive request cancellation. Join it before
-		// the shared store and epoch manager are torn down.
 		<-finished
 	})
 	return done

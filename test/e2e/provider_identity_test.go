@@ -35,12 +35,6 @@ const (
 	keylessProviderE2EReadOnly = "e2e-keyless-read-only-task"
 )
 
-// A keyless azure-openai Provider end to end with a fake Entra: the
-// controller authenticates the Provider with a workload identity, and a
-// type: ai Task reaches it through the controller relay. The fake's Azure
-// OpenAI endpoint answers only tokens it issued to that identity for its
-// resource, so a successful Task proves the chain, and the fake's records
-// prove that no key and no Entra token reached the worker.
 var _ = Describe("Keyless Azure OpenAI Provider with a fake Entra", Ordered, Serial, Label("provider-identity"),
 	func() {
 		var apiBaseURL, apiToken string
@@ -162,14 +156,20 @@ var _ = Describe("Keyless Azure OpenAI Provider with a fake Entra", Ordered, Ser
 			Expect(err).NotTo(HaveOccurred())
 			Expect(json.Unmarshal(output, &pods)).To(Succeed())
 			Expect(pods.Items).NotTo(BeEmpty())
+			sawRelayEnv := false
 			for _, container := range pods.Items[0].Spec.Containers {
 				for _, env := range container.Env {
 					Expect(env.Name).NotTo(Equal("OPENAI_API_KEY"))
+					if env.Name == "ORKA_AI_PROVIDER_RELAY" {
+						Expect(env.Value).To(ContainSubstring(keylessProviderE2EName))
+						sawRelayEnv = true
+					}
 					if env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil {
 						Expect(env.ValueFrom.SecretKeyRef.Name).NotTo(ContainSubstring(keylessProviderE2EName))
 					}
 				}
 			}
+			Expect(sawRelayEnv).To(BeTrue(), "the worker Pod should receive ORKA_AI_PROVIDER_RELAY for the keyless Provider")
 		})
 
 		It("refuses a read-only AI Task, whose worker cannot authenticate to the relay", func() {

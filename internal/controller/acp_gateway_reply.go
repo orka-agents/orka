@@ -10,15 +10,12 @@ import (
 	"github.com/orka-agents/orka/internal/aitools"
 )
 
-// projectACPReplyPolicy runs only for new bindings, before profile/descriptor
-// sealing. The copied Task is a snapshot input, never a persisted spec change.
 func (r *TaskReconciler) projectACPReplyPolicy(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, external bool) (*corev1alpha1.Task, error) {
 	allowed := effectiveACPAllowedTools(task, agent)
 	selected := slices.Contains(allowed, aitools.GatewayReplyToolName)
 	if external && !selected {
 		return task, nil
 	}
-	// Pending durable linkage must defer freezing.
 	eligible, err := r.GatewayService.ResolveReplyEligibility(ctx, task)
 	if err != nil {
 		return nil, err
@@ -28,7 +25,7 @@ func (r *TaskReconciler) projectACPReplyPolicy(ctx context.Context, task *corev1
 		if !permitted {
 			return nil, permanentACPAgentConfiguration(fmt.Errorf("reply_in_conversation requires an eligible gateway Task and permitted scope"))
 		}
-		return task, nil // Registered external policy must remain byte-for-byte exact.
+		return task, nil
 	}
 	explicit := agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultAllowedTools != nil
 	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowedTools != nil {
@@ -52,9 +49,6 @@ func (r *TaskReconciler) projectACPReplyPolicy(ctx context.Context, task *corev1
 	}
 	projected.Spec.AgentRuntime.AllowedTools = sortedUnique(allowed)
 	if grant {
-		// The grant turns an implicit native set into an explicit allowlist,
-		// which dispatch judges differently, so keep it only when the
-		// projected policy still fits the Agent ceiling.
 		if validateAgentRuntimeCeiling(projected, agent) != nil {
 			return task, nil
 		}

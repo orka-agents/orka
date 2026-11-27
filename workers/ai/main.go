@@ -109,14 +109,11 @@ func run(transcriptPath string) (err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	// Get configuration from environment
 	workerEnv := workerenv.ParseAIWorkerEnv(os.Getenv)
 	taskName := workerEnv.TaskName
 	taskNamespace := workerEnv.TaskNamespace
 	eventRecorder := common.NewHTTPEventRecorderFromEnv()
 	ctx = withWorkerUsage(ctx, eventRecorder)
-	// Gateway Tasks carry their current user turn only in the canonical transcript.
-	// Never substitute a direct prompt when that required input is missing.
 	promptIncluded := strings.EqualFold(strings.TrimSpace(os.Getenv(workerenv.SessionPromptIncluded)), "true")
 	sessionContext, settings, err := prepareAIWorkerInput(workerEnv, transcriptPath, promptIncluded)
 	if err != nil {
@@ -152,7 +149,6 @@ func run(transcriptPath string) (err error) {
 		taskSpan.End()
 	}()
 
-	// Settle before span completion and telemetry shutdown can observe cancellation.
 	defer func() {
 		err = finishAIWorkerRun(ctx, eventRecorder, taskName, err)
 	}()
@@ -176,8 +172,6 @@ func run(transcriptPath string) (err error) {
 	baseURL := workerEnv.BaseURL
 	azureAPIVersion := workerEnv.AzureAPIVersion
 
-	// Keyless Providers are reached through the controller's relay; the
-	// worker holds no credential for them.
 	relaySlots, err := workerenv.ParseProviderRelay(os.Getenv(workerenv.AIProviderRelay))
 	if err != nil {
 		return err
@@ -197,16 +191,13 @@ func run(transcriptPath string) (err error) {
 		}
 	}
 
-	// Create LLM provider
 	llmProvider, err := llm.NewProvider(provider, primaryConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create LLM provider: %w", err)
 	}
 
-	// Wrap with retry logic for transient errors
 	llmProvider = llm.NewRetryProvider(llmProvider)
 
-	// Set up fallback providers if configured
 	if len(workerEnv.Fallbacks) > 0 {
 		var fallbacks []llm.FallbackEntry
 		for i, fallbackEnv := range workerEnv.Fallbacks {
@@ -244,12 +235,8 @@ func run(transcriptPath string) (err error) {
 		}
 	}
 
-	// Wrap with GenAI tracing after retry/fallback composition so spans report the
-	// concrete serving provider while still covering the whole logical model call.
 	llmProvider = llm.NewTracingProvider(llmProvider)
 
-	// A memory consolidation run registers no tools and loads no memory or
-	// skills: the controller supplies its inputs and validates its result.
 	if strings.TrimSpace(os.Getenv(workerenv.MemoryConsolidationMode)) != "" {
 		result, err := runMemoryConsolidation(ctx, llmProvider, model, settings, prompt)
 		if err != nil {
@@ -267,10 +254,8 @@ func run(transcriptPath string) (err error) {
 		return nil
 	}
 
-	// Parse enabled tools
 	enabledTools := normalizeEnabledTools(workerEnv.Tools)
 
-	// Create Kubernetes client for Tool CRDs
 	k8sClient, err := createK8sClient()
 	if err != nil {
 		return fmt.Errorf("failed to create k8s client: %w", err)
@@ -284,15 +269,12 @@ func run(transcriptPath string) (err error) {
 		return err
 	}
 
-	// Registration does not enable tools omitted by the controller.
 	registerMemoryTools()
 
-	// Load custom Tool CRDs
 	customTools, err := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
 	if err != nil {
 		return fmt.Errorf("load custom tools: %w", err)
 	}
-	// Tools behind a connection-mode policy never run in this Pod.
 	connectorBackedToolNames, err = connectorBackedTools(ctx, k8sClient, taskNamespace, customTools)
 	if err != nil {
 		return fmt.Errorf("classify connector-backed tools: %w", err)
@@ -306,22 +288,18 @@ func run(transcriptPath string) (err error) {
 		return fmt.Errorf("prepare remote MCP tools: %w", err)
 	}
 
-	// Load skills from mounted volume and prepend to system prompt
 	if skillContent := loadSkillsFromVolume(); skillContent != "" {
 		systemPrompt = skillContent + "\n\n" + systemPrompt
 	}
 
-	// Autonomous mode: fetch plan state and augment system prompt
 	planPromptContext := ""
 	approvalPromptContext := ""
 	if coordinationEnv.AutonomousMode {
 		iteration := coordinationEnv.AutonomousIteration
 		maxIter := coordinationEnv.AutonomousMaxIterations
 
-		// Augment system prompt with autonomous instructions
 		systemPrompt += autonomousSystemPromptSuffix(iteration, maxIter)
 
-		// Fetch existing plan state from controller
 		planContext, err := loadPlanContext(ctx)
 		if err != nil {
 			return fmt.Errorf("load prior plan state: %w", err)
@@ -349,9 +327,6 @@ func run(transcriptPath string) (err error) {
 		fmt.Printf("Autonomous mode: iteration %d\n", iteration)
 	}
 
-	// Inject reviewed durable memory and reflection guidance into the system
-	// prompt. Both are best-effort: memory infrastructure must never prevent the
-	// worker from running the task.
 	if memoryContext := loadDurableMemoryContext(ctx); memoryContext != "" {
 		systemPrompt = appendSystemPromptSection(systemPrompt, memoryContext)
 	}
@@ -359,10 +334,8 @@ func run(transcriptPath string) (err error) {
 		systemPrompt = appendMemoryReflectionGuidance(systemPrompt)
 	}
 
-	// Build messages
 	messages := buildInitialMessages(sessionContext, prompt, promptIncluded, planPromptContext, approvalPromptContext)
 
-	// Create tool executor for custom tools
 	toolExecutor := worker.NewToolExecutor()
 
 	baseToolCtx := &tools.ToolContext{
@@ -379,10 +352,7 @@ func run(transcriptPath string) (err error) {
 			workerEnv.TransactionCredentialReadScopes,
 		),
 		RequireSecretReadAuthorization: workerEnv.EnforceTransactionCredentialAuth,
-		// Children this worker creates inherit the requester's connector
-		// authority only when the controller seals them on this worker's
-		// authenticated request.
-		SealTaskCreate: sealChildTaskViaController,
+		SealTaskCreate:                 sealChildTaskViaController,
 	}
 
 	baseToolCtx.GatewayReplySender, err = newNativeGatewayReplySender(
@@ -392,10 +362,8 @@ func run(transcriptPath string) (err error) {
 	if err != nil {
 		return err
 	}
-	// Only a bound, controller-authorized sender permits gateway tool advertisement.
 	llmTools := buildLLMTools(enabledTools, customTools, baseToolCtx)
 
-	// Execute the agent loop
 	result, err := executeAgentLoopWithEvents(
 		ctx, llmProvider, messages, systemPrompt, model, settings,
 		llmTools, customTools, toolExecutor, eventRecorder, baseToolCtx,
@@ -404,7 +372,6 @@ func run(transcriptPath string) (err error) {
 		return fmt.Errorf("agent execution failed: %w", err)
 	}
 
-	// Write result to controller via HTTP.
 	if err := writeResult(ctx, result); err != nil {
 		return fmt.Errorf("failed to write result: %w", err)
 	}
@@ -414,7 +381,6 @@ func run(transcriptPath string) (err error) {
 		common.WithEventContent(eventContent(map[string]any{logFieldResultLength: len(result)})),
 	)
 
-	// Upload any artifacts the agent wrote.
 	if err := uploadAIArtifacts(ctx, eventRecorder, taskName); err != nil {
 		return err
 	}
@@ -432,8 +398,6 @@ func prepareAIWorkerInput(
 	if err != nil {
 		return nil, modelSettings{}, err
 	}
-	// A memory consolidation run's prompt is only an optional focus: the run
-	// has a fixed instruction of its own.
 	consolidation := strings.TrimSpace(os.Getenv(workerenv.MemoryConsolidationMode)) != ""
 	if err := workerEnv.ValidateRequired(promptIncluded || consolidation); err != nil {
 		return nil, modelSettings{}, err
@@ -454,7 +418,6 @@ func registerModeAwareCoordinationTools(k8sClient client.Client, rawMode string,
 	return nil
 }
 
-// createK8sClient creates a controller-runtime client for accessing CRDs
 func createK8sClient() (client.Client, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -483,12 +446,6 @@ func createK8sClient() (client.Client, error) {
 	return k8sClient, nil
 }
 
-// loadCustomTools loads Tool CRDs from the cluster
-//
-// A Tool the controller dispatched as connector-backed (it is in the frozen
-// digest set) is never silently dropped: a read that keeps failing fails
-// startup so the Pod restarts with the tool set it was dispatched with,
-// instead of running with a permanently reduced one.
 func loadCustomTools(
 	ctx context.Context,
 	k8sClient client.Client,
@@ -499,20 +456,14 @@ func loadCustomTools(
 	frozenConnector := frozenConnectorToolDigests(os.Getenv(workerenv.ConnectorToolDigests))
 
 	for _, name := range toolNames {
-		// Skip built-in tools
 		if _, ok := tools.DefaultRegistry.Get(name); ok {
 			continue
 		}
 		_, frozen := frozenConnector[name]
 
-		// Try to load as custom Tool CRD
 		tool := &corev1alpha1.Tool{}
 		key := client.ObjectKey{Namespace: namespace, Name: name}
 		if err := readCustomTool(ctx, k8sClient, key, tool, frozen); err != nil {
-			// A dispatched connector-backed Tool that is gone fails startup
-			// too: the Job ends (it is never retried at the Job level) and
-			// the controller's retry re-dispatches with a fresh freeze,
-			// rather than this worker running a tool set nobody dispatched.
 			if frozen {
 				return nil, fmt.Errorf("load connector-backed tool %q: %w", name, err)
 			}
@@ -520,8 +471,6 @@ func loadCustomTools(
 			continue
 		}
 		if aitools.IsRemoteMCP(tool) {
-			// Remote binding/discovery is mandatory and Task-authorized, not a
-			// best-effort load that may silently omit a selected capability.
 			customTools[name] = tool
 			continue
 		}
@@ -540,8 +489,6 @@ func loadCustomTools(
 	return customTools, nil
 }
 
-// readCustomTool reads a Tool; a frozen connector-backed one is retried on
-// transient failures with the same bounds as its policy.
 func readCustomTool(
 	ctx context.Context, k8sClient client.Client, key client.ObjectKey, tool *corev1alpha1.Tool, frozen bool,
 ) error {
@@ -638,8 +585,6 @@ func bindApprovalOutboundAccessPolicyVersion(
 	return bindApprovalResolvedOutboundPolicyVersion(ctx, k8sClient, namespace, tool, policy)
 }
 
-// bindApprovalResolvedOutboundPolicyVersion binds the exact policy snapshot the
-// caller validated, without a second policy read introducing different selectors.
 func bindApprovalResolvedOutboundPolicyVersion(
 	ctx context.Context,
 	k8sClient client.Client,
@@ -781,7 +726,6 @@ func approvalOutboundPolicySecretRefs(
 	return refs
 }
 
-// buildLLMTools builds the combined tool list for the LLM
 func buildLLMTools(
 	enabledTools []string, customTools map[string]*corev1alpha1.Tool, toolContexts ...*tools.ToolContext,
 ) []llm.Tool {
@@ -797,14 +741,11 @@ func buildLLMTools(
 			toolCtx.TaskUID == "" || toolCtx.Namespace == "" || toolCtx.TaskID == "") {
 			continue
 		}
-		// Check if it's a built-in tool
 		if builtinTools := tools.DefaultRegistry.ToLLMTools([]string{name}); len(builtinTools) > 0 {
 			llmTools = append(llmTools, builtinTools...)
 			continue
 		}
 
-		// Check if it's a custom tool. A forwarding Tool serves a
-		// command-line client in an ACP runtime and is never a function.
 		if tool, ok := customTools[name]; ok {
 			if tool.Spec.HTTP != nil && tool.Spec.HTTP.Forward != nil {
 				continue
@@ -923,9 +864,6 @@ func workerServiceAccountToken() string {
 	return ""
 }
 
-// providerRelay sends a slot's model requests through the controller,
-// authenticated with this worker's ServiceAccount token, read per request
-// because the kubelet rotates it.
 func providerRelay(workerEnv workerenv.AIWorkerEnv, slot string) *llm.ControllerRelay {
 	return &llm.ControllerRelay{
 		URL: workerenv.ProviderRelayURL(workerEnv.ControllerURL, workerEnv.TaskNamespace, workerEnv.TaskName, slot),
@@ -1099,9 +1037,7 @@ func truncateUTF8(value string, maxBytes int) string {
 	return value[:maxBytes]
 }
 
-// getAPIKey retrieves the API key for the given provider
 func getAPIKey(provider string) string {
-	// Check environment variables
 	switch provider {
 	case "anthropic":
 		if key := os.Getenv(workerenv.AnthropicAPIKey); key != "" {
@@ -1113,7 +1049,6 @@ func getAPIKey(provider string) string {
 		}
 	}
 
-	// Check mounted secrets
 	secretPaths := []string{
 		"/secrets/task",
 		"/secrets/agent",
@@ -1125,7 +1060,6 @@ func getAPIKey(provider string) string {
 			return strings.TrimSpace(string(data))
 		}
 
-		// Also try generic API_KEY
 		keyFile = fmt.Sprintf("%s/api-key", path)
 		if data, err := os.ReadFile(keyFile); err == nil {
 			return strings.TrimSpace(string(data))
@@ -1230,7 +1164,6 @@ func initialMessageBytes(message llm.Message) int {
 	return len(message.Role) + len(message.Content) + len(message.Name) + len(message.ToolCallID) + 16
 }
 
-// loadSessionContext loads required input or best-effort optional history.
 func loadSessionContext(transcriptPath string, required bool) ([]llm.Message, error) {
 	data, err := os.ReadFile(transcriptPath)
 	if err != nil {
@@ -1244,7 +1177,6 @@ func loadSessionContext(transcriptPath string, required bool) ([]llm.Message, er
 
 func parseSessionContext(data []byte, required bool) ([]llm.Message, error) {
 	var messages []llm.Message
-	// Allow the JSONL terminator without hiding an actual blank final row.
 	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 	for i, line := range lines {
 		line = strings.TrimSpace(line)
@@ -1255,12 +1187,10 @@ func parseSessionContext(data []byte, required bool) ([]llm.Message, error) {
 		var msg store.SessionMessage
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
 			if required {
-				// Decoder errors can include transcript contents; report only the line.
 				return nil, fmt.Errorf("session transcript contains an invalid message at line %d", i+1)
 			}
 			continue
 		}
-		// Validate the actual final row before filtering roles or adding provenance.
 		if required && i == len(lines)-1 && (msg.Role != roleUser || strings.TrimSpace(msg.Content) == "") {
 			return nil, fmt.Errorf(
 				"session transcript must end with a non-empty user message when %s is true",
@@ -1279,7 +1209,6 @@ func parseSessionContext(data []byte, required bool) ([]llm.Message, error) {
 	return messages, nil
 }
 
-// loadPlanContext fetches the current plan state from the controller API.
 func loadPlanContext(ctx context.Context) (string, error) {
 	controllerURL := os.Getenv(workerenv.ControllerURL)
 	taskName := os.Getenv(workerenv.TaskName)
@@ -1289,9 +1218,6 @@ func loadPlanContext(ctx context.Context) (string, error) {
 		return "", nil
 	}
 
-	// A Pod can start before the controller persists its Job name and UID.
-	// Preserve the same startup window as required session transcripts while
-	// honoring worker cancellation and keeping authorization fail-closed.
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	planURL := fmt.Sprintf("%s/internal/v1/plans/%s/%s", controllerURL, taskNamespace, taskName)
@@ -1326,7 +1252,6 @@ func loadPlanContext(ctx context.Context) (string, error) {
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode == http.StatusNotFound {
-		// No plan yet (first iteration)
 		return "", nil
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -1367,8 +1292,6 @@ func executeAgentLoopWithEvents(
 	baseToolCtxOpt ...*tools.ToolContext,
 ) (string, error) {
 	baseToolCtx := optionalToolContext(baseToolCtxOpt)
-	// A new execution/model turn is a new logical operation, not semantic dedupe.
-	// The identity remains fixed across transport retries of that tool execution.
 	replyExecutionID := rand.Text()
 	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
 	maxIterations := agentLoopMaxIterations(coordinationEnv)
@@ -1494,7 +1417,6 @@ func executeAgentLoopWithEvents(
 			finalAnswerRetry = false
 		}
 
-		// Add assistant message with tool calls
 		messages = append(messages, llm.Message{
 			Role:      "assistant",
 			Content:   resp.Content,
@@ -1529,7 +1451,6 @@ func executeAgentLoopWithEvents(
 			continue
 		}
 
-		// Execute tool calls
 		for _, tc := range resp.ToolCalls {
 			fmt.Printf("Executing tool: %s\n", tc.Name)
 
@@ -1563,7 +1484,6 @@ func executeAgentLoopWithEvents(
 				)
 			}
 			if execErr != nil {
-				// execErr is handled by the common error path below.
 			} else if alreadyFired {
 				result = fmt.Sprintf("already executed approved action for idempotency key %s; skipping duplicate", approvalKey)
 			} else if customToolForCall != nil {
@@ -1573,8 +1493,6 @@ func executeAgentLoopWithEvents(
 					execCtx = worker.WithToolIdempotencyKey(execCtx, approvalKey)
 				}
 				if connectorBackedToolNames[toolName] {
-					// The person's linked-account token lives only in the
-					// controller; the worker asks it to run the call.
 					result, execErr = executeConnectorToolViaController(execCtx, nil, customTool, execArgs, tc.ID, approvalKey)
 				} else {
 					result, execErr = executeNativeCustomTool(execCtx, baseToolCtx, toolExecutor, customTool, execArgs)
@@ -1583,7 +1501,6 @@ func executeAgentLoopWithEvents(
 					approvalGate.markFired(approvalKey)
 				}
 			} else {
-				// Fall back to built-in tools
 				if approvalKey != "" {
 					execArgs, execErr = injectIdempotencyKey(execArgs, approvalKey)
 				}
@@ -1603,9 +1520,6 @@ func executeAgentLoopWithEvents(
 					execCtx = tools.WithToolContext(stepCtx, &toolCtxCopy)
 				}
 				if execErr == nil && approvalKey != "" {
-					// Schema preflight cannot execute the tool, so it must not
-					// consume approval. Once execution starts, retain the fired
-					// key even if the tool returns an argument-shaped error.
 					if tool, ok := tools.DefaultRegistry.Get(toolName); ok {
 						_, execErr = tools.NormalizeToolArguments(tool, execArgs)
 						if execErr != nil {
@@ -1641,7 +1555,6 @@ func executeAgentLoopWithEvents(
 				)
 			}
 
-			// Add tool result
 			messages = append(messages, llm.Message{
 				Role:       logFieldTool,
 				Content:    result,
@@ -1735,7 +1648,6 @@ func finishAIWorkerRun(
 	if runErr == nil {
 		runErr = ctx.Err()
 	}
-	// Settle the outcome before publishing; a lost response must not change it.
 	if runErr == nil {
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeWorkerCompleted, 0,
 			common.WithEventTaskName(taskName),
@@ -1834,7 +1746,6 @@ func completionOutcomeError(outcome llm.CompletionOutcome, stopReason string) er
 	return fmt.Errorf("model returned %s response with stop reason %q", outcome, stopReason)
 }
 
-// writeResult submits the result to the controller via HTTP POST.
 func writeResult(ctx context.Context, result string) error {
 	return common.SubmitResultContext(ctx, []byte(result))
 }
@@ -1916,13 +1827,11 @@ func workerSecretReadError(message, suggestion string) *tools.ChatToolError {
 	}
 }
 
-// loadSkillsFromVolume reads skill content from the mounted volume at /workspace/.skills/.
 func loadSkillsFromVolume() string {
 	skillsDir := os.Getenv(workerenv.SkillsDir)
 	if skillsDir == "" {
 		skillsDir = "/workspace/.skills"
 	}
-	// Preferred path: job builder writes a deterministic merged prompt.
 	promptPath := filepath.Join(skillsDir, "PROMPT.md")
 	if data, err := os.ReadFile(promptPath); err == nil {
 		content := strings.TrimSpace(string(data))
@@ -1932,7 +1841,6 @@ func loadSkillsFromVolume() string {
 		}
 	}
 
-	// Backward-compatible fallback: load <skill>/SKILL.md files.
 	entries, err := os.ReadDir(skillsDir)
 	if err != nil {
 		return ""
@@ -1966,11 +1874,6 @@ func loadSkillsFromVolume() string {
 	return sb.String()
 }
 
-// sealChildTaskViaController asks the controller to seal the requester stamp
-// onto a child Task this worker just created. The controller authenticates
-// this Pod as the parent Task's worker and checks the child's ownership and
-// requester before sealing; a failure leaves the child unverified for
-// connector use and is not an error for the creating tool.
 func sealChildTaskViaController(ctx context.Context, _ client.Client, task *corev1alpha1.Task) error {
 	controllerURL := strings.TrimRight(strings.TrimSpace(os.Getenv(workerenv.ControllerURL)), "/")
 	namespace := strings.TrimSpace(os.Getenv(workerenv.TaskNamespace))
@@ -1983,10 +1886,6 @@ func sealChildTaskViaController(ctx context.Context, _ client.Client, task *core
 	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	token := workerServiceAccountToken()
-	// Nothing repairs a seal later, so a failure that may clear is retried
-	// briefly: a 409 (the child changed between the controller's read and
-	// its fenced seal), a 429 or 5xx, or a transport error. Any other
-	// response is final.
 	backoff := sealConflictBackoff
 	var last string
 	for attempt := range 4 {
@@ -2025,15 +1924,8 @@ func sealChildTaskViaController(ctx context.Context, _ client.Client, task *core
 	return nil
 }
 
-// sealConflictBackoff is the first wait before a seal is retried; each
-// retry doubles it.
 var sealConflictBackoff = 250 * time.Millisecond
 
-// sealHTTPClient is the client used to reach the controller for sealing;
-// tests replace it with a fixture client.
-// It carries the worker's ServiceAccount token, so it neither honors proxy
-// environment variables nor follows redirects: the token reaches the
-// controller and nothing else.
 var sealHTTPClient = func() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil

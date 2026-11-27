@@ -42,7 +42,6 @@ func TestMergePullRequestTool_Metadata(t *testing.T) {
 	if len(params) == 0 {
 		t.Error("parameters should not be empty")
 	}
-	// Verify schema contains expected fields
 	var schema map[string]any
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Fatalf("failed to parse parameters: %v", err)
@@ -122,15 +121,12 @@ func TestMergePullRequestTool_MissingSecret(t *testing.T) {
 }
 
 func TestMergePullRequestTool_CIChecksFailed(t *testing.T) {
-	// Mock GitHub API
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
-			// Return PR details with head SHA
 			w.WriteHeader(200)
 			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"number":42}`)
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
-			// Return failed check
 			w.WriteHeader(200)
 			_, _ = fmt.Fprintf(w, `{"total_count":2,"check_runs":[{"name":"build","status":"completed","conclusion":"success"},{"name":"lint","status":"completed","conclusion":"failure"}]}`)
 		default:
@@ -197,7 +193,6 @@ func TestMergePullRequestTool_CIChecksFailed(t *testing.T) {
 }
 
 func TestMergePullRequestTool_Success(t *testing.T) {
-	// Mock GitHub API
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if auth := r.Header.Get("Authorization"); auth != testBearerToken {
 			t.Error("request did not use the expected forge credential")
@@ -205,15 +200,12 @@ func TestMergePullRequestTool_Success(t *testing.T) {
 
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):
-			// Return PR details with head SHA
 			w.WriteHeader(200)
 			_, _ = fmt.Fprintf(w, `{"head":{"sha":"abc123"},"number":42}`)
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
-			// All checks passed
 			w.WriteHeader(200)
 			_, _ = fmt.Fprintf(w, `{"total_count":2,"check_runs":[{"name":"build","status":"completed","conclusion":"success"},{"name":"lint","status":"completed","conclusion":"success"}]}`)
 		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/pulls/42/merge"):
-			// Verify merge request body
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
 			if body[mergeMethodField] != defaultMergeMethod {
@@ -293,7 +285,6 @@ func TestMergePullRequestTool_Success(t *testing.T) {
 }
 
 func TestMergePullRequestTool_Execute_APIError(t *testing.T) {
-	// Mock GitHub API returning 500 on PR details fetch
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = fmt.Fprintf(w, `{"message":"internal server error"}`)
@@ -355,7 +346,6 @@ func TestMergePullRequestTool_Execute_InvalidArgs(t *testing.T) {
 
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
-	// Pass args missing required fields
 	args := json.RawMessage(`{"bad": true}`)
 
 	_, err := tool.Execute(context.Background(), args)
@@ -452,7 +442,6 @@ func TestMergePullRequestTool_Execute_DifferentMergeMethods(t *testing.T) {
 }
 
 func TestMergePullRequestTool_Execute_PRAlreadyMerged(t *testing.T) {
-	// Mock GitHub API: PR fetch and checks succeed, but merge returns 405
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls/42"):

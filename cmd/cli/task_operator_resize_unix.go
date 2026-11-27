@@ -13,8 +13,6 @@ import (
 	"github.com/orka-agents/orka/internal/operatoraccess"
 )
 
-// watchTerminalResize forwards local window size changes to the remote
-// terminal until stopped.
 func watchTerminalResize(ctx context.Context, controls chan<- operatoraccess.Control) func() {
 	changes := make(chan os.Signal, 1)
 	signal.Notify(changes, syscall.SIGWINCH)

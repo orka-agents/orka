@@ -138,7 +138,6 @@ func TestFoundryRecoveryRejectsUnauthorizedOrMismatchedRelay(t *testing.T) {
 				writeJSON(w, http.StatusOK, foundryRecoveryProof(t, r))
 			}))
 			request := foundryRecoveryRequest(t, cfg)
-			// Apply header and subject changes before signing the final request.
 			headerRequest := httptest.NewRequest(http.MethodPut, harnessv2.FoundryBootRetirementPath, nil)
 			headerRequest.Header.Set("Authorization", "present")
 			headerRequest.Header.Set(OperationCapabilityHeader, "present")

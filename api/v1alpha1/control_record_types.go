@@ -9,18 +9,10 @@ package v1alpha1
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 const (
-	// ControlRecordArtifactRetentionFinalizer prevents deletion while a control
-	// record can still retain or reconcile a content-addressed artifact.
 	ControlRecordArtifactRetentionFinalizer = "core.orka.ai/artifact-retention"
-	// ControlRecordLeaseProtectionFinalizer prevents deletion of a control record
-	// while a Kubernetes Lease still fences mutations for that record.
-	ControlRecordLeaseProtectionFinalizer = "core.orka.ai/lease-protection"
+	ControlRecordLeaseProtectionFinalizer   = "core.orka.ai/lease-protection"
 
-	// ControlRecordIDHashLabel stores a DNS-safe digest of the immutable logical
-	// record ID so namespaced records can be found without trusting mutable data.
-	ControlRecordIDHashLabel = "core.orka.ai/control-record-id-hash"
-	// ControlRecordTaskUIDLabel associates a controller-owned record with the
-	// immutable UID of the Task that caused it to be created.
+	ControlRecordIDHashLabel  = "core.orka.ai/control-record-id-hash"
 	ControlRecordTaskUIDLabel = "core.orka.ai/task-uid"
 )
 
@@ -108,9 +100,6 @@ type ControlRecordOwner struct {
 	UID string `json:"uid"`
 }
 
-// RBAC for the Kubernetes-authoritative ACP control-record store. These
-// markers intentionally live with the API surface so generation does not
-// require wiring the store into cmd/main.go.
 // +kubebuilder:rbac:groups=core.orka.ai,resources=promptattempts;runtimesessioncontrols;branchclaims;publications;externaleffects;controllerepochs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=promptattempts/status;runtimesessioncontrols/status;branchclaims/status;publications/status;externaleffects/status;controllerepochs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=promptattempts/finalizers;runtimesessioncontrols/finalizers;branchclaims/finalizers;publications/finalizers;externaleffects/finalizers;controllerepochs/finalizers,verbs=update

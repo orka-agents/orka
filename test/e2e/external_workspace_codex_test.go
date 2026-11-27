@@ -119,7 +119,6 @@ func waitForExternalCodexWorkspace(taskName, className, providerName string) ext
 	return identity
 }
 
-// Only metadata crosses the command boundary; never read or print Secret data.
 func externalCodexOwnedResourceNames(g Gomega, kind string, ownerUIDs ...string) []string {
 	output, err := utils.Run(exec.Command("kubectl", "get", kind, "-n", namespace,
 		"-o", `jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.ownerReferences[*].uid}{"\n"}{end}`))
@@ -182,8 +181,6 @@ func mockLLMServedExternalCodexRead(requests []mockLLMRequest) bool {
 	return false
 }
 
-// Providers are nested Go modules and are not included in the shared module zip.
-// Fetch the complete immutable source revision, never a floating branch or tag.
 func buildExternalFakeWorkspaceProvider() (string, error) {
 	versionTemplate := "{{if .Replace}}replaced{{else}}{{.Version}}{{end}}"
 	output, err := utils.Run(exec.Command("go", "list", "-m", "-f", versionTemplate,
@@ -216,11 +213,6 @@ func buildExternalFakeWorkspaceProvider() (string, error) {
 	if strings.TrimSpace(output) != externalFakeWorkspaceProviderRevision {
 		return "", fmt.Errorf("external fake provider checkout did not resolve the exact pinned revision")
 	}
-	// The pinned module version must name the exact commit built here. A
-	// pseudo-version has no tag; its encoded commit prefix must match the
-	// revision, which the exact-SHA fetch above already pins, and go.sum
-	// authenticates the module content. A release version's tag must resolve
-	// to that commit. Malformed versions fail closed.
 	pseudo, err := utils.PseudoVersionNamesRevision(
 		externalFakeWorkspaceProviderVersion, externalFakeWorkspaceProviderRevision)
 	if err != nil {
@@ -291,8 +283,6 @@ func deployExternalFakeWorkspaceProvider() externalFakeWorkspaceProviderFixtureN
 }
 
 func cleanupExternalFakeWorkspaceProvider(manifests []map[string]any, names externalFakeWorkspaceProviderFixtureNames) {
-	// Keep the provider and its privileges alive until Core has finalized every
-	// workspace of this class, including uncertain-create journals.
 	EventuallyWithOffset(1, func(g Gomega) {
 		var workspaces workspacev1alpha1.ExecutionWorkspaceList
 		kubectlJSON(g, &workspaces, "get", "executionworkspaces", "-n", namespace)

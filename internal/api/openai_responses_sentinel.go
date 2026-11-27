@@ -11,9 +11,6 @@ import (
 	"github.com/orka-agents/orka/internal/llm"
 )
 
-// Strip across the concatenated text while retaining each source item's
-// boundary and status, even if removing the marker empties an item. Leading
-// whitespace is trimmed once, matching the coordinator's existing policy.
 func stripResponsesGoalStateSentinel(resp *llm.CompletionResponse) *llm.CompletionResponse {
 	if resp == nil || resp.OutputItems == nil {
 		return stripGoalStateSentinelFromResponse(resp)

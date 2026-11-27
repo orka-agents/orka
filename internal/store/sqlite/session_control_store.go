@@ -23,8 +23,6 @@ const (
 	sessionControlFieldUID       = "session UID"
 )
 
-// CreateSessionControl attaches an immutable SessionUID and fenced control
-// metadata to an existing transcript session.
 func (s *Store) CreateSessionControl(ctx context.Context, control *store.SessionControl, fence store.ControllerEpochFence) (*store.SessionControl, error) {
 	normalized, fence, err := store.NormalizeSessionControlForCreate(control, fence)
 	if err != nil {
@@ -86,7 +84,6 @@ func (s *Store) CreateSessionControl(ctx context.Context, control *store.Session
 	return &normalized, nil
 }
 
-// GetSessionControl returns control state for an existing transcript session.
 func (s *Store) GetSessionControl(ctx context.Context, namespace, sessionName string) (*store.SessionControl, error) {
 	namespace = strings.TrimSpace(namespace)
 	sessionName = strings.TrimSpace(sessionName)
@@ -103,8 +100,6 @@ func (s *Store) GetSessionControl(ctx context.Context, namespace, sessionName st
 	return &control, nil
 }
 
-// AcquireSessionMutationLease acquires the next monotonic lease generation and
-// mirrors ownership into the legacy session active_task field in the same transaction.
 func (s *Store) AcquireSessionMutationLease(ctx context.Context, request store.AcquireSessionMutationLeaseRequest) (*store.SessionControl, error) {
 	request.Namespace = strings.TrimSpace(request.Namespace)
 	request.SessionName = strings.TrimSpace(request.SessionName)
@@ -215,8 +210,6 @@ func (s *Store) AcquireSessionMutationLease(ctx context.Context, request store.A
 	return &control, nil
 }
 
-// CommitSessionRuntimeGeneration records the newest provider RuntimeSession
-// generation proven live under the exact active Session lease.
 func (s *Store) CommitSessionRuntimeGeneration(ctx context.Context, request store.CommitSessionRuntimeGenerationRequest) (*store.SessionControl, error) {
 	request.Namespace = strings.TrimSpace(request.Namespace)
 	request.SessionName = strings.TrimSpace(request.SessionName)
@@ -296,8 +289,6 @@ func (s *Store) CommitSessionRuntimeGeneration(ctx context.Context, request stor
 	return &control, nil
 }
 
-// ReleaseSessionMutationLease atomically aborts an exact pre-prompt lease in
-// the legacy SQLite-authoritative store.
 func (s *Store) ReleaseSessionMutationLease(ctx context.Context, request store.ReleaseSessionMutationLeaseRequest) (*store.SessionControl, error) {
 	request.Namespace = strings.TrimSpace(request.Namespace)
 	request.SessionName = strings.TrimSpace(request.SessionName)
@@ -401,10 +392,6 @@ func (s *Store) ReleaseSessionMutationLease(ctx context.Context, request store.R
 	return &control, nil
 }
 
-// ReconcileSessionControl atomically establishes an independently observed
-// branch baseline and returns a reconciliation-blocked Session and BranchClaim
-// to Available using exact session/claim version and generation fences.
-//
 //nolint:gocyclo // Session and branch recovery are one explicit cross-aggregate CAS transaction.
 func (s *Store) ReconcileSessionControl(ctx context.Context, request store.ReconcileSessionControlRequest) (*store.SessionControl, error) {
 	request.Namespace = strings.TrimSpace(request.Namespace)
@@ -542,7 +529,6 @@ func (s *Store) ReconcileSessionControl(ctx context.Context, request store.Recon
 	return &control, nil
 }
 
-// CreateSessionTurn opens a durable turn only under its exact active lease.
 func (s *Store) CreateSessionTurn(ctx context.Context, request store.CreateSessionTurnRequest) (*store.SessionTurn, error) {
 	normalized, fence, err := store.NormalizeSessionTurnForCreate(request.Turn, request.Fence)
 	if err != nil {
@@ -607,7 +593,6 @@ func (s *Store) CreateSessionTurn(ctx context.Context, request store.CreateSessi
 	return &normalized, nil
 }
 
-// GetSessionTurn returns a durable session turn.
 func (s *Store) GetSessionTurn(ctx context.Context, id string) (*store.SessionTurn, error) {
 	id = strings.TrimSpace(id)
 	if err := store.ValidateControlIdentifier("session turn ID", id); err != nil {
@@ -620,11 +605,6 @@ func (s *Store) GetSessionTurn(ctx context.Context, id string) (*store.SessionTu
 	return &turn, nil
 }
 
-// FinalizeSessionTurn is the atomic cross-store completion barrier. It optionally
-// appends the canonical user/terminal transcript entries, snapshots the publication
-// receipt, advances or blocks branch/session baselines, releases only the matching
-// lease, and enqueues the terminal projection before commit.
-//
 //nolint:gocyclo // This is the deliberate atomic cross-store completion transaction.
 func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeSessionTurnRequest) (*store.SessionTurn, error) {
 	if err := request.Key.Validate(); err != nil {
@@ -805,9 +785,6 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 			return nil, err
 		}
 	}
-	// This duplicate SQL control path is not production storage, so it still
-	// attributes the attempt's usage itself; production finalization receives
-	// the attributed totals from the storage client.
 	inputTokens, outputTokens, err := sqlControlAttemptTokens(ctx, tx, control.Namespace, request.Key)
 	if err != nil {
 		return nil, err
@@ -895,11 +872,6 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 	return &turn, nil
 }
 
-// ResumeSessionTurnFinalization is a compatibility no-op for the legacy
-// SQLite-authoritative store because its transcript, control, lease, and outbox
-// finalization commit in one transaction. It still validates the current epoch
-// and exact persisted finalization identity so recovery cannot accept a
-// different turn or digest.
 func (s *Store) ResumeSessionTurnFinalization(ctx context.Context, request store.ResumeSessionTurnFinalizationRequest) (*store.SessionTurn, error) {
 	if err := request.Key.Validate(); err != nil {
 		return nil, err

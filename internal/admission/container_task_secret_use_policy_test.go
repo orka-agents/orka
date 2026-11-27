@@ -32,8 +32,6 @@ const (
 	secretUseAIWorkerUser   = "system:serviceaccount:" + admissionTestNamespace + ":orka-ai-worker"
 )
 
-// secretUseGrants allows `use` only on the listed Secrets for the listed
-// users, and records every check the policy makes.
 type secretUseGrants struct {
 	allowed map[string]map[string]bool
 	checked []string
@@ -66,8 +64,6 @@ func loadContainerTaskSecretUsePolicy(t *testing.T) *admissionregistrationv1.Val
 	return policy
 }
 
-// admitsSecretUse evaluates the policy, match conditions included, as
-// kube-apiserver does for a write by username.
 func admitsSecretUse(
 	t *testing.T,
 	policy *admissionregistrationv1.ValidatingAdmissionPolicy,

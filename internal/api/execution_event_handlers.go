@@ -29,7 +29,6 @@ const (
 	defaultEventStreamHeartbeatEvery = 15 * time.Second
 )
 
-// ListTaskEvents handles GET /api/v1/tasks/{id}/events.
 func (h *Handlers) ListTaskEvents(c fiber.Ctx) error {
 	started := time.Now()
 	success := false
@@ -73,8 +72,6 @@ func (h *Handlers) ListTaskEvents(c fiber.Ctx) error {
 	return c.JSON(NewListExecutionEventsResponse(namespace, events.ExecutionEventStreamTypeTask, taskName, query.afterSeq, latestSeq, listed))
 }
 
-// StreamTaskEvents handles GET /api/v1/tasks/{id}/stream?after=N.
-//
 //nolint:gocyclo // Replay, reconnect, heartbeat, terminal, and post-terminal completion are one stream state machine.
 func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 	taskName := c.Params("id")
@@ -86,8 +83,6 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	// Live events are published by name; only the Task authorized here is
-	// streamed, never one created again under its name meanwhile.
 	taskUID := string(task.UID)
 	if h.executionEventStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "execution event storage not enabled")
@@ -112,8 +107,6 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 		heartbeatEvery = defaultEventStreamHeartbeatEvery
 	}
 	streamStore := h.executionEventStore
-	// SendStreamWriter outlives the Fiber handler, so clone strings derived
-	// from fiber.Ctx before Fiber can recycle request buffers.
 	namespace = strings.Clone(namespace)
 	taskName = strings.Clone(taskName)
 	liveEvents := h.liveEvents
@@ -124,15 +117,10 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 	c.Set("X-Accel-Buffering", "no")
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
-		// Fiber recycles request contexts after the handler returns. Use a
-		// stream-owned context and rely on write/heartbeat failures to detect
-		// client disconnects.
 		ctx, cancelStream := context.WithCancel(context.Background())
 		defer cancelStream()
 		done := metrics.RecordExecutionEventStreamOpen("task", query.afterSeq > 0)
 		defer done()
-		// Live events are a best-effort tap on the running prompt, subscribed
-		// before the replay so none is missed while it is written.
 		var liveC <-chan liveevents.Event
 		if live && liveEvents != nil {
 			subscription := liveEvents.Subscribe(namespace, taskName)
@@ -260,7 +248,6 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 					return
 				}
 				if !ok {
-					// A dropped subscriber is told once; durable events continue.
 					liveC = nil
 				}
 			case <-poll.C:
@@ -281,16 +268,12 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 	})
 }
 
-// LiveExecutionEventResponse is one live event of a running Task, sent as an
-// SSE "live" frame. Runtime is the redacted runtime event; Approval reports a
-// permission request held for the Task's requester.
 type LiveExecutionEventResponse struct {
 	TaskUID  string                `json:"taskUID,omitempty"`
 	Runtime  *harnessv2.Event      `json:"runtime,omitempty"`
 	Approval *LiveApprovalResponse `json:"approval,omitempty"`
 }
 
-// LiveApprovalResponse is a held permission request or how it ended.
 type LiveApprovalResponse struct {
 	ID         string                       `json:"id"`
 	State      string                       `json:"state"`
@@ -302,9 +285,6 @@ type LiveApprovalResponse struct {
 	OptionID   string                       `json:"optionID,omitempty"`
 }
 
-// writeLiveExecutionEventSSEFrame writes a live frame, or, once the
-// subscription closed, a live_lagged frame telling the client that live
-// events stopped and the durable events remain authoritative.
 func writeLiveExecutionEventSSEFrame(w *bufio.Writer, event liveevents.Event, open bool) bool {
 	if !open {
 		if _, err := fmt.Fprint(w, "event: live_lagged\ndata: {}\n\n"); err != nil {
@@ -333,7 +313,6 @@ func writeLiveExecutionEventSSEFrame(w *bufio.Writer, event liveevents.Event, op
 	return w.Flush() == nil
 }
 
-// ListSessionEvents handles GET /api/v1/sessions/{id}/events.
 func (h *Handlers) ListSessionEvents(c fiber.Ctx) error {
 	started := time.Now()
 	success := false
@@ -377,7 +356,6 @@ func (h *Handlers) ListSessionEvents(c fiber.Ctx) error {
 	return c.JSON(NewListSessionExecutionEventsResponse(namespace, sessionName, query.afterSeq, latestSeq, listed))
 }
 
-// StreamSessionEvents handles GET /api/v1/sessions/{id}/stream?after=N.
 func (h *Handlers) StreamSessionEvents(c fiber.Ctx) error {
 	sessionName := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
@@ -410,8 +388,6 @@ func (h *Handlers) StreamSessionEvents(c fiber.Ctx) error {
 		heartbeatEvery = defaultEventStreamHeartbeatEvery
 	}
 	streamStore := h.executionEventStore
-	// SendStreamWriter outlives the Fiber handler, so clone strings derived
-	// from fiber.Ctx before Fiber can recycle request buffers.
 	namespace = strings.Clone(namespace)
 	sessionName = strings.Clone(sessionName)
 
@@ -421,9 +397,6 @@ func (h *Handlers) StreamSessionEvents(c fiber.Ctx) error {
 	c.Set("X-Accel-Buffering", "no")
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
-		// Fiber recycles request contexts after the handler returns. Use a
-		// stream-owned context and rely on write/heartbeat failures to detect
-		// client disconnects.
 		ctx, cancelStream := context.WithCancel(context.Background())
 		defer cancelStream()
 		done := metrics.RecordExecutionEventStreamOpen("session", query.afterSeq > 0)
@@ -574,12 +547,6 @@ func (h *Handlers) existingSessionNameForTask(ctx context.Context, namespace str
 	return executionEventSessionName(ctx, sessionStore, namespace, task)
 }
 
-// executionEventSessionName names the existing Session a Task's execution
-// events are attributed to, which is what a Session timeline lists. A
-// spec.sessionRef names it directly. A Task the chat API created has no
-// sessionRef and names its chat Session in the orka.ai/chat-session label,
-// which clients cannot set through the API; that label counts only when it
-// names a chat Session.
 func executionEventSessionName(ctx context.Context, sessionStore store.SessionStore, namespace string, task *corev1alpha1.Task) (string, error) {
 	sessionName := sessionNameForTask(task)
 	chatLabeled := false
@@ -591,7 +558,6 @@ func executionEventSessionName(ctx context.Context, sessionStore store.SessionSt
 		return "", nil
 	}
 	if sessionStore == nil {
-		// Without a store the label's Session type cannot be checked.
 		if chatLabeled {
 			return "", nil
 		}
@@ -638,8 +604,6 @@ func (h *Handlers) taskDeletedForEventStream(ctx context.Context, namespace, tas
 		}
 		return false, err
 	}
-	// A terminating-but-readable Task can still emit cancellation, failure, or
-	// cleanup events. Keep the stream open until the object is actually gone.
 	return false, nil
 }
 

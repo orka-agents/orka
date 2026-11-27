@@ -25,8 +25,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Each string denotes one upstream output item, including adjacent messages.
-// Streaming starts items in index order, then completes them in reverse order.
 func orderedResponsesWire(order []string, name, arguments string) (map[string]any, []map[string]any) {
 	response := responsesFixtureResponse("")
 	output := make([]any, 0, len(order))
@@ -253,8 +251,6 @@ func TestResponsesProductionOrderedStreamRejectsLateOutput(t *testing.T) {
 	require.NotContains(t, string(data), "unexpected late text")
 }
 
-// Only the unsupported Stream method is substituted here. This exercises the
-// fallback completion through the real SSE writer and HTTP serialization.
 func TestResponsesNonStreamingProviderOrderedFallback(t *testing.T) {
 	call := llm.ToolCall{ID: "call-one", Name: "client_tool", Arguments: json.RawMessage(`{}`)}
 	provider := &oaiMockProvider{streamErr: fmt.Errorf("streaming unsupported"), resp: &llm.CompletionResponse{

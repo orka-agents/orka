@@ -19,9 +19,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-// agentRuntimeSessionExposure records possible runtime admission, not prompt
-// success. A controller restart may clear a Planned attempt's mutable binding;
-// this immutable record still identifies every boot which could own its work.
 type agentRuntimeSessionExposure struct {
 	SchemaVersion  int             `json:"schemaVersion"`
 	Namespace      string          `json:"namespace"`
@@ -71,9 +68,6 @@ func (d *ACPDispatcher) recordKubernetesRuntimeExposure(ctx context.Context, tas
 		binding.Task.UID != task.UID || binding.RuntimeRef.UID != runtime.UID || binding.RuntimeRef.Generation != runtime.Generation {
 		return errors.New("runtime exposure lacks the immutable Task execution binding")
 	}
-	// Persist the complete process binding before creating the runtime Session.
-	// In particular, task-scoped executions previously stamped the boot only
-	// after create returned, leaving a crash window without durable identity.
 	if err := agentRuntimeRecoveryGuard(ctx, d.Store, fence, func(writeCtx context.Context) error {
 		latest := &corev1alpha1.Task{}
 		if err := d.APIReader.Get(writeCtx, client.ObjectKeyFromObject(task), latest); err != nil {

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# demo_profile defaults to presenter; demo_profile_is matches/fails correctly.
 
 set -Eeuo pipefail
 
@@ -23,7 +22,6 @@ got_docs="$(demo_profile)"
 assert_eq "${got_docs}" "docs"
 demo_profile_is docs || { printf 'FAIL demo_profile_is docs when DOCS\n' >&2; exit 1; }
 
-# Unknown value falls back to presenter (defensive).
 DEMO_RECORD_PROFILE=bogus
 got_fallback="$(demo_profile)"
 assert_eq "${got_fallback}" "presenter" "unknown profile falls back to presenter inside style.sh"

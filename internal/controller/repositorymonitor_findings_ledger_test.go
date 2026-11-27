@@ -34,7 +34,6 @@ func TestRepositoryMonitorMergeFindingLedger(t *testing.T) {
 	review := &repositoryMonitorReviewResult{
 		PreviousFindings: []repositoryMonitorReviewPreviousFinding{{ID: "f-fixed", Status: "fixed"}, {ID: "f-open", Status: "open"}, {ID: "f-unknown", Status: "fixed"}},
 		Findings: []repositoryMonitorReviewFinding{
-			// The reviewer cannot set Orka's record fields.
 			{Priority: "P2", File: "b.go", Line: 31, Title: "Missing error-check!", ID: "f-forged", Status: repositoryMonitorFindingStatusFixed},
 			{Priority: "P1", File: "d.go", Line: 7, Title: "Race", OutsideChanges: true},
 			{Priority: "P2", File: "e.go", Line: 99, Title: "Unrelated nit"},
@@ -204,7 +203,6 @@ func TestRepositoryMonitorPlanReview(t *testing.T) {
 		}
 	}
 	record("accepted", "reviewed", repositoryMonitorReviewVerdictNeedsChanges)
-	// A base whose Task is gone cannot show it saw every change.
 	if got := plan("newer"); got.Mode != repositoryMonitorReviewModeFull {
 		t.Fatalf("plan on a base without its Task = %+v, want full", got)
 	}
@@ -229,8 +227,6 @@ func TestRepositoryMonitorPlanReview(t *testing.T) {
 	if got := plan("unknown"); got.Mode != repositoryMonitorReviewModeFull {
 		t.Fatalf("compare failure plan = %+v, want full", got)
 	}
-	// A base review that saw only part of the pull request leaves the rest
-	// unreviewed, so a later head gets a full review instead of a delta.
 	for name, gap := range map[string]repositoryMonitorReviewContext{
 		"unavailable": {ContextUnavailable: repositoryMonitorReviewContextErrorTimeout},
 		"truncated":   {Truncated: repositoryMonitorReviewContextTruncation{Files: true}},
@@ -267,9 +263,6 @@ func TestRepositoryMonitorFollowUpReviewPrompt(t *testing.T) {
 	if strings.Contains(incremental, "f-done") {
 		t.Fatal("incremental prompt lists a fixed finding")
 	}
-	// The pull request context and the delta parse independently, so a passed
-	// follow-up review is not gated as lacking context, and coverage comes from
-	// the delta the reviewer was shown.
 	if reason := repositoryMonitorReviewVerdictGateReason(incremental, repositoryMonitorReviewVerdictPassed); reason != "" {
 		t.Fatalf("passed follow-up review gated: %s", reason)
 	}
@@ -330,8 +323,6 @@ func TestRepositoryMonitorIngestsIncrementalReview(t *testing.T) {
 		return record
 	}
 
-	// Nothing changed on the same head, so the reviewer cannot close the
-	// finding there, and Orka keeps needs_changes despite a passed verdict.
 	again := ingest("review-same-head", "old", repositoryMonitorReviewModeSameHead, repositoryMonitorReviewVerdictPassed)
 	if again.Verdict != repositoryMonitorReviewVerdictNeedsChanges || !again.Repairable || !strings.HasPrefix(again.Summary, "Orka set the verdict to needs_changes") {
 		t.Fatalf("same-head record = verdict %q repairable %t summary %q", again.Verdict, again.Repairable, again.Summary)
@@ -598,8 +589,6 @@ func TestRepositoryMonitorCarriedSensitiveFindingsStayRestricted(t *testing.T) {
 	}
 	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "sensitive", Namespace: "default", UID: types.UID("uid-sensitive")}, Spec: corev1alpha1.RepositoryMonitorSpec{RepoURL: repositoryMonitorTestRepoURL, Branch: "main", Agents: corev1alpha1.RepositoryMonitorAgents{Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"}}}}
 	monitor.Spec.Review.Publish.Enabled = true
-	// The first pass was security-sensitive and was never published; a record
-	// written before findings carried the flag must still be treated that way.
 	if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: "pass-1", MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 5, HeadSHA: "h5", Verdict: repositoryMonitorReviewVerdictSecuritySensitive, SecurityStatus: repositoryMonitorReviewVerdictSecuritySensitive,
 		FindingsJSON: `[{"priority":"P1","file":"auth.go","line":9,"title":"Token logged","body":"secret detail"}]`}); err != nil {
 		t.Fatal(err)
@@ -631,7 +620,6 @@ func TestRepositoryMonitorCarriedSensitiveFindingsStayRestricted(t *testing.T) {
 		t.Fatalf("publish records = %+v err=%v, want a security-sensitive skip", publishes, err)
 	}
 
-	// Once fixed, the finding is still never named in a published review.
 	body := renderRepositoryMonitorReviewBody(monitor, item, task, &store.ReviewRecord{ID: "later", HeadSHA: "h6", Verdict: repositoryMonitorReviewVerdictPassed},
 		"publish-2", []repositoryMonitorReviewFinding{{ID: "f-s", Priority: "P1", Title: "Token logged", Status: repositoryMonitorFindingStatusFixed, ResolvedHead: "h6", SecuritySensitive: true}})
 	if strings.Contains(body, "Token logged") {
@@ -674,7 +662,6 @@ func TestRepositoryMonitorReviewShownSensitiveFindingStaysUnpublished(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The fix counts, but the review that saw the finding is not published.
 	if record.Verdict != repositoryMonitorReviewVerdictPassed || record.SecurityStatus != repositoryMonitorReviewVerdictSecuritySensitive {
 		t.Fatalf("record = verdict %q security %q, want passed and still security_sensitive", record.Verdict, record.SecurityStatus)
 	}
@@ -683,13 +670,11 @@ func TestRepositoryMonitorReviewShownSensitiveFindingStaysUnpublished(t *testing
 func TestRepositoryMonitorSensitiveReviewRestrictsCarriedFindings(t *testing.T) {
 	base := &store.ReviewRecord{ID: "review-old", HeadSHA: "old"}
 	carried := []repositoryMonitorReviewFinding{ledgerFinding("f-carried", "P2", "a.go", 3, "Leaky log line")}
-	// The follow-up judged the carried finding sensitive without repeating it.
 	review := &repositoryMonitorReviewResult{Verdict: repositoryMonitorReviewVerdictSecuritySensitive}
 	ledger := repositoryMonitorMergeFindingLedger(repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeIncremental, Base: base, Ledger: carried}, review, "new", "review-new", nil)
 	if len(ledger) != 1 || !ledger[0].SecuritySensitive {
 		t.Fatalf("ledger = %+v, want the carried finding restricted", ledger)
 	}
-	// The next review keeps the restriction even though its own result is clean.
 	record := &store.ReviewRecord{ID: "review-new", HeadSHA: "new", Verdict: repositoryMonitorReviewVerdictSecuritySensitive, FindingsJSON: `[{"id":"f-carried","priority":"P2","title":"Leaky log line","status":"open"}]`}
 	loaded, err := repositoryMonitorLedgerFromRecord(record)
 	if err != nil || !loaded[0].SecuritySensitive {
@@ -703,7 +688,6 @@ func TestRepositoryMonitorSensitiveReviewRestrictsCarriedFindings(t *testing.T) 
 func TestRepositoryMonitorSensitiveReviewRestrictsFindingsItFixes(t *testing.T) {
 	base := &store.ReviewRecord{ID: "review-old", HeadSHA: "old"}
 	carried := []repositoryMonitorReviewFinding{ledgerFinding("f-carried", "P2", "a.go", 3, "Leaky log line")}
-	// The follow-up judged the carried finding sensitive while marking it fixed.
 	review := &repositoryMonitorReviewResult{
 		Verdict:          repositoryMonitorReviewVerdictSecuritySensitive,
 		PreviousFindings: []repositoryMonitorReviewPreviousFinding{{ID: "f-carried", Status: repositoryMonitorFindingStatusFixed}},
@@ -712,8 +696,6 @@ func TestRepositoryMonitorSensitiveReviewRestrictsFindingsItFixes(t *testing.T) 
 	if len(ledger) != 1 || ledger[0].Status != repositoryMonitorFindingStatusFixed || !ledger[0].SecuritySensitive {
 		t.Fatalf("ledger = %+v, want the fixed finding restricted", ledger)
 	}
-	// A record from before the merge restricted fixed findings is read the same
-	// way; a finding fixed at an earlier head was never in this review's scope.
 	record := &store.ReviewRecord{ID: "review-new", HeadSHA: "new", SecurityStatus: repositoryMonitorReviewVerdictSecuritySensitive, FindingsJSON: `[` +
 		`{"id":"f-carried","priority":"P2","title":"Leaky log line","status":"fixed","resolvedHead":"new"},` +
 		`{"id":"f-earlier","priority":"P2","title":"Typo","status":"fixed","resolvedHead":"old"}]`}
@@ -721,7 +703,6 @@ func TestRepositoryMonitorSensitiveReviewRestrictsFindingsItFixes(t *testing.T) 
 	if err != nil || len(loaded) != 2 || !loaded[0].SecuritySensitive || loaded[1].SecuritySensitive {
 		t.Fatalf("loaded = %+v err=%v, want only the finding fixed at the sensitive head restricted", loaded, err)
 	}
-	// A clean same-head review that carries the ledger never names it.
 	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "default"}}
 	same := repositoryMonitorMergeFindingLedger(repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeSameHead, Ledger: loaded}, &repositoryMonitorReviewResult{Verdict: repositoryMonitorReviewVerdictPassed}, "new", "review-same", nil)
 	body := renderRepositoryMonitorReviewBody(monitor, &store.MonitorItem{Number: 1}, &corev1alpha1.Task{}, &store.ReviewRecord{ID: "review-same", HeadSHA: "new", Verdict: repositoryMonitorReviewVerdictPassed}, "publish-1", same)
@@ -739,7 +720,6 @@ func TestRepositoryMonitorFollowUpReviewPromptBoundsFindingsAndContext(t *testin
 		ledger = append(ledger, ledgerFinding(fmt.Sprintf("f-%04x", i), "P2", "a.go", int64(i+1), "Bug "+credential))
 		ledger[i].Body = strings.Repeat("x", 4000)
 	}
-	// Both the pull request and the delta are larger than their budgets.
 	files := make([]repositoryMonitorPullRequestFileResponse, 0, 90)
 	for i := range 90 {
 		files = append(files, repositoryMonitorPullRequestFileResponse{Filename: fmt.Sprintf("f%02d.go", i), Status: "added", Additions: 2000, Patch: "@@ -0,0 +1,2000 @@\n" + strings.Repeat("+line of code\n", 2000)})
@@ -754,7 +734,6 @@ func TestRepositoryMonitorFollowUpReviewPromptBoundsFindingsAndContext(t *testin
 	if !strings.Contains(prompt, "more open findings were omitted for size") {
 		t.Fatal("follow-up prompt does not say that open findings were omitted")
 	}
-	// The contexts and findings share one budget; the rest is fixed text.
 	if limit := repositoryMonitorReviewContextMaxBytes + 16<<10; len(prompt) > limit {
 		t.Fatalf("follow-up prompt is %d bytes, want at most %d", len(prompt), limit)
 	}
@@ -766,17 +745,13 @@ func TestRepositoryMonitorFollowUpReviewPromptBoundsFindingsAndContext(t *testin
 	}
 }
 
-// assertRepositoryMonitorExhaustivePassAwaited checks that a pending pass on
-// pull request 1's head sha1 is queued and holds repairs back.
 func assertRepositoryMonitorExhaustivePassAwaited(t *testing.T, r *RepositoryMonitorReconciler, monitor *corev1alpha1.RepositoryMonitor, db store.RepositoryMonitorStore) {
 	t.Helper()
 	ctx := context.Background()
-	// A review-only monitor has no workflow poll, so the next pass is queued.
 	continuations, _, err := db.ListMonitorRuns(ctx, store.MonitorRunFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Phase: repositoryMonitorRunPhaseQueued})
 	if err != nil || len(continuations) != 1 || continuations[0].TargetNumber != 1 || continuations[0].TargetSHA != "sha1" {
 		t.Fatalf("queued runs = %+v err=%v, want one run for the next pass", continuations, err)
 	}
-	// No repair may move the head before the passes finish.
 	if pending, err := r.repositoryMonitorHeadExhaustivePassPending(ctx, monitor, repositoryMonitorPullRequest{Number: 1, HeadSHA: "sha1"}); err != nil || !pending {
 		t.Fatalf("head pass pending = %t err=%v, want true", pending, err)
 	}
@@ -812,8 +787,6 @@ func TestRepositoryMonitorFollowUpGateRequiresACompleteDelta(t *testing.T) {
 	monitor := repositoryMonitorInventoryTestMonitor()
 	pr := repositoryMonitorPullRequest{Number: 7, BaseSHA: "base", HeadSHA: "newer"}
 	reviewContext := newRepositoryMonitorReviewContext("orka-agents", "orka", pr)
-	// The delta lists a modified file without its patch, so it is incomplete
-	// even though the pull request context is complete.
 	prompt := buildRepositoryMonitorReviewPrompt(monitor, "orka-agents", "orka", pr, reviewContext, repositoryMonitorReviewPlan{
 		Mode: repositoryMonitorReviewModeIncremental, Base: &store.ReviewRecord{ID: "accepted", HeadSHA: "reviewed"},
 		Delta: []repositoryMonitorPullRequestFileResponse{{Filename: "big.go", Status: "modified", Additions: 5000, Deletions: 5000}},
@@ -845,7 +818,6 @@ func TestRepositoryMonitorExhaustivePassDoesNotWaitForGreenCIAgain(t *testing.T)
 		t.Fatal(err)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	// CI turned red after the first pass passed its green-CI gate.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		switch {
 		case strings.HasSuffix(req.URL.Path, "/check-runs"):

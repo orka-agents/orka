@@ -231,7 +231,6 @@ func TestGatewaySessionContinuationRejectsRecreatedRetiredName(t *testing.T) {
 	event := gatewayContinuationEvent(time.Now().UTC().Truncate(time.Second), "recreated")
 	completion := gatewayContinuationCompletion(event, event.SessionName, "retired-session-uid")
 	seedGatewayContinuationCompletion(t, s, completion)
-	// Model a legacy writer that bypassed the generic creation fence.
 	if _, err := s.db.ExecContext(t.Context(), `INSERT INTO sessions
 		(namespace, name, session_type, owner_type, owner_ref) VALUES (?, ?, 'gateway', 'gateway', ?)`,
 		event.Namespace, event.SessionName, event.GatewayUID+"/"+event.BindingUID); err != nil {
@@ -368,8 +367,6 @@ func gatewayContinuationCompletion(event store.GatewayEvent, physicalName, sessi
 	}
 }
 
-// These fixtures represent an already committed cleanup. Reclamation itself is
-// tested separately; admission must preserve these old identities and receipts.
 func seedGatewayContinuationCompletion(t *testing.T, s *Store, completion store.SessionCleanupCompletion) {
 	t.Helper()
 	tx, err := s.db.BeginTx(t.Context(), nil)

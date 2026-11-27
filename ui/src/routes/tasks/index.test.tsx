@@ -75,8 +75,6 @@ describe('tasks routes', () => {
     it('renders TaskDetail with taskId param', () => {
       const Component = TaskDetailRoute.component!
       render(<Component />)
-      // Task detail fetches data; in loading state it shows skeletons
-      // The component is rendered without errors
       expect(document.querySelector('.animate-pulse')).toBeInTheDocument()
     })
   })

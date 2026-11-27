@@ -7,9 +7,6 @@ import (
 	celconfig "k8s.io/apiserver/pkg/apis/cel"
 )
 
-// TestMaxDelegationAgeMustDecodeAsABoundedDuration covers values the API
-// server must refuse: one that cannot decode as a Go duration would keep the
-// controller from reading any OutboundAccessPolicy.
 func TestMaxDelegationAgeMustDecodeAsABoundedDuration(t *testing.T) {
 	const crd = "core.orka.ai_outboundaccesspolicies.yaml"
 	rootValidator := loadRootValidator(t, crd)
@@ -19,7 +16,6 @@ func TestMaxDelegationAgeMustDecodeAsABoundedDuration(t *testing.T) {
 		wantError bool
 	}{
 		{age: "1h"}, {age: "24h0m0s"}, {age: "90m"}, {age: "8760h"}, {age: "8760h0m0s"}, {age: "30s"},
-		// Canonical forms a typed client sends for sub-second values.
 		{age: "24h0m0.000000001s"}, {age: "8759h59m59.999999999s"},
 		{age: "not-a-duration", wantError: true}, {age: "999999999999h", wantError: true},
 		{age: "9223372037s", wantError: true}, {age: "0s", wantError: true}, {age: "-1h", wantError: true},

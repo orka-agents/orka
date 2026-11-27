@@ -11,8 +11,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// CreateSessionTurn validates the Kubernetes-authoritative SessionControl and
-// PromptAttempt, then persists only the SQLite-owned open turn record.
 func (s *Store) CreateSessionTurn(ctx context.Context, request store.CreateSessionTurnRequest) (*store.SessionTurn, error) {
 	if s.sessionTurns == nil {
 		return nil, ErrSessionTurnStoreNotConfigured
@@ -60,15 +58,6 @@ func (s *Store) CreateSessionTurn(ctx context.Context, request store.CreateSessi
 	})
 }
 
-// FinalizeSessionTurn implements the cross-store completion protocol:
-//
-//  1. validate all Kubernetes-authoritative fences and terminal receipts;
-//  2. atomically commit SQLite turn/transcript/deferred-outbox data;
-//  3. CAS-update Kubernetes BranchClaim and SessionControl, then release Lease;
-//  4. activate the SQLite outbox projection.
-//
-// Every step is idempotent so restart after any committed boundary resumes the
-// same finalization instead of replaying transcript or publication effects.
 func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeSessionTurnRequest) (*store.SessionTurn, error) {
 	if s.sessionTurns == nil {
 		return nil, ErrSessionTurnStoreNotConfigured
@@ -148,10 +137,6 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 	return s.completePersistedSessionTurnFinalization(ctx, *turn, fence, snapshot, &plan)
 }
 
-// ResumeSessionTurnFinalization completes only the Kubernetes and outbox tail
-// of a finalization whose SQLite SessionTurn/transcript/outbox transaction is
-// already durable. All timing, digest, terminal, publication, and projection
-// inputs are reloaded from the persisted turn and outbox record.
 func (s *Store) ResumeSessionTurnFinalization(ctx context.Context, request store.ResumeSessionTurnFinalizationRequest) (*store.SessionTurn, error) {
 	if s.sessionTurns == nil {
 		return nil, ErrSessionTurnStoreNotConfigured

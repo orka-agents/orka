@@ -17,7 +17,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// CheckTaskProgressTool gets the current phase, duration, and status conditions of a task.
 type CheckTaskProgressTool struct{}
 
 func (t *CheckTaskProgressTool) Name() string { return checkTaskProgressToolName }
@@ -55,7 +54,6 @@ func (t *CheckTaskProgressTool) Execute(ctx context.Context, args json.RawMessag
 	data := map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: string(task.Status.Phase), messageField: task.Status.Message}
 
 	if task.Status.StartTime != nil {
-		// A finished Task's duration ends at completion, not at this call.
 		end := time.Now()
 		if task.Status.CompletionTime != nil {
 			end = task.Status.CompletionTime.Time

@@ -19,15 +19,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	_ "modernc.org/sqlite" // SQLite driver registration
+	_ "modernc.org/sqlite"
 )
 
-// dbStatsName labels the connection pool statistics of the store
-// OpenLockedStore opens, exported as the go_sql_* series.
 const dbStatsName = "orka_store_sqlite"
 
-// writeTransactionBuckets span a free single connection through the 60s
-// budget of the controller's longest detached store write.
 var writeTransactionBuckets = []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60}
 
 var (
@@ -37,13 +33,6 @@ var (
 			Help: "Size of the SQLite database file in bytes",
 		},
 	)
-	// writeWaitSeconds and writeHoldSeconds split the time of a contract
-	// write with a write envelope, or of receipt pruning: the wait for the
-	// store's single connection, and the time the operation then holds it
-	// until it commits or rolls back. Other users of the connection appear
-	// only in the pool statistics. A long wait
-	// with short holds is pool contention or a starved process; a long hold
-	// is slow SQL, or a holder the host descheduled.
 	writeWaitSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "orka_store_sqlite_write_wait_seconds",
@@ -66,30 +55,17 @@ func init() {
 	metrics.Registry.MustRegister(dbSizeBytes, writeWaitSeconds, writeHoldSeconds)
 }
 
-// NewDB opens a SQLite database with recommended pragmas for WAL mode,
-// busy timeout, synchronous mode, and foreign keys. It creates or validates the
-// current schema; upgrades require OpenLockedStore's exclusive controller lock.
 func NewDB(path string) (*sql.DB, error) {
 	return newDB(path, false, SynchronousNormal)
 }
 
-// Synchronous is the SQLite synchronous mode a store commits under, which
-// decides the durability class it reports.
 type Synchronous string
 
 const (
-	// SynchronousNormal syncs the write-ahead log only at checkpoints. A
-	// commit survives a process restart, but the most recent commits can be
-	// lost if the host or its storage fails first. Describe reports
-	// local-buffered. It is the default.
 	SynchronousNormal Synchronous = "normal"
-	// SynchronousFull syncs the write-ahead log on every commit, so a commit
-	// also survives a host failure. Describe reports local-fsync. Each commit
-	// waits for the sync, which limits the single writer on slow storage.
-	SynchronousFull Synchronous = "full"
+	SynchronousFull   Synchronous = "full"
 )
 
-// ParseSynchronous parses a synchronous mode name, normal or full.
 func ParseSynchronous(value string) (Synchronous, error) {
 	switch mode := Synchronous(strings.ToLower(strings.TrimSpace(value))); mode {
 	case SynchronousNormal, SynchronousFull:
@@ -110,11 +86,6 @@ func (mode Synchronous) pragma() (string, error) {
 	}
 }
 
-// sqliteDSN makes the driver write and read every time.Time in UTC. SQL
-// compares stored times as text, so one zone keeps those comparisons correct
-// and satisfies the storage contract's UTC rule whatever zone a caller used.
-// Rows written earlier in another zone are read back in UTC, but their stored
-// text keeps its offset, so SQL comparisons with them can still be wrong.
 func sqliteDSN(path string) string {
 	separator := "?"
 	if strings.Contains(path, "?") {
@@ -133,22 +104,15 @@ func newDB(path string, allowMigration bool, synchronous Synchronous) (*sql.DB, 
 		return nil, err
 	}
 
-	// Single writer — SQLite only supports one concurrent writer.
-	// WAL mode allows concurrent reads alongside the single writer.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0) // keep connection alive
+	db.SetConnMaxLifetime(0)
 
-	// Set pragmas per-connection. These are not persistent in SQLite and
-	// must be set on each connection. With MaxOpenConns(1), we have exactly one.
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA busy_timeout=5000",
 		synchronousPragma,
 		"PRAGMA foreign_keys=ON",
-		// Deleted content is overwritten with zeros rather than left in free
-		// pages: connector custody rows are crypto-shredded on disconnect,
-		// and a later file snapshot must not be able to recover them.
 		"PRAGMA secure_delete=ON",
 	}
 	for _, p := range pragmas {
@@ -174,7 +138,6 @@ func newDB(path string, allowMigration bool, synchronous Synchronous) (*sql.DB, 
 	return db, nil
 }
 
-// currentSchemaStatements defines the complete supported SQLite layout.
 func currentSchemaStatements() []string {
 	statements := []string{
 		datasetSchema,
@@ -1079,64 +1042,34 @@ func currentSchemaStatements() []string {
 	return append(statements, authSessionSchemaStatements()...)
 }
 
-// Store implements both store.ResultStore and store.SessionStore.
 type Store struct {
-	db         *sql.DB
-	securityTx *sql.Tx
-	// securityClock, set on a scan ingestion's transaction-scoped store,
-	// supplies the times the security writes of one step assign.
-	securityClock func() time.Time
-	dbPath        string
-	processLock   io.Closer
-	// ownsProcessLock is set for a store OpenLockedStore opened under the
-	// process lock, which an embedded dataset binding requires.
-	ownsProcessLock bool
-	// dbStats exports the connection pool statistics of a store
-	// OpenLockedStore opened; close unregisters it.
-	dbStats          prometheus.Collector
-	executionEventMu sync.Mutex
-	// pendingWALTruncate remembers a connector custody deletion whose log
-	// truncation found the log busy; the next custody operation finishes it.
-	// It starts set, so a truncation a previous process could not finish is
-	// completed by this process's first custody operation.
+	db                 *sql.DB
+	securityTx         *sql.Tx
+	securityClock      func() time.Time
+	dbPath             string
+	processLock        io.Closer
+	ownsProcessLock    bool
+	dbStats            prometheus.Collector
+	executionEventMu   sync.Mutex
 	pendingWALTruncate atomic.Bool
 
-	// incarnation identifies this open of the database. Describe reports it,
-	// so a reopen, the only way SQLite's serving database can restart, is
-	// visible as a new incarnation.
 	incarnation string
 
-	// requireWriteEnvelopes refuses a contract write without a write
-	// envelope. Production sets it; package tests may write without one.
 	requireWriteEnvelopes atomic.Bool
 
-	// nativeSessionSealer seals native state for the duplicate SQL control
-	// implementation's turn finalization. Production never installs it.
 	nativeSessionSealer store.NativeSessionFinalizationSealer
 
-	// applyMemoryProposalAfterAcceptedRead is a test hook used to coordinate
-	// multi-connection proposal-apply races after an accepted proposal is read.
 	applyMemoryProposalAfterAcceptedRead func()
 
-	// archiveMemoryProposalAfterActiveRead is a test hook used to coordinate
-	// multi-connection proposal-archive races after an active proposal is read.
 	archiveMemoryProposalAfterActiveRead func()
 
-	// checkTaskDataFenceAfterGenerationRead is a test hook called between a
-	// fence check's cleanup generation read and its Job revocation reads.
 	checkTaskDataFenceAfterGenerationRead func(context.Context)
 
-	// clock, when set by a test, replaces the provider clock that measures
-	// operation age and receipt retention.
 	clock func() time.Time
 
-	// writeState, when set by a test, replaces the dataset write state, which
-	// is always ready for an open SQLite store.
 	writeState func() storagev1.DatasetState
 }
 
-// NewStore creates a new Store backed by the given SQLite database.
-// The dbPath is the filesystem path to the database file (used for metrics and logging).
 func NewStore(db *sql.DB, dbPath string) *Store {
 	s := &Store{db: db, dbPath: dbPath}
 	s.pendingWALTruncate.Store(true)
@@ -1144,23 +1077,16 @@ func NewStore(db *sql.DB, dbPath string) *Store {
 	return s
 }
 
-// OpenOption configures OpenLockedStore.
 type OpenOption func(*openOptions)
 
 type openOptions struct {
 	synchronous Synchronous
 }
 
-// WithSynchronous selects the synchronous mode the store commits under.
-// Without it, a store uses SynchronousNormal.
 func WithSynchronous(mode Synchronous) OpenOption {
 	return func(options *openOptions) { options.synchronous = mode }
 }
 
-// OpenLockedStore acquires the process-lifetime filesystem lock adjacent to
-// path before SQLite is opened. Production controller wiring must use this
-// constructor so overlapping Pods or releases cannot initialize or write
-// the same database even if Kubernetes ownership fencing is misconfigured.
 func OpenLockedStore(path string, options ...OpenOption) (*Store, error) {
 	selected := openOptions{synchronous: SynchronousNormal}
 	for _, option := range options {
@@ -1185,10 +1111,6 @@ func OpenLockedStore(path string, options ...OpenOption) (*Store, error) {
 	return s, nil
 }
 
-// registerDBStats exports the connection pool statistics of the store, so a
-// wait for its single connection is visible. The process lock admits one
-// such store per database, and the controller opens one; when another store
-// of this process already exports them, this one does not.
 func (s *Store) registerDBStats() {
 	collector := collectors.NewDBStatsCollector(s.db, dbStatsName)
 	if err := metrics.Registry.Register(collector); err == nil {
@@ -1196,19 +1118,14 @@ func (s *Store) registerDBStats() {
 	}
 }
 
-// Start runs background maintenance and blocks until ctx is cancelled,
-// then closes the database without issuing any final writes.
-// It satisfies the controller-runtime manager.Runnable interface.
 func (s *Store) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx).WithName("sqlite-store")
 
 	logger.Info("SQLite store is configured — ensure a PersistentVolume is mounted at the store path for data durability", "path", s.dbPath)
 
-	// Update DB size metric periodically
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
-	// Record initial size
 	s.updateDBSizeMetric()
 
 	for {
@@ -1224,10 +1141,6 @@ func (s *Store) Start(ctx context.Context) error {
 	}
 }
 
-// NeedLeaderElection keeps SQLite-backed background mutation behind the
-// controller-runtime leader gate. The filesystem lock remains held for the
-// whole process lifetime, including standby/startup, and is the final defense
-// against overlapping writers.
 func (s *Store) NeedLeaderElection() bool { return true }
 
 func (s *Store) close() error {
@@ -1247,10 +1160,8 @@ func (s *Store) close() error {
 	return lockErr
 }
 
-// Close releases the database and process lock, including a failed bootstrap.
 func (s *Store) Close() error { return s.close() }
 
-// updateDBSizeMetric reads the database file size and updates the gauge.
 func (s *Store) updateDBSizeMetric() {
 	if s.dbPath == "" || s.dbPath == ":memory:" {
 		return
@@ -1262,7 +1173,6 @@ func (s *Store) updateDBSizeMetric() {
 	dbSizeBytes.Set(float64(info.Size()))
 }
 
-// HealthCheck verifies the database is reachable by executing a simple query.
 func (s *Store) HealthCheck(ctx context.Context) error {
 	var n int
 	return s.db.QueryRowContext(ctx, "SELECT 1").Scan(&n)

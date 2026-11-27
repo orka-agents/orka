@@ -11,8 +11,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// Render actual chart image defaults instead of the shared digest-overriding
-// fixture, so development and release image selection remains observable.
 func renderInstallationDefaults(t *testing.T, overrides ...string) (string, error) {
 	t.Helper()
 	helm, err := exec.LookPath("helm")

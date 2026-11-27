@@ -8,9 +8,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// RemoteArtifactUploader persists frozen workspace deltas through the
-// controller artifact API. A nil uploader means the artifact API is not
-// configured and write deltas fail closed.
 type RemoteArtifactUploader struct {
 	client *ArtifactClient
 }
@@ -48,10 +45,6 @@ func (u *RemoteArtifactUploader) UploadWorkspaceDelta(
 		MediaType:  artifactcap.MediaTypeWorkspaceDelta,
 	}
 	if request.ArtifactUploadAuthorization == nil {
-		// The controller cannot bind an upload capability until the frozen
-		// workspace delta has been produced and its exact digest and size are
-		// known. Ask the authenticated controller-side broker for that one-shot
-		// capability only after constructing the content-addressed reference.
 		return u.client.Upload(ctx, reference, artifact, &request)
 	}
 	authorization := artifactcap.Authorization{Capability: request.ArtifactUploadAuthorization.Capability, RequestDigest: request.ArtifactUploadAuthorization.RequestDigest}

@@ -14,10 +14,6 @@ import (
 
 const resolvedNamespaceLocalKey = "resolvedNamespace"
 
-// ResolveNamespace determines the effective namespace for a request.
-// When watchNamespace is set: it's the only allowed namespace (explicit mismatches are rejected with 403).
-// Otherwise: explicit param > SA namespace from token > "default".
-// If enforceIsolation is true, the resolved namespace must match the user's SA namespace.
 func ResolveNamespace(c fiber.Ctx, explicit string, watchNamespace string, enforceIsolation bool) (string, error) {
 	var ns string
 	if watchNamespace != "" {
@@ -36,8 +32,6 @@ func ResolveNamespace(c fiber.Ctx, explicit string, watchNamespace string, enfor
 		ns = GetEffectiveNamespace(c, "")
 	}
 
-	// Enforce namespace isolation: authenticated callers must carry a namespace
-	// and can only access that namespace.
 	if enforceIsolation {
 		ui := GetUserInfo(c)
 		if ui != nil && ui.Namespace == "" {

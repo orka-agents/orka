@@ -52,8 +52,6 @@ const (
 	finishReasonToolCalls                         = "tool_calls"
 )
 
-// OpenAICompatHandler implements OpenAI-compatible /openai/v1/chat/completions and /openai/v1/models endpoints.
-// This allows OpenAI-compatible clients to use Orka as a custom provider.
 type OpenAICompatHandler struct {
 	client                    client.Client
 	apiReader                 client.Reader
@@ -67,7 +65,6 @@ type OpenAICompatHandler struct {
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
-// NewOpenAICompatHandler creates an OpenAI-compatible API handler.
 func NewOpenAICompatHandler(c client.Client, apiReader client.Reader, watchNamespace string, enforceNS bool, config ChatConfig, resolver *ProviderResolver, rs store.ResultStore, kubeClientOpt ...kubernetes.Interface) *OpenAICompatHandler {
 	var kubeClient kubernetes.Interface
 	if len(kubeClientOpt) > 0 {
@@ -86,9 +83,6 @@ func NewOpenAICompatHandler(c client.Client, apiReader client.Reader, watchNames
 	}
 }
 
-// --- OpenAI API types ---
-
-// OAIRequest is the OpenAI chat completion request format.
 type OAIRequest struct {
 	Model            string             `json:"model"`
 	Messages         []OAIMessage       `json:"messages"`
@@ -107,13 +101,11 @@ type OAIRequest struct {
 	ResponseFormat   *OAIResponseFormat `json:"response_format,omitempty"`
 }
 
-// OAIResponseFormat is the OpenAI response_format field.
 type OAIResponseFormat struct {
-	Type       string             `json:"type"` // "text", "json_object", "json_schema"
+	Type       string             `json:"type"`
 	JSONSchema *OAIJSONSchemaSpec `json:"json_schema,omitempty"`
 }
 
-// OAIJSONSchemaSpec holds the json_schema details within response_format.
 type OAIJSONSchemaSpec struct {
 	Name        string         `json:"name"`
 	Schema      map[string]any `json:"schema,omitempty"`
@@ -121,49 +113,42 @@ type OAIJSONSchemaSpec struct {
 	Description string         `json:"description,omitempty"`
 }
 
-// StreamOptions holds stream-specific options.
 type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
-// OAIMessage represents an OpenAI chat message.
 type OAIMessage struct {
 	Role       string        `json:"role,omitempty"`
-	Content    any           `json:"content"` // string or []ContentPart
+	Content    any           `json:"content"`
 	Name       string        `json:"name,omitempty"`
 	ToolCalls  []OAIToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string        `json:"tool_call_id,omitempty"`
 	Refusal    *string       `json:"refusal,omitempty"`
 }
 
-// OAITool is an OpenAI tool definition.
 type OAITool struct {
-	Type     string         `json:"type"` // "function"
+	Type     string         `json:"type"`
 	Function OAIFunctionDef `json:"function"`
 }
 
-// OAIFunctionDef is an OpenAI function definition.
 type OAIFunctionDef struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
-// OAIToolCall is an OpenAI tool call.
 type OAIToolCall struct {
 	Index    *int            `json:"index,omitempty"`
 	ID       string          `json:"id,omitempty"`
-	Type     string          `json:"type,omitempty"` // "function"
+	Type     string          `json:"type,omitempty"`
 	Function OAIFunctionCall `json:"function"`
 }
 
-// OAIFunctionCall is a function call within a tool call.
 type OAIFunctionCall struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
 }
 
-// OAIResponse is the OpenAI chat completion response.
 type OAIResponse struct {
 	ID                string      `json:"id"`
 	Object            string      `json:"object"`
@@ -174,7 +159,6 @@ type OAIResponse struct {
 	SystemFingerprint string      `json:"system_fingerprint,omitempty"`
 }
 
-// OAIChoice is a choice in the response.
 type OAIChoice struct {
 	Index        int         `json:"index"`
 	Message      *OAIMessage `json:"message,omitempty"`
@@ -182,14 +166,12 @@ type OAIChoice struct {
 	FinishReason *string     `json:"finish_reason"`
 }
 
-// OAIUsage contains token usage statistics.
 type OAIUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// OAIModel is the model object for /openai/v1/models.
 type OAIModel struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
@@ -197,22 +179,17 @@ type OAIModel struct {
 	OwnedBy string `json:"owned_by"`
 }
 
-// OAIModelList is the response for GET /openai/v1/models.
 type OAIModelList struct {
 	Object string     `json:"object"`
 	Data   []OAIModel `json:"data"`
 }
 
-// OAIErrorTypeInvalidRequest is the OpenAI error type for a request the API
-// will not act on.
 const OAIErrorTypeInvalidRequest = "invalid_request_error"
 
-// OAIError is the OpenAI error response format.
 type OAIError struct {
 	Error OAIErrorDetail `json:"error"`
 }
 
-// OAIErrorDetail is the error detail.
 type OAIErrorDetail struct {
 	Message string  `json:"message"`
 	Type    string  `json:"type"`
@@ -220,7 +197,6 @@ type OAIErrorDetail struct {
 	Code    *string `json:"code"`
 }
 
-// HandleChatCompletions handles POST /openai/v1/chat/completions.
 func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	var req OAIRequest
 	if err := c.Bind().JSON(&req); err != nil {
@@ -260,8 +236,6 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		return openAIContextTokenAuthorizationError(c, err)
 	}
 
-	// Resolve provider and model from the request model field.
-	// Supports "provider/model" format (e.g., "anthropic/claude-sonnet-4") or plain model name.
 	provider, model, providerInfo, err := h.resolveCompatProvider(c, ctx, req.Model, namespace)
 	if err != nil {
 		if ferr, ok := err.(*fiber.Error); ok && ferr.Code == fiber.StatusForbidden {
@@ -285,8 +259,6 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	completionID := fmt.Sprintf("chatcmpl-%s", generateChatID())
 	now := time.Now().Unix()
 
-	// Inject Orka tools and run the server-side agentic loop by default.
-	// Set X-Orka-Tools: disabled to use as a transparent proxy instead.
 	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, compReq, compatCoordinatorSetup{
 		Namespace:           namespace,
 		ToolUseAction:       "openAITools",
@@ -297,7 +269,6 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		return openAIContextTokenAuthorizationError(c, err)
 	}
 
-	// Build ToolContext for coordinator tools
 	var proxyToolCtx *tools.ToolContext
 	if orkaToolsEnabled {
 		proxyToolCtx = newCompatProxyToolContext(compatProxyToolContextConfig{
@@ -395,7 +366,6 @@ func buildOpenAICompletionRequest(req OAIRequest, model string) (*llm.Completion
 	return compReq, nil
 }
 
-// handleNonStreamingCompletion handles a non-streaming chat completion request.
 func (h *OpenAICompatHandler) handleNonStreamingCompletion(
 	c fiber.Ctx,
 	ctx context.Context,
@@ -416,7 +386,6 @@ func (h *OpenAICompatHandler) handleNonStreamingCompletion(
 	return h.formatOAIResponse(c, resp, completionID, model, created)
 }
 
-// handleNonStreamingToolLoop runs the agentic tool loop and returns the final result in OpenAI format.
 func (h *OpenAICompatHandler) handleNonStreamingToolLoop(
 	c fiber.Ctx,
 	ctx context.Context,
@@ -439,10 +408,6 @@ func (h *OpenAICompatHandler) handleNonStreamingToolLoop(
 	return h.formatOAIResponse(c, resp, completionID, model, created)
 }
 
-// handleStreamingToolLoop runs the agentic tool loop inside the SSE response.
-// Orka tool calls remain server-side; user-visible progress is emitted as
-// ordinary assistant content chunks so OpenAI-compatible clients keep receiving
-// bytes during multi-minute coordinator workflows.
 func (h *OpenAICompatHandler) handleStreamingToolLoop(
 	c fiber.Ctx,
 	ctx context.Context,
@@ -467,7 +432,6 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 		streamCtx, streamCancel := context.WithTimeout(streamBaseCtx, h.config.MaxDuration)
 		defer streamCancel()
 
-		// Send role chunk
 		roleChunk := OAIResponse{
 			ID:      completionID,
 			Object:  oaiChatCompletionChunk,
@@ -526,7 +490,6 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 			return
 		}
 
-		// Send finish chunk
 		finishChunk := OAIResponse{
 			ID:      completionID,
 			Object:  oaiChatCompletionChunk,
@@ -584,13 +547,10 @@ func stripGoalStateSentinelFromResponse(resp *llm.CompletionResponse) *llm.Compl
 	}
 	respCopy := *resp
 	respCopy.Content = strippedContent
-	// The coordinator rewrote the final text; discard the provider snapshot
-	// rather than exposing stale, unstripped text through another serializer.
 	respCopy.OutputItems = nil
 	return &respCopy
 }
 
-// formatOAIResponse formats a CompletionResponse into OpenAI API format.
 func (h *OpenAICompatHandler) formatOAIResponse(c fiber.Ctx, resp *llm.CompletionResponse, completionID, model string, created int64) error {
 	if resp == nil {
 		return openAICompletionOutcomeError(c, "")
@@ -609,7 +569,6 @@ func (h *OpenAICompatHandler) formatOAIResponse(c fiber.Ctx, resp *llm.Completio
 		Content: resp.Content,
 	}
 
-	// Convert tool calls
 	if len(resp.ToolCalls) > 0 {
 		msg.ToolCalls = make([]OAIToolCall, 0, len(resp.ToolCalls))
 		for i, tc := range resp.ToolCalls {
@@ -658,7 +617,6 @@ func openAICompletionOutcomeError(c fiber.Ctx, reason string) error {
 	}})
 }
 
-// handleStreamingCompletion handles a streaming chat completion request.
 func (h *OpenAICompatHandler) handleStreamingCompletion(
 	c fiber.Ctx,
 	ctx context.Context,
@@ -673,7 +631,6 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 	c.Set("Connection", "keep-alive")
 	c.Set("X-Accel-Buffering", "no")
 
-	// Capture for closure
 	capturedProvider := provider
 	capturedReq := req
 	streamBaseCtx := detachedSpanContext(ctx)
@@ -689,7 +646,6 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 				_ = writeStreamError(w, "provider_error")
 				return
 			}
-			// Try non-streaming fallback via Complete
 			resp, completeErr := capturedProvider.Complete(streamCtx, capturedReq)
 			if completeErr != nil {
 				oaiLog.Error(completeErr, "stream fallback completion failed")
@@ -710,7 +666,6 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 				return
 			}
 
-			// Send role chunk
 			roleChunk := OAIResponse{
 				ID:      completionID,
 				Object:  oaiChatCompletionChunk,
@@ -723,7 +678,6 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 			}
 			_ = writeStreamChunk(w, roleChunk)
 
-			// Send content
 			if resp.Content != "" {
 				contentChunk := OAIResponse{
 					ID:      completionID,
@@ -738,7 +692,6 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 				_ = writeStreamChunk(w, contentChunk)
 			}
 
-			// Send tool calls if any
 			for i, tc := range resp.ToolCalls {
 				idx := i
 				tcChunk := OAIResponse{
@@ -764,7 +717,6 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 				_ = writeStreamChunk(w, tcChunk)
 			}
 
-			// Send finish
 			finishChunk := OAIResponse{
 				ID:      completionID,
 				Object:  oaiChatCompletionChunk,
@@ -778,7 +730,6 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 			}
 			_ = writeStreamChunk(w, finishChunk)
 
-			// Send usage if requested
 			if streamOpts != nil && streamOpts.IncludeUsage {
 				usageChunk := OAIResponse{
 					ID:      completionID,
@@ -799,7 +750,6 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 			return
 		}
 
-		// Send initial role chunk
 		roleChunk := OAIResponse{
 			ID:      completionID,
 			Object:  oaiChatCompletionChunk,
@@ -914,7 +864,6 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 	})
 }
 
-// HandleListModels handles GET /openai/v1/models.
 func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 	ctx := c.Context()
 
@@ -927,7 +876,6 @@ func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 		return openAIContextTokenAuthorizationError(c, err)
 	}
 
-	// List Provider CRDs to build a model list
 	providerList := &corev1alpha1.ProviderList{}
 	listOpts := []client.ListOption{}
 	if namespace != "" {
@@ -960,7 +908,6 @@ func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 				})
 				seen[modelID] = true
 			}
-			// Also add the plain model name
 			if !seen[p.Spec.DefaultModel] {
 				models = append(models, OAIModel{
 					ID:      p.Spec.DefaultModel,
@@ -979,8 +926,6 @@ func (h *OpenAICompatHandler) HandleListModels(c fiber.Ctx) error {
 	})
 }
 
-// convertOAIMessages converts OpenAI messages to internal llm.Message format.
-// Extracts the system prompt from system messages.
 func convertOAIMessages(msgs []OAIMessage) ([]llm.Message, string) {
 	var systemPrompt string
 	messages := make([]llm.Message, 0, len(msgs))
@@ -998,7 +943,6 @@ func convertOAIMessages(msgs []OAIMessage) ([]llm.Message, string) {
 			Name:       m.Name,
 		}
 
-		// Convert tool calls
 		if len(m.ToolCalls) > 0 {
 			msg.ToolCalls = make([]llm.ToolCall, 0, len(m.ToolCalls))
 			for _, tc := range m.ToolCalls {
@@ -1016,8 +960,6 @@ func convertOAIMessages(msgs []OAIMessage) ([]llm.Message, string) {
 	return messages, systemPrompt
 }
 
-// extractContent extracts string content from an OAI message content field.
-// Content can be a string or an array of content parts.
 func extractContent(content any) string {
 	if content == nil {
 		return ""
@@ -1027,7 +969,6 @@ func extractContent(content any) string {
 	case string:
 		return v
 	case []any:
-		// Array of content parts — extract text parts
 		var parts []string
 		for _, part := range v {
 			if m, ok := part.(map[string]any); ok {
@@ -1040,7 +981,6 @@ func extractContent(content any) string {
 		}
 		return strings.Join(parts, "\n")
 	default:
-		// Try JSON marshal/unmarshal for other types
 		b, err := json.Marshal(v)
 		if err != nil {
 			return ""
@@ -1053,7 +993,6 @@ func extractContent(content any) string {
 	}
 }
 
-// convertOAITools converts OpenAI tool definitions to internal llm.Tool format.
 func convertOAITools(inputTools []OAITool) []llm.Tool {
 	if len(inputTools) == 0 {
 		return nil
@@ -1102,7 +1041,6 @@ func mapStreamFinishReason(reason string, hasNonBlankContent, hasToolCalls bool)
 	}
 }
 
-// writeStreamChunk writes a single SSE chunk in OpenAI streaming format.
 func writeStreamChunk(w *bufio.Writer, chunk OAIResponse) error {
 	data, err := json.Marshal(chunk)
 	if err != nil {
@@ -1132,7 +1070,6 @@ func writeStreamError(w *bufio.Writer, reason string) error {
 	return w.Flush()
 }
 
-// writeStreamDone writes the final [DONE] marker for OpenAI streaming.
 func writeStreamDone(w *bufio.Writer) error {
 	if _, err := fmt.Fprintf(w, "data: [DONE]\n\n"); err != nil {
 		return err
@@ -1140,8 +1077,6 @@ func writeStreamDone(w *bufio.Writer) error {
 	return w.Flush()
 }
 
-// resolveCompatProvider keeps provider selection and authorization identical for
-// both OpenAI wire protocols.
 func (h *OpenAICompatHandler) resolveCompatProvider(c fiber.Ctx, ctx context.Context, modelStr, namespace string) (llm.Provider, string, ProviderResolutionInfo, error) {
 	return h.resolver.ResolveWithInfo(ctx, ResolveOpts{
 		ModelStr:  modelStr,
@@ -1155,8 +1090,7 @@ func (h *OpenAICompatHandler) resolveCompatProvider(c fiber.Ctx, ctx context.Con
 			}
 			return authorizeChatProviderUse(c, h.kubeClient, "openAIChatCompletions", provider)
 		},
-		RequireModel: true,
-		// Enforced scoped context tokens get no implicit Provider selection.
+		RequireModel:            true,
 		RequireExplicitProvider: requestRequiresExplicitProvider(c, h.contextTokenAuthorization),
 	})
 }

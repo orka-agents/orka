@@ -14,9 +14,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-// connectorCompletionReasons are the reason codes ConnectionCallback puts in
-// its redirect. Anything else is not echoed, so a crafted link cannot show
-// its own words as the failure.
 var connectorCompletionReasons = map[string]bool{
 	"access_denied":          true, //nolint:goconst // Wire reason codes stay literal so the list reads against the callback.
 	"connection_mismatch":    true,
@@ -36,10 +33,6 @@ var connectorCompletionReasons = map[string]bool{
 	"storage_failed":         true,
 }
 
-// connectorCompletionTemplate is the page the connector callback lands on
-// when the controller serves no dashboard. It runs no script and loads
-// nothing: the one-time completion value stays in the URL fragment, which
-// never reaches the server, and the person copies it into the CLI.
 var connectorCompletionTemplate = template.Must(template.New("connector-completion").Parse(`<!doctype html>
 <html lang="en">
 <head>
@@ -72,10 +65,6 @@ type connectorCompletionView struct {
 	UnknownName bool
 }
 
-// ConnectorCompletionPage serves the connector callback's redirect target
-// when the dashboard is disabled. The query is attacker-controlled, so only
-// valid Kubernetes names and reason codes are shown; anything else falls
-// back to a placeholder rather than a command someone else wrote.
 func (h *Handlers) ConnectorCompletionPage(c fiber.Ctx) error {
 	view := connectorCompletionView{Failed: c.Query("status") == "error"}
 	if reason := c.Query("reason"); connectorCompletionReasons[reason] {

@@ -32,10 +32,6 @@ func admissionChainTask(name string, taskType corev1alpha1.TaskType) *corev1alph
 	}
 }
 
-// A new agent Task's first reconcile adds its finalizer, writes Pending, and
-// goes on into admission in the same pass, instead of waiting a queue round
-// after each of its own writes. This harness has no Agent, so admission
-// settles the Task in that pass.
 func TestReconcileChainsAgentTaskAdmissionInOnePass(t *testing.T) {
 	task := admissionChainTask("chained", corev1alpha1.TaskTypeAgent)
 	r := newUnitReconciler(newTestScheme(), task, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "ns-uid"}})
@@ -54,7 +50,6 @@ func TestReconcileChainsAgentTaskAdmissionInOnePass(t *testing.T) {
 	}
 }
 
-// Job-backed Tasks keep one step per reconcile.
 func TestReconcileKeepsOneStepPerPassForJobTasks(t *testing.T) {
 	task := admissionChainTask("container", corev1alpha1.TaskTypeContainer)
 	r := newUnitReconciler(newTestScheme(), task, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "ns-uid"}})
@@ -72,8 +67,6 @@ func TestReconcileKeepsOneStepPerPassForJobTasks(t *testing.T) {
 	}
 }
 
-// A chained pass writes Pending from the Task in hand; when that write
-// conflicts it falls back to the re-reading retry.
 func TestInitializePendingStatusFallsBackOnConflict(t *testing.T) {
 	task := admissionChainTask("conflicting", corev1alpha1.TaskTypeAgent)
 	r := newUnitReconciler(newTestScheme(), task)

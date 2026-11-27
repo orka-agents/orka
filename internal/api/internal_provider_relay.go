@@ -32,36 +32,22 @@ import (
 )
 
 const (
-	// providerRelayMaxRequestBytes is the API server's body limit, which
-	// applies before the relay sees a request; providerRelayMaxResponseBytes
-	// matches the ACP runtime provider proxy.
 	providerRelayMaxRequestBytes  = defaultAPIRequestBodyLimit
 	providerRelayMaxResponseBytes = 64 << 20
-	// providerRelayMaxConcurrent bounds the model requests the controller
-	// relays at once, across all Tasks.
-	providerRelayMaxConcurrent = 64
+	providerRelayMaxConcurrent    = 64
 )
 
-// providerRelayTimeout bounds one relayed request, including a streamed
-// response, and how long a worker may take to read it; providerRelayReadTimeout
-// bounds the worker's upload. They are variables only so tests can shorten
-// them.
 var (
 	providerRelayTimeout     = 30 * time.Minute
 	providerRelayReadTimeout = 30 * time.Second
 )
 
-// providerRelayRoute matches the relay route before Fiber routes the request,
-// so the server can bound its reads and writes.
-var providerRelayRoute = regexp.MustCompile(`^/internal/v1/tasks/[^/]+/[^/]+/providers/[^/]+/`)
+var providerRelayRoute = regexp.MustCompile(`(?i)^/internal/v1/tasks/[^/]+/[^/]+/providers/[^/]+/`)
 
 func isProviderRelayPath(path string) bool {
 	return providerRelayRoute.MatchString(path)
 }
 
-// providerRelayPaths are the Azure OpenAI requests the AI worker makes: chat
-// completions for a deployment and the Responses API. The worker's SDK
-// builds them; nothing else reaches the Provider through the relay.
 var providerRelayPaths = []*regexp.Regexp{
 	regexp.MustCompile(`^/openai/deployments/[A-Za-z0-9_.-]+/chat/completions$`),
 	regexp.MustCompile(`^/openai/responses$`),
@@ -69,13 +55,6 @@ var providerRelayPaths = []*regexp.Regexp{
 
 var providerRelayAPIVersion = regexp.MustCompile(`^[0-9A-Za-z.-]{1,64}$`)
 
-// RelayProviderRequest relays a type: ai worker's model request to a keyless
-// Provider. The worker authenticates with its own ServiceAccount token; the
-// controller checks that it is the current worker for the Task, that the
-// slot names the Provider its Job was built for, and that the Provider is
-// still keyless and Ready, then adds the Provider identity's token and
-// forwards the request to the Provider's endpoint. The worker never sees
-// the token.
 func (h *InternalHandlers) RelayProviderRequest(c fiber.Ctx) error {
 	if h.providerIdentities == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "this controller has no Provider identities")
@@ -100,9 +79,9 @@ func (h *InternalHandlers) RelayProviderRequest(c fiber.Ctx) error {
 	if c.Request().Header.ContentLength() > providerRelayMaxRequestBytes {
 		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "request body is too large")
 	}
-	body := c.Body()
-	if len(body) > providerRelayMaxRequestBytes {
-		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "request body is too large")
+	body, err := readBoundedRelayRequestBody(c)
+	if err != nil {
+		return err
 	}
 
 	if !providerproxy.TryAcquireSlot(h.providerRelaySlots) {
@@ -122,22 +101,48 @@ func (h *InternalHandlers) RelayProviderRequest(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusFailedDependency, "the Provider's baseURL is invalid")
 	}
 	identity, baseURL, identities := provider.EntraIdentity(), provider.Spec.BaseURL, h.providerIdentities
+	providerUID, providerGeneration := provider.UID, provider.Generation
+	revalidateBeforeSend := func(gateCtx context.Context) error {
+		liveTask, verifyErr := h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName)
+		if verifyErr != nil {
+			return verifyErr
+		}
+		if liveTask.Spec.Type != corev1alpha1.TaskTypeAI || liveTask.Status.Phase != corev1alpha1.TaskPhaseRunning {
+			return fiber.NewError(fiber.StatusForbidden, "the provider relay serves running tasks only")
+		}
+		liveProvider, providerErr := relayedProvider(gateCtx, reader, liveTask, slot)
+		if providerErr != nil {
+			return providerErr
+		}
+		if liveProvider.UID != providerUID || liveProvider.Generation != providerGeneration ||
+			liveProvider.EntraIdentity() != identity || liveProvider.Spec.BaseURL != baseURL {
+			return fiber.NewError(fiber.StatusConflict, "the Provider changed while preparing the request")
+		}
+		return nil
+	}
+	var gateErr error
 	httpClient, err := llm.NewBearerHTTPClientWithTransport(baseURL, func(ctx context.Context) (string, error) {
-		return identities.Token(ctx, identity, baseURL)
+		token, tokenErr := identities.Token(ctx, identity, baseURL)
+		if tokenErr != nil {
+			return "", tokenErr
+		}
+		if err := revalidateBeforeSend(ctx); err != nil {
+			gateErr = err
+			return "", err
+		}
+		return token, nil
 	}, h.providerRelayTransport)
 	if err != nil {
 		return fiber.NewError(fiber.StatusFailedDependency, "the Provider's baseURL cannot carry a token")
 	}
 
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Context()), providerRelayTimeout)
+	ctx, cancel := context.WithTimeout(c.Context(), providerRelayTimeout)
 	upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, providerproxy.Target(base, suffix, query).String(), bytes.NewReader(body))
 	if err != nil {
 		cancel()
 		return fiber.NewError(fiber.StatusBadRequest, "invalid relay request")
 	}
 	providerproxy.CopyRequestHeaders(upstream.Header, providerRelayHeader(c))
-	// Let the transport negotiate compression, so the byte limits apply to
-	// the decoded body and no Content-Encoding reaches the worker.
 	upstream.Header.Del("Accept-Encoding")
 	upstream.Header.Del("Content-Length")
 	upstream.Header.Del("Host")
@@ -145,6 +150,9 @@ func (h *InternalHandlers) RelayProviderRequest(c fiber.Ctx) error {
 	response, err := httpClient.Do(upstream)
 	if err != nil {
 		cancel()
+		if gateErr != nil {
+			return gateErr
+		}
 		var providerErr *llm.ProviderError
 		if errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusServiceUnavailable {
 			log.Info("provider relay could not obtain a token", "namespace", namespace, "task", taskName, "slot", slot, "provider", provider.Name)
@@ -153,9 +161,6 @@ func (h *InternalHandlers) RelayProviderRequest(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadGateway, "the Provider request failed")
 	}
 
-	// The transport decodes the gzip it asked for and removes the header. Any
-	// other encoding would reach the worker with its header removed, and the
-	// size bound would apply to the encoded bytes.
 	if encoding := response.Header.Get("Content-Encoding"); encoding != "" && !strings.EqualFold(encoding, "identity") {
 		_ = response.Body.Close()
 		cancel()
@@ -171,11 +176,7 @@ func (h *InternalHandlers) RelayProviderRequest(c fiber.Ctx) error {
 		}
 	}
 	c.Status(response.StatusCode)
-	released = true // the response body releases the slot
-	// fasthttp writes each read as a chunk and closes the body when the
-	// response is done, which returns the slot. The server's write timeout
-	// for this route ends a write to a worker that stopped reading, which
-	// the request deadline cannot interrupt.
+	released = true
 	c.Response().SetBodyStream(&relayResponseBody{
 		body: response.Body, remaining: providerRelayMaxResponseBytes,
 		finish: func(err error) {
@@ -190,11 +191,28 @@ func (h *InternalHandlers) RelayProviderRequest(c fiber.Ctx) error {
 	return nil
 }
 
-// relayResponseBody streams a Provider's answer to the worker. A read error,
-// or an answer over the size bound, is returned to fasthttp instead of a clean
-// end, so the chunked body is left unterminated and the worker reads it as a
-// failure rather than as a complete answer, such as a Responses stream that
-// lost its terminal event.
+func readBoundedRelayRequestBody(c fiber.Ctx) ([]byte, error) {
+	if c.Request().IsBodyStream() {
+		stream := c.Request().BodyStream()
+		if stream == nil {
+			return nil, fiber.NewError(fiber.StatusBadRequest, "invalid request body stream")
+		}
+		body, err := io.ReadAll(io.LimitReader(stream, providerRelayMaxRequestBytes+1))
+		if err != nil {
+			return nil, fiber.NewError(fiber.StatusBadRequest, "failed to read request body")
+		}
+		if len(body) > providerRelayMaxRequestBytes {
+			return nil, fiber.NewError(fiber.StatusRequestEntityTooLarge, "request body is too large")
+		}
+		return body, nil
+	}
+	body := c.Body()
+	if len(body) > providerRelayMaxRequestBytes {
+		return nil, fiber.NewError(fiber.StatusRequestEntityTooLarge, "request body is too large")
+	}
+	return body, nil
+}
+
 type relayResponseBody struct {
 	body      io.ReadCloser
 	remaining int64
@@ -224,17 +242,12 @@ func (b *relayResponseBody) Close() error {
 	return nil
 }
 
-// providerRelayRequest is a relay request that passed the caller, Task, path
-// and query checks.
 type providerRelayRequest struct {
 	namespace, taskName, slot string
 	task                      *corev1alpha1.Task
 	suffix, query             string
 }
 
-// providerRelayTarget checks who is calling and what for: a POST from the
-// current worker of a running type: ai Task, on an allowed Azure OpenAI path
-// with only an api-version query.
 func (h *InternalHandlers) providerRelayTarget(c fiber.Ctx) (providerRelayRequest, error) {
 	request := providerRelayRequest{
 		namespace: strings.Clone(strings.TrimSpace(c.Params("namespace"))),
@@ -254,8 +267,6 @@ func (h *InternalHandlers) providerRelayTarget(c fiber.Ctx) (providerRelayReques
 	if task.Spec.Type != corev1alpha1.TaskTypeAI {
 		return request, fiber.NewError(fiber.StatusForbidden, "the provider relay serves type: ai tasks only")
 	}
-	// The caller check also admits a worker that is still starting or
-	// finalizing; model calls belong to the running Task only.
 	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
 		return request, fiber.NewError(fiber.StatusForbidden, "the provider relay serves running tasks only")
 	}
@@ -280,8 +291,6 @@ func providerRelayPathAllowed(path string) bool {
 	return false
 }
 
-// providerRelayQuery admits only the api-version parameter the Azure OpenAI
-// SDK adds.
 func providerRelayQuery(raw string) (string, error) {
 	values, err := url.ParseQuery(raw)
 	if err != nil {
@@ -310,8 +319,6 @@ func providerRelayHeader(c fiber.Ctx) http.Header {
 	return header
 }
 
-// relayedProvider returns the Provider the Task's Job froze for slot, if it
-// is still the same object, keyless and Ready.
 func relayedProvider(ctx context.Context, reader client.Reader, task *corev1alpha1.Task, slot string) (*corev1alpha1.Provider, error) {
 	if reader == nil {
 		return nil, fiber.NewError(fiber.StatusServiceUnavailable, "provider relay is unavailable")

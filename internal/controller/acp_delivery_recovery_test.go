@@ -53,7 +53,6 @@ func TestACPDispatcherCurrentEpochRecoveryReusesTerminalProjection(t *testing.T)
 					t.Fatal(err)
 				}
 			} else {
-				// The durable record committed, but the Task status write was lost.
 				if err := fixture.kubeClient.Get(fixture.ctx, key, task); err != nil {
 					t.Fatal(err)
 				}

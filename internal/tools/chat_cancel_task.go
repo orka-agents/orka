@@ -16,7 +16,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// ChatCancelTaskTool cancels and deletes a task (chat version).
 type ChatCancelTaskTool struct{}
 
 func (t *ChatCancelTaskTool) Name() string { return cancelTaskToolName }

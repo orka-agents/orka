@@ -107,9 +107,7 @@ func TestExternalAPIRepositoryMonitorReferencedReads(t *testing.T) {
 				})
 				spec := monitorSpec
 				if reference.legacyRead {
-					// Legacy credentials are effective only when readCredentialRef is absent.
 					spec = strings.ReplaceAll(spec, "\"readCredentialRef\"", "\"gitSecretRef\"")
-					// Write workflows require the explicit read credential field.
 					spec = strings.ReplaceAll(spec, "\"issues\":{\"enabled\":true}", "\"issues\":{\"enabled\":false}")
 					spec = strings.ReplaceAll(spec, "\"repair\":{\"enabled\":true}", "\"repair\":{\"enabled\":false}")
 					permissions = slices.DeleteFunc(permissions, func(p authorizationv1.ResourceAttributes) bool {

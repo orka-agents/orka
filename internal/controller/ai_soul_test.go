@@ -173,7 +173,6 @@ func TestAISoulIntroductionAfterExecutionIsRejected(t *testing.T) {
 					t.Fatal("rejected introduction persisted a soul binding")
 				}
 
-				// Unconfigured legacy retries keep their original behavior.
 				agent.Spec.Soul = nil
 				prepared, err := r.prepareAISoul(ctx, stored, agent)
 				if err != nil || prepared != nil || stored.Status.SoulBinding != nil {
@@ -184,9 +183,6 @@ func TestAISoulIntroductionAfterExecutionIsRejected(t *testing.T) {
 	}
 }
 
-// A control-field edit such as spec.suspend advances the Task generation
-// without changing its execution inputs, so the binding must keep matching for
-// the next autonomous iteration. An input edit must not.
 func TestAISoulBindingSurvivesControlFieldEdits(t *testing.T) {
 	ctx := context.Background()
 	agent := &corev1alpha1.Agent{
@@ -234,8 +230,6 @@ func TestAISoulBindingSurvivesControlFieldEdits(t *testing.T) {
 		t.Fatal("a Job could launch with inputs the binding did not freeze")
 	}
 
-	// A binding recorded before the inputs digest existed keeps the exact
-	// generation check.
 	legacy := paused.DeepCopy()
 	legacy.Status.SoulBinding = task.Status.SoulBinding.DeepCopy()
 	legacy.Status.SoulBinding.InputsDigest = ""
@@ -244,8 +238,6 @@ func TestAISoulBindingSurvivesControlFieldEdits(t *testing.T) {
 	}
 }
 
-// A pause that lands after an autonomous iteration finished, while the next
-// one waits in Pending, must stop it before a Job starts.
 func TestAutonomousPauseBetweenIterationsStopsDispatch(t *testing.T) {
 	ctx := context.Background()
 	agent := &corev1alpha1.Agent{
@@ -283,9 +275,6 @@ func TestAutonomousPauseBetweenIterationsStopsDispatch(t *testing.T) {
 	}
 }
 
-// A memory consolidation run sends none of its Agent's prompts, so the
-// Agent's soul is neither read nor bound: a soul whose ConfigMap is missing
-// cannot block the run.
 func TestMemoryConsolidationRunNeverBindsTheAgentsSoul(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {

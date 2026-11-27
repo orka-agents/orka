@@ -84,7 +84,6 @@ export const agentSpecSchema = z.object({
     approvalRequiredTools: z.array(z.string()).optional(),
   }).optional(),
   runtime: agentRuntimeSchema.optional(),
-  // Kept so editing an Agent never drops its identity binding.
   identity: z.object({
     entra: z.object({ agentIdentityID: z.string() }).strict().optional(),
   }).strict().optional(),
@@ -150,7 +149,6 @@ export const agentSchema = z.object({
   status: agentStatusSchema.optional(),
 })
 
-/** The text an Agent's spec.systemPrompt.configMapRef selects. */
 export const agentSystemPromptSchema = z.object({
   configMapRef: z.object({ name: z.string(), key: z.string() }),
   content: z.string(),

@@ -40,8 +40,6 @@ func TestInternalCallerAuthorizerVerifyNamespace(t *testing.T) {
 		{name: "explicit namespace mismatch", userInfo: &UserInfo{Namespace: "other", Username: "system:serviceaccount:other:worker"}, wantStatus: http.StatusForbidden},
 		{name: "service account username mismatch", userInfo: &UserInfo{Username: "system:serviceaccount:other:worker"}, wantStatus: http.StatusForbidden},
 		{name: "service account namespace match", userInfo: &UserInfo{Username: "system:serviceaccount:default:worker"}, wantStatus: http.StatusNoContent},
-		// Fail closed: a caller without a verifiable namespace identity must
-		// not pass for arbitrary namespaces.
 		{name: "non service account without namespace is denied", userInfo: &UserInfo{Username: "admin"}, wantStatus: http.StatusForbidden},
 		{name: "explicit namespace match without service account username", userInfo: &UserInfo{Username: "admin", Namespace: "default"}, wantStatus: http.StatusNoContent},
 	}
@@ -127,9 +125,6 @@ func TestSubmitResultRequiresCurrentTaskWorkerWithKubernetesClient(t *testing.T)
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 }
 
-// A result is accepted only from a token bound to the live worker Pod of the
-// addressed Task's current Job: not from another Task's worker Pod in the same
-// namespace and ServiceAccount, and not from a token naming a stale Pod UID.
 func TestSubmitResultAcceptsOnlyTheTasksOwnWorkerPod(t *testing.T) {
 	scheme := internalCallerAuthScheme(t)
 	taskA := internalCallerAuthTask()

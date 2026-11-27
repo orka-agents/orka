@@ -33,17 +33,12 @@ const (
 	closeGoingAway    = websocket.StatusGoingAway
 	closeSlowClient   = websocket.StatusTryAgainLater
 
-	maxFrameBytes = 4 << 20
-	// maxRequestIDBytes bounds a request's id, which its response echoes.
-	maxRequestIDBytes = 256
-	// maxQueuedBytes bounds the messages waiting for one slow client by size,
-	// as SendQueue bounds them by count.
-	maxQueuedBytes          = 64 << 20
-	maxClientIDLength       = 256
-	maxURILength            = 2048
-	maxWatchesPerConnection = 64
-	// maxInitialSubscriptions bounds the distinct channels an initialize or
-	// reconnect may name. Each is snapshotted under the user's hub lock.
+	maxFrameBytes               = 4 << 20
+	maxRequestIDBytes           = 256
+	maxQueuedBytes              = 64 << 20
+	maxClientIDLength           = 256
+	maxURILength                = 2048
+	maxWatchesPerConnection     = 64
 	maxInitialSubscriptions     = 256
 	defaultListLimit            = 100
 	maxListLimit                = 1000
@@ -70,8 +65,6 @@ func rpcErr(code int32, format string, args ...any) *rpcError {
 	return &rpcError{Code: code, Message: fmt.Sprintf(format, args...)}
 }
 
-// reconnectReplay and reconnectSnapshot encode the two reconnect results
-// with their type discriminator, which the generated variants omit.
 type reconnectReplay struct {
 	Type    string                    `json:"type"`
 	Actions []ahptypes.ActionEnvelope `json:"actions"`
@@ -83,7 +76,6 @@ type reconnectSnapshot struct {
 	Snapshots []ahptypes.Snapshot `json:"snapshots"`
 }
 
-// inbound is a JSON-RPC request or notification. IDs are echoed as sent.
 type inbound struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
@@ -100,20 +92,15 @@ type outbound struct {
 	Error   *rpcError       `json:"error,omitempty"`
 }
 
-// conn is one client connection. Commands run on the read loop in order;
-// writes go through a bounded queue drained by one writer.
 type conn struct {
 	host      *Host
 	principal Principal
 	ws        *websocket.Conn
 	send      chan frame
-	// queued is the size of the messages in send.
 	queued    atomic.Int64
 	done      chan struct{}
 	closeOnce sync.Once
 
-	// handled runs backends' side effects of client actions one at a time, in
-	// the order the client sent them, off the read loop.
 	handled chan func()
 
 	mu          sync.Mutex
@@ -122,8 +109,7 @@ type conn struct {
 	version     string
 	dialect     string
 	subs        map[string]bool
-	// watches are the connection's resource watches, by channel.
-	watches map[string]context.CancelFunc
+	watches     map[string]context.CancelFunc
 }
 
 func newConn(host *Host, principal Principal, ws *websocket.Conn) *conn {
@@ -139,8 +125,6 @@ func newConn(host *Host, principal Principal, ws *websocket.Conn) *conn {
 	}
 }
 
-// pingLoop keeps an idle connection alive through proxies that close quiet
-// ones, and closes a connection whose client stopped answering.
 func (c *conn) pingLoop(ctx context.Context) {
 	interval := c.host.cfg.PingInterval
 	if interval <= 0 {
@@ -166,7 +150,6 @@ func (c *conn) pingLoop(ctx context.Context) {
 	}
 }
 
-// run serves the connection until it closes.
 func (c *conn) run(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -177,8 +160,6 @@ func (c *conn) run(ctx context.Context) {
 	}
 	defer c.host.unregister(c)
 	defer c.releaseWatches()
-	// A revocation that landed between the door's check and registration
-	// found no connection to close; check again now that this one is findable.
 	if err := c.host.cfg.Tokens.Recheck(ctx, c.principal); err != nil {
 		_ = c.ws.Close(closeTokenInvalid, "the connection token is no longer valid")
 		return
@@ -188,10 +169,6 @@ func (c *conn) run(ctx context.Context) {
 	expiry := time.AfterFunc(expires, func() { c.closeWith(closeTokenInvalid, "the connection token expired") })
 	defer expiry.Stop()
 
-	// Commands, writes and pings stop as soon as the connection closes. The
-	// read does not: cancelling it would drop the connection before the close
-	// frame, which tells the client why, is written. It ends with the close
-	// handshake.
 	work, stopWork := context.WithCancel(ctx)
 	defer stopWork()
 	go func() {
@@ -201,8 +178,6 @@ func (c *conn) run(ctx context.Context) {
 	go c.writeLoop(work)
 	go c.handleLoop()
 	go c.pingLoop(work)
-	// Only the read loop below queues actions; closing after it stops lets
-	// the worker drain them.
 	defer close(c.handled)
 	for {
 		kind, data, err := c.ws.Read(ctx)
@@ -212,7 +187,6 @@ func (c *conn) run(ctx context.Context) {
 		}
 		select {
 		case <-c.done:
-			// A closing connection handles nothing more.
 			return
 		default:
 		}
@@ -229,7 +203,6 @@ func (c *conn) run(ctx context.Context) {
 	}
 }
 
-// frame is a queued message, or a close that runs after the messages before it.
 type frame struct {
 	data   []byte
 	close  bool
@@ -237,9 +210,6 @@ type frame struct {
 	reason string
 }
 
-// handleLoop runs admitted client actions' side effects in order, including
-// the ones still queued when the connection closes. The read loop is the only
-// producer and closes the queue when it stops.
 func (c *conn) handleLoop() {
 	for handle := range c.handled {
 		handle()
@@ -268,8 +238,6 @@ func (c *conn) writeLoop(ctx context.Context) {
 	}
 }
 
-// closeAfterWrites closes the connection once the messages already queued,
-// such as the error that explains the close, have been written.
 func (c *conn) closeAfterWrites(code websocket.StatusCode, reason string) {
 	select {
 	case <-c.done:
@@ -318,8 +286,6 @@ func (c *conn) state() (bool, string, string) {
 	return c.initialized, c.clientID, c.version
 }
 
-// deliverAction sends an envelope if the connection subscribes to its
-// channel and knows its action type. It must not block.
 func (c *conn) deliverAction(envelope ahptypes.ActionEnvelope) {
 	c.mu.Lock()
 	ok := c.initialized && c.subs[envelope.Channel]
@@ -349,7 +315,6 @@ func (c *conn) handle(ctx context.Context, data []byte) {
 		c.write(outbound{ID: json.RawMessage("null"), Error: rpcErr(ahptypes.ErrorCodeParseError, "invalid JSON-RPC message")})
 		return
 	}
-	// Revocation takes effect on the next command, not only on the next sweep.
 	if err := c.host.cfg.Tokens.Recheck(ctx, c.principal); err != nil {
 		c.closeWith(closeTokenInvalid, "the connection token is no longer valid")
 		return
@@ -382,8 +347,6 @@ func (c *conn) handle(ctx context.Context, data []byte) {
 	c.respond(msg.ID, result)
 }
 
-// responded is returned by a command that queued its own response, in order
-// with the actions around it.
 type responded struct{}
 
 func (c *conn) respond(id json.RawMessage, result any) {
@@ -416,15 +379,12 @@ func (c *conn) dispatch(ctx context.Context, msg inbound) (any, error) {
 	case "disposeSession":
 		return nil, c.disposeSession(ctx, msg.Params)
 	case "authenticate":
-		// No agent advertises a protected resource yet. The params are never
-		// logged: they carry the client's credential.
 		return nil, rpcErr(ahptypes.ErrorCodeInvalidParams, "the resource is not advertised by any agent")
 	case "createTerminal":
 		return nil, c.createTerminal(ctx, msg.Params)
 	case "disposeTerminal":
 		return nil, c.disposeTerminal(ctx, msg.Params)
 	case "completions":
-		// No agent offers completions; an empty list keeps clients' input working.
 		return ahptypes.CompletionsResult{Items: []ahptypes.CompletionItem{}}, nil
 	case "resourceRead":
 		return c.resourceRead(ctx, msg.Params)
@@ -442,8 +402,6 @@ func (c *conn) dispatch(ctx context.Context, msg inbound) (any, error) {
 	}
 }
 
-// extension serves a host-specific extensions/ command through the backend
-// that offers it.
 func (c *conn) extension(ctx context.Context, method string, raw json.RawMessage) (any, error) {
 	result, err := c.host.cfg.Backends.extension(ctx, c.principal, method, raw, emitter{host: c.host, principal: c.principal})
 	if errors.Is(err, ErrUnknownExtension) {
@@ -455,9 +413,6 @@ func (c *conn) extension(ctx context.Context, method string, raw json.RawMessage
 	return result, err
 }
 
-// resourceRead serves content a session's channel advertises, such as the
-// before and after files of a changeset. The host reads nothing else: no
-// path on the server is reachable through it.
 func (c *conn) resourceRead(ctx context.Context, raw json.RawMessage) (any, error) {
 	var params ahptypes.ResourceReadParams
 	if err := decodeParams(raw, &params); err != nil {
@@ -468,8 +423,6 @@ func (c *conn) resourceRead(ctx context.Context, raw json.RawMessage) (any, erro
 		return nil, notFound
 	}
 	if params.Channel == rootChannel {
-		// The protocol scopes resourceRead to the root channel; backends find
-		// the session that owns the resource, within this user's state only.
 		result, err := c.host.cfg.Backends.readRootResource(ctx, c.principal, params.Uri)
 		if errors.Is(err, ErrResourceNotFound) {
 			return nil, notFound
@@ -557,10 +510,6 @@ func validClientID(id string) bool {
 	return true
 }
 
-// distinctSubscriptions returns channels without repeats, in their first
-// order, and refuses more than maxInitialSubscriptions distinct channels, so one
-// frame cannot make the host snapshot a channel over and over under the hub
-// lock.
 func distinctSubscriptions(channels []string) ([]string, error) {
 	seen := make(map[string]bool, min(len(channels), maxInitialSubscriptions))
 	distinct := make([]string, 0, min(len(channels), maxInitialSubscriptions))
@@ -649,8 +598,6 @@ func (c *conn) initialize(ctx context.Context, id, raw json.RawMessage) (any, er
 	return responded{}, nil
 }
 
-// activate marks the connection initialized with its subscriptions. Callers
-// hold the hub lock, so delivery starts exactly after the baseline they send.
 func (c *conn) activate(clientID, version, dialect string, channels []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -672,10 +619,6 @@ func (c *conn) unsubscribeFrom(channel string) {
 	c.mu.Unlock()
 }
 
-// reconnect restores a client's negotiated state and replays what it missed,
-// or sends fresh snapshots when the journal no longer covers the gap. A
-// client the server does not know, or one that belongs to another user, must
-// initialize again; it never receives an empty replay.
 func (c *conn) reconnect(ctx context.Context, id, raw json.RawMessage) (any, error) {
 	var params ahptypes.ReconnectParams
 	if err := decodeParams(raw, &params); err != nil {
@@ -712,9 +655,6 @@ func (c *conn) reconnect(ctx context.Context, id, raw json.RawMessage) (any, err
 	return responded{}, nil
 }
 
-// reconnectResult builds the replay, or the snapshots when the journal no
-// longer covers the gap, for the channels the user may still see. Callers
-// hold the hub lock at sequence seq.
 func (c *conn) reconnectResult(
 	ctx context.Context,
 	version string,
@@ -741,9 +681,6 @@ func (c *conn) reconnectResult(
 	if err != nil {
 		return nil, nil, err
 	}
-	// Root notifications, such as a session added, are not journaled, so a
-	// replay cannot carry one the client may have missed: it gets snapshots,
-	// the protocol's durable recovery path, and lists its sessions again.
 	if slices.Contains(allowed, rootChannel) && c.host.hub(c.principal.UserKey).rootNotified >= params.LastSeenServerSeq {
 		complete = false
 	}
@@ -823,10 +760,6 @@ func (c *conn) listSessions(ctx context.Context, raw json.RawMessage) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	// Sessions come most recently modified first, then by URI. A cursor names
-	// the last session a page held by that order, not its position: sessions
-	// created, disposed or modified between pages move the others, and a page
-	// resumes after the named one without repeating or skipping any.
 	start := 0
 	if params.Cursor != nil {
 		var ok bool
@@ -853,15 +786,11 @@ func (c *conn) listSessions(ctx context.Context, raw json.RawMessage) (any, erro
 
 const sessionCursorPrefix = "s1:"
 
-// sessionCursor names session as the last a page held.
 func sessionCursor(session store.AHPSession) string {
 	key := sessionCursorPrefix + session.ModifiedAt.UTC().Format(time.RFC3339Nano) + "\x00" + session.Session
 	return base64.RawURLEncoding.EncodeToString([]byte(key))
 }
 
-// sessionCursorStart returns where the page after the cursor's session starts
-// in sessions, ordered as the store lists them. A cursor of the earlier
-// numeric form is an offset.
 func sessionCursorStart(cursor string, sessions []store.AHPSession) (int, bool) {
 	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
 	if err != nil {
@@ -923,9 +852,6 @@ func (c *conn) createSession(ctx context.Context, raw json.RawMessage) (err erro
 		}
 		return err
 	}
-	// Until the session is ready, a failure takes back what was created, so
-	// the URI can be created again: the catalog record, the stored channels
-	// and the backend's session.
 	var stored []string
 	cataloged, committed := false, false
 	defer func() {
@@ -961,7 +887,6 @@ func (c *conn) createSession(ctx context.Context, raw json.RawMessage) (err erro
 		}
 		channels[changeset] = storedChannel{Session: session, State: ahptypes.SnapshotState{Changeset: &changesetState}}
 	}
-	// Subscribe before the channels exist so no action on them is missed.
 	c.subscribeTo(session)
 	defer func() {
 		if err != nil {
@@ -999,10 +924,6 @@ func (c *conn) createSession(ctx context.Context, raw json.RawMessage) (err erro
 	return nil
 }
 
-// freeSessionURI makes sure no session or other channel uses a URI claimed
-// for a new session. A session's channels without its catalog record are what
-// a failed creation could not take back, since a session is cataloged before
-// it is ready and loses the record last: they are cleared for the new one.
 func (c *conn) freeSessionURI(ctx context.Context, session string) error {
 	if _, err := c.host.cfg.Store.GetAHPSession(ctx, c.principal.UserKey, session); err == nil {
 		return rpcErr(ahptypes.ErrorCodeSessionAlreadyExists, "the session already exists")
@@ -1016,18 +937,12 @@ func (c *conn) freeSessionURI(ctx context.Context, session string) error {
 	if err != nil {
 		return err
 	}
-	// Another channel, such as a terminal, may already use the URI.
 	if stored.State.Session == nil {
 		return rpcErr(ahptypes.ErrorCodeAlreadyExists, "the URI is already used by another channel")
 	}
 	return c.host.forgetSession(ctx, c.principal.UserKey, session, sessionChannels(session, stored))
 }
 
-// takeBackSession removes what a failed createSession made: the stored
-// channels, the catalog record when it was written and the backend's session.
-// What a store failure leaves is found again: channels with the catalog
-// record keep the session listed for disposal, and channels without it are
-// cleared by the next creation of the URI.
 func (c *conn) takeBackSession(ctx context.Context, backend SessionBackend, session string, cataloged bool, stored []string) {
 	if cataloged || len(stored) > 0 {
 		_ = c.host.forgetSession(ctx, c.principal.UserKey, session, stored)
@@ -1035,8 +950,6 @@ func (c *conn) takeBackSession(ctx context.Context, backend SessionBackend, sess
 	_ = backend.DisposeSession(ctx, c.principal, session)
 }
 
-// sessionChannels returns a session's channels as its stored state lists them:
-// the session's own, its chats and its changesets.
 func sessionChannels(session string, stored storedChannel) []string {
 	channels := []string{session}
 	if stored.State.Session == nil {
@@ -1053,8 +966,6 @@ func sessionChannels(session string, stored storedChannel) []string {
 	return channels
 }
 
-// hostChannelScheme reports a URI on a scheme the host routes to terminals or
-// resource watches, which therefore cannot name a session.
 func hostChannelScheme(uri string) bool {
 	return strings.HasPrefix(uri, terminalScheme) || strings.HasPrefix(uri, resourceWatchScheme)
 }
@@ -1072,9 +983,6 @@ func (c *conn) disposeSession(ctx context.Context, raw json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	// The session's chats and changesets are found from its state, read before
-	// anything is disposed of: a read that fails leaves the session to be
-	// disposed of again, rather than its channels behind.
 	channels := []string{session}
 	stored, _, err := c.host.readChannel(ctx, c.principal.UserKey, session)
 	if err != nil && !errors.Is(err, errUnknownChannel) {
@@ -1096,9 +1004,6 @@ func (c *conn) disposeSession(ctx context.Context, raw json.RawMessage) error {
 	return nil
 }
 
-// dispatchAction validates a client action, lets its session's backend
-// authorize it as the operation it causes, then applies and journals it with
-// its origin. A rejected action is echoed to this client with a reason.
 func (c *conn) dispatchAction(ctx context.Context, raw json.RawMessage) {
 	var params struct {
 		Channel   string          `json:"channel"`
@@ -1120,7 +1025,6 @@ func (c *conn) dispatchAction(ctx context.Context, raw json.RawMessage) {
 			c.write(outbound{Method: methodAction, Params: envelope})
 			return
 		}
-		// An undecodable action is echoed as the client sent it.
 		c.write(outbound{Method: methodAction, Params: struct {
 			Channel         string                 `json:"channel"`
 			Action          json.RawMessage        `json:"action"`
@@ -1177,15 +1081,9 @@ func (c *conn) dispatchAction(ctx context.Context, raw json.RawMessage) {
 	handle := func() {
 		backend.HandleClientAction(handleCtx, principal, params.Channel, action, emitter{host: c.host, principal: principal})
 	}
-	// The action was admitted and applied: its side effect runs even if the
-	// connection closes meanwhile.
 	c.handled <- handle
 }
 
-// updateActiveSessions journals the user's session count on the root channel.
-// It runs once a session is created or disposed of, which a failure here must
-// not report as failed: the count is logged instead, and the next session
-// created or disposed of counts again.
 func (h *Host) updateActiveSessions(ctx context.Context, principal Principal) {
 	sessions, err := h.cfg.Store.ListAHPSessions(ctx, principal.UserKey)
 	if err == nil {
@@ -1199,8 +1097,6 @@ func (h *Host) updateActiveSessions(ctx context.Context, principal Principal) {
 	}
 }
 
-// detectDialect picks the per-client translation layer. Only the default
-// dialect exists so far; the value is persisted so reconnects keep it.
 func detectDialect(info *ahptypes.Implementation) string {
 	_ = info
 	return defaultDialect

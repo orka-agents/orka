@@ -15,14 +15,12 @@ import (
 	"github.com/orka-agents/orka/internal/cli/client"
 )
 
-// Verbosity levels for the tracker.
 const (
 	VerbosityDefault = 0
 	VerbosityV       = 1
 	VerbosityVV      = 2
 )
 
-// Tool names used in tracker event handling.
 const (
 	toolCheckTaskProgress = "check_task_progress"
 	toolWaitForTask       = "wait_for_task"
@@ -32,7 +30,6 @@ const (
 	statusDone            = "done"
 )
 
-// agentEntry tracks one delegated sub-agent.
 type agentEntry struct {
 	name       string
 	taskName   string
@@ -45,7 +42,6 @@ type agentEntry struct {
 	result     string
 }
 
-// tracker manages the live subagent status panel.
 type tracker struct {
 	mu        sync.Mutex
 	agents    []*agentEntry
@@ -56,7 +52,6 @@ type tracker struct {
 	stopCh    chan struct{}
 	stopped   bool
 
-	// styles
 	spinnerStyle lipgloss.Style
 	nameStyle    lipgloss.Style
 	successStyle lipgloss.Style
@@ -67,7 +62,6 @@ type tracker struct {
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// newTracker creates a new agent tracker.
 func newTracker(w io.Writer, verbosity int, isTTY bool) *tracker {
 	t := &tracker{
 		agents:       make([]*agentEntry, 0),
@@ -85,7 +79,6 @@ func newTracker(w io.Writer, verbosity int, isTTY bool) *tracker {
 	return t
 }
 
-// startSpinner begins the spinner animation goroutine.
 func (t *tracker) startSpinner() {
 	if !t.isTTY {
 		return
@@ -116,14 +109,12 @@ func (t *tracker) startSpinner() {
 	}()
 }
 
-// stop stops the spinner goroutine.
 func (t *tracker) stop() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if !t.stopped {
 		t.stopped = true
 		close(t.stopCh)
-		// Mark remaining agents as done (stream completed normally)
 		for _, a := range t.agents {
 			if !a.done {
 				a.done = true
@@ -131,7 +122,6 @@ func (t *tracker) stop() {
 				a.status = statusDone
 			}
 		}
-		// Clear spinner lines and render final state
 		if t.isTTY && len(t.agents) > 0 {
 			t.clearLines(len(t.agents))
 			t.renderFinal()
@@ -139,7 +129,6 @@ func (t *tracker) stop() {
 	}
 }
 
-// handleEvent processes SSE events for agent tracking.
 func (t *tracker) handleEvent(evt client.SSEEvent) {
 	var data client.SSEEventData
 	if err := json.Unmarshal([]byte(evt.Data), &data); err != nil {
@@ -152,7 +141,6 @@ func (t *tracker) handleEvent(evt client.SSEEvent) {
 		case toolDelegateTask, toolCreateAgentTask:
 			t.addAgent(data)
 		case toolCheckTaskProgress, toolWaitForTask:
-			// Show that we're polling a task
 			t.updateAgentStatus(data, "checking…")
 		}
 		if t.verbosity >= VerbosityVV {
@@ -185,18 +173,15 @@ func (t *tracker) handleEvent(evt client.SSEEvent) {
 	}
 }
 
-// addAgent adds a new agent to the tracker.
 func (t *tracker) addAgent(data client.SSEEventData) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// Parse agent name from args
 	var args map[string]any
 	agentName := cliTaskTypeAgent
 	taskName := ""
 	prompt := ""
 	if err := json.Unmarshal(data.Args, &args); err == nil {
-		// delegate_task uses "agent", create_agent_task uses "agentRef"
 		if name, ok := args[cliTaskTypeAgent].(string); ok {
 			agentName = name
 		} else if name, ok := args["agentRef"].(string); ok {
@@ -224,9 +209,7 @@ func (t *tracker) addAgent(data client.SSEEventData) {
 	t.agents = append(t.agents, entry)
 
 	if t.isTTY {
-		// Will be rendered by spinner
 	} else {
-		// Static line for non-TTY
 		line := fmt.Sprintf("├─ ◦ %s", agentName)
 		if t.verbosity >= VerbosityV && prompt != "" {
 			line += fmt.Sprintf("  %s", prompt)
@@ -235,10 +218,6 @@ func (t *tracker) addAgent(data client.SSEEventData) {
 	}
 }
 
-// recordCreatedTaskName stores the task name a delegate_task or
-// create_agent_task result reports. delegate_task always generates the child
-// name, so later progress and wait results can only be matched to the agent by
-// the name returned here.
 func (t *tracker) recordCreatedTaskName(data client.SSEEventData) {
 	var result struct {
 		TaskName string `json:"taskName"`
@@ -269,8 +248,6 @@ func (t *tracker) recordCreatedTaskName(data client.SSEEventData) {
 			target = a
 			break
 		}
-		// Without call IDs, the chat loop runs one tool call at a time, so the
-		// latest unnamed agent belongs to this result.
 		if data.ID == "" && a.taskName == "" {
 			target = a
 		}
@@ -280,10 +257,6 @@ func (t *tracker) recordCreatedTaskName(data client.SSEEventData) {
 	}
 }
 
-// completeAgents applies the task phases a wait tool reported. Agents the
-// result does not report as terminal stay pending, so a later cancellation is
-// still recorded. A failed tool call finishes nothing; only a successful result
-// with no readable phase completes every pending agent, as before.
 func (t *tracker) completeAgents(data client.SSEEventData) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -305,7 +278,7 @@ func (t *tracker) completeAgents(data client.SSEEventData) {
 	for _, a := range t.agents {
 		if !a.done {
 			a.done = true
-			a.success = true // The result reported no phase for this agent.
+			a.success = true
 			a.status = statusDone
 			elapsed := time.Since(a.startTime).Round(time.Second)
 
@@ -322,8 +295,6 @@ func (t *tracker) completeAgents(data client.SSEEventData) {
 	}
 }
 
-// allAgentsDoneLocked reports whether every tracked agent is finished. The
-// caller must hold t.mu.
 func (t *tracker) allAgentsDoneLocked() bool {
 	for _, a := range t.agents {
 		if !a.done {
@@ -333,7 +304,6 @@ func (t *tracker) allAgentsDoneLocked() bool {
 	return true
 }
 
-// updateAgentStatus updates the status text for a running agent.
 func (t *tracker) updateAgentStatus(data client.SSEEventData, status string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -350,7 +320,6 @@ func (t *tracker) updateAgentStatus(data client.SSEEventData, status string) {
 	}
 }
 
-// updateAgentFromProgress updates agent status from check_task_progress result.
 func (t *tracker) updateAgentFromProgress(data client.SSEEventData) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -360,14 +329,11 @@ func (t *tracker) updateAgentFromProgress(data client.SSEEventData) {
 	}
 }
 
-// reportedTaskPhase is one task phase found in a tool result.
 type reportedTaskPhase struct {
 	task  string
 	phase string
 }
 
-// toolResultFailed reports whether a tool result is a chat tool error
-// ({"success":false,...}), such as rejected arguments.
 func toolResultFailed(raw json.RawMessage) bool {
 	var envelope struct {
 		Success *bool `json:"success"`
@@ -375,9 +341,6 @@ func toolResultFailed(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &envelope) == nil && envelope.Success != nil && !*envelope.Success
 }
 
-// taskPhasesFromResult extracts task phases from a check_task_progress,
-// wait_for_task or wait_for_tasks result. Chat tools wrap their payload as
-// {"success":true,"data":{...}}; unwrapped payloads are accepted as well.
 func taskPhasesFromResult(raw json.RawMessage) []reportedTaskPhase {
 	var envelope struct {
 		Data json.RawMessage `json:"data"`
@@ -409,8 +372,6 @@ func taskPhasesFromResult(raw json.RawMessage) []reportedTaskPhase {
 	return phases
 }
 
-// applyTaskPhaseLocked records a reported phase on the first pending agent for
-// the task. The caller must hold t.mu.
 func (t *tracker) applyTaskPhaseLocked(taskName, phase string) {
 	for _, a := range t.agents {
 		if !a.done && (a.taskName == taskName || taskName == "") {
@@ -420,14 +381,10 @@ func (t *tracker) applyTaskPhaseLocked(taskName, phase string) {
 				a.done = true
 				a.success = true
 			case "Failed", "Cancelled":
-				// A cancelled task is terminal but not successful; leaving it
-				// pending would let stop/completeAgents report it as success.
 				a.done = true
 				a.success = false
 			}
 			if a.done && !t.isTTY {
-				// completeAgents and stop skip finished agents in non-TTY
-				// output, so print the terminal outcome now.
 				icon := "✓"
 				if !a.success {
 					icon = "✗"
@@ -439,7 +396,6 @@ func (t *tracker) applyTaskPhaseLocked(taskName, phase string) {
 	}
 }
 
-// completeAgentByName marks an agent as done when its output is fetched.
 func (t *tracker) completeAgentByName(data client.SSEEventData) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -458,13 +414,11 @@ func (t *tracker) completeAgentByName(data client.SSEEventData) {
 	}
 }
 
-// render draws the current state (called by spinner goroutine, must hold mu).
 func (t *tracker) render() {
 	if len(t.agents) == 0 {
 		return
 	}
 
-	// Move cursor up to overwrite previous render
 	if t.spinIdx > 0 || len(t.agents) > 0 {
 		for range t.agents {
 			fmt.Fprint(t.w, "\033[A\033[2K") //nolint:errcheck
@@ -497,7 +451,6 @@ func (t *tracker) render() {
 	}
 }
 
-// renderFinal draws the completed state.
 func (t *tracker) renderFinal() {
 	for _, a := range t.agents {
 		var icon string
@@ -515,14 +468,12 @@ func (t *tracker) renderFinal() {
 	}
 }
 
-// clearLines clears n lines above the cursor.
 func (t *tracker) clearLines(n int) {
 	for range n {
 		fmt.Fprint(t.w, "\033[A\033[2K") //nolint:errcheck
 	}
 }
 
-// isTTYCheck returns true if the given writer is a TTY.
 func isTTYCheck(w io.Writer) bool {
 	if f, ok := w.(*os.File); ok {
 		fi, err := f.Stat()

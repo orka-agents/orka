@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016 # acp_report_update arguments are jq programs.
-# Source-only acceptance of the packaged candidate in the bootstrap's own Kind
-# cluster. The caller verifies candidate provenance before invoking this file.
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   echo "error: source scripts/lib/release-chart-acceptance.sh; do not execute it directly" >&2
@@ -17,7 +15,6 @@ live_acp_release_chart_kubectl() {
   kubectl --context "${LIVE_ACP_CONTEXT}" "$@"
 }
 
-# Values contain references to operator-created Secrets, never key material.
 live_acp_release_chart_values() {
   python3 - "$1" "$2" "$3" <<'PY'
 import base64
@@ -75,8 +72,6 @@ output.write_text(json.dumps(values) + "\n")
 PY
 }
 
-# The packaged chart serves admission through orka-webhook, not the Kustomize
-# installation's orka-admission Service.
 live_acp_release_chart_tls() (
   set -Eeuo pipefail
   umask 077
@@ -148,7 +143,6 @@ live_acp_release_chart_assert_recovery() {
 }
 
 live_acp_release_chart_assert_mode_rejection() {
-  # A transport error or a missing Secret is not an immutable-mode rejection.
   [[ "$4" != "0" ]] || return 1
   grep -Eq 'controller\.mode must be harness-v2' "$3" || return 1
   jq -e -s 'length == 2 and .[0] == .[1]
@@ -209,8 +203,6 @@ _live_acp_release_chart_start_api() {
   local deadline=$((SECONDS + 30))
   _live_acp_release_chart_stop_api
   : >"${chart_work_dir}/api-forward.log"
-  # Keep the PID attached to kubectl itself so cleanup cannot orphan a child
-  # port-forward process behind a background shell function.
   (exec kubectl --context "${LIVE_ACP_CONTEXT}" -n orka-system port-forward --address=127.0.0.1 \
     deployment/orka-controller :8080) >"${chart_work_dir}/api-forward.log" 2>&1 &
   chart_api_pid=$!
@@ -240,8 +232,6 @@ _live_acp_release_chart_stable_state() {
   helm --kube-context "${LIVE_ACP_CONTEXT}" -n orka-system status orka -o json |
     jq '{revision:.version, status:.info.status}' >"${chart_work_dir}/release-state.json" || return 1
   helm --kube-context "${LIVE_ACP_CONTEXT}" -n orka-system get manifest orka >"${chart_work_dir}/release-manifest.yaml" || return 1
-  # A context default fills omitted namespaces without rejecting explicit ones.
-  # Keep this override private to the lookup and omit credentials from it.
   live_acp_release_chart_kubectl config view --minify -o json |
     jq '{apiVersion, kind, contexts: [.contexts[] | .context.namespace = "orka-system"]}' \
       >"${chart_work_dir}/release-context.json" || return 1
@@ -321,8 +311,6 @@ _live_acp_release_chart_acceptance() (
   done
   acp_report_update '.chart.install = true' || return 1
 
-  # Exercise the chart-configured default worker and the authenticated result
-  # API. No explicit Task image can hide a broken worker image value.
   marker="orka-release-chart-$(openssl rand -hex 16)"
   jq -n --arg task "${task}" --arg marker "${marker}" '{apiVersion:"core.orka.ai/v1alpha1",kind:"Task",
     metadata:{name:$task,namespace:"orka-system"},spec:{type:"container",command:["/bin/sh","-c","printf %s \"$1\"","--",$marker],
@@ -347,8 +335,6 @@ _live_acp_release_chart_acceptance() (
     "${chart_work_dir}/before.json" >/dev/null || return 1
   acp_report_update '.chart.containerTask = true' || return 1
 
-  # Remove the completed worker and its logs before replacement. A missing
-  # SQLite result can no longer be reconstructed from the old Pod output.
   job="$(jq -er '.task.jobName' "${chart_work_dir}/before.json")" || return 1
   live_acp_release_chart_kubectl -n orka-system delete job "${job}" --cascade=foreground --wait=true --timeout=60s >/dev/null || return 1
   live_acp_release_chart_kubectl -n orka-system get pods -l "orka.ai/task=${task}" -o json |
@@ -392,8 +378,6 @@ _live_acp_release_chart_acceptance() (
   _live_acp_release_chart_result "${task}" "${marker}" || return 1
   acp_report_update '.chart.oppositeModeRejected = true' || return 1
 
-  # The bootstrap retains the chart for canonical ACP validation and owns its
-  # cluster cleanup. Retire only this helper's deterministic Task here.
   live_acp_release_chart_kubectl -n orka-system delete task "${task}" --wait=true --timeout=60s >/dev/null
 )
 

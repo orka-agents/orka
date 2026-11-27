@@ -67,9 +67,6 @@ func TestMCPApprovalAuthoritativeEpochLossStopsBeforeExecution(t *testing.T) {
 				require.Equal(t, store.ExternalEffectInFlight, before.State)
 			}
 
-			// Change the authoritative epoch and holder while retaining the old
-			// broker credentials and live prompt registration. The actual epoch
-			// guard, rather than a prompt-watcher cancellation, must stop the call.
 			advanceMCPApprovalEpochForRecovery(t, f)
 			require.NoError(t, f.broker.Prompts.AuthorizeACPMCPPrompt(f.ctx, f.request))
 			if !claimed {
@@ -78,9 +75,6 @@ func TestMCPApprovalAuthoritativeEpochLossStopsBeforeExecution(t *testing.T) {
 			resume()
 			select {
 			case response := <-done:
-				// Unlike a readable SQLite-only fixture, the real Kubernetes
-				// effect store also fences receipt writes. The obsolete owner
-				// must return promptly without claiming it committed a denial.
 				require.Equal(t, http.StatusServiceUnavailable, response.Code)
 			case <-time.After(3 * time.Second):
 				t.Fatal("confirmed epoch loss was retried instead of returning promptly")
@@ -116,8 +110,6 @@ func advanceMCPApprovalEpochForRecovery(t *testing.T, f *mcpApprovalRecoveryFixt
 
 func requireMCPApprovalEpochRecovery(t *testing.T, f *mcpApprovalRecoveryFixture, pending approvals.Approval, before *store.ExternalEffect, claimed bool) {
 	t.Helper()
-	// Recovery runs with the successor's fence and no remembered authority or
-	// access to the executable request. The original handler has already ended.
 	f.broker.ApprovalSecrets = nil
 	f.broker.Prompts = DurableACPMCPPromptAuthorizer{Attempts: f.control, PromptLeases: &ACPMCPPromptLeaseRegistry{}}
 	require.NoError(t, f.reconcile(t))
@@ -129,8 +121,6 @@ func requireMCPApprovalEpochRecovery(t *testing.T, f *mcpApprovalRecoveryFixture
 	require.Equal(t, approvals.StatusApproved, approval.Status)
 	require.Equal(t, before.Attempts, after.Attempts)
 	if claimed {
-		// The durable claim alone cannot prove the executor was never called.
-		// Preserve that uncertainty even though this test observed zero calls.
 		require.Equal(t, store.ExternalEffectOutcomeUnknown, after.State)
 		require.Equal(t, acpApprovalOutcomeUnknown, approval.ExecutionOutcome)
 		require.Equal(t, acpMCPApprovalUnknownReason, approval.ExecutionReason)

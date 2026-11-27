@@ -25,8 +25,6 @@ const (
 	assertion = "fixture-controller-credential"
 )
 
-// The fake is driven here with the controller's own Entra client, so it
-// answers exactly the requests the controller sends.
 func newFixture(t *testing.T) (*httptest.Server, func(credential string) *agentidentity.Source) {
 	t.Helper()
 	fake := fakeentra.New(fakeentra.Config{

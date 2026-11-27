@@ -205,8 +205,6 @@ func TestContinuationKeepsAuthorityOverItsPredecessorsChildren(t *testing.T) {
 		t.Fatalf("a continuation must keep authority over its predecessor's children: %v", err)
 	}
 
-	// The annotation alone proves nothing: without the predecessor's resumed
-	// status naming this Task, the child stays out of scope.
 	forgedPredecessor := predecessor.DeepCopy()
 	forgedPredecessor.ResourceVersion = ""
 	forgedPredecessor.Status.Wait.ContinuationTaskUID = "uid-someone-else"
@@ -221,8 +219,6 @@ func TestContinuationKeepsAuthorityOverItsPredecessorsChildren(t *testing.T) {
 }
 
 func TestParkUntilBoundsTheReasonInCharacters(t *testing.T) {
-	// A schema-valid multibyte reason is accepted even though it exceeds
-	// MaxReasonLength bytes.
 	multibyte := strings.Repeat("é", taskwait.MaxReasonLength)
 	c := newFakeClient(parkTestTask())
 	args, _ := json.Marshal(map[string]string{"kind": "timer", "reason": multibyte, "duration": "10m"})
@@ -238,8 +234,6 @@ func TestParkUntilBoundsTheReasonInCharacters(t *testing.T) {
 		t.Fatal("a reason over the character limit must be rejected")
 	}
 
-	// Redaction placeholders are longer than the short secrets they replace,
-	// so a valid reason can grow past the limit; the persisted value stays bounded.
 	secrets := strings.Repeat("password=x ", taskwait.MaxReasonLength/len("password=x "))
 	expanding, _ := json.Marshal(map[string]string{"kind": "timer", "reason": secrets, "duration": "10m"})
 	c = newFakeClient(parkTestTask())

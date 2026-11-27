@@ -12,8 +12,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// otlpEndpointSuffix and otlpProtocolSuffix name the
-// OTEL_EXPORTER_OTLP_*_ENDPOINT and OTEL_EXPORTER_OTLP_*_PROTOCOL settings.
 const (
 	otlpEndpointSuffix = "ENDPOINT"
 	otlpProtocolSuffix = "PROTOCOL"
@@ -23,49 +21,25 @@ const (
 	runtimePoolTelemetryEndpointEnv        = "OTEL_EXPORTER_OTLP_ENDPOINT"
 	runtimePoolTelemetryTracesEndpointEnv  = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
 	runtimePoolTelemetryMetricsEndpointEnv = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
-	// runtimePoolMetricsExporterEnv set to "none" opts out of metrics export.
-	runtimePoolMetricsExporterEnv = "OTEL_METRICS_EXPORTER"
-	otlpProtocolHTTPProtobuf      = "http/protobuf"
-	// otlpHTTPTracesPath and otlpHTTPMetricsPath are the paths OTLP/HTTP
-	// appends to a generic base URL for each signal.
-	otlpHTTPTracesPath  = "/v1/traces"
-	otlpHTTPMetricsPath = "/v1/metrics"
+	runtimePoolMetricsExporterEnv          = "OTEL_METRICS_EXPORTER"
+	otlpProtocolHTTPProtobuf               = "http/protobuf"
+	otlpHTTPTracesPath                     = "/v1/traces"
+	otlpHTTPMetricsPath                    = "/v1/metrics"
 )
 
-// runtimePoolTelemetryScalarSuffixes are the non-secret exporter settings a
-// supervisor accepts for each signal.
 var runtimePoolTelemetryScalarSuffixes = []string{otlpProtocolSuffix, "INSECURE", "COMPRESSION"}
 
-// nativeRuntimeEnvironmentLimit is the native backend's (Agent Substrate's)
-// per-container environment limit. A larger request is refused by the
-// provider and the runtime never starts.
 const nativeRuntimeEnvironmentLimit = 32
 
-// runtimePoolTelemetryEnableEnv turns supervisor telemetry on.
 const runtimePoolTelemetryEnableEnv = "ORKA_ENABLE_TELEMETRY"
 
-// runtimePoolOTLPSignal is one signal's resolved exporter configuration.
 type runtimePoolOTLPSignal struct {
-	// endpoint is a base URL when generic, else the signal's full URL.
 	endpoint string
 	generic  bool
-	// path is the path OTLP/HTTP appends to a generic base URL.
-	path string
-	// scalars holds PROTOCOL, INSECURE and COMPRESSION values; an explicit
-	// grpc protocol is stored empty because the supervisor defaults to it.
-	scalars map[string]string
+	path     string
+	scalars  map[string]string
 }
 
-// runtimePoolTelemetryEnv follows the native AI worker scalar allowlist for
-// supervisor traces and GenAI metrics. Traces gate the projection: a
-// metrics-only controller configuration enables nothing. Settings are encoded
-// with as few entries as keep their SDK meaning. Every configured signal is
-// projected: a Pod-backed runtime has no environment limit, and a native
-// runtime re-fits telemetry to the room its other settings leave with
-// fitNativeRuntimeTelemetry.
-// Collector egress is operator-owned unless --runtime-telemetry-collector-egress
-// admits the projected origins for gateway-enforced runtimes. Never copy
-// headers, certificate paths, resource attributes or Task context.
 func runtimePoolTelemetryEnv(enabled bool, getenv func(string) string) []corev1.EnvVar {
 	traces, metrics, ok := runtimePoolTelemetrySignals(enabled, getenv)
 	if !ok {
@@ -74,18 +48,10 @@ func runtimePoolTelemetryEnv(enabled bool, getenv func(string) string) []corev1.
 	return encodeRuntimePoolTelemetryEnv(traces, metrics)
 }
 
-// isRuntimePoolTelemetryEnvName reports an environment name supervisor
-// telemetry projection may use.
 func isRuntimePoolTelemetryEnvName(name string) bool {
 	return name == runtimePoolTelemetryEnableEnv || strings.HasPrefix(name, "OTEL_EXPORTER_OTLP_")
 }
 
-// fitNativeRuntimeTelemetry re-projects supervisor telemetry into the entries
-// the native environment limit leaves after every other runtime setting. It
-// starts from every configured signal, not the fixed Pod budget: traces and
-// metrics when they fit, else traces alone, else none. It returns the fitted
-// environment and, when telemetry is enabled, whether every configured signal
-// survived with a status message.
 func fitNativeRuntimeTelemetry(env []corev1.EnvVar, enabled bool, getenv func(string) string) ([]corev1.EnvVar, bool, string) {
 	base := make([]corev1.EnvVar, 0, len(env))
 	var current []corev1.EnvVar
@@ -104,8 +70,6 @@ func fitNativeRuntimeTelemetry(env []corev1.EnvVar, enabled bool, getenv func(st
 	full := encodeRuntimePoolTelemetryEnv(traces, metrics)
 	if len(full) <= room {
 		if reflect.DeepEqual(current, full) {
-			// Keep an unchanged projection where it is, so the frozen
-			// request does not change order for nothing.
 			return env, true, "supervisor telemetry is configured on the native runtime"
 		}
 		return append(base, full...), true, "supervisor telemetry is configured on the native runtime"
@@ -122,8 +86,6 @@ func fitNativeRuntimeTelemetry(env []corev1.EnvVar, enabled bool, getenv func(st
 		max(room, 0), len(full), nativeRuntimeEnvironmentLimit)
 }
 
-// telemetryCollectorEndpoints returns the collector endpoints an environment
-// hands the supervisor, in order.
 func telemetryCollectorEndpoints(env []corev1.EnvVar) []string {
 	var endpoints []string
 	for _, variable := range env {
@@ -134,8 +96,6 @@ func telemetryCollectorEndpoints(env []corev1.EnvVar) []string {
 	return endpoints
 }
 
-// runtimePoolTelemetrySignals resolves the supervisor's trace configuration
-// and, when it fits on its own, its metrics configuration.
 func runtimePoolTelemetrySignals(enabled bool, getenv func(string) string) (runtimePoolOTLPSignal, *runtimePoolOTLPSignal, bool) {
 	traces := runtimePoolOTLPSignal{path: otlpHTTPTracesPath, scalars: map[string]string{}}
 	if !enabled {
@@ -164,8 +124,6 @@ func runtimePoolTelemetrySignals(enabled bool, getenv func(string) string) (runt
 	return traces, &metrics, true
 }
 
-// normalizedOTLPScalar stores an explicit grpc protocol as unset: the
-// supervisor exports gRPC when no protocol is set, so it costs no entry.
 func normalizedOTLPScalar(suffix, value string) string {
 	if suffix == otlpProtocolSuffix && value == "grpc" {
 		return ""
@@ -173,10 +131,6 @@ func normalizedOTLPScalar(suffix, value string) string {
 	return value
 }
 
-// encodeRuntimePoolTelemetryEnv projects traces, and metrics when non-nil.
-// A generic endpoint is projected only when it resolves to both signals'
-// URLs, so a dropped signal never falls back to it. A scalar both signals
-// agree on is projected once under its generic name.
 func encodeRuntimePoolTelemetryEnv(traces runtimePoolOTLPSignal, metrics *runtimePoolOTLPSignal) []corev1.EnvVar {
 	env := []corev1.EnvVar{{Name: runtimePoolTelemetryEnableEnv, Value: strconv.FormatBool(true)}}
 	switch base, shared := runtimePoolSharedOTLPBase(traces, metrics); {
@@ -215,15 +169,10 @@ func encodeRuntimePoolTelemetryEnv(traces runtimePoolOTLPSignal, metrics *runtim
 	return env
 }
 
-// httpProtocol reports whether the signal exports OTLP/HTTP, whose generic
-// endpoint is a base URL; gRPC treats generic and signal endpoints alike.
 func (signal runtimePoolOTLPSignal) httpProtocol() bool {
 	return signal.scalars[otlpProtocolSuffix] == otlpProtocolHTTPProtobuf
 }
 
-// signalURL is the signal-specific endpoint equivalent to the signal's
-// configuration, appending the signal path to a generic OTLP/HTTP base URL
-// exactly as the SDK does.
 func (signal runtimePoolOTLPSignal) signalURL() string {
 	if !signal.generic {
 		return signal.endpoint
@@ -244,9 +193,6 @@ func otlpHTTPSignalURL(base, signalPath string, httpProtocol bool) string {
 	return parsed.String()
 }
 
-// runtimePoolSharedOTLPBase returns a generic endpoint that resolves to every
-// exported signal's URL under SDK semantics. A trace-only projection never
-// shares one, because metrics would resolve it too.
 func runtimePoolSharedOTLPBase(traces runtimePoolOTLPSignal, metrics *runtimePoolOTLPSignal) (string, bool) {
 	if metrics == nil {
 		return "", false
@@ -275,8 +221,6 @@ func runtimePoolSharedOTLPBase(traces runtimePoolOTLPSignal, metrics *runtimePoo
 	return "", false
 }
 
-// sameOTLPURL compares two endpoint URLs as the exporter would use them. An
-// OTLP/HTTP signal URL without a path posts to "/".
 func sameOTLPURL(a, b string, httpProtocol bool) bool {
 	left, err := url.Parse(a)
 	if err != nil {
@@ -297,14 +241,7 @@ func sameOTLPURL(a, b string, httpProtocol bool) bool {
 	return left.String() == right.String()
 }
 
-// runtimePoolMetricsTelemetrySignal resolves the metrics exporter for
-// supervisor GenAI metrics. An unreachable metrics-specific endpoint drops
-// metrics instead of falling back to a different collector, as worker Jobs
-// do. The supervisor disables all telemetry on any setting it does not
-// accept, so a metrics setting it would reject drops metrics rather than
-// traces. It reports false when metrics are dropped.
 func runtimePoolMetricsTelemetrySignal(getenv func(string) string) (runtimePoolOTLPSignal, bool) {
-	// The standard opt-out wins over any endpoint, including the generic one.
 	if strings.EqualFold(strings.TrimSpace(getenv(runtimePoolMetricsExporterEnv)), "none") {
 		return runtimePoolOTLPSignal{}, false
 	}
@@ -331,8 +268,6 @@ func runtimePoolMetricsTelemetrySignal(getenv func(string) string) (runtimePoolO
 	return metrics, true
 }
 
-// supervisorAcceptsOTLPSetting mirrors the ACP supervisor's fail-closed
-// exporter settings check (workers/acp/supervisor/telemetry.go).
 func supervisorAcceptsOTLPSetting(suffix, value string) bool {
 	switch suffix {
 	case otlpEndpointSuffix:
@@ -350,23 +285,14 @@ func supervisorAcceptsOTLPSetting(suffix, value string) bool {
 	}
 }
 
-// runtimePoolTelemetryCollectorEndpoints returns the collector endpoints the
-// supervisor environment projection hands to runtimes, in a stable order.
 func runtimePoolTelemetryCollectorEndpoints(enabled bool, getenv func(string) string) []string {
 	return telemetryCollectorEndpoints(runtimePoolTelemetryEnv(enabled, getenv))
 }
 
-// runtimePoolConfiguredCollectorEndpoints returns every collector endpoint a
-// runtime may receive: the full projection, which a native runtime may narrow.
 func runtimePoolConfiguredCollectorEndpoints(getenv func(string) string) []string {
 	return runtimePoolTelemetryCollectorEndpoints(true, getenv)
 }
 
-// validateRuntimeTelemetryCollectorOrigin validates one projected OTLP endpoint for
-// the gateway egress allowlist. Admission is fail-closed: the endpoint must be
-// an absolute http(s) URL naming a fully qualified DNS host, never an IP
-// address, wildcard or scheme-less gRPC target, so the allowlisted origin is
-// exactly the collector the supervisor exports to.
 func validateRuntimeTelemetryCollectorOrigin(raw string) error {
 	raw = strings.TrimSpace(raw)
 	if !strings.HasPrefix(strings.ToLower(raw), urlSchemeHTTP+"://") && !strings.HasPrefix(strings.ToLower(raw), urlSchemeHTTPS+"://") {
@@ -382,10 +308,6 @@ func validateRuntimeTelemetryCollectorOrigin(raw string) error {
 	return nil
 }
 
-// ValidateRuntimeTelemetryCollectorEgress checks the controller configuration
-// for --runtime-telemetry-collector-egress at startup. The opt-in requires
-// telemetry and at least one projected collector endpoint, and every projected
-// endpoint must be expressible as an allowlisted origin.
 func ValidateRuntimeTelemetryCollectorEgress(telemetryEnabled, collectorEgress bool, getenv func(string) string) error {
 	if !collectorEgress {
 		return nil
@@ -401,9 +323,6 @@ func ValidateRuntimeTelemetryCollectorEgress(telemetryEnabled, collectorEgress b
 		if err := validateRuntimeTelemetryCollectorOrigin(endpoint); err != nil {
 			return err
 		}
-		// The opt-in admits collectors only for gateway-enforced runtimes,
-		// whose admission refuses a short Service name: refuse it here
-		// rather than leave every such RuntimePool Degraded.
 		host, _, _, _ := externalEgressOrigin(endpoint)
 		if err := externalEgressHostResolvable("the OTLP collector endpoint", host); err != nil {
 			return fmt.Errorf("runtime telemetry collector egress: %w", err)
@@ -412,12 +331,6 @@ func ValidateRuntimeTelemetryCollectorEgress(telemetryEnabled, collectorEgress b
 	return runtimePoolTelemetryTransportConflict(runtimePoolTelemetryEnv(true, getenv))
 }
 
-// runtimePoolTelemetryTransportConflict refuses a projected signal whose
-// INSECURE setting contradicts its endpoint scheme. Collector egress rules
-// follow the scheme, an http origin as HTTP and an https origin as TLS
-// passthrough, but the OTLP exporters apply INSECURE after it: an https
-// endpoint with INSECURE=true exports cleartext, and an http one with
-// INSECURE=false exports TLS, which the derived rule does not carry.
 func runtimePoolTelemetryTransportConflict(env []corev1.EnvVar) error {
 	values := runtimePoolLiteralEnvironment(env)
 	for _, signal := range []string{"traces", "metrics"} {

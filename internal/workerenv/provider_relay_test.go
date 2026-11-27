@@ -30,6 +30,8 @@ func TestProviderRelayRoundTripsAndRejectsWhatItCannotTrust(t *testing.T) {
 	for _, bad := range []string{
 		`not json`,
 		`{"primary":{"namespace":"default","name":"azure","uid":"u"}} {}`,
+		`{"primary":{"namespace":"default","name":"azure","uid":"u"}} }`,
+		`{"primary":{"namespace":"default","name":"azure","uid":"u"}} ]`,
 		`{"secondary":{"namespace":"default","name":"azure","uid":"u"}}`,
 		`{"fallback-01":{"namespace":"default","name":"azure","uid":"u"}}`,
 		`{"fallback--1":{"namespace":"default","name":"azure","uid":"u"}}`,

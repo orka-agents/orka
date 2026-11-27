@@ -10,20 +10,14 @@ import (
 	"github.com/google/uuid"
 )
 
-// NativeSessionLimitsHeader opts into the additive capability limit. Older
-// clients strictly decode capabilities and must not receive unknown fields.
 const NativeSessionLimitsHeader = "X-Orka-Native-Session-Limits"
 
 const (
-	// DefaultMaxNativeSessionBytes is the default encoded bundle policy.
 	DefaultMaxNativeSessionBytes = 8 << 20
-	// MaxNativeSessionBytes is the absolute supported encoded bundle ceiling.
-	MaxNativeSessionBytes = 64 << 20
-	// LegacyMaxNativeSessionBytes applies when an older runtime advertises no cap.
-	LegacyMaxNativeSessionBytes = 512 << 10
+	MaxNativeSessionBytes        = 64 << 20
+	LegacyMaxNativeSessionBytes  = 512 << 10
 )
 
-// NormalizeNativeSessionMaxBytes resolves an omitted policy and rejects unsafe limits.
 func NormalizeNativeSessionMaxBytes(limit int) (int, error) {
 	if limit == 0 {
 		return DefaultMaxNativeSessionBytes, nil
@@ -34,14 +28,10 @@ func NormalizeNativeSessionMaxBytes(limit int) (int, error) {
 	return limit, nil
 }
 
-// NativeSessionJSONLimit allows base64 bundle encoding plus bounded control metadata.
-// This exemption is only for native restore and capture, not ordinary control JSON.
 func NativeSessionJSONLimit(limit int) int {
 	return 2*limit + MaxCanonicalJSONBytes
 }
 
-// NativeSessionSnapshot contains private provider conversation state. It must
-// never be included in Task status, events, or diagnostic logging.
 type NativeSessionSnapshot struct {
 	Data                 []byte            `json:"data"`
 	DataDigest           string            `json:"dataDigest"`
@@ -126,12 +116,10 @@ func (r NativeSessionRestoration) Validate() error {
 }
 
 type CaptureNativeSessionRequest struct {
-	Protocol string           `json:"protocol"`
-	Metadata MutationMetadata `json:"metadata"`
-	// These fields reconcile one known capture under fresh current authority.
-	// A reconciliation never starts another capture if the original is absent.
-	OriginalOperationID   OperationID   `json:"originalOperationID,omitempty"`
-	OriginalRequestDigest RequestDigest `json:"originalRequestDigest,omitempty"`
+	Protocol              string           `json:"protocol"`
+	Metadata              MutationMetadata `json:"metadata"`
+	OriginalOperationID   OperationID      `json:"originalOperationID,omitempty"`
+	OriginalRequestDigest RequestDigest    `json:"originalRequestDigest,omitempty"`
 }
 
 func (r CaptureNativeSessionRequest) ValidateAt(now time.Time) error {

@@ -15,19 +15,10 @@ import (
 )
 
 const (
-	// DefaultAgentExecutionSnapshotRetentionInterval is the default cadence for
-	// reference-aware encrypted snapshot collection.
 	DefaultAgentExecutionSnapshotRetentionInterval = time.Hour
-	// DefaultAgentExecutionSnapshotRetention is the minimum audit/backup
-	// retention period before an unreferenced snapshot becomes collectible.
-	DefaultAgentExecutionSnapshotRetention = 30 * 24 * time.Hour
+	DefaultAgentExecutionSnapshotRetention         = 30 * 24 * time.Hour
 )
 
-// AgentExecutionSnapshotRetentionManager removes encrypted execution
-// snapshots only after both Kubernetes and durable-store references have been
-// absent for a complete retention window. The in-memory unreferenced clock is
-// intentionally conservative: a controller restart starts the window again,
-// delaying collection rather than risking premature deletion.
 type AgentExecutionSnapshotRetentionManager struct {
 	APIReader client.Reader
 	Store     store.AgentExecutionSnapshotLifecycleStore
@@ -40,10 +31,8 @@ type AgentExecutionSnapshotRetentionManager struct {
 	unreferencedSince map[string]time.Time
 }
 
-// NeedLeaderElection keeps lifecycle decisions on the single elected writer.
 func (*AgentExecutionSnapshotRetentionManager) NeedLeaderElection() bool { return true }
 
-// Start runs one pass immediately and then periodically until cancellation.
 func (m *AgentExecutionSnapshotRetentionManager) Start(ctx context.Context) error {
 	if err := m.validate(); err != nil {
 		return err
@@ -136,9 +125,6 @@ func (m *AgentExecutionSnapshotRetentionManager) collectOnce(ctx context.Context
 			continue
 		}
 
-		// Re-list all Kubernetes references and re-count durable references at
-		// the deletion boundary. Any uncertainty aborts the pass without
-		// deleting this or later candidates.
 		latestReferences, err := m.loadKubernetesReferences(ctx)
 		if err != nil {
 			return err

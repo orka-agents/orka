@@ -242,8 +242,6 @@ func TestACPDispatcherFirstNativeCaptureRecoveryAfterPoolRetirement(t *testing.T
 			require.NoError(t, err)
 			pool := &corev1alpha1.RuntimePool{}
 			require.NoError(t, fixture.kubeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: current.Status.Execution.RuntimePoolName}, pool))
-			// The lifecycle owner proves exact authenticated quiescence and
-			// persists its receipt before forgetting or replacing this pool.
 			drained := dispatcherRuntimeStatusResponseForPool(harnessv2.ProfileDigest(pool.Spec.Runtime.Profile.Digest), string(pool.UID), harnessv2.RuntimeSessionDescriptor{})
 			drained.Lifecycle, drained.Drain = harnessv2.SupervisorLifecycleDraining, harnessv2.DrainStatus{Requested: true}
 			reconciler := &RuntimePoolReconciler{Client: fixture.kubeClient, APIReader: fixture.kubeClient}
@@ -724,8 +722,6 @@ func TestACPDispatcherRejectsIncompatibleNativeRuntimeBeforeSessionMutation(t *t
 						onDelete: func(harnessv2.DeleteRuntimeSessionRequest) { deletes++ },
 						onPrompt: func(harnessv2.StartPromptRequest) { prompts++ },
 					}
-					// Codex without the capability and a non-Codex runtime advertising
-					// it must both reject the import before Session mutation.
 					if runtimeType == corev1alpha1.AgentRuntimeClaude {
 						options.nativeSnapshot = &snapshot
 					}
@@ -777,9 +773,6 @@ func TestACPDispatcherRejectsIncompatibleNativeRuntimeBeforeSessionMutation(t *t
 	}
 }
 
-// A failed, cancelled, or lost prompt yields no new native state and the
-// supervisor retires that runtime, so the Session settles its terminal marker
-// with the existing checkpoint carried forward instead of holding the lease.
 func TestACPDispatcherNativeContinuityCarriesCheckpointAcrossNonSuccess(t *testing.T) {
 	for _, test := range []struct {
 		name          string
@@ -869,10 +862,6 @@ func TestACPDispatcherNativeContinuityCarriesCheckpointAcrossNonSuccess(t *testi
 	}
 }
 
-// A capture intent that expires before the runtime ever records it must not
-// reconcile forever: the same runtime incarnation reports that no capture
-// started, and the controller begins one fresh capture under a superseding
-// intent.
 func TestACPDispatcherExpiredNativeCaptureIntentStartsFreshSafeCapture(t *testing.T) {
 	for _, proof := range []harnessv2.ErrorCode{harnessv2.ErrorCodeNativeCaptureNotStarted, harnessv2.ErrorCodeNativeCaptureRetryReady} {
 		t.Run(string(proof), func(t *testing.T) {
@@ -927,7 +916,6 @@ func TestACPDispatcherExpiredNativeCaptureIntentStartsFreshSafeCapture(t *testin
 			restarted := &ACPDispatcher{Client: fixture.kubeClient, APIReader: fixture.kubeClient, Store: failure,
 				ResultStore: persistence, EventStore: persistence, Snapshots: persistence, Sessions: continuity, Epochs: fixture.dispatcher.Epochs}
 
-			// The first recovery retains the intent without a usable capture receipt.
 			require.Error(t, restarted.recoverStaleTask(ctx, fixture.currentTask(t, ctx), fence))
 			require.Len(t, requests, 1)
 			original := requests[0]
@@ -966,10 +954,6 @@ func TestACPDispatcherExpiredNativeCaptureIntentStartsFreshSafeCapture(t *testin
 	}
 }
 
-// Native restore loads the provider's whole saved conversation, so it cannot
-// honor a sessionRef.throughMessageId that names an earlier message. Such a
-// Task must fail before it binds the Session, not read history past its cutoff.
-// A cutoff at the checkpoint's own boundary still restores natively.
 func TestACPDispatcherNativeRestoreHonorsHistoryCutoff(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -1073,12 +1057,6 @@ func TestACPDispatcherNativeRestoreHonorsHistoryCutoff(t *testing.T) {
 	}
 }
 
-// An operator exec admitted after the pre-capture taint check, but before the
-// capture closed operator admission, taints the Task and may change the
-// private home. The snapshot the capture returns must then be discarded: a
-// first native turn reconciles its persisted intent and falls back to the
-// transcript, and a Session that already depends on native continuity fails
-// closed.
 func TestNativeCaptureDiscardsASnapshotTaintedDuringCapture(t *testing.T) {
 	for _, nativeContinuity := range []bool{false, true} {
 		name := "first-native-turn"
@@ -1119,8 +1097,6 @@ func TestNativeCaptureDiscardsASnapshotTaintedDuringCapture(t *testing.T) {
 			captures := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				captures++
-				// orka-api taints the Task before forwarding the exec that the
-				// capture barrier later kills.
 				latest := &corev1alpha1.Task{}
 				require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(task), latest))
 				latest.Annotations[operatoraccess.TaintAnnotation] = operatoraccess.EncodeTaint(operatoraccess.Taint{AuditID: "op-1"})
@@ -1159,8 +1135,6 @@ func TestNativeCaptureDiscardsASnapshotTaintedDuringCapture(t *testing.T) {
 			require.True(t, intent.Unsupported, "the persisted capture intent must record the transcript fallback")
 			require.NoError(t, dispatcher.guardNativeSessionSettlement(ctx, current, session, nil),
 				"settlement must not wait for a checkpoint that was discarded")
-			// A retry takes the pre-capture taint path and settles the same way
-			// without contacting the runtime again.
 			require.NoError(t, dispatcher.captureTaskNativeSession(ctx, runtimeClient, current, runtimeFence, session))
 			require.Equal(t, 1, captures)
 			require.Nil(t, session.NativeCapture)
@@ -1168,8 +1142,6 @@ func TestNativeCaptureDiscardsASnapshotTaintedDuringCapture(t *testing.T) {
 	}
 }
 
-// A capture intent persisted before the Task was tainted is reconciled by the
-// pre-capture taint path too, so settlement does not wait forever for it.
 func TestOperatorTaintReconcilesAPersistedCaptureIntent(t *testing.T) {
 	ctx := t.Context()
 	raw, _, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "native-taint-intent.db"))

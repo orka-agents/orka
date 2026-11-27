@@ -35,13 +35,11 @@ import (
 )
 
 type ForkTaskRequest struct {
-	AfterSeq    *int64                        `json:"afterSeq,omitempty"`
-	NewTaskName string                        `json:"newTaskName,omitempty"`
-	AgentRef    *corev1alpha1.AgentReference  `json:"agentRef,omitempty"`
-	Prompt      string                        `json:"prompt,omitempty"`
-	Workspace   *corev1alpha1.WorkspaceConfig `json:"workspace,omitempty"`
-	// ExecutionCheckpoint explicitly selects workspace data. AfterSeq selects
-	// transcript context independently and is not a filesystem checkpoint.
+	AfterSeq            *int64                                     `json:"afterSeq,omitempty"`
+	NewTaskName         string                                     `json:"newTaskName,omitempty"`
+	AgentRef            *corev1alpha1.AgentReference               `json:"agentRef,omitempty"`
+	Prompt              string                                     `json:"prompt,omitempty"`
+	Workspace           *corev1alpha1.WorkspaceConfig              `json:"workspace,omitempty"`
 	ExecutionCheckpoint *corev1alpha1.WorkspaceCheckpointReference `json:"executionCheckpoint,omitempty"`
 }
 
@@ -53,8 +51,6 @@ type ForkTaskResponse struct {
 	ForkContext    forkcontext.Context `json:"forkContext"`
 }
 
-// ForkTask handles POST /api/v1/tasks/{id}/fork.
-//
 //nolint:gocyclo // Keep fork inheritance, authorization, and the final Task creation in order.
 func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	sourceName := c.Params("id")
@@ -117,12 +113,6 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	forkCtx.Truncated = forkCtx.Truncated || scanTruncated
 	idempotencyKey := strings.TrimSpace(c.Get("Idempotency-Key"))
 	newName := strings.TrimSpace(req.NewTaskName)
-	// Idempotent recovery is opt-in via an explicit Idempotency-Key. We do NOT
-	// infer idempotency from (source, afterSeq, requester) alone, because that
-	// tuple omits the divergent overrides (prompt/agentRef/workspace) — forking
-	// one checkpoint into several distinct branches is the primary use case, so
-	// the default must mint a unique name. With a key, the caller is explicitly
-	// asserting "same logical fork", so retries collapse onto one object.
 	idempotent := newName == "" && idempotencyKey != ""
 	if newName == "" {
 		if idempotent {
@@ -131,9 +121,6 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 			newName = generatedForkTaskName(sourceName)
 		}
 	}
-	// A fork of an AHP turn carries the turn's prompt and conversation, so it
-	// is private as the turn is: marked a turn, and named, like any session it
-	// starts, with the AHP prefix. Generated names keep the source's.
 	ahpFork := ahpTurnTask(source)
 	if ahpFork && !strings.HasPrefix(newName, ahpNamePrefix) {
 		return fiber.NewError(fiber.StatusBadRequest, "a fork of an AHP turn must be named with the "+ahpNamePrefix+" prefix, which keeps it private")
@@ -179,7 +166,6 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		return err
 	}
 	stampTaskRequesterFromUserInfo(forked, GetUserInfo(c))
-	// The session the fork continues cannot be another person's AHP session.
 	if forked.Spec.SessionRef != nil {
 		hidden, err := h.forkSessionHidden(c.Context(), GetUserInfo(c), namespace, forked.Name, forked.Spec.SessionRef.Name)
 		if err != nil {
@@ -196,18 +182,11 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		return err
 	}
 
-	// Reject oversize objects BEFORE any write. The apiserver/etcd object-size
-	// limit is enforced only on the real persisted write (a DryRunAll create does
-	// not catch it), so guard with an explicit serialized-size budget here and
-	// surface 413 rather than a generic 500 with an orphaned request event.
 	if size := forkedTaskSerializedSize(forked); size > maxForkedTaskSerializedBytes {
 		return fiber.NewError(fiber.StatusRequestEntityTooLarge,
 			fmt.Sprintf("forked task is too large (%d bytes > %d limit); fork from an earlier checkpoint or shorten the prompt", size, maxForkedTaskSerializedBytes))
 	}
 
-	// Create the Task FIRST (it is the authoritative object). Only after a
-	// confirmed-successful create do we append fork timeline events, so a failed
-	// create can never orphan a TaskForkRequested/Created event (invariant 1 & 4).
 	createErr := h.client.Create(c.Context(), forked)
 	if createErr == nil {
 		sealRequesterStamp(c.Context(), h.client, forked)
@@ -215,13 +194,6 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	if err := createErr; err != nil {
 		switch {
 		case apierrors.IsAlreadyExists(err):
-			// Idempotent recovery only when the caller opted in with an
-			// Idempotency-Key: the existing object is the same logical fork (same
-			// source, transcript sequence, and workspace checkpoint), so return it
-			// instead of creating a duplicate.
-			// Without a key (default unique auto-name, or an explicit user-supplied
-			// name), a collision is a genuine conflict — we never silently alias a
-			// divergent fork onto a pre-existing Task whose spec differs.
 			if idempotent {
 				if existing, ok := h.matchingExistingFork(c.Context(), namespace, newName, sourceName, afterSeq, req.ExecutionCheckpoint); ok {
 					return c.Status(fiber.StatusOK).JSON(ForkTaskResponse{Namespace: namespace, SourceTaskName: sourceName, NewTaskName: existing.Name, AfterSeq: afterSeq, ForkContext: forkCtx})
@@ -237,9 +209,6 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		}
 	}
 
-	// Timeline events are best-effort AFTER the authoritative create. A failure
-	// here must not fail the fork (the Task already exists and is self-describing
-	// via its parent labels/annotations); log and continue (invariant 1).
 	h.appendForkTimelineEvents(c.Context(), namespace, sourceName, newName, afterSeq, sourceSessionName, forkedSessionName)
 
 	return c.Status(fiber.StatusCreated).JSON(ForkTaskResponse{Namespace: namespace, SourceTaskName: sourceName, NewTaskName: newName, AfterSeq: afterSeq, ForkContext: forkCtx})
@@ -260,12 +229,8 @@ func applyForkExecutionCheckpoint(spec *corev1alpha1.TaskSpec, checkpoint *corev
 		return nil
 	}
 	ws := spec.Execution.Workspace
-	// A fork must never attach to the source Session's writable filesystem or
-	// silently reapply that Session's original restore point.
 	spec.SessionRef = nil
 	if ws.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
-		// Preserve a Session-only class's reuse contract, with a new identity
-		// so subsequent turns continue the fork's data instead of its source.
 		spec.SessionRef = &corev1alpha1.SessionReference{Name: forkName, Create: true, Append: true}
 	} else if ws.ClassRef != nil {
 		ws.OnDetach = corev1alpha1.WorkspaceOnDetachDelete
@@ -277,9 +242,6 @@ func applyForkExecutionCheckpoint(spec *corev1alpha1.TaskSpec, checkpoint *corev
 	return nil
 }
 
-// maxForkedTaskSerializedBytes bounds the serialized forked Task well under the
-// kube-apiserver/etcd ~1.5 MiB object-size limit, leaving headroom for
-// server-side managed fields and status.
 const maxForkedTaskSerializedBytes = 1024 * 1024
 
 func forkedTaskSerializedSize(task *corev1alpha1.Task) int {
@@ -288,15 +250,11 @@ func forkedTaskSerializedSize(task *corev1alpha1.Task) int {
 	}
 	data, err := json.Marshal(task)
 	if err != nil {
-		// Treat an unmarshalable object as oversize (fail-closed).
 		return maxForkedTaskSerializedBytes + 1
 	}
 	return len(data)
 }
 
-// forkRequesterIdentity returns a stable identifier for the caller used to scope
-// deterministic fork names, so different users forking the same checkpoint do not
-// collide. Falls back to empty when unauthenticated.
 func forkRequesterIdentity(c fiber.Ctx) string {
 	if info := GetUserInfo(c); info != nil {
 		if u := strings.TrimSpace(info.Username); u != "" {
@@ -306,9 +264,6 @@ func forkRequesterIdentity(c fiber.Ctx) string {
 	return ""
 }
 
-// deterministicForkTaskName derives a stable fork name so retries of the same
-// logical fork (identified by an explicit Idempotency-Key) resolve to the same
-// object. Used only on the opt-in idempotent path.
 func deterministicForkTaskName(sourceName string, afterSeq int64, requester, idempotencyKey string) string {
 	seed := idempotencyKey
 	if seed == "" {
@@ -318,11 +273,6 @@ func deterministicForkTaskName(sourceName string, afterSeq int64, requester, ide
 	return fmt.Sprintf("%s-fork-%s", forkcontext.SanitizeTaskNamePrefix(sourceName), hex.EncodeToString(sum[:4]))
 }
 
-// forkSessionHidden reports a session a fork may not continue: another
-// person's AHP session. A fork of an AHP turn whose workspace is reused per
-// session starts a session named after itself, with the AHP prefix its name
-// inherits; that one is the fork's own while no Task continues it and no
-// Session by its name exists.
 func (h *Handlers) forkSessionHidden(ctx context.Context, ui *UserInfo, namespace, fork, session string) (bool, error) {
 	session, ahp := ahpSessionName(session)
 	if !ahpPerson(ui) || !ahp {
@@ -345,12 +295,6 @@ func (h *Handlers) forkSessionHidden(ctx context.Context, ui *UserInfo, namespac
 	return ahpSessionHiddenBy(ui, session, owners), nil
 }
 
-// generatedForkTaskName mints a unique fork name (random suffix). This is the
-// default for auto-named forks so that forking one checkpoint into several
-// distinct branches always creates distinct Tasks; it never aliases divergent
-// forks. Retry-safety for the same logical fork is opt-in via an Idempotency-Key
-// (see deterministicForkTaskName); the create-before-events ordering already
-// removes the transient-failure retry that previously caused duplicates.
 func generatedForkTaskName(sourceName string) string {
 	var suffix [4]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
@@ -359,9 +303,6 @@ func generatedForkTaskName(sourceName string) string {
 	return fmt.Sprintf("%s-fork-%s", forkcontext.SanitizeTaskNamePrefix(sourceName), hex.EncodeToString(suffix[:]))
 }
 
-// matchingExistingFork returns the existing Task at newName if it is the same
-// logical fork (same source task, transcript sequence, and exact workspace
-// checkpoint), enabling idempotent recovery on retry.
 func (h *Handlers) matchingExistingFork(
 	ctx context.Context, namespace, newName, sourceName string, afterSeq int64,
 	checkpoint *corev1alpha1.WorkspaceCheckpointReference,
@@ -390,9 +331,6 @@ func (h *Handlers) matchingExistingFork(
 	return existing, true
 }
 
-// appendForkTimelineEvents records the fork request + created events on the
-// source and forked streams. It is best-effort: the authoritative Task already
-// exists, so an append failure is logged but does not fail the request.
 func (h *Handlers) appendForkTimelineEvents(ctx context.Context, namespace, sourceName, newName string, afterSeq int64, sourceSessionName, forkedSessionName string) {
 	requestContent, err := marshalForkEventContent(sourceName, newName, afterSeq, "request")
 	if err != nil {
@@ -634,10 +572,6 @@ func listTaskEventsThrough(
 	return newTaskTimelineReader(eventStore, namespace, taskName).listRecentContextThrough(ctx, throughSeq, forkcontext.DefaultMaxEvents+1)
 }
 
-// invalidObjectError reports a Kubernetes Invalid rejection of a caller-supplied
-// object as 400 naming the rejected fields, and an admission webhook's denial
-// as 400 with the webhook's reason. It returns nil for any other error, so an
-// authorization failure of the API server's own identity stays a server error.
 func invalidObjectError(kind string, err error) error {
 	switch {
 	case apierrors.IsInvalid(err):
@@ -648,8 +582,6 @@ func invalidObjectError(kind string, err error) error {
 	return nil
 }
 
-// invalidObjectMessage names the fields an Invalid create rejected, so the
-// caller can correct them, without repeating the whole object in the reply.
 func invalidObjectMessage(prefix string, err error) string {
 	status, ok := err.(apierrors.APIStatus)
 	if !ok || status.Status().Details == nil || len(status.Status().Details.Causes) == 0 {

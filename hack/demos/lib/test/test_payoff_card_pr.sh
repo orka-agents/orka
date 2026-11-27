@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
-# payoff_card_pr returns non-zero when the task result has no PR URL,
-# and zero when it does. We stub summarize_task_run with two different
-# JSON payloads to exercise both branches without a cluster.
 
 set -Eeuo pipefail
 
 . "$(dirname "${BASH_SOURCE[0]}")/_test_helpers.sh"
 
-# No PR URL → non-zero exit.
 summarize_task_run() {
   jq -n '{
     task: "demo-x",
@@ -25,7 +21,6 @@ set -e
 assert_status_nonzero "${rc_missing}" "payoff_card_pr without PR URL must fail"
 assert_contains "${out_missing}" "no PR URL"
 
-# Real PR URL → exit 0, card body contains the URL.
 summarize_task_run() {
   jq -n '{
     task: "demo-y",

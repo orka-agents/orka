@@ -23,7 +23,6 @@ function createWrapper() {
   )
 }
 
-// A stream the test drives event by event, standing in for a live turn.
 function controlledSSE() {
   let controller!: ReadableStreamDefaultController<Uint8Array>
   const encoder = new TextEncoder()
@@ -38,14 +37,12 @@ function controlledSSE() {
       try {
         controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
       } catch {
-        // The client already cancelled the stream.
       }
     },
     close() {
       try {
         controller.close()
       } catch {
-        // Already closed or cancelled.
       }
     },
   }
@@ -134,7 +131,6 @@ describe('useSendMessage', () => {
 
     const messages = useChatStore.getState().messages
     expect(messages[0]).toMatchObject({ role: 'user', content: 'Hi there' })
-    // Streaming should be false after completion
     expect(useChatStore.getState().isStreaming).toBe(false)
   })
 
@@ -262,7 +258,6 @@ describe('useSendMessage', () => {
   })
 
   it('harvests created task names from a successful create-task result (data.name) onto the assistant turn', async () => {
-    // Production shape: ChatToolResult{ success, data: { name, namespace, phase } }.
     mockSSEFetch([
       {
         event: 'tool_result',
@@ -328,7 +323,6 @@ describe('useSendMessage', () => {
   })
 
   it('drops a turn orphaned by a namespace switch instead of writing into the new transcript', async () => {
-    // The response arrives only after the namespace has moved on.
     let release: () => void = () => {}
     const gate = new Promise<void>((resolve) => {
       release = resolve
@@ -457,7 +451,6 @@ describe('useSendMessage', () => {
   })
 
   it('handles trailing SSE buffer without double newline', async () => {
-    // Send SSE data that does NOT end with \n, so parseSSELines trailing check is hit
     fetchSpy.mockImplementation((input, init) => {
       const url = typeof input === 'string' ? input : (input as Request).url
       if (url.endsWith('/chat') && init?.method === 'POST') {
@@ -514,7 +507,6 @@ describe('useSendMessage', () => {
     fetchSpy.mockImplementation((input, init) => {
       const url = typeof input === 'string' ? input : (input as Request).url
       if (url.endsWith('/chat') && init?.method === 'POST') {
-        // Send malformed JSON in a complete SSE event (with double newline) to hit the catch block
         const text = 'event: message\ndata: {not valid json}\n\nevent: message\ndata: {"content":"after-malformed"}\n\n'
         const stream = new ReadableStream({
           start(controller) {
@@ -535,7 +527,6 @@ describe('useSendMessage', () => {
       await result.current('test malformed')
     })
 
-    // The malformed event should be skipped, but the valid one should be processed
     const assistantMsg = useChatStore.getState().messages.find((m) => m.role === 'assistant')
     expect(assistantMsg).toBeDefined()
     expect(assistantMsg!.content).toBe('after-malformed')
@@ -545,7 +536,6 @@ describe('useSendMessage', () => {
     fetchSpy.mockImplementation((input, init) => {
       const url = typeof input === 'string' ? input : (input as Request).url
       if (url.endsWith('/chat') && init?.method === 'POST') {
-        // Trailing buffer with malformed JSON (no double newline at end)
         const text = 'event: message\ndata: {bad json}'
         const stream = new ReadableStream({
           start(controller) {
@@ -566,7 +556,6 @@ describe('useSendMessage', () => {
       await result.current('test trailing malformed')
     })
 
-    // No assistant message should be added (malformed was skipped)
     const assistantMsg = useChatStore.getState().messages.find((m) => m.role === 'assistant')
     expect(assistantMsg).toBeUndefined()
     expect(useChatStore.getState().isStreaming).toBe(false)
@@ -672,7 +661,6 @@ describe('useSendMessage', () => {
     })
     useChatStore.setState({ provider: '', model: 'claude-opus-4-1' })
 
-    // No useChatConfig subscriber: the config is not cached when the send starts.
     const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
     await act(async () => {
       await result.current('model only, config cold')
@@ -735,9 +723,6 @@ describe('useSendMessage', () => {
   })
 
   describe('ending a turn early', () => {
-    // Routes POST /chat to a controlled stream and records DELETE /chat/{id}.
-    // `onDelete` plays the server: by default the cancelled turn ends its
-    // stream with the interruption error, as HandleCancelChat does.
     function mockTurn(options: { deleteStatus?: number; deleteBody?: unknown } = {}) {
       const sse = controlledSSE()
       const deletes: Array<{ url: string; headers: Record<string, string> }> = []
@@ -784,7 +769,6 @@ describe('useSendMessage', () => {
       expect(deletes[0].url).toBe('/api/v1/chat/sess-1?namespace=default')
       expect(deletes[0].headers.Authorization).toBe('Bearer test-token')
       const state = useChatStore.getState()
-      // The interruption error is replaced by the stop outcome.
       expect(state.messages.filter((m) => m.role === 'error')).toEqual([])
       expect(state.messages[state.messages.length - 1]).toMatchObject({
         role: 'status',
@@ -866,7 +850,6 @@ describe('useSendMessage', () => {
         useChatStore.getState().newSession()
       })
 
-      // The discarded transcript cannot show it, so the failure is a toast.
       await waitFor(() => expect(toast.error).toHaveBeenCalledWith(
         'Could not stop the previous reply: not authorized',
         expect.objectContaining({ action: expect.objectContaining({ label: 'Retry' }) }),
@@ -896,7 +879,6 @@ describe('useSendMessage', () => {
         await turn
       })
       expect(deletes.map((d) => d.url)).toEqual(['/api/v1/chat/sess-orphan?namespace=default'])
-      // Nothing from the orphaned turn reaches the new namespace's transcript.
       expect(useChatStore.getState().messages).toEqual([])
       expect(useChatStore.getState().currentSessionId).toBeNull()
     })

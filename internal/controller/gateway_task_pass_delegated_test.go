@@ -18,8 +18,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// A parent that delegates a gateway tool holds it in its grant for its
-// children, but its own tool policy never offers it.
 func TestGatewayTaskPassDelegatedTools(t *testing.T) {
 	g := &childPassGateway{bindings: map[string]childPassRequest{}}
 	server := httptest.NewTLSServer(http.HandlerFunc(g.serve))
@@ -36,7 +34,6 @@ func TestGatewayTaskPassDelegatedTools(t *testing.T) {
 	}
 	require.NoError(t, r.Create(t.Context(), &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: parent.Namespace}, Spec: corev1alpha1.ToolSpec{Description: "plain", HTTP: &corev1alpha1.HTTPExecution{URL: "https://example.com/plain"}}}))
 
-	// Admission refuses the list without delegation enabled.
 	disabled := agent.DeepCopy()
 	disabled.ObjectMeta = metav1.ObjectMeta{Name: "disabled-delegation", Namespace: agent.Namespace}
 	disabled.Spec.Coordination = &corev1alpha1.CoordinationConfig{DelegatedGatewayTools: []string{"lookup"}}
@@ -53,25 +50,21 @@ func TestGatewayTaskPassDelegatedTools(t *testing.T) {
 	require.Equal(t, []string{"lookup"}, parentBody.GatewayGrant.Tools)
 	_, offered := parentBody.MCPConfiguration.ToolPolicy.Descriptor("lookup")
 	require.False(t, offered, "a delegated tool must stay out of the parent's tool policy")
-	// The broker accepts only calls its frozen policy describes.
 	call := harnessv2.MCPToolCall{CallID: "parent-call", ToolName: "lookup", Arguments: json.RawMessage(`{}`)}
 	_, err = call.ValidateAt(harnessv2.PromptMCPAuthorization{ToolPolicy: parentBody.MCPConfiguration.ToolPolicy}, time.Now())
 	require.ErrorContains(t, err, `MCP tool "lookup" is not an allowed brokered tool`)
 
-	// Freeze fails closed on names that aren't gateway task pass Tools.
 	for _, name := range []string{"plain", "missing"} {
 		bad := agent.DeepCopy()
 		bad.Spec.Coordination.DelegatedGatewayTools = []string{name}
 		_, err = r.freezeGatewayTaskGrant(t.Context(), parent, bad, *parentBody.MCPConfiguration)
 		require.True(t, isPermanentACPAgentConfigurationError(err), "%s: %v", name, err)
 	}
-	// Without the field the parent's grant holds only its own tools, as before.
 	plainParent := agent.DeepCopy()
 	plainParent.Spec.Coordination.DelegatedGatewayTools = nil
 	grant, err := r.freezeGatewayTaskGrant(t.Context(), parent, plainParent, *parentBody.MCPConfiguration)
 	require.NoError(t, err)
 	require.Empty(t, grant.Tools)
-	// A root Task with no gateway event has no grant to pass on, and still runs.
 	manual := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "manual-parent", Namespace: parent.Namespace}, Spec: *parent.Spec.DeepCopy()}
 	manual.Spec.RequestedBy = nil
 	require.NoError(t, r.Create(t.Context(), manual))
@@ -106,7 +99,6 @@ func TestGatewayTaskPassDelegatedTools(t *testing.T) {
 		return err
 	}
 
-	// A child whose own policy lists the tool gets a pass; only it calls.
 	with := newChild("delegated-child", "lookup", "forbidden")
 	require.Equal(t, []string{"lookup"}, gatewayBoundBody(t, r, with).GatewayGrant.Tools)
 	require.NoError(t, callLookup(with))
@@ -116,7 +108,6 @@ func TestGatewayTaskPassDelegatedTools(t *testing.T) {
 	require.Equal(t, []string{string(with.UID)}, g.called)
 	g.Unlock()
 
-	// A child whose policy doesn't list it gets no pass for it.
 	without := newChild("undelegated-child", "forbidden")
 	require.Empty(t, gatewayBoundBody(t, r, without).GatewayGrant.Tools)
 	require.Error(t, callLookup(without))
@@ -132,18 +123,14 @@ func TestGatewayTaskPassDelegatedTools(t *testing.T) {
 		require.NoError(t, r.Create(t.Context(), child))
 		return child
 	}
-	// A child that only routes passes the list on when its parent's grant holds the tool.
 	router := childOf("router-child", parent)
 	grant, err = r.freezeGatewayTaskGrant(t.Context(), router, agent, *parentBody.MCPConfiguration)
 	require.NoError(t, err)
 	require.Equal(t, []string{"lookup"}, grant.Tools)
 	require.Equal(t, string(parent.UID), grant.Parent.UID)
-	// A name in both the policy and the list appears once.
 	grant, err = r.freezeGatewayTaskGrant(t.Context(), parent, agent, *gatewayBoundBody(t, r, with).MCPConfiguration)
 	require.NoError(t, err)
 	require.Equal(t, []string{"forbidden", "lookup"}, grant.Tools)
-	// Under a parent with no gateway grant, such as a native AI-worker Task,
-	// it has nothing to pass on and still runs, with or without provenance admission.
 	native := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "native-parent", Namespace: parent.Namespace}, Spec: *parent.Spec.DeepCopy()}
 	require.NoError(t, r.Create(t.Context(), native))
 	nativeRouter := childOf("native-router-child", native)
@@ -154,7 +141,6 @@ func TestGatewayTaskPassDelegatedTools(t *testing.T) {
 		require.Nil(t, grant)
 	}
 	r.TaskProvenanceProtected = true
-	// A child that calls a gateway tool itself still fails there.
 	_, err = r.freezeGatewayTaskGrant(t.Context(), nativeRouter, childAgent, *gatewayBoundBody(t, r, with).MCPConfiguration)
 	require.ErrorContains(t, err, "parent has no frozen gateway grant")
 	require.True(t, isPermanentACPAgentConfigurationError(err))

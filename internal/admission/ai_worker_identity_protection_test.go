@@ -46,9 +46,6 @@ func aiWorkerSecret(secretType string) *unstructured.Unstructured {
 	}}
 }
 
-// codeExecJob mirrors the Job the Kubernetes code_exec backend builds
-// (internal/tools/code_exec_kubernetes.go); TestKubernetesCodeExecJobMeetsAIWorkerIdentityPolicy
-// keeps the two in step.
 func codeExecJob() *unstructured.Unstructured {
 	name := "orka-code-exec-run-0123456789abcdef"
 	return &unstructured.Unstructured{Object: map[string]any{
@@ -57,8 +54,6 @@ func codeExecJob() *unstructured.Unstructured {
 		"metadata":   map[string]any{"name": name, "namespace": admissionTestNamespace},
 		"spec": map[string]any{
 			"template": map[string]any{
-				// The builder's labels plus the selector labels the API server
-				// adds to every Job's Pod template.
 				"metadata": map[string]any{"labels": map[string]any{
 					"app.kubernetes.io/name":             "orka",
 					"orka.ai/tool":                       "code_exec",
@@ -159,7 +154,6 @@ func TestAIWorkerIdentityProtectionJobs(t *testing.T) {
 		"a container inheriting the Pod's RuntimeDefault profile")
 	require.True(t, admits(aiWorkerIdentityTestWorker, setCodeContainerField(t, codeExecJob(), "Localhost",
 		"securityContext", "seccompProfile", "type")), "a Localhost profile")
-	// A container profile overrides the Pod's, so this container runs confined.
 	require.True(t, admits(aiWorkerIdentityTestWorker, setJobField(t, codeExecJob(), "Unconfined",
 		"securityContext", "seccompProfile", "type")), "a confined container in an Unconfined Pod")
 	unlabeled := codeExecJob()
@@ -204,7 +198,6 @@ func TestAIWorkerIdentityProtectionJobs(t *testing.T) {
 		"root":             setCodeContainerField(t, codeExecJob(), false, "securityContext", "runAsNonRoot"),
 		"hostPort": setCodeContainerField(t, codeExecJob(), []any{map[string]any{
 			"containerPort": int64(80), "hostPort": int64(80)}}, "ports"),
-		// The controller's Service and NetworkPolicy selectors.
 		"controller component label": setPodLabel(t, codeExecJob(), "app.kubernetes.io/component", "controller"),
 		"release instance label":     setPodLabel(t, codeExecJob(), "app.kubernetes.io/instance", "orka"),
 		"network role label":         setPodLabel(t, codeExecJob(), "orka.ai/network-role", "controller"),
@@ -215,7 +208,6 @@ func TestAIWorkerIdentityProtectionJobs(t *testing.T) {
 		"capabilities kept":          setCodeContainerField(t, codeExecJob(), []any{"NET_RAW"}, "securityContext", "capabilities", "drop"),
 		"container seccomp Unconfined": setCodeContainerField(t, codeExecJob(), "Unconfined",
 			"securityContext", "seccompProfile", "type"),
-		// Unset means Unconfined on nodes without kubelet seccompDefault.
 		"seccomp unset": func() *unstructured.Unstructured {
 			job := codeExecJob()
 			unstructured.RemoveNestedField(job.Object, "spec", "template", "spec", "securityContext", "seccompProfile")
@@ -239,8 +231,6 @@ func TestAIWorkerIdentityProtectionJobs(t *testing.T) {
 	}
 }
 
-// Replacing a platform ServiceAccount with one of the same name would inherit
-// its RoleBindings, so the AI worker may only manage code_exec's own accounts.
 func TestAIWorkerIdentityProtectionServiceAccounts(t *testing.T) {
 	policy := compileAIWorkerIdentityProtection(t)
 	serviceAccount := func(name string) *unstructured.Unstructured {
@@ -266,8 +256,6 @@ func TestAIWorkerIdentityProtectionServiceAccounts(t *testing.T) {
 		account.SetLabels(map[string]string{"orka.ai/platform-identity": "true"})
 		return account
 	}
-	// A platform account that happens to match the code_exec prefix, for
-	// example serviceAccount.name=orka-code-exec-controller, stays protected.
 	platform := "orka-code-exec-controller"
 	require.False(t, policy.admits(t, saKind, saResource, platform, apiserveradmission.Delete,
 		aiWorkerIdentityTestWorker, "", nil, marked(platform)), "delete a marked account")

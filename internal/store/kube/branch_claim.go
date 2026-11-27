@@ -12,14 +12,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// CreateBranchClaim creates the cluster-scoped canonical repository/ref claim.
 func (s *Store) CreateBranchClaim(ctx context.Context, claim *store.BranchClaim, fence store.ControllerEpochFence) (*store.BranchClaim, error) {
 	created, _, err := s.CreateBranchClaimWithResult(ctx, claim, fence)
 	return created, err
 }
 
-// CreateBranchClaimWithResult reports true only when this call created the
-// immutable Kubernetes object rather than observing an existing equivalent.
 func (s *Store) CreateBranchClaimWithResult(ctx context.Context, claim *store.BranchClaim, fence store.ControllerEpochFence) (*store.BranchClaim, bool, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, false, err
@@ -79,7 +76,6 @@ func (s *Store) CreateBranchClaimWithResult(ctx context.Context, claim *store.Br
 	return result, completeErr == nil, completeErr
 }
 
-// GetBranchClaim returns a cluster-scoped claim by canonical ID.
 func (s *Store) GetBranchClaim(ctx context.Context, id string) (*store.BranchClaim, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, err
@@ -96,10 +92,6 @@ func (s *Store) GetBranchClaim(ctx context.Context, id string) (*store.BranchCla
 	return &result, nil
 }
 
-// ReclaimBranchClaim deletes only the exact available owner-fenced object. UID
-// and resourceVersion preconditions close the read/delete race. Absence or a
-// different immutable owner/request identity means the original claim was
-// already reclaimed and possibly replaced, so the retry is a safe no-op.
 func (s *Store) ReclaimBranchClaim(ctx context.Context, request store.ReclaimBranchClaimRequest) error {
 	if err := s.requireClient(); err != nil {
 		return err
@@ -150,8 +142,6 @@ func (s *Store) ReclaimBranchClaim(ctx context.Context, request store.ReclaimBra
 	return mapKubernetesError("delete reclaimed branch claim", deleteErr)
 }
 
-// CompareAndSwapBranchClaim applies exact version, generation, baseline,
-// availability, resourceVersion, and controller-epoch fences.
 func (s *Store) CompareAndSwapBranchClaim(ctx context.Context, change store.BranchClaimCAS) (*store.BranchClaim, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, err

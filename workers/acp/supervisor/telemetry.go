@@ -24,7 +24,6 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
-// OTLP exporter protocols the supervisor accepts.
 const (
 	otlpProtocolGRPC         = "grpc"
 	otlpProtocolHTTPProtobuf = "http/protobuf"
@@ -37,30 +36,17 @@ const (
 	supervisorTelemetryTLSScheme  = "https"
 )
 
-// Telemetry is the supervisor-owned instrumentation. Nil members are disabled.
 type Telemetry struct {
-	// Tracer records acp.supervisor.* operation spans.
-	Tracer trace.Tracer
-	// GenAITracer records invoke_agent, chat and execute_tool spans derived
-	// from the ACP session stream and the provider proxy.
+	Tracer      trace.Tracer
 	GenAITracer trace.Tracer
-	// Meter records GenAI client metrics.
-	Meter metric.Meter
+	Meter       metric.Meter
 }
 
-// NewTelemetryFromEnv creates a supervisor-owned trace provider. It never changes
-// global providers, imports resource attributes, or instruments provider children.
-// No endpoint (or no explicit enable flag) means no exporter. Callers must treat
-// initialization failure as disabled telemetry, not as an execution failure.
 func NewTelemetryFromEnv() (trace.Tracer, func(context.Context) error, error) {
 	telemetry, shutdown, err := NewSupervisorTelemetryFromEnv()
 	return telemetry.Tracer, shutdown, err
 }
 
-// NewSupervisorTelemetryFromEnv creates the supervisor's trace and metric
-// providers. Traces need a trace endpoint; metrics need a metrics endpoint and
-// are independent of traces. Neither changes global providers, and both fail
-// closed to disabled on any unsupported configuration.
 func NewSupervisorTelemetryFromEnv() (Telemetry, func(context.Context) error, error) {
 	noop := func(context.Context) error { return nil }
 	if os.Getenv("ORKA_ENABLE_TELEMETRY") != supervisorTelemetryTrueValue {
@@ -69,8 +55,6 @@ func NewSupervisorTelemetryFromEnv() (Telemetry, func(context.Context) error, er
 	traceEndpoint := supervisorSignalEnv("TRACES", "ENDPOINT")
 	metricsEndpoint := supervisorSignalEnv("METRICS", "ENDPOINT")
 	if strings.TrimSpace(os.Getenv(supervisorMetricsExporterEnv)) == supervisorExporterNone {
-		// An explicit metrics opt-out keeps a generic endpoint for traces
-		// only.
 		metricsEndpoint = ""
 	}
 	if traceEndpoint == "" && metricsEndpoint == "" {
@@ -91,7 +75,6 @@ func NewSupervisorTelemetryFromEnv() (Telemetry, func(context.Context) error, er
 		provider := sdktrace.NewTracerProvider(
 			sdktrace.WithResource(supervisorTraceResource),
 			sdktrace.WithBatcher(safeTelemetryExporter{exporter}, sdktrace.WithExportTimeout(supervisorTelemetryTimeout)),
-			// A span ended while panicking would otherwise record the panic value.
 			sdktrace.WithoutPanicRecording(),
 		)
 		telemetry.Tracer = provider.Tracer("orka.acp.supervisor")
@@ -117,7 +100,6 @@ func NewSupervisorTelemetryFromEnv() (Telemetry, func(context.Context) error, er
 	shutdown := func(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(ctx, supervisorTelemetryTimeout)
 		defer cancel()
-		// Providers flush concurrently so the total stays within one timeout.
 		results := make(chan error, len(shutdowns))
 		for _, shutdown := range shutdowns {
 			go func() { results <- shutdown(ctx) }()
@@ -136,8 +118,6 @@ func NewSupervisorTelemetryFromEnv() (Telemetry, func(context.Context) error, er
 	return telemetry, shutdown, nil
 }
 
-// supervisorSignalEnv resolves one OTLP exporter setting with SDK precedence:
-// the signal-specific value, then the generic value.
 func supervisorSignalEnv(signal, suffix string) string {
 	if value := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_" + signal + "_" + suffix)); value != "" {
 		return value
@@ -179,11 +159,8 @@ func newSupervisorMetricExporter(ctx context.Context) (sdkmetric.Exporter, error
 	return exporter, nil
 }
 
-// safeMetricExporter enforces the supervisor resource allowlist and keeps
-// collector diagnostics out of supervisor logs, as safeTelemetryExporter does.
 type safeMetricExporter struct {
 	sdkmetric.Exporter
-	// resource replaces whatever resource the SDK assembled.
 	resource *resource.Resource
 }
 
@@ -213,13 +190,9 @@ func (e safeMetricExporter) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// The SDK reports asynchronous exporter errors. Never let collector response
-// bodies, URLs or transport diagnostics enter supervisor logs through that path.
 type safeTelemetryExporter struct{ sdktrace.SpanExporter }
 
 func (e safeTelemetryExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
-	// The SDK merges OTEL_RESOURCE_ATTRIBUTES even with an explicit resource.
-	// Enforce the supervisor resource allowlist at the exporter boundary.
 	safeSpans := make([]sdktrace.ReadOnlySpan, len(spans))
 	for i, span := range spans {
 		safeSpans[i] = supervisorExportSpan{span}
@@ -238,7 +211,6 @@ func (e safeTelemetryExporter) Shutdown(ctx context.Context) error {
 }
 
 const (
-	// supervisorMetricsExporterEnv accepts only "none", which disables metrics.
 	supervisorMetricsExporterEnv = "OTEL_METRICS_EXPORTER"
 	supervisorExporterNone       = "none"
 )
@@ -247,11 +219,6 @@ const supervisorServiceName = "orka-acp-supervisor"
 
 var supervisorTraceResource = resource.NewSchemaless(attribute.String("service.name", supervisorServiceName))
 
-// newSupervisorMetricResource identifies one supervisor boot. Supervisors of
-// different RuntimePools report the same runtime and model attributes, and a
-// cumulative metric stream needs a single writer, so service.instance.id tells
-// their streams apart. It is a random UUID drawn at start: it names no Task,
-// user, session, Pod or credential, and a restarted supervisor gets a new one.
 func newSupervisorMetricResource() *resource.Resource {
 	return resource.NewSchemaless(
 		attribute.String("service.name", supervisorServiceName),
@@ -263,9 +230,6 @@ type supervisorExportSpan struct{ sdktrace.ReadOnlySpan }
 
 func (supervisorExportSpan) Resource() *resource.Resource { return supervisorTraceResource }
 
-// SDK constructors read environment values before applying explicit options and
-// may log malformed inputs. Reject unsupported ambient configuration before any
-// SDK initialization; managed Pods receive only these non-secret scalar settings.
 func supervisorTelemetryEnvironmentSafe() bool {
 	for _, entry := range os.Environ() {
 		name, value, _ := strings.Cut(entry, "=")
@@ -297,9 +261,6 @@ func supervisorTelemetryEnvironmentSafe() bool {
 				return false
 			}
 		case "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT":
-			// Content capture is deliberately ignored: GenAI spans and metrics
-			// derived from the ACP stream never carry prompt, completion, tool
-			// argument or tool result content, whatever this value says.
 		default:
 			return false
 		}

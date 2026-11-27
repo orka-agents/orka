@@ -49,9 +49,6 @@ import (
 const testWatchNamespace = "prod"
 
 func TestHandlers_ProviderReadsRequireKubernetesRBACForTokenReviewUser(t *testing.T) {
-	// TokenReview-authenticated reads run with the controller's credentials,
-	// so the Provider list and get handlers must pass a SubjectAccessReview
-	// for the caller before the orka-client Role grant means anything.
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 
@@ -72,8 +69,6 @@ func TestHandlers_ProviderReadsRequireKubernetesRBACForTokenReviewUser(t *testin
 		{"list allowed", http.MethodGet, "/providers?namespace=default", "list", "", true, http.StatusOK},
 		{"get denied", http.MethodGet, "/providers/openai?namespace=default", "get", "openai", false, http.StatusForbidden},
 		{"get allowed", http.MethodGet, "/providers/openai?namespace=default", "get", "openai", true, http.StatusOK},
-		// Authorization runs before the read, so a denied caller cannot
-		// enumerate names through a 403-vs-404 difference.
 		{"get denied unknown name", http.MethodGet, "/providers/missing?namespace=default", "get", "missing", false, http.StatusForbidden},
 	}
 	for _, tt := range tests {
@@ -200,8 +195,6 @@ func setupTestHandlers() (*Handlers, *fiber.App) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	// The API server assigns UIDs; the fake client does not, and the
-	// requester stamp binds the UID.
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 			if obj.GetUID() == "" {
@@ -460,7 +453,6 @@ func TestHandlers_CreateTaskRejectsNonPositiveTimeout(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode, timeout)
 	}
-	// The Kubernetes-style body carries the timeout in spec.timeout.
 	for _, timeout := range []time.Duration{0, -5 * time.Minute} {
 		body := CreateTaskRequest{
 			Name: "zero-timeout", Namespace: "default",
@@ -585,7 +577,6 @@ func TestHandlers_CreateTask_DefaultNamespace(t *testing.T) {
 	body := CreateTaskRequest{
 		Name: "test-task",
 		Type: corev1alpha1.TaskTypeContainer,
-		// No namespace - should default to "default"
 	}
 	bodyBytes, _ := json.Marshal(body)
 
@@ -602,7 +593,6 @@ func TestHandlers_CreateTask_DefaultNamespace(t *testing.T) {
 	}
 }
 
-// testAPIRequesterStampKey is the stamp key the API tests seal under.
 var testAPIRequesterStampKey = []byte("fedcba9876543210fedcba9876543210")
 
 func TestHandlers_CreateTask_StampsRequestedByFromOIDC(t *testing.T) {
@@ -2161,9 +2151,6 @@ func TestHandlers_CreateTask_RejectsClientSuppliedTransaction(t *testing.T) {
 	}
 }
 
-// encoding/json decodes any key equal under strings.EqualFold into a tagged
-// field, including non-ASCII folds such as U+017F (ſ) for "s" that
-// strings.ToLower leaves unchanged.
 func TestHandlers_CreateTask_RejectsServerOwnedKeysInAnySpelling(t *testing.T) {
 	spoofed := map[string]any{"subject": "spoofed"}
 	tests := []struct {
@@ -2281,7 +2268,7 @@ func TestHandlers_CreateTask_NamespaceScoped(t *testing.T) {
 
 	body := CreateTaskRequest{
 		Name:      "test-task",
-		Namespace: "other-ns", // Different from watchNamespace
+		Namespace: "other-ns",
 		Type:      corev1alpha1.TaskTypeContainer,
 	}
 	bodyBytes, _ := json.Marshal(body)
@@ -2498,7 +2485,6 @@ func TestHandlers_TaskResponsesOmitManagedFields(t *testing.T) {
 			body, err := io.ReadAll(resp.Body)
 			require.NoError(t, err)
 			require.NotContains(t, string(body), "managedFields")
-			// The rest of the metadata is still served.
 			require.Contains(t, string(body), `"team":"core"`)
 		})
 	}
@@ -2664,7 +2650,7 @@ func TestHandlers_GetTaskLogs_NoJob(t *testing.T) {
 				},
 				Status: corev1alpha1.TaskStatus{
 					Phase:   tt.phase,
-					JobName: "", // No job
+					JobName: "",
 				},
 			}
 
@@ -2710,7 +2696,6 @@ func TestHandlers_GetTaskLogs_WithJob(t *testing.T) {
 		t.Fatalf("Test request failed: %v", err)
 	}
 
-	// Returns OK with placeholder message
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
@@ -2733,7 +2718,6 @@ func TestHandlers_GetTaskResult_Success(t *testing.T) {
 	}
 
 	handlers, app := setupTestHandlersWithObjects(task)
-	// Save result to store
 	require.NoError(t, handlers.resultStore.SaveResult(context.Background(), "default", "test-task", []byte("task result content")))
 	app.Get("/tasks/:id/result", handlers.GetTaskResult)
 
@@ -2758,7 +2742,7 @@ func TestHandlers_GetTaskResult_NoResult(t *testing.T) {
 			Type: corev1alpha1.TaskTypeContainer,
 		},
 		Status: corev1alpha1.TaskStatus{
-			ResultRef: nil, // No result
+			ResultRef: nil,
 		},
 	}
 
@@ -3020,8 +3004,6 @@ func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *storageclien
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	// The API server assigns UIDs; the fake client does not, and the
-	// requester stamp binds the UID.
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 			if obj.GetUID() == "" {
@@ -3037,8 +3019,6 @@ func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *storageclien
 	app := fiber.New()
 	return handlers, app, ss
 }
-
-// --- ListSessions tests ---
 
 func TestHandlers_ListSessions_Success(t *testing.T) {
 	handlers, app, ss := setupTestHandlersWithSessionManager()
@@ -3100,7 +3080,6 @@ func TestHandlers_ListSessions_HidesGatewaySessions(t *testing.T) {
 func TestHandlers_ListSessions_HonorsLimitAndContinue(t *testing.T) {
 	handlers, app, ss := setupTestHandlersWithSessionManager()
 	ctx := context.Background()
-	// Created oldest first, so the list returns them in reverse.
 	created := time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC)
 	for i, name := range []string{"session-c", "session-b", "session-a"} {
 		at := created.Add(time.Duration(i) * time.Minute)
@@ -3148,9 +3127,6 @@ func TestHandlers_ListSessions_HonorsLimitAndContinue(t *testing.T) {
 func TestHandlers_ListSessions_CursorEqualToCacheSentinelResumes(t *testing.T) {
 	handlers, app, ss := setupTestHandlersWithSessionManager()
 	ctx := context.Background()
-	// Equal creation times sort by name: "continue-not-supported" <
-	// "session-z". A page that ends on the sentinel-named session must still
-	// resume after it.
 	for _, name := range []string{"continue-not-supported", "session-z"} {
 		require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 			Namespace: "default", Name: name, SessionType: "task",
@@ -3209,7 +3185,6 @@ func TestHandlers_ListSessions_DefaultNamespace(t *testing.T) {
 	handlers, app, _ := setupTestHandlersWithSessionManager()
 	app.Get("/sessions", handlers.ListSessions)
 
-	// No namespace query param - should default to "default"
 	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
 	resp, err := app.Test(req)
 	if err != nil {
@@ -3234,7 +3209,6 @@ func TestHandlers_ListSessions_WatchNamespace(t *testing.T) {
 	app := fiber.New()
 	app.Get("/sessions", handlers.ListSessions)
 
-	// No namespace provided - should use watchNamespace
 	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
 	resp, err := app.Test(req)
 	if err != nil {
@@ -3245,8 +3219,6 @@ func TestHandlers_ListSessions_WatchNamespace(t *testing.T) {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 }
-
-// --- GetSession tests ---
 
 func TestHandlers_SessionEndpointsRequireKubernetesRBACForTokenReviewUser(t *testing.T) {
 	const (
@@ -3502,7 +3474,6 @@ func TestHandlers_GetSession_WatchNamespace(t *testing.T) {
 	app := fiber.New()
 	app.Get("/sessions/:id", handlers.GetSession)
 
-	// explicit namespace that doesn't match watchNamespace should be rejected
 	req := httptest.NewRequest(http.MethodGet, "/sessions/my-session?namespace=other", nil)
 	resp, err := app.Test(req)
 	if err != nil {
@@ -3513,8 +3484,6 @@ func TestHandlers_GetSession_WatchNamespace(t *testing.T) {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusForbidden)
 	}
 }
-
-// --- DeleteSession tests ---
 
 func TestHandlers_DeleteSession_Success(t *testing.T) {
 	handlers, app, ss := setupTestHandlersWithSessionManager()
@@ -3565,7 +3534,6 @@ func TestHandlers_DeleteSession_NotFound(t *testing.T) {
 		t.Fatalf("Test request failed: %v", err)
 	}
 
-	// SQLite DELETE is a no-op when not found, not an error
 	if resp.StatusCode != http.StatusNoContent {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNoContent)
 	}
@@ -3601,8 +3569,6 @@ func TestHandlers_DeleteSession_WatchNamespace(t *testing.T) {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNoContent)
 	}
 }
-
-// --- GetTaskLogs additional tests ---
 
 func TestHandlers_GetTaskLogs_NotFound(t *testing.T) {
 	handlers, app := setupTestHandlers()
@@ -3652,8 +3618,6 @@ func TestHandlers_GetTaskLogs_WatchNamespace(t *testing.T) {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 }
-
-// --- GetTaskResult additional tests ---
 
 func TestHandlers_GetTaskResult_TaskNotFound(t *testing.T) {
 	handlers, app := setupTestHandlers()
@@ -3780,8 +3744,6 @@ func TestHandlers_GetTaskResult_WatchNamespace(t *testing.T) {
 	}
 }
 
-// --- DeleteTask additional tests ---
-
 func TestHandlers_DeleteTask_WatchNamespace(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -3813,7 +3775,6 @@ func TestHandlers_DeleteTask_WatchNamespace(t *testing.T) {
 	}
 }
 
-// readLines is a test helper that reads lines from a reader into a channel.
 func readLines(r io.Reader) <-chan string {
 	ch := make(chan string)
 	go func() {
@@ -3825,8 +3786,6 @@ func readLines(r io.Reader) <-chan string {
 	}()
 	return ch
 }
-
-// --- readLines tests ---
 
 func TestReadLines(t *testing.T) {
 	input := "line1\nline2\nline3\n"
@@ -4016,7 +3975,6 @@ func TestGetTaskPlan(t *testing.T) {
 	app := fiber.New()
 	app.Get("/api/v1/tasks/:id/plan", handlers.GetTaskPlan)
 
-	// Pre-save a plan into the store
 	err := ss.SavePlan(context.Background(), "default", "plan-task", &store.PlanState{
 		TaskName:     "plan-task",
 		Namespace:    "default",
@@ -4081,7 +4039,6 @@ func TestResolveNamespace_IsolationEnforced(t *testing.T) {
 
 	app := fiber.New()
 	app.Get("/test", func(c fiber.Ctx) error {
-		// Set user info in context (simulating auth middleware)
 		c.Locals(UserInfoContextKey, &UserInfo{
 			Username:  "system:serviceaccount:team-a:default",
 			Namespace: "team-a",
@@ -4162,7 +4119,6 @@ func TestResolveNamespace_WatchNamespaceMismatch(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
 	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
-	// Set watchNamespace to "production"
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "production", SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
@@ -4179,8 +4135,6 @@ func TestResolveNamespace_WatchNamespaceMismatch(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
-
-// --- CreateAgent tests ---
 
 func TestHandlers_CreateAgent_Success(t *testing.T) {
 	handlers, app := setupTestHandlers()
@@ -4436,8 +4390,6 @@ func TestHandlers_CreateAgent_ContextTokenAuthorizationRejectsDisallowedAgentSpe
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
-// --- UpdateAgent tests ---
-
 func TestHandlers_UpdateAgent_Success(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
@@ -4673,8 +4625,6 @@ func TestHandlers_UpdateAgent_InvalidBody(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
-// --- DeleteAgent tests ---
-
 func TestHandlers_DeleteAgent_Success(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
@@ -4702,8 +4652,6 @@ func TestHandlers_DeleteAgent_NotFound(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
-
-// --- ListSecretNames tests ---
 
 func TestHandlers_ListSecretNames_Success(t *testing.T) {
 	secret := &corev1.Secret{
@@ -4840,8 +4788,6 @@ func TestHandlers_ListSecretNames_ContextTokenAuthorizationEnforceRejectsNamespa
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
-// --- StreamPodLogs tests ---
-
 func TestStreamPodLogs_WithFakeClientset(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -4852,29 +4798,21 @@ func TestStreamPodLogs_WithFakeClientset(t *testing.T) {
 	clientset := kubefake.NewSimpleClientset(pod) //nolint:staticcheck
 	ctx := context.Background()
 
-	// StreamPodLogs should return a stream (or error) — with fake clientset
-	// it returns a stream even without real logs, but we verify the function is callable.
 	stream, err := StreamPodLogs(ctx, clientset, "default", "test-pod", "worker")
 	if err == nil && stream != nil {
 		defer stream.Close() //nolint:errcheck
 	}
-	// The fake clientset may or may not error — we just verify the function doesn't panic
-	// and correctly calls the K8s API.
 	_ = err
 }
 
 func TestStreamPodLogs_CancelledContext(t *testing.T) {
 	clientset := kubefake.NewSimpleClientset() //nolint:staticcheck
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
+	cancel()
 
 	_, err := StreamPodLogs(ctx, clientset, "default", "test-pod", "worker")
-	// With a cancelled context, the stream call may or may not error depending
-	// on the fake implementation — we verify no panic.
 	_ = err
 }
-
-// --- handleAuthValidate tests ---
 
 func TestHandlers_HandleAuthValidate(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -4897,8 +4835,6 @@ func TestHandlers_HandleAuthValidate(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
 	require.Equal(t, true, result["authenticated"])
 }
-
-// --- GetTaskLogs additional branch tests ---
 
 func TestHandlers_GetTaskLogs_ResultStoreAvailable(t *testing.T) {
 	task := &corev1alpha1.Task{
@@ -4971,8 +4907,6 @@ func TestHandlers_GetTaskLogs_NamespaceForbidden(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
-// --- GetSession transcript generation test ---
-
 func TestHandlers_GetSession_WithTranscript(t *testing.T) {
 	handlers, app, ss := setupTestHandlersWithSessionManager()
 	ctx := context.Background()
@@ -5002,12 +4936,9 @@ func TestHandlers_GetSession_WithTranscript(t *testing.T) {
 	require.NotEmpty(t, transcript)
 	require.Contains(t, transcript, "hello")
 	require.Contains(t, transcript, "hi there")
-	// Transcript should be JSONL (newline-separated)
 	lines := strings.Split(transcript, "\n")
 	require.Len(t, lines, 2)
 }
-
-// --- DeleteSession error path tests ---
 
 func TestHandlers_DeleteSession_NamespaceForbidden(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -5026,8 +4957,6 @@ func TestHandlers_DeleteSession_NamespaceForbidden(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
-
-// --- GetTaskPlan additional tests ---
 
 func TestHandlers_GetTaskPlan_TaskNotFound(t *testing.T) {
 	handlers, app := setupTestHandlers()
@@ -5054,7 +4983,6 @@ func TestHandlers_GetTaskPlan_NoPlanStore(t *testing.T) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
-	// planStore is nil
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient})
 
 	app := fiber.New()
@@ -5065,8 +4993,6 @@ func TestHandlers_GetTaskPlan_NoPlanStore(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusNotImplemented, resp.StatusCode)
 }
-
-// --- GetTask plan enrichment test ---
 
 func TestHandlers_GetTask_WithPlanEnrichment(t *testing.T) {
 	task := &corev1alpha1.Task{
@@ -5135,7 +5061,6 @@ func TestHandlers_GetTask_NoPlanStoreNoEnrichment(t *testing.T) {
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).WithStatusSubresource(task).Build()
-	// planStore is nil
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient})
 
 	app := fiber.New()
@@ -5151,8 +5076,6 @@ func TestHandlers_GetTask_NoPlanStoreNoEnrichment(t *testing.T) {
 	_, hasPlan := result["plan"]
 	require.False(t, hasPlan, "response should not contain plan field when planStore is nil")
 }
-
-// --- Tests: GetTaskChildren ---
 
 func TestHandlers_GetTaskChildren_Success(t *testing.T) {
 	parent := &corev1alpha1.Task{
@@ -5210,8 +5133,6 @@ func TestHandlers_GetTaskChildren_WithNamespace(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
-// --- Tests: Readyz with health checker ---
-
 type fakeHealthChecker struct {
 	err error
 }
@@ -5255,8 +5176,6 @@ func TestHandlers_Readyz_HealthCheckSuccess(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
-
-// --- Tests: GetTaskLogs with clientset ---
 
 func TestHandlers_GetTaskLogs_TaskNotFoundReturns404(t *testing.T) {
 	handlers, app := setupTestHandlers()
@@ -5385,8 +5304,6 @@ func TestHandlers_GetTaskLogs_TailLines(t *testing.T) {
 		})
 	}
 }
-
-// --- Tests: DeleteTask with watch namespace ---
 
 func TestHandlers_DeleteTask_WatchNamespaceScoped(t *testing.T) {
 	task := &corev1alpha1.Task{
@@ -5614,8 +5531,6 @@ func TestHandlers_ApplyMemoryProposalRejectedOrArchived(t *testing.T) {
 	}
 }
 
-// --- Tests: CreateAgent already exists (conflict) ---
-
 func TestHandlers_CreateAgent_Conflict(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
@@ -5636,8 +5551,6 @@ func TestHandlers_CreateAgent_Conflict(t *testing.T) {
 	require.Equal(t, http.StatusConflict, resp.StatusCode)
 }
 
-// --- Tests: ListTools & GetTool with CRDs ---
-
 func TestHandlers_GetTool_CRD(t *testing.T) {
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -5656,8 +5569,6 @@ func TestHandlers_GetTool_CRD(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
-
-// --- Tests: UpdateAgent invalid body ---
 
 func TestHandlers_UpdateAgent_WatchNamespace(t *testing.T) {
 	agent := &corev1alpha1.Agent{
@@ -5678,8 +5589,6 @@ func TestHandlers_UpdateAgent_WatchNamespace(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
-
-// --- Tests: CreateAgent with metadata format ---
 
 func TestHandlers_CreateAgent_MetadataFormat(t *testing.T) {
 	handlers, app := setupTestHandlers()
@@ -5711,8 +5620,6 @@ func TestHandlers_CreateTask_RejectsServerOwnedSpecCaseVariants(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
-// A transaction token reads a consolidation run's full report only with the
-// scopes that reading the run's inputs needs: Sessions and memory.
 func TestHandlers_MemoryConsolidationReport_ContextTokenAuthorization(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")

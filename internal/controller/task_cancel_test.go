@@ -36,7 +36,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// cancelGuardStore records whether a write ran inside the epoch guard.
 type cancelGuardStore struct {
 	store.DurableControlStore
 	entered int
@@ -180,7 +179,6 @@ func TestRequestedCancellationMessageReadsTheLiveTask(t *testing.T) {
 	plain := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: testNS, UID: "plain-uid"}}
 	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(requested, plain).Build()
 	d := &ACPDispatcher{Client: c, APIReader: c}
-	// The dispatcher's copy predates the request.
 	stale := requested.DeepCopy()
 	stale.Annotations = nil
 	if got := d.requestedCancellationMessage(context.Background(), stale); got != "cancelled by alice: wrong repository" {
@@ -214,7 +212,6 @@ func TestACPMCPBrokerRefusesCallsOnceCancellationIsRequested(t *testing.T) {
 		t.Fatalf("running Task: %v", err)
 	}
 
-	// The Task is still Running: the controller has not reconciled the request.
 	task.Annotations = map[string]string{labels.AnnotationCancelRequested: "cancelled by alice: wrong repository"}
 	reader = fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).Build()
 	if _, _, err := findACPMCPTaskExecution(context.Background(), reader, request, fence); !errors.Is(err, errACPMCPTaskCancelled) {
@@ -222,9 +219,6 @@ func TestACPMCPBrokerRefusesCallsOnceCancellationIsRequested(t *testing.T) {
 	}
 }
 
-// Cancelling a standalone Agent Task while its RuntimeSession is being created
-// aborts the create call. The run settles as Cancelled with the request's
-// message instead of a RuntimeSessionStartFailed failure.
 func TestACPDispatcherSettlesCancellationDuringRuntimeSessionCreate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -241,9 +235,6 @@ func TestACPDispatcherSettlesCancellationDuringRuntimeSessionCreate(t *testing.T
 					runtimeServer.Config.Handler.ServeHTTP(w, r)
 					return
 				}
-				// Record the cancel request as the API does and the Cancelled
-				// phase as the controller does, then hold the create until the
-				// dispatcher's cancellation watcher aborts it.
 				if err := cancelTaskForTest(r.Context(), *kubeClient, fixture.task, request); err != nil {
 					t.Errorf("cancel the Task: %v", err)
 				}
@@ -304,17 +295,12 @@ func cancelTaskForTest(ctx context.Context, c client.Client, task *corev1alpha1.
 	})
 }
 
-// Cancelling a class-backed Agent Task while its workspace attachment is
-// pending, before any execution status exists, still settles the attachment.
-// With artifact retirement enabled, completion and deletion recognize the
-// Task as ended before an attempt and finish.
 func TestCancelledTaskSettlesItsPendingClassWorkspaceAttachment(t *testing.T) {
 	ctx := context.Background()
 	r, task, workspaceKey, retirer := cancelTaskWithPendingClassWorkspace(t)
 	key := client.ObjectKeyFromObject(task)
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 
-	// Completion retires artifact references and settles the workspace.
 	settled := false
 	for range 5 {
 		if err := r.Get(ctx, key, task); err != nil {
@@ -343,7 +329,6 @@ func TestCancelledTaskSettlesItsPendingClassWorkspaceAttachment(t *testing.T) {
 		t.Fatalf("artifact retirement calls = %d, want one", len(retirer.calls))
 	}
 
-	// Deletion reclaims the (absent) attempts and releases the finalizer.
 	if err := r.Delete(ctx, task); err != nil {
 		t.Fatal(err)
 	}
@@ -360,9 +345,6 @@ func TestCancelledTaskSettlesItsPendingClassWorkspaceAttachment(t *testing.T) {
 	t.Fatalf("finalizers = %v, want the deleted Task released", task.Finalizers)
 }
 
-// cancelTaskWithPendingClassWorkspace cancels a class-backed Agent Task whose
-// workspace attachment is written but not yet acknowledged, with artifact
-// retirement enabled, and returns it Cancelled.
 func cancelTaskWithPendingClassWorkspace(t *testing.T) (*TaskReconciler, *corev1alpha1.Task, types.NamespacedName, *recordingIdentityRetirer) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -404,7 +386,6 @@ func cancelTaskWithPendingClassWorkspace(t *testing.T) (*TaskReconciler, *corev1
 		t.Fatalf("read workspace: %v", err)
 	}
 	admitTestACPWorkspace(t, r, workspace)
-	// The attach pass writes the attachment; the adapter has not acknowledged it.
 	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || ready {
 		t.Fatalf("attach pass = (%v, %v), want a pending attachment", ready, err)
 	}
@@ -444,8 +425,6 @@ func cancelTaskWithPendingClassWorkspace(t *testing.T) (*TaskReconciler, *corev1
 	return r, task, workspaceKey, retirer
 }
 
-// A recorded cancel request stops a prepared publication before the
-// controller writes the Cancelled phase.
 func TestPublicationHonorsARecordedCancelRequest(t *testing.T) {
 	running := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "running", Namespace: testNS, UID: "running-uid"},
@@ -464,8 +443,6 @@ func TestPublicationHonorsARecordedCancelRequest(t *testing.T) {
 	}
 }
 
-// A write Task cancelled after its prompt succeeded but before publication
-// pushed keeps who cancelled it and why.
 func TestCancelTaskAfterExecutionKeepsTheCancelRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -507,9 +484,6 @@ func TestCancelTaskAfterExecutionKeepsTheCancelRequest(t *testing.T) {
 	}
 }
 
-// A PromptAttempt persisted before a lost status write leaves a Task without
-// execution status, which recovery never visits. Cancelling it settles the
-// attempt and binds it to the terminal execution.
 func TestCancelRequestedAgentTaskSettlesAnUnprojectedAttempt(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -577,10 +551,6 @@ func TestCancelRequestedAgentTaskSettlesAnUnprojectedAttempt(t *testing.T) {
 	}
 }
 
-// A workspace status projection that keeps failing must not keep a
-// cancelled class-backed Agent Task running: the Cancelled phase, which
-// stops the dispatcher's run, is written first, and a later reconcile still
-// cancels the Tasks it delegated.
 func TestReconcileCancelsBeforeAFailingWorkspaceProjection(t *testing.T) {
 	const request = "cancelled by alice: wrong repository"
 	task := &corev1alpha1.Task{
@@ -640,8 +610,6 @@ func TestReconcileCancelsBeforeAFailingWorkspaceProjection(t *testing.T) {
 	if workspaceReads != 0 {
 		t.Fatalf("workspace reads = %d, want the cancellation applied before the workspace projection", workspaceReads)
 	}
-	// The next reconcile reaches the failing projection, but cancels the
-	// delegated child first.
 	_, _ = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(task)})
 	delegated := &corev1alpha1.Task{}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(child), delegated); err != nil {
@@ -652,9 +620,6 @@ func TestReconcileCancelsBeforeAFailingWorkspaceProjection(t *testing.T) {
 	}
 }
 
-// TestRuntimeWatcherStopsARunOnACancelRequest covers a cancel request whose
-// Cancelled status write keeps failing: the Task stays Running, but the
-// runtime watcher sees the request itself and stops the run.
 func TestRuntimeWatcherStopsARunOnACancelRequest(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -684,11 +649,6 @@ func TestRuntimeWatcherStopsARunOnACancelRequest(t *testing.T) {
 	}
 }
 
-// TestCancelledTaskCancelsTheChildrenItControls covers delegated work: a
-// cancelled parent asks its Pending and Running children to cancel, reaching
-// children in other namespaces by the parent UID they record and work that
-// outlived a finished child. It leaves finished children, children it does
-// not control, and scheduled templates alone.
 func TestCancelledTaskCancelsTheChildrenItControls(t *testing.T) {
 	parent := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default", UID: "parent-uid"},
@@ -733,8 +693,6 @@ func TestCancelledTaskCancelsTheChildrenItControls(t *testing.T) {
 		elsewhere("namesake-elsewhere", "another-parent-uid"),
 	}
 	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(objects...).Build()
-	// The cache has not seen the child in the other namespace yet; the API
-	// server has.
 	stale := interceptor.NewClient(c, interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if err := c.List(ctx, list, opts...); err != nil {
@@ -774,16 +732,11 @@ func TestCancelledTaskCancelsTheChildrenItControls(t *testing.T) {
 			t.Errorf("%s: cancel requested = %t, want %t", key, requested, want)
 		}
 	}
-	// A second pass changes nothing.
 	if err := r.cancelChildTasks(context.Background(), parent); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// TestInterruptedCancelStopsTheJobWhileAChildRefuses covers a parent that
-// recovery recorded as Failed after a cancel request, with a child whose
-// cancel keeps failing: the cascade still runs and reports the refusal for a
-// retry, and the parent's own completion, its Job included, still proceeds.
 func TestInterruptedCancelStopsTheJobWhileAChildRefuses(t *testing.T) {
 	controller := true
 	parent := &corev1alpha1.Task{
@@ -838,11 +791,6 @@ func TestInterruptedCancelStopsTheJobWhileAChildRefuses(t *testing.T) {
 	}
 }
 
-// TestCancelReachesLocalChildrenWithNamespaceScopedTaskAccess covers the
-// standard install, whose controller may list Tasks only in the namespaces
-// it is bound in: a cluster-wide list is forbidden, yet the parent's own
-// children are still cancelled, and with namespace isolation on no
-// cluster-wide list is tried at all.
 func TestCancelReachesLocalChildrenWithNamespaceScopedTaskAccess(t *testing.T) {
 	controller := true
 	parent := &corev1alpha1.Task{
@@ -890,10 +838,6 @@ func TestCancelReachesLocalChildrenWithNamespaceScopedTaskAccess(t *testing.T) {
 	}
 }
 
-// TestCancelReachesGrandchildrenThroughACancelRequestedChild covers a child
-// already asked to cancel whose own cascade never runs, as when its status
-// write keeps failing: the cancelled ancestor still reaches its running
-// grandchild.
 func TestCancelReachesGrandchildrenThroughACancelRequestedChild(t *testing.T) {
 	controller := true
 	owner := func(name string, uid types.UID) []metav1.OwnerReference {
@@ -933,9 +877,6 @@ func TestCancelReachesGrandchildrenThroughACancelRequestedChild(t *testing.T) {
 	}
 }
 
-// TestJobCreationSeesACancelTheCacheMissed covers a cancel request written
-// after the cached copy was read: Job creation re-reads the Task and starts
-// no workload.
 func TestJobCreationSeesACancelTheCacheMissed(t *testing.T) {
 	stale := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "native", Namespace: testNS, UID: "native-uid"},
@@ -958,9 +899,6 @@ func TestJobCreationSeesACancelTheCacheMissed(t *testing.T) {
 	}
 }
 
-// TestCancelReachesGrandchildrenThroughADeletingChild covers a child being
-// deleted whose finalizer keeps it readable: it is not patched, but its
-// running grandchild is still cancelled.
 func TestCancelReachesGrandchildrenThroughADeletingChild(t *testing.T) {
 	controller := true
 	owner := func(name string, uid types.UID) []metav1.OwnerReference {
@@ -1002,16 +940,12 @@ func TestCancelReachesGrandchildrenThroughADeletingChild(t *testing.T) {
 	}
 }
 
-// failingUsageStore refuses to register usage, as during a storage outage.
 type failingUsageStore struct{ *sqlite.Store }
 
 func (failingUsageStore) RegisterUsageTask(context.Context, store.UsageTask) error {
 	return store.ErrUnavailable
 }
 
-// TestUsageOutageStillCancelsDelegatedWork covers a cancelled Task whose
-// usage registration keeps failing: the reconcile fails early, but its
-// running child is still asked to cancel.
 func TestUsageOutageStillCancelsDelegatedWork(t *testing.T) {
 	controller := true
 	parent := &corev1alpha1.Task{
@@ -1045,9 +979,6 @@ func TestUsageOutageStillCancelsDelegatedWork(t *testing.T) {
 	}
 }
 
-// TestCancelCascadeListsATreeOnce covers a wide, deep delegation tree: the
-// walk reads it in at most two list requests, however many Tasks it holds,
-// and still reaches every running descendant.
 func TestCancelCascadeListsATreeOnce(t *testing.T) {
 	controller := true
 	root := &corev1alpha1.Task{
@@ -1079,7 +1010,6 @@ func TestCancelCascadeListsATreeOnce(t *testing.T) {
 		}
 	}
 	grow("root", 3)
-	// The deepest Tasks are still running.
 	for _, object := range objects {
 		if task := object.(*corev1alpha1.Task); strings.Count(task.Name, "-") == 3 {
 			task.Status.Phase = corev1alpha1.TaskPhaseRunning
@@ -1114,11 +1044,6 @@ func TestCancelCascadeListsATreeOnce(t *testing.T) {
 	}
 }
 
-// TestCancelCascadeReachesParkedChildChains covers delegated children that
-// parked their turns: they finished Succeeded, but a waiting one can still
-// start another turn, and a resumed one continues in a Task it does not
-// control. The cascade cancels the wait and the continuation, and walks what
-// the continuation delegated.
 func TestCancelCascadeReachesParkedChildChains(t *testing.T) {
 	controller := true
 	root := &corev1alpha1.Task{
@@ -1156,8 +1081,6 @@ func TestCancelCascadeReachesParkedChildChains(t *testing.T) {
 			},
 		},
 	}
-	// The continuation keeps its coordinator's parent label, but only a
-	// non-controller owner reference to the parked Task.
 	continuation := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "resumed-next", Namespace: "default", UID: "resumed-next-uid",
@@ -1204,9 +1127,6 @@ func TestCancelCascadeReachesParkedChildChains(t *testing.T) {
 	}
 }
 
-// TestRequestedCancellationMessagesAreBounded covers a cancel request whose
-// message exceeds what the execution status may hold: both cancel paths read
-// it bounded, so the terminal status write cannot be refused for its length.
 func TestRequestedCancellationMessagesAreBounded(t *testing.T) {
 	long := strings.Repeat("x", 4*acpPromptFailureMessageLimit)
 	native := &corev1alpha1.Task{
@@ -1224,15 +1144,6 @@ func TestRequestedCancellationMessagesAreBounded(t *testing.T) {
 	}
 }
 
-// TestLateDelegatedChildCancelsItselfUnderAStoppedAncestor covers a child
-// whose Create committed after a cancelled ancestor's cascade had already
-// run: a child in another namespace wakes no parent, and its direct parent
-// may have finished normally. Pending, it walks its UID-pinned chain,
-// through the finished parent and into the parent's recorded namespace, and
-// requests its own cancellation. Only a cancel is a signal: a chain no UID
-// proves, a live chain, an ancestor deleted as retention deletes finished
-// runs, a namesake in the child's own namespace, and a scheduled template
-// are left alone.
 func TestLateDelegatedChildCancelsItselfUnderAStoppedAncestor(t *testing.T) {
 	controller := true
 	root := &corev1alpha1.Task{
@@ -1254,8 +1165,6 @@ func TestLateDelegatedChildCancelsItselfUnderAStoppedAncestor(t *testing.T) {
 			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
 		}
 	}
-	// lateChild is a Pending child in another namespace, pinned to its
-	// parent by UID and, when given, the parent's namespace.
 	lateChild := func(name, parent, parentUID, parentNamespace string) *corev1alpha1.Task {
 		task := &corev1alpha1.Task{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "other",
@@ -1290,9 +1199,6 @@ func TestLateDelegatedChildCancelsItselfUnderAStoppedAncestor(t *testing.T) {
 		"a cron run of a schedule a cancelled Task delegated": {lateChild("run", "nightly", "nightly-uid", "default"), false},
 		"a cron run of a cancelled schedule":                  {lateChild("cancelled-run", "cancelled-nightly", "cancelled-nightly-uid", "default"), true},
 	}
-	// kept finished under a run that retention has since deleted; neighbor
-	// is an unrelated Task in the child's namespace. nightly is a schedule
-	// the cancelled root delegated, whose runs answer only to it.
 	neighbor := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "neighbor", Namespace: "other", UID: "neighbor-uid"}}
 	nightly := finishedUnder("nightly", "root", "root-uid")
 	nightly.Spec.Schedule = "0 2 * * *"

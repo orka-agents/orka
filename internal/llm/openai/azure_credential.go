@@ -13,11 +13,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 )
 
-// transportAuthenticated selects openai-go's Azure token-credential mode for
-// a client whose HTTP transport authenticates each request itself: the
-// origin-pinned bearer client, which sets the Provider's token, or the
-// controller relay, which sets the worker's. It holds and fetches no token;
-// the transport replaces the empty bearer the SDK writes.
 type transportAuthenticated struct{}
 
 var _ azcore.TokenCredential = transportAuthenticated{}

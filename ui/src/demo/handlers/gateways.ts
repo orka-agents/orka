@@ -7,10 +7,6 @@ import { usageHandlers } from './usage'
 
 const deliveries: GatewayDelivery[] = gatewayDeliveries.map((delivery) => ({ ...delivery }))
 
-/**
- * One page of a ledger list, filtered by gateway and state. The continue token
- * is the next offset, like the controller's opaque cursor.
- */
 function ledgerPage<T extends { gatewayName: string; state: string }>(request: Request, items: T[]) {
   if (!inDemoNamespace(request)) return HttpResponse.json({ items: [], metadata: {} })
   const gateway = query(request, 'gateway')
@@ -27,7 +23,6 @@ function ledgerPage<T extends { gatewayName: string; state: string }>(request: R
 
 const byUpdated = (a: GatewayDelivery, b: GatewayDelivery) => b.updatedAt.localeCompare(a.updatedAt)
 
-/** A manual retry goes out on the next adapter pass and lands a moment later. */
 function retry(delivery: GatewayDelivery) {
   const now = new Date().toISOString()
   Object.assign(delivery, { state: 'Pending', manualRetryCount: delivery.manualRetryCount + 1, nextAttemptAt: now, updatedAt: now })
@@ -46,7 +41,6 @@ function retry(delivery: GatewayDelivery) {
   }, 2500)
 }
 
-/** Gateways, bindings, the event ledger, and the delivery outbox; plus connectors and usage. */
 export const gatewayHandlers: RequestHandler[] = [
   http.get(api('/gateways'), ({ request }) => HttpResponse.json({ items: inDemoNamespace(request) ? gateways : [], metadata: {} })),
 

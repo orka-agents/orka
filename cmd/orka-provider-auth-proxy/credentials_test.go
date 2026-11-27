@@ -169,8 +169,6 @@ func TestPreviousTokenOverlapExpiresWithoutExtensionAcrossRestart(t *testing.T) 
 		t.Fatal("current token expired with previous token")
 	}
 
-	// Recreate every mounted file to model a fresh Pod/projected-volume
-	// materialization while preserving the same absolute expiry metadata.
 	writeTokenFile(t, currentPath, testProviderTokenNew)
 	writeTokenFile(t, previousPath, testProviderTokenOld)
 	writeTokenDeadline(t, validUntilPath, validUntil)
@@ -241,8 +239,6 @@ func TestTokenFileReloaderReadsOneProjectedSecretGeneration(t *testing.T) {
 	writeTokenDeadline(t, filepath.Join(secondGeneration, "previous-token-valid-until"), now.Add(overlap))
 	switchProjectedGeneration(t, directory, filepath.Base(secondGeneration))
 
-	// Kubernetes publishes ..data before creating visible symlinks for newly
-	// added keys. Reload must still read the complete selected generation.
 	if _, err := os.Lstat(previousPath); !os.IsNotExist(err) {
 		t.Fatalf("previous-token visible path unexpectedly exists: %v", err)
 	}
@@ -346,8 +342,6 @@ func TestTokenRotationControllerFirstWithPreloadedOverlapToken(t *testing.T) {
 		t.Fatal("unstaged next token was accepted")
 	}
 
-	// Pre-stage the next controller token in the overlap slot, then switch the
-	// controller before changing which token is designated current by the proxy.
 	now = now.Add(time.Minute)
 	writeTokenFile(t, previousPath, testProviderTokenNext)
 	writeTokenDeadline(t, validUntilPath, now.Add(overlap))

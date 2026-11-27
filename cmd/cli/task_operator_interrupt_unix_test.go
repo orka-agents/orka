@@ -26,8 +26,6 @@ import (
 	"github.com/orka-agents/orka/internal/operatoraccess"
 )
 
-// fakePortForward makes newClientWithTunnel "start" a port-forward to api and
-// reports how it was started and whether it was stopped.
 type fakePortForward struct {
 	isolated atomic.Bool
 	stopped  atomic.Int32
@@ -54,8 +52,6 @@ func installFakePortForward(t *testing.T, api *httptest.Server) *fakePortForward
 		forward.isolated.Store(isolateInterrupt)
 		return port, 0, func() { forward.stopped.Add(1) }, nil
 	}
-	// An interrupt must never reach the Go default action, which would end
-	// the test binary, whatever handlers the code under test has registered.
 	guard := make(chan os.Signal, 8)
 	signal.Notify(guard, os.Interrupt)
 	t.Cleanup(func() { signal.Stop(guard) })
@@ -80,9 +76,6 @@ func waitFor(t *testing.T, what string, done func() bool) {
 	}
 }
 
-// operatorExecFixture serves one operator exec stream. It reports when the
-// stream opened and each SIGINT the CLI forwards, and finishes the command
-// with exit status 0 once finish is closed.
 type operatorExecFixture struct {
 	opened    chan struct{}
 	forwarded atomic.Int32
@@ -134,10 +127,6 @@ func runTaskExec(t *testing.T) chan error {
 	return result
 }
 
-// Without a terminal the first Ctrl-C is forwarded to the remote command as
-// SIGINT. A port-forward the command started itself must survive it: the
-// stream would otherwise drop under a command that handles SIGINT and carries
-// on. It is started outside the terminal's interrupt and no handler stops it.
 func TestTaskExecKeepsItsPortForwardThroughTheFirstInterrupt(t *testing.T) {
 	fixture, api := newOperatorExecFixture(t)
 	forward := installFakePortForward(t, api)
@@ -145,7 +134,6 @@ func TestTaskExecKeepsItsPortForwardThroughTheFirstInterrupt(t *testing.T) {
 	<-fixture.opened
 	interruptSelf(t)
 	waitFor(t, "the interrupt to be forwarded", func() bool { return fixture.forwarded.Load() == 1 })
-	// Give a handler that should not exist the chance to run.
 	time.Sleep(100 * time.Millisecond)
 	if stopped := forward.stopped.Load(); stopped != 0 {
 		t.Fatalf("the first interrupt stopped the port-forward %d time(s); the remote command is still running", stopped)
@@ -167,8 +155,6 @@ func TestTaskExecKeepsItsPortForwardThroughTheFirstInterrupt(t *testing.T) {
 	}
 }
 
-// A second Ctrl-C abandons the stream, and with it the port-forward the
-// command owned.
 func TestTaskExecStopsItsPortForwardWhenTheStreamIsAbandoned(t *testing.T) {
 	fixture, api := newOperatorExecFixture(t)
 	t.Cleanup(func() { close(fixture.finish) })
@@ -192,8 +178,6 @@ func TestTaskExecStopsItsPortForwardWhenTheStreamIsAbandoned(t *testing.T) {
 	}
 }
 
-// Every other command keeps the existing behavior: an interrupt stops a
-// port-forward it started.
 func TestNewClientFromCmdStopsItsPortForwardOnInterrupt(t *testing.T) {
 	api := httptest.NewServer(http.NotFoundHandler())
 	defer api.Close()
@@ -235,9 +219,6 @@ func TestForwardOperatorInterruptsForwardsOnceThenAbandons(t *testing.T) {
 	}
 }
 
-// Ctrl-C signals the terminal's foreground process group. A port-forward the
-// exec owns is started in a group of its own so only the CLI decides when it
-// ends.
 func TestIsolateFromTerminalInterruptLeavesTheForegroundProcessGroup(t *testing.T) {
 	sleep, err := exec.LookPath("sleep")
 	if err != nil {

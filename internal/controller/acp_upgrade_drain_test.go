@@ -608,8 +608,6 @@ func TestKubernetesACPUpgradeDrainBarrierObserver(t *testing.T) {
 		&corev1alpha1.Publication{ObjectMeta: metav1.ObjectMeta{Name: "foreign-preparing", Namespace: "tenant-b"}, Status: corev1alpha1.PublicationStatus{State: corev1alpha1.PublicationControlState(store.PublicationPreparing)}},
 		&corev1alpha1.ExternalEffect{ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "tenant-a"}, Status: corev1alpha1.ExternalEffectStatus{State: corev1alpha1.ExternalEffectControlState(store.ExternalEffectPending)}},
 		&corev1alpha1.ExternalEffect{ObjectMeta: metav1.ObjectMeta{Name: "succeeded", Namespace: "tenant-a"}, Status: corev1alpha1.ExternalEffectStatus{State: corev1alpha1.ExternalEffectControlState(store.ExternalEffectSucceeded)}},
-		// Boot evidence reservations an interrupted controller left empty are
-		// local proofs, not in-flight external work.
 		&corev1alpha1.ExternalEffect{ObjectMeta: metav1.ObjectMeta{Name: "empty-boot-preparation", Namespace: "tenant-a"},
 			Spec:   corev1alpha1.ExternalEffectSpec{Kind: runtimePoolBootPreparationKind},
 			Status: corev1alpha1.ExternalEffectStatus{State: corev1alpha1.ExternalEffectControlState(store.ExternalEffectPending)}},
@@ -939,8 +937,6 @@ func TestRuntimeSessionControlAvailableWithoutLeaseIsQuiescent(t *testing.T) {
 	}
 }
 
-// ReadACPUpgradeDrainMarker returns the marker atomically ordered on the
-// authoritative controller-epoch Lease.
 func ReadACPUpgradeDrainMarker(
 	ctx context.Context,
 	reader client.Reader,
@@ -960,8 +956,6 @@ func ReadACPUpgradeDrainMarker(
 	return marker, nil
 }
 
-// ACPUpgradeDrainCompletedForEpoch is the only planned-takeover predicate. A
-// timeout or merely persisted intent intentionally returns false.
 func ACPUpgradeDrainCompletedForEpoch(
 	ctx context.Context,
 	reader client.Reader,

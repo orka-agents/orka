@@ -13,7 +13,6 @@ func TestGitHubWebhook_PullRequestReviewAndCommentTriggerExternalCommentMonitors
 	monitor.Spec.Repair.Enabled = true
 	monitor.Spec.Repair.ExternalComments.Enabled = true
 
-	// A second monitor without externalComments enabled must not match review events.
 	other := githubWebhookRepositoryMonitor("no-ext-review-webhook", true)
 	other.Spec.Repair.Enabled = true
 	other.Spec.Repair.ExternalComments.Enabled = false
@@ -46,7 +45,6 @@ func TestGitHubWebhook_PullRequestReviewAndCommentTriggerExternalCommentMonitors
 		t.Fatalf("other monitor should not queue on review event: %+v err=%v", otherRuns, err)
 	}
 
-	// pull_request_review_comment created on a different PR also queues a run.
 	commentBody := []byte(`{
 		"action": "created",
 		"repository": {"full_name": "sozercan/vekil", "html_url": "https://github.com/sozercan/vekil", "clone_url": "https://github.com/sozercan/vekil.git", "default_branch": "main"},
@@ -62,7 +60,6 @@ func TestGitHubWebhook_PullRequestReviewAndCommentTriggerExternalCommentMonitors
 		t.Fatalf("pull_request_review_comment status = %d, want 201; body: %s", resp2.StatusCode, readRespBody(t, resp2))
 	}
 
-	// Ignored action (edited) does not queue.
 	editedBody := []byte(`{
 		"action": "edited",
 		"repository": {"full_name": "sozercan/vekil", "html_url": "https://github.com/sozercan/vekil", "clone_url": "https://github.com/sozercan/vekil.git", "default_branch": "main"},

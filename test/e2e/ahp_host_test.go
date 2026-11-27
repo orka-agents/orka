@@ -34,9 +34,7 @@ import (
 )
 
 const (
-	ahpE2EAgent = "e2e-ahp-codex"
-	// ahpE2EProvider is the one AHP agent Orka offers; it runs the codex
-	// Agent's model on Codex.
+	ahpE2EAgent        = "e2e-ahp-codex"
 	ahpE2EProvider     = "copilot"
 	ahpE2ESubject      = "e2e-ahp-person"
 	ahpE2ERepository   = "https://github.com/octocat/Hello-World"
@@ -49,11 +47,6 @@ const (
 	ahpE2ETurnWait     = 8 * time.Minute
 )
 
-// The AHP host end to end: a person signed in with OIDC mints a connection
-// token, a desktop-style client connects to /ahp with the token in the URL,
-// sees the built-in runtime, and runs and cancels turns that are Orka Tasks.
-// Tokens stay in memory: they never enter command arguments, failure
-// messages or reports.
 var _ = Describe("Agent Host Protocol host", Ordered, Serial, Label("agent-runtime", "ahp"), func() {
 	var (
 		authority  *aimockAuthorityEval
@@ -95,13 +88,10 @@ var _ = Describe("Agent Host Protocol host", Ordered, Serial, Label("agent-runti
 		Expect(err).NotTo(HaveOccurred())
 
 		By("offering one built-in runtime model to AHP people")
-		// Codex enforces only its unrestricted policy or a read-only tool set,
-		// so the Agent keeps the default tools, as the other Codex specs do.
 		Expect(applyManifestJSON(runtimeAgentManifest(ahpE2EAgent, "codex", runtimeMatrixMockCodexModel, 4,
 			nil))).To(Succeed())
 		DeferCleanup(deleteE2EObjects, "agent", ahpE2EAgent)
 
-		// Runs before the Agent is deleted and the controller is restored.
 		DeferCleanup(func() {
 			if client != nil {
 				_ = client.Shutdown(context.Background())
@@ -163,7 +153,6 @@ var _ = Describe("Agent Host Protocol host", Ordered, Serial, Label("agent-runti
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
 		transport, err := ahpws.Connect(ctx, ahpE2EHostURL(authority.apiURL, ahpToken))
-		// The dial error repeats the URL, which carries the token.
 		authorizationExpectNoError(err, "the AHP WebSocket connection failed")
 		client, err = ahp.Connect(ctx, transport, ahp.DefaultConfig())
 		Expect(err).NotTo(HaveOccurred())
@@ -211,8 +200,7 @@ var _ = Describe("Agent Host Protocol host", Ordered, Serial, Label("agent-runti
 			Channel: sessionURI, Provider: &provider, WorkingDirectories: []string{"file://" + cloned.Project.Path},
 			Config: map[string]json.RawMessage{
 				"approvalMode": json.RawMessage(`"allow-all"`),
-				// A repository the host cannot probe has no default branch.
-				"baseBranch": json.RawMessage(`"` + ahpE2EBaseBranch + `"`),
+				"baseBranch":   json.RawMessage(`"` + ahpE2EBaseBranch + `"`),
 			},
 		}, nil)).To(Succeed())
 		session, _, err := client.Subscribe(ctx, sessionURI)
@@ -310,16 +298,12 @@ var _ = Describe("Agent Host Protocol host", Ordered, Serial, Label("agent-runti
 	})
 })
 
-// ahpE2EHostURL is the URL a desktop AHP client is given: the token travels
-// in the query because such clients send no Authorization header.
 func ahpE2EHostURL(apiURL, token string) string {
 	base := strings.TrimRight(apiURL, "/")
 	base = "ws" + strings.TrimPrefix(base, "http")
 	return base + "/ahp?tkn=" + url.QueryEscape(token)
 }
 
-// ahpE2EAPI calls the Orka API with a bearer token. Errors and bodies are
-// never echoed, since requests and responses can carry tokens.
 func ahpE2EAPI(apiURL, bearer, method, path, body string) (int, []byte) {
 	req, err := http.NewRequest(method, strings.TrimRight(apiURL, "/")+path, strings.NewReader(body))
 	authorizationExpectNoError(err, "the Orka API request is invalid")
@@ -349,15 +333,12 @@ func ahpE2EListedTokenIDs(body []byte) []string {
 	return ids
 }
 
-// ahpE2EDoorStatus asks the AHP door without upgrading, so a valid token gets
-// a WebSocket handshake error and an invalid one gets 401.
 func ahpE2EDoorStatus(apiURL, token string) int {
 	target := strings.TrimRight(apiURL, "/") + "/ahp"
 	if token != "" {
 		target += "?tkn=" + url.QueryEscape(token)
 	}
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Get(target)
-	// The error repeats the URL, which carries the token.
 	authorizationExpectNoError(err, "the AHP door request failed")
 	_ = resp.Body.Close()
 	return resp.StatusCode
@@ -373,7 +354,6 @@ func ahpE2EStartTurn(ctx context.Context, client *ahp.Client, chat, turnID, text
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 }
 
-// ahpE2EWaitForTurnTask finds the person's Task whose prompt carries marker.
 func ahpE2EWaitForTurnTask(marker string) corev1alpha1.Task {
 	var found corev1alpha1.Task
 	EventuallyWithOffset(1, func(g Gomega) {
@@ -391,7 +371,6 @@ func ahpE2EWaitForTurnTask(marker string) corev1alpha1.Task {
 	return found
 }
 
-// ahpE2EWaitForTurn waits until the chat records turnID as ended.
 func ahpE2EWaitForTurn(client *ahp.Client, chat, turnID string, timeout time.Duration) ahptypes.Turn {
 	var ended ahptypes.Turn
 	EventuallyWithOffset(1, func(g Gomega) {
@@ -404,8 +383,6 @@ func ahpE2EWaitForTurn(client *ahp.Client, chat, turnID string, timeout time.Dur
 	return ended
 }
 
-// ahpE2EWaitForIdleSession waits until the session's chat is idle again,
-// which clients read as the end of the session's work.
 func ahpE2EWaitForIdleSession(client *ahp.Client, session string) {
 	EventuallyWithOffset(1, func(g Gomega) {
 		state := ahpE2ESnapshot(g, client, session)

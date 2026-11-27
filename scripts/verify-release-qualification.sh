@@ -57,8 +57,6 @@ if ! acp_report_qualified "${report}" || ! jq -e \
   exit 1
 fi
 
-# Reruns reuse the run ID. Require the same completed attempt after downloading
-# and validating its report, before accepting or retaining that evidence.
 gh api "repos/${repository}/actions/runs/${run_id}" >"${report_dir}/run-after-download.json"
 if ! jq -e --slurpfile initial "${report_dir}/run.json" '
     def identity: {run_attempt, status, conclusion, event, head_sha, head_branch, path,

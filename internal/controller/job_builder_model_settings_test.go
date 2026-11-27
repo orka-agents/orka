@@ -116,7 +116,6 @@ func TestJobBuilder_AIModelSettingsEnv(t *testing.T) {
 						if !hasAgentEnvFromSecret(container.EnvFrom) {
 							t.Fatal("missing direct Agent Secret EnvFrom")
 						}
-						// Explicit Env entries take precedence over any same-named Secret keys.
 						envVars = container.Env
 					} else {
 						envVars = builder.buildEnvVars(context.Background(), task, agent, nil)

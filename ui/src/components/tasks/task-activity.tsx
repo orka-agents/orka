@@ -19,10 +19,6 @@ interface TaskActivityProps {
   initialView?: ActivityView
 }
 
-/**
- * What the task did, step by step: the same execution events grouped into a
- * trace, or as the raw stream with filters and "Fork from here".
- */
 export function TaskActivity({ taskId, taskUid, taskNamespace, taskPhase, initialView = 'trace' }: TaskActivityProps) {
   const [view, setView] = useState<ActivityView>(initialView)
   return (

@@ -34,7 +34,6 @@ func TestExternalCodexReadFixtureRequiresRealToolResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// E2E command helpers change the working directory to the project root.
 	t.Chdir(projectDir)
 	data, err := os.ReadFile(filepath.Join(projectDir, mockLLMFixtureDir, "agent_runtime_matrix.json"))
 	if err != nil {

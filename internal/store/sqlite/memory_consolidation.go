@@ -12,8 +12,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// validateMemoryProposalChanges checks the targets and sources a new proposal
-// names. Only consolidation types carry targets, and each needs its own count.
 func validateMemoryProposalChanges(proposal *store.MemoryProposal) error {
 	consolidation := store.IsMemoryConsolidationProposalType(proposal.Type)
 	if !consolidation && len(proposal.Targets) > 0 {
@@ -98,10 +96,6 @@ func unmarshalMemoryProposalChanges(proposal *store.MemoryProposal, targetsJSON,
 	return nil
 }
 
-// checkConsolidationTargets refuses a consolidation proposal whose targets
-// are missing, deleted or at another generation than the proposal read. The
-// proposal is stale, so it returns ErrConflict rather than a precondition a
-// new resolve could satisfy.
 func checkConsolidationTargets(ctx context.Context, tx *sql.Tx, proposal *store.MemoryProposal) error {
 	for _, target := range proposal.Targets {
 		var generation uint64
@@ -123,9 +117,6 @@ func checkConsolidationTargets(ctx context.Context, tx *sql.Tx, proposal *store.
 	return nil
 }
 
-// retireConsolidationTargets changes every target of a checked proposal:
-// a merge or supersede deletes and disables each, superseded by replacement,
-// and a retire disables each. Every target gains one generation.
 func retireConsolidationTargets(ctx context.Context, tx *sql.Tx, proposal *store.MemoryProposal, replacement string, at time.Time) error {
 	for _, target := range proposal.Targets {
 		query := `UPDATE memories
@@ -133,9 +124,6 @@ func retireConsolidationTargets(ctx context.Context, tx *sql.Tx, proposal *store
 			 WHERE namespace = ? AND id = ? AND generation = ? AND deleted = FALSE`
 		args := []any{replacement, at, proposal.Namespace, target.MemoryID, target.Generation}
 		if replacement == "" {
-			// Disabling a memory a person already disabled changes nothing, so
-			// it keeps its generation, and other proposals that read it stay
-			// current.
 			query = `UPDATE memories
 				 SET generation = generation + CASE WHEN disabled = TRUE THEN 0 ELSE 1 END,
 				     updated_at = CASE WHEN disabled = TRUE THEN updated_at ELSE ? END,
@@ -158,19 +146,11 @@ func retireConsolidationTargets(ctx context.Context, tx *sql.Tx, proposal *store
 	return nil
 }
 
-// refuseLinkedConsolidationMemory refuses to apply a merge or supersede
-// proposal that a memory already names as its source. A consolidation
-// proposal creates its memory in the same transaction that retires its
-// targets, so such a memory was not created by applying it: anyone who can
-// create a memory can name any proposal, and adopting it would retire the
-// targets into content nobody reviewed.
 func refuseLinkedConsolidationMemory(proposal *store.MemoryProposal, linked *store.Memory) error {
 	return store.ConflictErrorf("memory %q names memory proposal %q as its source, but a %s proposal creates its memory only when it is applied",
 		linked.ID, proposal.ID, proposal.Type)
 }
 
-// applyRetireProposal disables every target of an accepted retire proposal
-// and records the proposal as applied to its first target, in tx.
 func applyRetireProposal(ctx context.Context, tx *writeTx, application store.MemoryProposalApplication, proposal *store.MemoryProposal) (*store.Memory, error) {
 	if err := checkConsolidationTargets(ctx, tx.Tx, proposal); err != nil {
 		return nil, err

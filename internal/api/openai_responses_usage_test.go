@@ -32,7 +32,6 @@ func TestResponsesRecordsUsage(t *testing.T) {
 				var calls atomic.Int32
 				handler, app := setupResponsesHTTP(t, func(w http.ResponseWriter, r *http.Request) {
 					if calls.Add(1) == 1 {
-						// Namespace ownership must be captured before even the API-mode probe.
 						require.NoError(t, reader.Delete(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: defaultNamespace}}))
 						require.NoError(t, reader.Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: defaultNamespace, UID: "replacement-namespace"}}))
 					}
@@ -49,7 +48,6 @@ func TestResponsesRecordsUsage(t *testing.T) {
 				}, false)
 				handler.resultStore = backend
 				handler.apiReader = reader
-				// A stale informer identity must not override the uncached reader.
 				require.NoError(t, handler.client.Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: defaultNamespace, UID: "stale-namespace"}}))
 				body := fmt.Sprintf(`{"model":"fixture/test-model","store":false,"stream":%t,"input":"hello"}`, stream)
 				status, response := requestResponses(t, app, body, !coordinator)
@@ -102,7 +100,6 @@ func TestResponsesUsageIdentityFailurePreventsProviderCall(t *testing.T) {
 			}, false)
 			handler.resultStore = newInternalExecutionEventStore(t)
 			handler.apiReader = testInternalExecutionEventClient(t)
-			// The cached Namespace still exists, but the authoritative lookup fails.
 			require.NoError(t, handler.client.Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: defaultNamespace, UID: "stale-namespace"}}))
 			body := fmt.Sprintf(`{"model":"fixture/test-model","store":false,"stream":%t,"input":"hello"}`, stream)
 			status, response := requestResponses(t, app, body, true)
@@ -140,7 +137,6 @@ func TestResponsesCacheUsage(t *testing.T) {
 					}
 					chunks := make(chan llm.StreamChunk, 3)
 					chunks <- llm.StreamChunk{Content: completion.Content}
-					// A terminal chunk need not repeat previously reported usage.
 					chunks <- llm.StreamChunk{
 						InputTokens: completion.InputTokens, OutputTokens: completion.OutputTokens, UsageReported: true,
 						CachedInputTokens: usage.cached, CacheWriteInputTokens: usage.write, InputExcludesCache: usage.excludesCache,

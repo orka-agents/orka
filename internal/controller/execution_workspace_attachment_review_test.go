@@ -469,9 +469,6 @@ func TestWorkspaceAttachmentManagerStoresHeaderSafeBearerText(t *testing.T) {
 	}
 }
 
-// A controller restart after Secret creation but before the workspace patch
-// leaves an exact next-epoch orphan. Once the old holder's Lease expires, a
-// successor adopts that credential instead of failing forever on AlreadyExists.
 func TestWorkspaceAttachmentManagerRecoversOwnedOrphanAfterLeaseHandoff(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -4,9 +4,6 @@ package fakeentra_test
 
 import (
 	"context"
-	"encoding/pem"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,17 +12,8 @@ import (
 	"github.com/orka-agents/orka/test/fixtures/fakeentra"
 )
 
-// The AI worker's own Azure OpenAI provider reads the fake's answers, as one
-// response and as a stream, so the E2E fails only on a real regression.
 func TestFakeEntraModelAnswersParseWithTheAzureSDK(t *testing.T) {
 	server, source := newModelFixture(t)
-	// The provider uses the system roots, which are read once per process.
-	caFile := filepath.Join(t.TempDir(), "ca.pem")
-	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
-	if err := os.WriteFile(caFile, certificate, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("SSL_CERT_FILE", caFile)
 
 	identities := source(assertion)
 	provider, err := openai.NewProvider(llm.ProviderConfig{
@@ -33,6 +21,7 @@ func TestFakeEntraModelAnswersParseWithTheAzureSDK(t *testing.T) {
 		BaseURL:             server.URL,
 		ProviderType:        "azure-openai",
 		AzureDeploymentName: "gpt-x",
+		HTTPTransport:       server.Client().Transport,
 	})
 	if err != nil {
 		t.Fatal(err)

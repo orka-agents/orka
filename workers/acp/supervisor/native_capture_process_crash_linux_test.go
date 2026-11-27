@@ -40,8 +40,6 @@ type nativeCrashBoundary struct {
 	Operation     harnessv2.OperationRecord
 }
 
-// Run as root in the runtime image with the production ACP exec helper installed.
-// Only the fixture ACP child runs; no Codex binary or live inference is needed.
 func TestSupervisorNativeCaptureProcessCrash(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root for distinct supervisor and ACP child identities")
@@ -99,8 +97,6 @@ func TestSupervisorNativeCaptureProcessCrash(t *testing.T) {
 func nativeCrashConfig(t *testing.T, root string) (Config, harnessv2.RuntimeProfile) {
 	t.Helper()
 	cfg, profile := newTestConfigWithUpstream(t, "native-resume", "http://127.0.0.1:1", strings.Repeat("p", 32))
-	// All surviving evidence and the identity allocator belong to the parent,
-	// not the killed helper's t.TempDir cleanup lifetime.
 	cfg.SessionBaseDir = filepath.Join(root, "sessions")
 	cfg.Capabilities.SupportsNativeSessions = true
 	cfg.Provider.PrepareSession = prepareCodexHome
@@ -145,8 +141,6 @@ func killNativeCaptureSubprocess(t *testing.T, root string, cfg Config) nativeCr
 		diagnostics, _ := os.ReadFile(log.Name())
 		t.Fatalf("supervisor readiness acknowledgement: %v\n%s", err, diagnostics)
 	}
-	// Pin the acknowledged child before starting capture so every later failure
-	// has exact-process cleanup, even if the second acknowledgement is lost.
 	providerPID, childUID := boundary.ProviderPID, boundary.ChildUID
 	childPIDFD := ownNativeCrashChild(t, cmd.Process.Pid, boundary)
 	request := mutationHTTPRequest(t, http.MethodPost, "/v2/runtime-sessions/session-1/native-session", boundary.Capture, cfg)
@@ -187,9 +181,6 @@ func killNativeCaptureSubprocess(t *testing.T, root string, cfg Config) nativeCr
 	if err == nil || !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
 		t.Fatalf("supervisor did not die by SIGKILL: error=%v status=%v", err, status)
 	}
-	// The production exec helper reinstates Pdeathsig after dropping credentials.
-	// Prove exit independently of supervisor Wait and before fallback cleanup;
-	// killing the child ourselves must never satisfy this assertion.
 	if err := waitNativeCrashChildExit(childPIDFD, 5*time.Second); err != nil {
 		t.Fatalf("ACP child PID=%d UID=%d did not exit after supervisor SIGKILL before test cleanup: %v", providerPID, childUID, err)
 	}
@@ -206,8 +197,6 @@ func killNativeCaptureSubprocess(t *testing.T, root string, cfg Config) nativeCr
 	return boundary
 }
 
-// ownNativeCrashChild keeps a Linux process handle, not a reusable numeric PID.
-// Linux without pidfd support fails closed rather than risking another process.
 func ownNativeCrashChild(t *testing.T, supervisorPID int, boundary nativeCrashBoundary) int {
 	t.Helper()
 	if boundary.PID != supervisorPID || boundary.PID == os.Getpid() || boundary.ProviderPID <= 0 ||
@@ -228,7 +217,6 @@ func ownNativeCrashChild(t *testing.T, supervisorPID int, boundary nativeCrashBo
 		if err := waitNativeCrashChildExit(fd, 0); err == nil {
 			return
 		}
-		// This is test cleanup on failure, not evidence of production exit.
 		t.Logf("test cleanup: killing pinned ACP child PID=%d UID=%d", boundary.ProviderPID, boundary.ChildUID)
 		if err := unix.PidfdSendSignal(fd, unix.SIGKILL, nil, 0); err != nil && !errors.Is(err, unix.ESRCH) {
 			t.Errorf("test cleanup: signal ACP child PID=%d: %v", boundary.ProviderPID, err)
@@ -237,8 +225,6 @@ func ownNativeCrashChild(t *testing.T, supervisorPID int, boundary nativeCrashBo
 			t.Errorf("test cleanup: ACP child PID=%d exit not observed: %v", boundary.ProviderPID, err)
 		}
 	})
-	// An exited handle cannot refer to a newly reused /proc PID whose UID was
-	// inspected above. The acknowledged provider must still be alive here.
 	if err := waitNativeCrashChildExit(fd, 0); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("acknowledged ACP child PID=%d was not live when pinned: %v", boundary.ProviderPID, err)
 	}
@@ -257,8 +243,6 @@ func waitNativeCrashChildExit(fd int, timeout time.Duration) error {
 			}
 			return err
 		}
-		// A pidfd becomes readable only after exit, even if an orphan zombie
-		// remains in /proc. A zombie no longer holds the private home open.
 		if poll[0].Revents&(unix.POLLIN|unix.POLLHUP) != 0 {
 			return nil
 		}
@@ -271,8 +255,6 @@ func waitNativeCrashChildExit(fd int, timeout time.Duration) error {
 	}
 }
 
-// This helper must never return after acknowledging the barrier. Its handler
-// is executing production authenticated capture, not a fake capture executor.
 func TestSupervisorNativeCaptureProcessCrashHelper(t *testing.T) {
 	root := os.Getenv("ORKA_NATIVE_CAPTURE_CRASH_HELPER_ROOT")
 	if root == "" {
@@ -320,9 +302,6 @@ func TestSupervisorNativeCaptureProcessCrashHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// captureNativeSession closes MCP before it closes the provider transport.
-	// The cancellation acknowledgement proves capture is entered; holding the
-	// existing provider mutex prevents exit proof, encoding, or publication.
 	entered := make(chan struct{})
 	state.providerProxy.mu.Lock()
 	state.mcpProxy.mu.Lock()
@@ -384,7 +363,6 @@ func TestSupervisorNativeCaptureProcessCrashHelper(t *testing.T) {
 	if err := ack.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// Deliberately no Close, unlock, signal handler, or graceful return.
 	<-returned
 	t.Fatal("capture escaped the held provider transport before SIGKILL")
 }

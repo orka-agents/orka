@@ -125,8 +125,6 @@ func onlyChildProcess(pid int) func(int) ([]int, error) {
 
 func newSynchronousChildProcessReaper() *childProcessReaper {
 	reaper := newChildProcessReaper(true)
-	// Prevent tests from leaking a process-wide SIGCHLD loop; they drive scans
-	// synchronously so each assertion has deterministic ownership.
 	reaper.startOnce.Do(func() {})
 	return reaper
 }

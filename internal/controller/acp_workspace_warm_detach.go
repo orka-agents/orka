@@ -26,22 +26,8 @@ import (
 	"github.com/orka-agents/orka/internal/operatoraccess"
 )
 
-// ADR 0055: a detached session workspace whose frozen detach action is
-// Suspend may stay Ready, with its runtime running, for a bounded window
-// before the Suspend applies. The window is frozen per workspace through
-// acpWorkspaceSuspendAfterDetachAnnotation; one window instance is the
-// absolute acpWorkspaceSuspendAtAnnotation deadline.
-
-// acpWorkspaceWarmExpiryGrace bounds how long live continuation demand may
-// defer a warm window's expiry past its deadline, and how close to the
-// deadline a continuation records its demand before attaching.
 const acpWorkspaceWarmExpiryGrace = 2 * time.Minute
 
-// stampACPWorkspaceWarmDemand records a continuation's demand on a warm
-// workspace whose deadline is near. Retention's delayed Suspend is an
-// optimistic write on the same object, so once this lands the expiry either
-// sees the demand and defers, or loses the conflict, exactly as it would
-// against the attachment itself.
 func (r *TaskReconciler) stampACPWorkspaceWarmDemand(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -59,9 +45,6 @@ func (r *TaskReconciler) stampACPWorkspaceWarmDemand(
 	return r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
-// warmWindowDemandOutstanding reports demand that must defer a warm window's
-// expiry: a live recorded requester, an open speculative start (ADR 0057),
-// or any live continuation Task of the Session, bound or not yet linked.
 func (r *ACPWorkspaceRetentionReconciler) warmWindowDemandOutstanding(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -76,8 +59,6 @@ func (r *ACPWorkspaceRetentionReconciler) warmWindowDemandOutstanding(
 	return r.liveSessionContinuationExists(ctx, workspace, nil)
 }
 
-// parseACPWorkspaceSuspendAfterDetach parses a frozen warm-detach window: a
-// positive Go duration of at most maxACPWorkspaceSuspendAfterDetach.
 func parseACPWorkspaceSuspendAfterDetach(raw string) (time.Duration, error) {
 	window, err := time.ParseDuration(raw)
 	if err != nil {
@@ -89,8 +70,6 @@ func parseACPWorkspaceSuspendAfterDetach(raw string) (time.Duration, error) {
 	return window, nil
 }
 
-// validateACPWorkspaceSuspendAfterDetachBounds rejects a window that is not
-// strictly shorter than a set idle timeout or maximum lifetime.
 func validateACPWorkspaceSuspendAfterDetachBounds(window, idleTimeout, maxLifetime time.Duration) error {
 	if idleTimeout > 0 && window >= idleTimeout {
 		return fmt.Errorf("suspendAfterDetach must be shorter than idleTimeout")
@@ -101,9 +80,6 @@ func validateACPWorkspaceSuspendAfterDetachBounds(window, idleTimeout, maxLifeti
 	return nil
 }
 
-// acpWorkspaceSuspendAfterDetachFromAnnotation returns the frozen window, or
-// false when the workspace froze none. A malformed controller-written value
-// disables the window: the frozen Suspend then applies at detach as before.
 func acpWorkspaceSuspendAfterDetachFromAnnotation(workspace *workspacev1alpha1.ExecutionWorkspace) (time.Duration, bool) {
 	if workspace == nil {
 		return 0, false
@@ -119,7 +95,6 @@ func acpWorkspaceSuspendAfterDetachFromAnnotation(workspace *workspacev1alpha1.E
 	return window, true
 }
 
-// acpWorkspaceSuspendAtDeadline parses the current warm-window deadline.
 func acpWorkspaceSuspendAtDeadline(workspace *workspacev1alpha1.ExecutionWorkspace) (time.Time, bool) {
 	if workspace == nil {
 		return time.Time{}, false
@@ -141,18 +116,8 @@ func acpWorkspaceQuarantined(workspace *workspacev1alpha1.ExecutionWorkspace) bo
 		workspaceprovider.ConditionIsTrue(workspace.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceQuarantined))
 }
 
-// acpWorkspaceWarmWindowDrainedAnnotation records that an eviction or upgrade
-// drain of the warm runtime ended the window early. Its Suspend then applies
-// at once: the drain's own deadline, which can be shorter than any window,
-// leaves no room to wait.
 const acpWorkspaceWarmWindowDrainedAnnotation = "acp.workspace.orka.ai/warm-window-drained-at"
 
-// endACPWorkspaceWarmWindowForDrain ends the warm window of a detached
-// workspace whose runtime the RuntimePool must drain (a worker eviction, or a
-// retirement for an upgrade or a changed runtime fence): it moves the
-// deadline to now, never later, so retention applies the frozen Suspend
-// before the drain's deadline instead of when the window would have ended.
-// ended reports a write; the caller requeues to read it back.
 func endACPWorkspaceWarmWindowForDrain(
 	ctx context.Context,
 	writer client.Client,
@@ -183,8 +148,6 @@ func endACPWorkspaceWarmWindowForDrain(
 	return true, nil
 }
 
-// acpWorkspaceWarmWindowOpen reports an unattached Ready workspace carrying a
-// parseable warm-window deadline for its recorded Suspend action.
 func acpWorkspaceWarmWindowOpen(workspace *workspacev1alpha1.ExecutionWorkspace) (time.Time, bool) {
 	if workspace == nil || !workspace.DeletionTimestamp.IsZero() ||
 		workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady ||
@@ -195,10 +158,6 @@ func acpWorkspaceWarmWindowOpen(workspace *workspacev1alpha1.ExecutionWorkspace)
 	return acpWorkspaceSuspendAtDeadline(workspace)
 }
 
-// acpWorkspaceWarmWindowHoldsPool is the RuntimePool demand rule for a
-// detached workspace: the pool keeps its replicas only while an open warm
-// window exists on a workspace that is not Failed, quarantined, or tainted.
-// It never evaluates the deadline; retention alone ends the window.
 func acpWorkspaceWarmWindowHoldsPool(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
 	if _, open := acpWorkspaceWarmWindowOpen(workspace); !open {
 		return false
@@ -207,11 +166,6 @@ func acpWorkspaceWarmWindowHoldsPool(workspace *workspacev1alpha1.ExecutionWorks
 		!acpWorkspaceQuarantined(workspace) && !operatoraccess.Tainted(workspace.Annotations)
 }
 
-// acpWorkspaceWarmDetachWindow returns the frozen window when the settling
-// Task's detach may keep the workspace warm, or zero. It requires an executed
-// turn that did not park (ADR 0041 promises to release parked capacity), a
-// session-reused Ready workspace whose recorded detach action is Suspend, the
-// durable-session commit stamp, and no failure, quarantine, or operator taint.
 func acpWorkspaceWarmDetachWindow(workspace *workspacev1alpha1.ExecutionWorkspace, task *corev1alpha1.Task) time.Duration {
 	window, frozen := acpWorkspaceSuspendAfterDetachFromAnnotation(workspace)
 	if !frozen || task == nil || task.Status.Wait != nil || taskNeverHeldACPWorkspaceAttachment(task) {
@@ -228,12 +182,6 @@ func acpWorkspaceWarmDetachWindow(workspace *workspacev1alpha1.ExecutionWorkspac
 	return window
 }
 
-// settleACPWorkspaceWarm completes an eligible Suspend settlement without
-// suspending: in one optimistic patch it records the Task receipt and the
-// detach instant, and clears the revocation stamp and any resume demand so a
-// continuation can attach the Ready workspace directly. The deadline stamped
-// when revocation began stands unchanged; it is never extended. applied=false
-// with retry=false means the cold path applies.
 func (r *TaskReconciler) settleACPWorkspaceWarm(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -245,8 +193,6 @@ func (r *TaskReconciler) settleACPWorkspaceWarm(
 	}
 	deadline, open := acpWorkspaceWarmWindowOpen(workspace)
 	if !open || !now.Before(deadline) {
-		// No window was opened at revocation, or it already elapsed: the
-		// frozen Suspend applies now, and that write removes the deadline.
 		return false, false, nil
 	}
 	base := workspace.DeepCopy()
@@ -270,9 +216,6 @@ func (r *TaskReconciler) settleACPWorkspaceWarm(
 	return true, false, nil
 }
 
-// clearACPWorkspaceSuspendAt ends a warm window without changing desired
-// state; the RuntimePool then scales to zero with data-preserving retirement.
-// pending records that the frozen Suspend still has to be retried.
 func clearACPWorkspaceSuspendAt(ctx context.Context, writer client.Client, workspace *workspacev1alpha1.ExecutionWorkspace, pending bool, now time.Time) error {
 	_, present := workspace.Annotations[acpWorkspaceSuspendAtAnnotation]
 	_, alreadyPending := workspace.Annotations[acpWorkspaceSuspendPendingAnnotation]
@@ -290,9 +233,6 @@ func clearACPWorkspaceSuspendAt(ctx context.Context, writer client.Client, works
 	return writer.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
-// acpWorkspaceWarmSuspendRetryable reports a detached Ready workspace whose
-// warm window ended while the retention cap was exhausted and whose frozen
-// Suspend can still apply.
 func acpWorkspaceWarmSuspendRetryable(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
 	if _, pending := workspace.Annotations[acpWorkspaceSuspendPendingAnnotation]; !pending {
 		return false
@@ -308,10 +248,6 @@ func acpWorkspaceWarmSuspendRetryable(workspace *workspacev1alpha1.ExecutionWork
 		strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation]) != ""
 }
 
-// retryPendingWarmSuspend retries the frozen Suspend of a workspace whose
-// warm window ended at an exhausted cap. While the cap stays exhausted it
-// falls through to ordinary idle retention, exactly as a quota-blocked
-// detach without a window leaves idle retention in force.
 func (r *ACPWorkspaceRetentionReconciler) retryPendingWarmSuspend(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -334,8 +270,6 @@ func (r *ACPWorkspaceRetentionReconciler) retryPendingWarmSuspend(
 	return ctrl.Result{}, true, nil
 }
 
-// reconcileWarmDetachWindow ends an open warm window. It runs before, and
-// independently of, idle retention. handled=false means no window is open.
 func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -357,10 +291,6 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 	drained := strings.TrimSpace(workspace.Annotations[acpWorkspaceWarmWindowDrainedAnnotation]) != ""
 	if !tainted && !drained && now.Before(deadline.Add(acpWorkspaceWarmExpiryGrace)) &&
 		workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
-		// A continuation that is bound but not attached yet must not watch
-		// the runtime it is about to attach get suspended. Its demand
-		// defers expiry for a bounded grace; the attachment then ends the
-		// window, or the grace runs out and the Suspend applies.
 		outstanding, err := r.warmWindowDemandOutstanding(ctx, workspace, now)
 		if err != nil {
 			return ctrl.Result{}, true, err
@@ -376,10 +306,6 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 			return ctrl.Result{RequeueAfter: min(5*time.Second, graceEnds.Sub(now)+time.Second)}, true, nil
 		}
 	}
-	// A fenced expiry can return without deleting: a Session continuation
-	// admitted before the retention fence vetoes it, or a concurrent update
-	// wins the precondition. Retention watches only workspaces, so keep the
-	// bounded lifetime requeue; a completed deletion makes it a no-op.
 	expire := func(reason, message string) (ctrl.Result, bool, error) {
 		if err := r.expireWorkspace(ctx, workspace, reason, message, true); err != nil {
 			return ctrl.Result{}, true, err
@@ -387,8 +313,6 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 		return ctrl.Result{RequeueAfter: lifetimeRequeue}, true, nil
 	}
 	if tainted {
-		// Operator access forfeits retention and cuts the window short.
-		// Continuation demand must not veto deleting a tainted workspace.
 		if err := r.expireWorkspace(ctx, workspace, "OperatorTaintedWarmWindowExpired",
 			"the warm-detach window ended early for a workspace tainted by operator access; applying the Delete disposition instead of Suspend", false); err != nil {
 			return ctrl.Result{}, true, err
@@ -400,9 +324,6 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 			"the warm-detach window elapsed for the terminally failed workspace; applying the Delete disposition")
 	}
 	if durableMarker, present := workspace.Annotations[acpWorkspaceDurableAnnotation]; present && durableMarker != booleanTrueValue {
-		// Invalid controller-authenticated content is corruption, not
-		// evidence that Delete is safe. End the window so the runtime stops
-		// with data-preserving retirement; idle retention stays fail-closed.
 		if err := clearACPWorkspaceSuspendAt(ctx, r.Client, workspace, false, now); err != nil {
 			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 				return ctrl.Result{RequeueAfter: time.Second}, true, nil
@@ -420,10 +341,6 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 	err := suspendACPWorkspaceWithinQuota(ctx, r.Client, r.quotaReader(), workspace, now, false, "", 0)
 	switch {
 	case errors.Is(err, errACPSuspendQuotaExhausted):
-		// The frozen Suspend stays pending, but the runtime must not keep
-		// running until maxLifetime: end the window and leave the workspace
-		// Ready so the pool scales to zero. retryPendingWarmSuspend retries
-		// the Suspend once capacity opens.
 		if clearErr := clearACPWorkspaceSuspendAt(ctx, r.Client, workspace, true, now); clearErr != nil {
 			if apierrors.IsConflict(clearErr) || apierrors.IsNotFound(clearErr) {
 				return ctrl.Result{RequeueAfter: time.Second}, true, nil
@@ -443,11 +360,6 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 	return ctrl.Result{}, true, nil
 }
 
-// validateACPWorkspaceSuspendAfterDetach verifies a materialized window when
-// present. An absent window stays admissible so a workspace created before
-// the annotation existed can be backfilled. A window frozen from the
-// controller default (ADR 0057) is admissible only for a binding whose
-// profile sets none, whatever default the current controller uses.
 func validateACPWorkspaceSuspendAfterDetach(workspace *workspacev1alpha1.ExecutionWorkspace, expected string) error {
 	raw, present := workspace.Annotations[acpWorkspaceSuspendAfterDetachAnnotation]
 	source, sourced := workspace.Annotations[acpWorkspaceSuspendAfterDetachSourceAnnotation]
@@ -469,9 +381,6 @@ func validateACPWorkspaceSuspendAfterDetach(workspace *workspacev1alpha1.Executi
 	return nil
 }
 
-// backfillACPWorkspaceSuspendAfterDetach migrates a workspace only when the
-// protected window annotation is absent. Present mismatches are rejected by
-// verifyACPClassWorkspace and never rewritten.
 func (r *TaskReconciler) backfillACPWorkspaceSuspendAfterDetach(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,

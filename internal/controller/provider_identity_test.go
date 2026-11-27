@@ -87,8 +87,6 @@ func TestProviderReconcileKeylessReadsNoSecretAndReportsCredentialReady(t *testi
 	if result.RequeueAfter != providerCredentialRecheck {
 		t.Fatalf("RequeueAfter = %v, want the hourly recheck", result.RequeueAfter)
 	}
-	// A second reconcile within the hour, as a status update causes, does
-	// not ask the issuer again.
 	now = now.Add(10 * time.Minute)
 	got, result = reconcileKeyless(t, r, c)
 	if identities.verifies != 1 || !got.Status.Ready {
@@ -136,8 +134,6 @@ func TestProviderReconcileKeylessRefusalAndOutage(t *testing.T) {
 	if result.RequeueAfter != providerCredentialRetry {
 		t.Fatalf("RequeueAfter = %v, want a refusal retried like an outage", result.RequeueAfter)
 	}
-	// An operator fixes the federated credential without touching the
-	// Provider: the next verification after the retry interval sees it.
 	identities.verifyErr = nil
 	now = now.Add(providerCredentialRetry)
 	got, _ = reconcileKeyless(t, r, c)
@@ -214,8 +210,6 @@ func TestProviderReconcileWithoutAuthOrSecretIsNotReady(t *testing.T) {
 	}
 }
 
-// During an outage, Providers sharing an identity wait for the retry instead
-// of each waiting out the issuer's timeout.
 func TestProviderReconcileKeylessOutageBacksOffPerIdentity(t *testing.T) {
 	now := time.Now()
 	identities := &fakeProviderIdentities{verifyErr: fmt.Errorf("down: %w", provideridentity.ErrIssuerUnavailable)}
@@ -245,7 +239,6 @@ func TestProviderReconcileKeylessOutageBacksOffPerIdentity(t *testing.T) {
 		t.Fatalf("RequeueAfter = %v, want the rest of the backoff", result.RequeueAfter)
 	}
 
-	// After the backoff the issuer is asked again, and an answer ends it.
 	now = now.Add(providerCredentialRetry)
 	identities.verifyErr = nil
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key}); err != nil {
@@ -259,8 +252,6 @@ func TestProviderReconcileKeylessOutageBacksOffPerIdentity(t *testing.T) {
 	}
 }
 
-// A deleted Provider's verification is forgotten, and one recreated under the
-// same name is verified again.
 func TestProviderReconcileKeylessForgetsDeletedProviders(t *testing.T) {
 	now := time.Now()
 	identities := &fakeProviderIdentities{}
@@ -277,8 +268,6 @@ func TestProviderReconcileKeylessForgetsDeletedProviders(t *testing.T) {
 		t.Fatal("a deleted Provider's verification was kept")
 	}
 
-	// A replacement that reuses the name but not the UID, before the delete
-	// was observed, is verified on its own.
 	r.verifications.Store(key, providerVerification{uid: "uid-old", generation: 1, identity: "models",
 		baseURL: "https://example.openai.azure.com", at: now, condition: metav1.Condition{Status: metav1.ConditionTrue}})
 	if err := c.Create(context.Background(), keylessTestProvider()); err != nil {
@@ -290,8 +279,6 @@ func TestProviderReconcileKeylessForgetsDeletedProviders(t *testing.T) {
 	}
 }
 
-// A keyless Provider switched to a Secret that does not exist keeps no
-// CredentialReady condition from its keyless days.
 func TestProviderReconcileDropsCredentialStateWhenSwitchedToAMissingSecret(t *testing.T) {
 	now := time.Now()
 	r, c := newKeylessReconciler(&fakeProviderIdentities{}, &now, keylessTestProvider())

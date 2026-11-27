@@ -22,8 +22,6 @@ from simulated_tools import SUMMARY
 TOOLS = ["create-work-order", "read-inventory"]
 FINALIZER = "human-approval-v2.orka.ai/acceptance-observer"
 TERMINAL = {"Succeeded", "Failed", "Cancelled", "OutcomeUnknown"}
-# Only known lifecycle codes may appear verbatim in cancellation diagnostics.
-# Unexpected reasons and free-form messages are retained only as hashes.
 CANCELLATION_DIAGNOSTIC_CODES = TERMINAL | {
     "Pending", "Running", "Finalizing", "Scheduled", "Ready", "Complete", "True", "False", "Unknown",
     "NotRequested", "VerifiedExact", "DeliveredSuperseded", "ReadValidated", "NoChange",
@@ -118,8 +116,6 @@ def validate_runtime(runtime, agent, capabilities, expected, backend):
 
 def validate_pending_approval(approval, run_id, task_uid):
     arguments = {"runID": run_id, "asset": "pump-1", "summary": SUMMARY}
-    # These fixture arguments contain only ASCII strings, so sorted compact
-    # JSON has the same representation as the broker's canonical arguments.
     digest = hashlib.sha256(json.dumps(arguments, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     require(approval.get("status") == "pending" and approval.get("targetTool") == "create-work-order" and
             approval.get("taskUID") == task_uid and approval.get("targetArgsPreview") == arguments and
@@ -139,8 +135,6 @@ def validate_cancellation(task, approval, result):
     if outcome == "Cancelled":
         require(status.get("phase") == "Cancelled", "cancelled execution has an inconsistent Task phase")
         return
-    # The agent may finish with the broker's denial before prompt cancellation
-    # reaches it. Preserve that real Completed event and validate its workspace.
     require(outcome == "Succeeded" and status.get("phase") == "Succeeded" and
             status.get("delivery", {}).get("outcome") == "ReadValidated" and
             "approval_cancelled" in result.get("result", ""),
@@ -166,8 +160,6 @@ def validate_cancellation_receipt(task, approval, before, after):
     receipt = status.get("response", {})
     require(receipt.get("isError") is True and receipt.get("code") == "approval_cancelled" and
             receipt.get("approvalID") == approval["id"], "cancelled action lost its original denial receipt")
-    # This denial receipt contains ASCII strings and a boolean, so the compact
-    # sorted encoding agrees with the controller's canonical JSON digest.
     digest = "sha256:" + hashlib.sha256(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     require(status.get("responseDigest") == digest, "cancelled action receipt failed integrity verification")
     task_status = task.get("status", {})
@@ -368,8 +360,6 @@ class Acceptance:
                     {"op": "add", "path": "/metadata/finalizers", "value": updated},
                 ])
             except CheckFailed:
-                # Controller cleanup can change the version or its finalizers
-                # between GET and PATCH. Retry only after observing that change.
                 current = self.kube_json("get", "task", name, "-o", "json")["metadata"]
                 require(current["uid"] == self.owned_tasks[name], "refusing to update a replaced Task")
                 if current["resourceVersion"] == metadata["resourceVersion"]:
@@ -407,8 +397,6 @@ class Acceptance:
             observed_wait = time.monotonic() - pending_since
             _, decided = self.decision(name, original, "approve")
             require(decided["id"] == original["id"] and decided["status"] == "approved", "decision did not approve the original call")
-            # An identical decision is idempotent while active. A Task that
-            # already settled may reject every further decision as stale.
             self.decision(name, original, "approve", (200, 409))
             self.decision(name, original, "decline", (409,))
         elif scenario == "decline":
@@ -430,7 +418,6 @@ class Acceptance:
             print(f"Recovery ready: Task {name} is pending. Restart the selected test runtime now; keep the Task and broker ledger.", flush=True)
             def authority_lost():
                 self.counts(name, 1, 0)
-                # Read-only probes may fail while the operator restarts a process.
                 try:
                     task = self.task(name)
                 except CheckFailed:
@@ -445,13 +432,8 @@ class Acceptance:
 
         task = self.settled(name)
         if scenario == "cancel":
-            # Save the original Task's terminal reason before any cancellation
-            # assertion can fail or cleanup can reclaim the remaining records.
             self.report.setdefault("cancellationDiagnostics", []).append(cancellation_diagnostics(task))
             self.save()
-            # Task cleanup can erase the approval timeline and result before
-            # removing our observer finalizer. Check the durable denial below;
-            # a late decision may correctly find no remaining approval event.
             status, _ = self.decision(name, original, "approve", (404, 409, 410))
             after = self.kube_json("get", "externaleffect", cancelled_effect["metadata"]["name"], "-o", "json")
             cancellation_evidence = {"lateDecisionHTTPStatus": status,

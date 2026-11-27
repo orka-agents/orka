@@ -19,77 +19,39 @@ import (
 )
 
 const (
-	// A crashed process can leave a two-minute control-store mutation lease.
-	// Wait beyond its expiry without weakening the lease's fencing checks.
 	defaultEpochAcquisitionTimeout = 3 * time.Minute
 	defaultEpochCASMaxRetryDelay   = time.Second
 )
 
-// ControllerEpochManager acquires one durable epoch after controller-runtime
-// leader election. Every ACP control-store mutation must use CurrentFence so a
-// stale leader cannot commit authoritative state after takeover.
-//
-// After acquiring the epoch in Kubernetes, the manager advances the
-// controller epoch of every storage dataset it is given to the exact record
-// Kubernetes granted, bound to the installation, checks each dataset against
-// what Kubernetes recorded it acknowledged, and opens each storage contract's
-// write fence once that contract's dataset has advanced and passed. Each
-// dataset opens independently, so an artifact store outage at takeover does
-// not hold back state writes. CurrentFence opens with the state contract.
-// While running, it advances each dataset's write watermark and checks a
-// dataset whose database restarted or switched; a dataset that lost
-// acknowledged writes holds the whole installation for storage recovery (see
-// storageTakeover).
 type ControllerEpochManager struct {
 	Store    store.ControllerEpochStore
 	Name     string
 	HolderID string
 
-	// WatermarkInterval is how often the manager advances each dataset's
-	// write watermark and checks whether its database restarted or switched.
-	// Zero means DefaultWatermarkInterval.
 	WatermarkInterval time.Duration
-	// HoldPollInterval is how often a held manager looks for an operator's
-	// acknowledgement of the hold. Zero means DefaultHoldPollInterval.
-	HoldPollInterval time.Duration
+	HoldPollInterval  time.Duration
 
 	mu      sync.RWMutex
 	current *store.ControllerEpoch
 	ready   chan struct{}
 	once    sync.Once
 
-	// admission is held for reading while an admitted side effect runs (see
-	// AdmitWork). Setting a hold or closing a fence publishes the change
-	// first and then takes it for writing, to wait for work admitted
-	// before the change; work admitted after it sees the change.
-	admission sync.RWMutex
-	// storageMu guards storage, hold and storageChanged.
-	storageMu sync.Mutex
-	storage   map[string]*contractFence
-	// hold is the installation's storage recovery hold, or nil. While it is
-	// set, WriteFence and CurrentFence refuse with a store.StorageHoldError.
-	hold *store.StorageRecoveryHold
-	// storageChanged closes, and is replaced, whenever a fence opens or the
-	// hold changes.
+	admission      sync.RWMutex
+	storageMu      sync.Mutex
+	storage        map[string]*contractFence
+	hold           *store.StorageRecoveryHold
 	storageChanged chan struct{}
 
-	// newHoldID and now replace uuid.NewString and time.Now in tests.
 	newHoldID func() string
 	now       func() time.Time
 }
 
-// EpochDataset is a storage dataset whose controller epoch and write
-// watermark the manager advances. AdvanceWriteWatermark is a fenced write, so
-// the dataset the storage client hands the manager attaches its envelope.
 type EpochDataset interface {
 	storagev1.ProviderDescriber
 	storagev1.ControllerEpochAdvancer
 	storagev1.WriteWatermarkStore
 }
 
-// contractFence is the write fence of one storage contract. datasetID and
-// fence are set when opened becomes true; all three are guarded by
-// storageMu.
 type contractFence struct {
 	dataset   EpochDataset
 	opened    bool
@@ -98,10 +60,7 @@ type contractFence struct {
 }
 
 const (
-	// epochStorageCallTimeout bounds one call of a storage step at takeover.
-	epochStorageCallTimeout = 30 * time.Second
-	// epochStorageMaxRetryDelay caps the wait between retries of a storage
-	// step that failed for a reason retrying can fix.
+	epochStorageCallTimeout   = 30 * time.Second
 	epochStorageMaxRetryDelay = 30 * time.Second
 )
 
@@ -111,9 +70,6 @@ func NewControllerEpochManager(epochStore store.ControllerEpochStore, holderID s
 	}
 }
 
-// WithStorage registers the dataset that serves a storage contract. The
-// manager advances its controller epoch at takeover and opens the contract's
-// write fence afterwards. Call this only during startup wiring.
 func (m *ControllerEpochManager) WithStorage(contract string, dataset EpochDataset) *ControllerEpochManager {
 	if m == nil {
 		return m
@@ -176,8 +132,6 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 		case controllerEpochMatchesCAS(observed, pending.change):
 			acquired = observed
 		case controllerEpochsEqual(observed, pending.predecessor):
-			// The CAS did not commit. Retain the exact payload, including its
-			// digest and timestamp, so a retry remains idempotent.
 		case coherentCompetingControllerEpoch(observed, pending):
 			pending, err = newControllerEpochCASIntent(m.Name, m.HolderID, observed)
 			if err != nil {
@@ -202,10 +156,6 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 	return m.openStorage(ctx, *acquired)
 }
 
-// openStorage runs the storage side of the takeover for the acquired epoch
-// until ctx ends (see storageTakeover). It returns early only with an error
-// that retrying cannot fix, such as a dataset bound to another installation
-// or a newer controller epoch.
 func (m *ControllerEpochManager) openStorage(ctx context.Context, acquired store.ControllerEpoch) error {
 	m.storageMu.Lock()
 	contracts := make(map[string]*contractFence, len(m.storage))
@@ -247,13 +197,9 @@ func (m *ControllerEpochManager) openStorage(ctx context.Context, acquired store
 	return ignoreDone(ctx, takeover.run(ctx))
 }
 
-// openContractFence opens one contract's write fence for datasetID, and
-// CurrentFence with the state contract's.
 func (m *ControllerEpochManager) openContractFence(contract, datasetID string, acquired store.ControllerEpoch) {
 	value := store.ControllerEpochFence{Name: acquired.Name, Epoch: acquired.Epoch, HolderID: acquired.HolderID}
 	m.storageMu.Lock()
-	// A fence opened earlier is updated too: after an acknowledged storage
-	// switch, the contract is served by another dataset.
 	fence := m.storage[contract]
 	if fence != nil && (!fence.opened || fence.datasetID != datasetID || fence.fence != value) {
 		fence.datasetID, fence.fence, fence.opened = datasetID, value, true
@@ -272,8 +218,6 @@ func (m *ControllerEpochManager) openCurrent(acquired store.ControllerEpoch) {
 	m.once.Do(func() { close(m.ready) })
 }
 
-// datasetAdvances runs one advance for each dataset, however many contracts
-// it serves, and shares its result.
 type datasetAdvances struct {
 	mu       sync.Mutex
 	advances map[string]*datasetAdvance
@@ -285,20 +229,11 @@ type datasetAdvance struct {
 	err    error
 }
 
-// datasetAdvanceResult is what a dataset held before and after this
-// takeover's advance.
 type datasetAdvanceResult struct {
-	// incarnation is the incarnation the dataset was described at before
-	// the advance read it.
-	incarnation string
-	// storedBefore is the controller epoch the dataset held before the
-	// advance, or zero when it held none.
+	incarnation  string
 	storedBefore int64
-	// watermark is the dataset's write watermark.
-	watermark storagev1.WriteWatermark
-	// hold is set, and the dataset was not advanced, when it holds less than
-	// it acknowledged.
-	hold *store.StorageRecoveryHold
+	watermark    storagev1.WriteWatermark
+	hold         *store.StorageRecoveryHold
 }
 
 func (a *datasetAdvances) do(
@@ -324,9 +259,6 @@ func (a *datasetAdvances) do(
 	}
 }
 
-// retryEpochStorageStep runs one storage step at takeover, retrying with
-// backoff until it succeeds, ctx ends, or it fails in a way retrying cannot
-// fix.
 func retryEpochStorageStep[T any](ctx context.Context, step string, call func(context.Context) (T, error)) (T, error) {
 	for attempt := 0; ; attempt++ {
 		callCtx, cancel := context.WithTimeout(ctx, epochStorageCallTimeout)
@@ -351,12 +283,6 @@ func retryEpochStorageStep[T any](ctx context.Context, step string, call func(co
 	}
 }
 
-// definiteEpochStorageError reports whether a storage step at takeover
-// failed in a way retrying cannot fix: the dataset is bound to another
-// installation or holds a newer or conflicting epoch (ErrFenced, which also
-// matches ErrConflict), the binding names another dataset, the request is
-// invalid, the dataset schema is incompatible, the dataset holds a lower
-// epoch than it acknowledged, or the installation record is missing.
 func definiteEpochStorageError(err error) bool {
 	return errors.Is(err, store.ErrConflict) ||
 		errors.Is(err, errEpochBelowAcknowledgement) ||
@@ -366,7 +292,6 @@ func definiteEpochStorageError(err error) bool {
 		errors.Is(err, store.ErrNotFound)
 }
 
-// ignoreDone returns nil for an error caused by ctx ending.
 func ignoreDone(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return nil
@@ -382,11 +307,6 @@ func isNilEpochDataset(dataset EpochDataset) bool {
 	return value.Kind() == reflect.Pointer && value.IsNil()
 }
 
-// WriteFence implements the storage client's fence source: it waits until
-// the dataset that serves contract has advanced to this controller's epoch
-// and returns the dataset's ID and the fence its writes carry. While the
-// installation is held for storage recovery it returns a
-// store.StorageHoldError at once, whether or not the fence had opened.
 func (m *ControllerEpochManager) WriteFence(ctx context.Context, contract string) (string, store.ControllerEpochFence, error) {
 	if m == nil {
 		return "", store.ControllerEpochFence{}, fmt.Errorf("controller epoch manager is not initialized")
@@ -418,15 +338,6 @@ func (m *ControllerEpochManager) WriteFence(ctx context.Context, contract string
 	}
 }
 
-// StorageHold returns a store.StorageHoldError while the installation is held
-// for storage recovery, and nil otherwise. A controller checks it before a
-// side effect that no storage write or control-store change guards, such as
-// creating a Job. A manager with storage datasets also fails closed while
-// any contract's fence is closed: before the takeover checks of its dataset
-// have passed, after a release until they pass again, and while a dataset
-// whose database restarted or switched is checked again. A restarted
-// controller therefore starts no work before it knows the storage it would
-// use holds what it acknowledged. That error matches ErrNotReady.
 func (m *ControllerEpochManager) StorageHold() error {
 	if m == nil {
 		return nil
@@ -444,12 +355,6 @@ func (m *ControllerEpochManager) StorageHold() error {
 	return nil
 }
 
-// AdmitWork runs create, a side effect that no storage write or
-// control-store change guards, such as creating a Job, only while
-// StorageHold reports nothing. A hold that is set, or a fence that closes,
-// takes effect at once for everything else and then waits for an admitted
-// create to return, so create either started before the change or does not
-// run at all; it then returns StorageHold's error.
 func (m *ControllerEpochManager) AdmitWork(ctx context.Context, create func(context.Context) error) error {
 	if m == nil {
 		return create(ctx)
@@ -462,7 +367,6 @@ func (m *ControllerEpochManager) AdmitWork(ctx context.Context, create func(cont
 	return create(ctx)
 }
 
-// heldError returns a store.StorageHoldError while a hold is set.
 func (m *ControllerEpochManager) heldError() error {
 	m.storageMu.Lock()
 	defer m.storageMu.Unlock()
@@ -472,16 +376,11 @@ func (m *ControllerEpochManager) heldError() error {
 	return &store.StorageHoldError{Hold: *m.hold}
 }
 
-// stateFenceOpenLocked reports whether the state contract's fence is open,
-// or true when no dataset serves the state contract. The caller holds
-// storageMu.
 func (m *ControllerEpochManager) stateFenceOpenLocked() bool {
 	fence := m.storage[storagev1.StateContract]
 	return fence == nil || fence.opened
 }
 
-// storageSignalLocked returns the channel that closes at the next change of
-// a fence or of the hold. The caller holds storageMu.
 func (m *ControllerEpochManager) storageSignalLocked() chan struct{} {
 	if m.storageChanged == nil {
 		m.storageChanged = make(chan struct{})
@@ -489,8 +388,6 @@ func (m *ControllerEpochManager) storageSignalLocked() chan struct{} {
 	return m.storageChanged
 }
 
-// notifyStorageLocked wakes every waiter of storageSignalLocked. The caller
-// holds storageMu.
 func (m *ControllerEpochManager) notifyStorageLocked() {
 	if m.storageChanged != nil {
 		close(m.storageChanged)
@@ -607,11 +504,6 @@ func coherentCompetingControllerEpoch(observed *store.ControllerEpoch, pending c
 		observed.RequestDigest != pending.change.RequestDigest
 }
 
-// CurrentFence waits until the controller epoch is acquired and the state
-// dataset's fence is open, and returns the fence every control-store
-// mutation carries. It waits again whenever the state fence is closed, and
-// while the installation is held for storage recovery it returns a
-// store.StorageHoldError at once.
 func (m *ControllerEpochManager) CurrentFence(ctx context.Context) (store.ControllerEpochFence, error) {
 	if m == nil || m.ready == nil {
 		return store.ControllerEpochFence{}, fmt.Errorf("controller epoch manager is not initialized")
@@ -654,9 +546,6 @@ func (m *ControllerEpochManager) CurrentFence(ctx context.Context) (store.Contro
 	}
 }
 
-// Current returns the acquired epoch once CurrentFence would, and false
-// before that, while the state fence is closed, or while the installation is
-// held for storage recovery.
 func (m *ControllerEpochManager) Current() (store.ControllerEpoch, bool) {
 	if m == nil {
 		return store.ControllerEpoch{}, false

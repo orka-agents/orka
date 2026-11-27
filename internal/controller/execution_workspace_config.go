@@ -12,16 +12,10 @@ import (
 	"strings"
 )
 
-// ExecutionWorkspaceRequest identifies a Substrate ActorTemplate (plus the
-// controller-configured bootstrap Secret) for template validation by the Tool
-// and SubstrateActorPool reconcilers.
 type ExecutionWorkspaceRequest struct {
-	TemplateName      string
-	TemplateNamespace string
-	TemplateUID       string
-	// TemplateSuspendUnsupported is set by template validation when Substrate
-	// cannot suspend an Actor of this template: it snapshots volumes only and
-	// mounts no durable directory. Such an Actor is stopped by deleting it.
+	TemplateName               string
+	TemplateNamespace          string
+	TemplateUID                string
 	TemplateSuspendUnsupported bool
 
 	SubstrateBootstrapSecretName string

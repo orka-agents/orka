@@ -34,13 +34,10 @@ func TestConnectStartsConsentOpensBrowserAndWaits(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections/github-abc":
 			polls++
 			if polls == 1 {
-				// The cache has not seen the Connection the POST created yet.
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
 			ready := polls >= 3
-			// The link being repaired stays Revoked until the new consent
-			// completes; the command keeps waiting through it.
 			state := "Revoked"
 			if ready {
 				state = "Ready"
@@ -141,16 +138,12 @@ func TestConnectWaitsForTheNewConsentWhenAlreadyLinked(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/connections":
-			// Re-consenting an already Ready link: the API starts a new
-			// consent but the current view is still the old, Ready grant.
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 				"connection":   map[string]any{"name": "github-abc", "provider": "github", "mode": "readOnly", "state": "Ready", "ready": true, "linkedAt": "2026-09-01T00:00:00Z", "grantSequence": 1},
 				"authorizeURL": "https://github.com/login/oauth/authorize?state=signed",
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections/github-abc":
 			polls++
-			// Same second, same linkedAt: only the grant sequence tells the
-			// new grant apart.
 			sequence := 1
 			if polls >= 3 {
 				sequence = 2
@@ -190,7 +183,6 @@ func TestConnectTimeoutBoundsAStalledPoll(t *testing.T) {
 				"authorizeURL": "https://github.com/login/oauth/authorize?state=signed",
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/connections/github-abc":
-			// A stalled status read must not outlive --timeout.
 			select {
 			case <-release:
 			case <-r.Context().Done():
@@ -269,15 +261,12 @@ func TestConnectRejectsUnknownModeAndExplainsForbidden(t *testing.T) {
 	}
 }
 
-// connectionListFixture serves the connector API for the list/get/delete
-// test; its fields switch the scenario the next CLI call sees.
 type connectionListFixture struct {
 	providerReady bool
 	deleting      bool
 	duplicated    bool
-	// revalidated models the API judging a stored-Ready link unusable.
-	revalidated bool
-	deleted     string
+	revalidated   bool
+	deleted       string
 }
 
 func (f *connectionListFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -309,7 +298,6 @@ func (f *connectionListFixture) ServeHTTP(w http.ResponseWriter, r *http.Request
 	}
 }
 
-// requireOutput fails unless out contains every want.
 func requireOutput(t *testing.T, label, out string, want ...string) {
 	t.Helper()
 	for _, w := range want {
@@ -319,7 +307,6 @@ func requireOutput(t *testing.T, label, out string, want ...string) {
 	}
 }
 
-// requireMatch fails unless out matches pattern exactly when match is true.
 func requireMatch(t *testing.T, label, out, pattern string, match bool) {
 	t.Helper()
 	if regexp.MustCompile(pattern).MatchString(out) != match {
@@ -345,7 +332,6 @@ func TestConnectionListGetDeleteAndProviders(t *testing.T) {
 	const anyTrue, readyFalse = `\s+true\s+`, `Ready:\s+false`
 	requireOutput(t, "list", run("connection", "list"), "github-abc", "readOnly", "PROVIDER")
 	requireOutput(t, "list json", run("connection", "list", "-o", "json"), `"provider": "github"`)
-	// A link whose provider is not accepted right now is not called ready.
 	fixture.providerReady = false
 	out := run("connection", "list")
 	requireOutput(t, "list with an unaccepted provider", out, "Ready (provider unavailable)")
@@ -353,26 +339,21 @@ func TestConnectionListGetDeleteAndProviders(t *testing.T) {
 	out = run("connection", "get", "github-abc")
 	requireOutput(t, "get with an unaccepted provider", out, "provider unavailable")
 	requireMatch(t, "get with an unaccepted provider", out, readyFalse, true)
-	// A disconnect still finishing is shown as such, in every format.
 	fixture.deleting = true
 	out = run("connection", "get", "github-abc")
 	requireOutput(t, "get while deleting", out, "Disconnecting")
 	requireMatch(t, "get while deleting", out, readyFalse, true)
 	requireOutput(t, "list -o json while deleting", run("connection", "list", "-o", "json"), `"state": "Disconnecting"`, `"ready": false`)
 	fixture.deleting = false
-	// A second link to the same provider makes both unusable, in every format.
 	fixture.duplicated = true
 	out = run("connection", "list")
 	requireOutput(t, "list with duplicate links", out, "(duplicate link)")
 	requireMatch(t, "list with duplicate links", out, anyTrue, false)
 	requireOutput(t, "get -o json with duplicate links", run("connection", "get", "github-abc", "-o", "json"), `"ready": false`, "duplicate link")
 	fixture.duplicated = false
-	// Structured output carries the same joined readiness.
 	requireOutput(t, "list -o json with an unaccepted provider", run("connection", "list", "-o", "json"), `"ready": false`, "provider unavailable", `"linkedAt"`)
 	requireOutput(t, "get -o json with an unaccepted provider", run("connection", "get", "github-abc", "-o", "json"), `"ready": false`, `"message": "linked"`)
 	fixture.providerReady = true
-	// A stored Ready state the API judged unusable never reads as usable,
-	// and get shows why.
 	fixture.revalidated = true
 	out = run("connection", "list")
 	requireOutput(t, "list with a revalidated link", out, "Ready (not usable)")
@@ -388,7 +369,6 @@ func TestConnectionListGetDeleteAndProviders(t *testing.T) {
 	requireOutput(t, "providers", run("connection", "providers"), "GitHub", "list_pull_requests (read)")
 }
 
-// A provider that gives the person an agent host says so before consent.
 func TestConnectDisclosesAnAgentHost(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

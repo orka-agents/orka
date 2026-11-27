@@ -17,8 +17,6 @@ import (
 	"github.com/orka-agents/orka/test/fixtures/fakeentra"
 )
 
-// An agent identity can also get a token for the model resource, but the
-// model endpoint serves only workload identities.
 func TestFakeEntraModelEndpointRefusesAgentIdentityTokens(t *testing.T) {
 	server, _ := newModelFixture(t)
 	config := agentidentity.EntraConfig{TenantID: tenant, BlueprintClientID: blueprint, Authority: server.URL}
@@ -42,8 +40,6 @@ const (
 	modelResource = "https://ai.azure.com"
 )
 
-// The workload flow is driven with the controller's own Provider identity
-// source, so the fake answers exactly the requests the controller sends.
 func newModelFixture(t *testing.T) (*httptest.Server, func(credential string) *provideridentity.Source) {
 	t.Helper()
 	fake := fakeentra.New(fakeentra.Config{

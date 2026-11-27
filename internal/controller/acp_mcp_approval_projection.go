@@ -11,43 +11,17 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// maxMCPApprovalProjectionAttempts bounds repeating a projection whose cleanup
-// fence or approval history moved between reading the request and writing the
-// projection.
 const maxMCPApprovalProjectionAttempts = 3
 
-// errMCPApprovalHistoryChanged reports that a terminal decision was recorded
-// after the projection read the approval, so its derived state is stale.
 var errMCPApprovalHistoryChanged = errors.New("approval history changed during projection")
 
-// mcpApprovalFence selects the cleanup fence a projection runs under.
 type mcpApprovalFence int
 
 const (
-	// mcpApprovalTaskFence moves only with cleanup of the Task's own data. The
-	// broker writes the Session association from the call's credentials, not
-	// from history, so cleanup of other Tasks in the namespace must not refuse
-	// a live call's projection.
 	mcpApprovalTaskFence mcpApprovalFence = iota
-	// mcpApprovalNamespaceFence also moves with Session cleanup, which moves
-	// only the namespace fence. Recovery copies the request's Session
-	// association from history, so cleanup that detaches it must refuse the
-	// append and make recovery read again.
 	mcpApprovalNamespaceFence
 )
 
-// withRetainedMCPApproval runs one projection, including recovery's
-// decision/outcome pair, under the selected cleanup fence. Authority and
-// effect reads must finish before entry. The request is read and the
-// projection appended as separate fenced calls: cleanup either removes the
-// projection after it is appended, or wins first and refuses the append, so
-// no evidence is projected onto a request cleanup removed. The appends are
-// deduplicated, so a projection repeated after a fence change does not
-// duplicate evidence.
-// Absence does not prove cleanup or execution outcome; receipts remain intact.
-// The callback returns a newly appended event (nil for replay/no-op). Observe
-// terminal decisions only after the projection commits, including recovery's
-// grouped decision/outcome pair.
 func withRetainedMCPApproval(
 	ctx context.Context,
 	eventStore store.ExecutionEventStore,
@@ -98,8 +72,6 @@ func projectRetainedMCPApproval(
 				event.StreamType != events.ExecutionEventStreamTypeTask || event.StreamID != taskName || event.TaskName != taskName {
 				continue
 			}
-			// Require an explicit UID on the original request, not the legacy
-			// untagged-event fallback or a terminal-only derived approval.
 			var request struct {
 				ApprovalID string `json:"approvalID"`
 				approvals.Approval
@@ -116,8 +88,6 @@ func projectRetainedMCPApproval(
 		if !retained {
 			return nil
 		}
-		// Derive decisions and the observed history position from this fenced
-		// read, rather than authorizing appends with a cached projection.
 		for _, approval := range approvals.Derive(listed, time.Time{}) {
 			if mcpApprovalProjectionBindingMatches(approval, expected) {
 				request = approval

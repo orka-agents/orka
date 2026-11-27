@@ -52,7 +52,6 @@ func TestExecutionEventTranscriptHistoryUsesPublishedCopies(t *testing.T) {
 						AssistantMessage: &harnessv2.AssistantMessageChunk{Text: text}}
 					appendMarkerWhitespaceUpdate(t, state, chunk, false)
 					if path == "incremental" && offset == 0 {
-						// Publish a prefix, then the full transcript at a later identity.
 						if _, isNew, err := state.AppendAssistantStreamClosureIfNew(ctx, chunk, text, false); err != nil || !isNew {
 							t.Fatalf("append prefix: new=%t err=%v", isNew, err)
 						}
@@ -107,8 +106,6 @@ func TestExecutionEventTranscriptHistoryUsesPublishedCopies(t *testing.T) {
 }
 
 func TestExecutionEventToolOutputHistoryUsesPublishedCopies(t *testing.T) {
-	// The raw stream fits the journal's 32K bound. Redaction expands the first
-	// assignment, pushing the harmless trailing marker out of the public text.
 	for _, test := range []struct {
 		name, output, contentText, summary string
 		originalChars                      int
@@ -261,8 +258,6 @@ func TestExecutionEventTruncationKeepsBoundarySeparator(t *testing.T) {
 				if second.ContentText != later {
 					t.Errorf("safe later public output = %q, want %q", second.ContentText, later)
 				}
-				// Join the exact strings returned by SQLite and the API DTO. The
-				// ellipsis must not be stripped to manufacture a pwd assignment.
 				joined := published + second.ContentText
 				if events.RedactExecutionEventText(joined) != joined {
 					t.Error("actual public cutoff and later output reconstruct a protected assignment")

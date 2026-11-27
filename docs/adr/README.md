@@ -120,11 +120,12 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0039](0039-agent-identities.md) | Give Agents an external identity, starting with Microsoft Entra | Proposed |
 | [0040](0040-forwarded-cli-requests.md) | Let command-line clients reach services through forwarding Tools, starting with the Azure CLI | Proposed |
 | [0042](0042-signed-durable-task-webhooks.md) | Sign Task webhooks and deliver them from durable Task status | Accepted, partly superseded by 0054 |
-| [0043](0043-control-plane-mcp-server.md) | Serve a control-plane MCP server by replaying REST routes | Accepted |
+| [0043](0043-control-plane-mcp-server.md) | Serve a control-plane MCP server by replaying REST routes | Accepted, partly superseded by 0055 |
 | [0048](0048-agent-runtime-ceilings.md) | Agent runtime ceilings bound what Tasks may request | Accepted |
 | [0051](0051-offline-memory-consolidation.md) | Consolidate memory offline into reviewed proposals | Accepted, landing in stages |
 | [0053](0053-approval-webhook-events.md) | Opt-in signed approval webhook events from durable approval transitions | Accepted, partly superseded by 0054 |
 | [0054](0054-task-webhook-delivery-workers.md) | Deliver Task webhooks from a worker pool, not the Task reconcile | Accepted |
+| [0055](0055-mcp-oauth-protected-resource-metadata.md) | Serve OAuth protected-resource metadata for the MCP server | Accepted |
 | [0058](0058-keyless-azure-openai-providers.md) | Keyless Azure OpenAI Providers authenticate in the controller | Accepted |
 
 ### Agent hosts and the Agent Host Protocol
@@ -150,12 +151,19 @@ How monitors review and repair pull requests.
 ### Code comments
 
 Why the code carries no comments, and the decisions recovered from the comments it used to
-carry. Each cleanup round adds one catalog record.
+carry. Each cleanup round adds catalog records.
 
 | # | Decision | Status |
 | --- | --- | --- |
 | [0062](0062-code-carries-no-comments.md) | Code carries no comments; decisions live in ADRs | Accepted |
 | [0063](0063-code-comment-decisions-round-1.md) | Decisions recovered from code comments, round 1 | Accepted |
+| [0064](0064-code-comment-decisions-controller.md) | Decisions recovered from code comments: the controllers | Accepted |
+| [0065](0065-code-comment-decisions-api.md) | Decisions recovered from code comments: the API server | Accepted |
+| [0066](0066-code-comment-decisions-acp-runtime.md) | Decisions recovered from code comments: the ACP runtime and agent hosts | Accepted |
+| [0067](0067-code-comment-decisions-storage.md) | Decisions recovered from code comments: storage | Accepted |
+| [0068](0068-code-comment-decisions-platform-packages.md) | Decisions recovered from code comments: the other platform packages | Accepted |
+| [0069](0069-code-comment-decisions-commands-scripts-tests.md) | Decisions recovered from code comments: commands, scripts, and tests | Accepted |
+| [0070](0070-code-comment-decisions-ui.md) | Decisions recovered from code comments: the UI | Accepted |
 
 ## Writing a new one
 

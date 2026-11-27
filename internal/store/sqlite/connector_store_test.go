@@ -23,9 +23,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// connectorTestStore is a SQLite store behind an activated storage client:
-// the client seals and opens custody, and the tests inspect the store's
-// files and rows directly.
 type connectorTestStore struct {
 	*storageclient.Client
 	store *Store
@@ -72,7 +69,6 @@ func TestConnectorCredentialRoundTrip(t *testing.T) {
 		t.Fatalf("credential metadata = %+v", got)
 	}
 
-	// The row never holds plaintext.
 	var ciphertext, dek []byte
 	if err := s.store.db.QueryRow(`SELECT ciphertext, dek_ciphertext FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&ciphertext, &dek); err != nil {
 		t.Fatal(err)
@@ -83,7 +79,6 @@ func TestConnectorCredentialRoundTrip(t *testing.T) {
 		}
 	}
 
-	// Rebinding any identity field must fail to open.
 	for name, mutate := range map[string]func(*store.ConnectorCredentialRef){
 		"subject":   func(r *store.ConnectorCredentialRef) { r.SubjectDigest = "digest-b" },
 		"provider":  func(r *store.ConnectorCredentialRef) { r.Provider = "gmail" },
@@ -99,7 +94,6 @@ func TestConnectorCredentialRoundTrip(t *testing.T) {
 		}
 	}
 
-	// Replacing the material rotates the wrapped data key.
 	var dekBefore []byte
 	_ = s.store.db.QueryRow(`SELECT dek_ciphertext FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&dekBefore)
 	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_second"}); err != nil {
@@ -134,7 +128,6 @@ func TestConnectorCredentialFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	// A client whose snapshot key is not active seals and opens nothing.
 	inactive := orkaClient(t, NewStore(db, dbPath))
 	if err := inactive.PutConnectorCredential(ctx, testCredentialRef(), store.ConnectorCredential{AccessToken: "x"}); !errors.Is(err, storageclient.ErrSnapshotKeyNotActive) {
 		t.Fatalf("Put without key err = %v", err)
@@ -158,8 +151,6 @@ func TestConnectorCredentialFailsClosed(t *testing.T) {
 	}
 }
 
-// TestConnectorCredentialKeyRotationBlocksOpen copies sealed custody into a
-// dataset whose client holds another key: the data key does not unwrap.
 func TestConnectorCredentialKeyRotationBlocksOpen(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -227,7 +218,6 @@ func TestConnectorConsentSingleUseAndExpiry(t *testing.T) {
 		t.Fatalf("expired consume err = %v, want ErrNotFound", err)
 	}
 
-	// Creating a new consent purges stale rows, and disconnect drops the rest.
 	stale := consent
 	stale.Nonce = "nonce-stale"
 	stale.ExpiresAt = time.Now().Add(-time.Hour)
@@ -255,9 +245,6 @@ func TestConnectorConsentSingleUseAndExpiry(t *testing.T) {
 	}
 }
 
-// testConsentSequence numbers fixture completions as if each came from a
-// newer consent than the last, so a test that parks several completions in
-// order models consents started in that order.
 var testConsentSequence atomic.Int64
 
 func testConnectorCompletion() store.ConnectorCompletion {
@@ -295,7 +282,6 @@ func TestConnectorCompletionRoundTrip(t *testing.T) {
 	if _, err := s.ConsumeConnectorCompletion(ctx, completion.Nonce); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("second consume err = %v, want ErrNotFound", err)
 	}
-	// Peek leaves the row for a retry; list opens every parked completion.
 	peekable := completion
 	peekable.Nonce = "completion-peek"
 	if err := s.CreateConnectorCompletion(ctx, peekable); err != nil {
@@ -325,8 +311,6 @@ func TestConnectorCompletionRoundTrip(t *testing.T) {
 	}
 }
 
-// TestConnectorCompletionExpiryAndDisconnect covers expired rows, which stay
-// listed for revocation, and disconnect, which drops every parked row.
 func TestConnectorCompletionExpiryAndDisconnect(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -340,8 +324,6 @@ func TestConnectorCompletionExpiryAndDisconnect(t *testing.T) {
 	if _, err := s.ConsumeConnectorCompletion(ctx, expired.Nonce); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expired consume err = %v", err)
 	}
-	// Expired rows cannot be redeemed but remain listed for revocation until
-	// the reconciler deletes them.
 	expiredToo := expired
 	expiredToo.Nonce = "completion-expired-2"
 	if err := s.CreateConnectorCompletion(ctx, expiredToo); err != nil {
@@ -360,7 +342,6 @@ func TestConnectorCompletionExpiryAndDisconnect(t *testing.T) {
 	if err := s.CreateConnectorCompletion(ctx, store.ConnectorCompletion{Nonce: "x"}); err == nil {
 		t.Fatal("incomplete completion must be rejected")
 	}
-	// Disconnect drops parked completions too.
 	parked := completion
 	parked.Nonce = "completion-parked"
 	if err := s.CreateConnectorCompletion(ctx, parked); err != nil {
@@ -374,9 +355,6 @@ func TestConnectorCompletionExpiryAndDisconnect(t *testing.T) {
 	}
 }
 
-// TestConnectorCredentialGrantFollowsCommits covers the grant read the
-// Delegated re-check uses: it follows every commit, and reports a missing or
-// tombstoned row as no grant.
 func TestConnectorCredentialGrantFollowsCommits(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -414,7 +392,6 @@ func TestConnectorCredentialTombstoneBlocksRecreation(t *testing.T) {
 		Credential: store.ConnectorCredential{AccessToken: "gho_parked"},
 		ExpiresAt:  time.Now().Add(10 * time.Minute),
 	}
-	// Deleting custody tombstones the UID permanently.
 	ref := testCredentialRef()
 	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho"}); err != nil {
 		t.Fatal(err)
@@ -443,10 +420,6 @@ func TestConnectorCredentialTombstoneBlocksRecreation(t *testing.T) {
 	}
 }
 
-// TestConnectorCompletionAuthenticatesPlaintextColumns covers a parked row
-// whose mode column was altered: the sealed payload no longer opens, so the
-// completion fence cannot be widened from readOnly to readWrite by editing
-// the store.
 func TestConnectorCompletionAuthenticatesPlaintextColumns(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -465,9 +438,6 @@ func TestConnectorCompletionAuthenticatesPlaintextColumns(t *testing.T) {
 	}
 }
 
-// TestConnectorConsentAuthenticatesPlaintextColumns covers a pending consent
-// whose authority digest column was altered: the verifier no longer opens, so
-// the callback cannot be steered to a replaced token endpoint.
 func TestConnectorConsentAuthenticatesPlaintextColumns(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -508,13 +478,9 @@ func TestConnectorCompletionCommitMarksRowAtomically(t *testing.T) {
 	if _, err := s.CommitConnectorCompletion(ctx, "missing", ref, completion.Credential); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("commit of a missing completion err = %v, want ErrNotFound", err)
 	}
-	// A missing completion leaves custody untouched: the transaction rolled back.
 	if held, err := s.GetConnectorCredential(ctx, ref); err != nil || held.AccessToken != "gho_parked" {
 		t.Fatalf("custody after rolled-back commit = %+v err = %v", held, err)
 	}
-	// The committed marker lives inside the sealed body: the row has no
-	// plaintext column to flip, and the re-sealed payload still opens only
-	// against its fence columns.
 	if _, err := s.store.db.Exec(`UPDATE connector_completions SET mode = 'readWrite' WHERE nonce = ?`, completion.Nonce); err != nil {
 		t.Fatal(err)
 	}
@@ -523,9 +489,6 @@ func TestConnectorCompletionCommitMarksRowAtomically(t *testing.T) {
 	}
 }
 
-// TestConnectorCommitRetiresReplacedCredential covers a re-authorization:
-// the credential a commit replaces stays sealed for disconnect to revoke,
-// and disconnect removes it with custody.
 func TestConnectorCommitRetiresReplacedCredential(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -572,7 +535,6 @@ func TestConnectorTombstoneFencesCommitsBeforeDeletion(t *testing.T) {
 	if err := s.TombstoneConnectorCustody(ctx, ref.ConnectionUID); err != nil {
 		t.Fatalf("tombstoning twice must be idempotent: %v", err)
 	}
-	// The material stays readable for revocation while new commits fail.
 	held, err := s.GetConnectorCredential(ctx, ref)
 	if err != nil || held.AccessToken != "gho_a" {
 		t.Fatalf("custody after tombstone = %+v err = %v", held, err)
@@ -580,8 +542,6 @@ func TestConnectorTombstoneFencesCommitsBeforeDeletion(t *testing.T) {
 	if _, err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); !errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 		t.Fatalf("commit after tombstone err = %v, want ErrConnectorCustodyTombstoned", err)
 	}
-	// A refresh that lands after the fence must not add rotated material
-	// outside the revocation set either.
 	if err := s.ReplaceConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_rotated", RefreshToken: "ghr_rotated"}, held.Version); !errors.Is(err, store.ErrConnectorCustodyTombstoned) {
 		t.Fatalf("replace after tombstone err = %v, want ErrConnectorCustodyTombstoned", err)
 	}
@@ -601,7 +561,6 @@ func TestConnectorCommitDoesNotRetireIdenticalMaterial(t *testing.T) {
 	ctx := context.Background()
 	completion := testConnectorCompletion()
 	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
-	// The provider re-issues the same long-lived tokens on every re-consent.
 	if err := s.PutConnectorCredential(ctx, ref, completion.Credential); err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +577,6 @@ func TestConnectorCommitDoesNotRetireIdenticalMaterial(t *testing.T) {
 	if retired, err := s.ListRetiredConnectorCredentials(ctx, ref); err != nil || len(retired) != 0 {
 		t.Fatalf("retired = %+v err = %v, want identical material not duplicated", retired, err)
 	}
-	// Genuinely different material is still kept for revocation.
 	completion.Nonce = "nonce-new"
 	completion.ConsentSequence = testConsentSequence.Add(1)
 	completion.Credential.AccessToken = "gho_different"
@@ -646,9 +604,6 @@ func TestConnectorCommitKeepsReplacedGrantWithRefreshTokenUntilDisconnect(t *tes
 			t.Fatal(err)
 		}
 	}
-	// A re-consent replaces a grant whose access token has expired but
-	// whose refresh token is still a live grant: it is kept for revocation
-	// at disconnect and never pruned by access-token expiry.
 	completion := testConnectorCompletion()
 	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
 	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: past}); err != nil {
@@ -659,7 +614,6 @@ func TestConnectorCommitKeepsReplacedGrantWithRefreshTokenUntilDisconnect(t *tes
 	if err != nil || len(retired) != 1 || retired[0].RefreshToken != "ghr_old" {
 		t.Fatalf("retired = %+v err = %v, want the expired grant kept for its refresh token", retired, err)
 	}
-	// A later refresh prunes nothing from that grant.
 	held, err := s.GetConnectorCredential(ctx, ref)
 	if err != nil {
 		t.Fatal(err)
@@ -670,8 +624,6 @@ func TestConnectorCommitKeepsReplacedGrantWithRefreshTokenUntilDisconnect(t *tes
 	if retired, err := s.ListRetiredConnectorCredentials(ctx, ref); err != nil || len(retired) != 2 || retired[0].RefreshToken != "ghr_old" {
 		t.Fatalf("retired after refresh = %+v err = %v, want the old grant kept and the refreshed-away token retired", retired, err)
 	}
-	// A replaced grant with an expired access token and no refresh token
-	// has nothing left to revoke.
 	second := testConnectorCompletion()
 	second.Nonce, second.ConnectionUID, second.Name = "nonce-second", "uid-2", "github-def"
 	secondRef := store.ConnectorCredentialRef{ConnectionUID: second.ConnectionUID, Namespace: second.Namespace, Name: second.Name, SubjectDigest: second.SubjectDigest, Provider: second.Provider}
@@ -698,16 +650,12 @@ func TestConnectorReplaceRetiresUnexpiredPreviousCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A stale writer retires nothing.
 	if err := s.ReplaceConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_stale", ExpiresAt: future}, held.Version+1); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("stale replace err = %v, want ErrConflict", err)
 	}
 	if retired, err := s.ListRetiredConnectorCredentials(ctx, ref); err != nil || len(retired) != 0 {
 		t.Fatalf("retired after stale replace = %+v err = %v, want none", retired, err)
 	}
-	// The refreshed-away access token is still valid at the provider, so it
-	// is kept for revocation; the refresh token is unchanged here, so the
-	// row is bounded by the access token's lifetime.
 	if err := s.ReplaceConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_b", RefreshToken: "ghr_a", ExpiresAt: past}, held.Version); err != nil {
 		t.Fatal(err)
 	}
@@ -715,8 +663,6 @@ func TestConnectorReplaceRetiresUnexpiredPreviousCredential(t *testing.T) {
 	if err != nil || len(retired) != 1 || retired[0].AccessToken != "gho_a" || retired[0].RefreshToken != "ghr_a" {
 		t.Fatalf("retired = %+v err = %v, want the replaced credential", retired, err)
 	}
-	// An already expired access token under the same refresh token has
-	// nothing left to revoke and is not kept.
 	held, err = s.GetConnectorCredential(ctx, ref)
 	if err != nil {
 		t.Fatal(err)
@@ -727,8 +673,6 @@ func TestConnectorReplaceRetiresUnexpiredPreviousCredential(t *testing.T) {
 	if retired, err := s.ListRetiredConnectorCredentials(ctx, ref); err != nil || len(retired) != 1 || retired[0].AccessToken != "gho_a" {
 		t.Fatalf("retired = %+v err = %v, want only the unexpired credential", retired, err)
 	}
-	// Retired material is pruned once it expires, so the table is bounded by
-	// the provider's token lifetime rather than by refresh count.
 	if _, err := s.store.db.ExecContext(ctx, `UPDATE connector_retired_credentials SET revocable_until = ? WHERE connection_uid = ?`, past, ref.ConnectionUID); err != nil {
 		t.Fatal(err)
 	}
@@ -769,7 +713,6 @@ func TestConnectorCredentialVersionsNeverRepeatAcrossShreds(t *testing.T) {
 	if err != nil || second.Version != 2 {
 		t.Fatalf("after shred and re-consent = %+v err = %v, want version 2", second, err)
 	}
-	// A fence taken against the shredded row no longer matches the new one.
 	if err := s.ShredConnectorCredential(ctx, ref.ConnectionUID, first.Version); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("stale shred err = %v, want ErrConflict", err)
 	}
@@ -795,9 +738,6 @@ func TestConnectorReplaceKeepsRotatedRefreshTokenUntilDisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The provider rotated the refresh token without promising to invalidate
-	// the previous one: that grant is kept for revocation at disconnect even
-	// though its access token has expired, and no later refresh prunes it.
 	if err := s.ReplaceConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_b", RefreshToken: "ghr_b", ExpiresAt: future}, held.Version); err != nil {
 		t.Fatal(err)
 	}
@@ -816,9 +756,6 @@ func TestConnectorReplaceKeepsRotatedRefreshTokenUntilDisconnect(t *testing.T) {
 	}
 }
 
-// TestConnectorCustodyAssignsMonotonicGrants covers the grant sequence: every
-// committed grant takes the next number for the Connection, the counter
-// outlives the credential row, and the number is read back with custody.
 func TestConnectorCustodyAssignsMonotonicGrants(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -840,8 +777,6 @@ func TestConnectorCustodyAssignsMonotonicGrants(t *testing.T) {
 	if held, err := s.GetConnectorCredential(ctx, ref); err != nil || held.GrantSequence != 2 {
 		t.Fatalf("custody after commit = %+v err = %v, want grant 2", held, err)
 	}
-	// A row that goes away without a disconnect (a shred) does not reset
-	// the counter: the next grant is still later than every earlier one.
 	if _, err := s.store.db.Exec(`DELETE FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID); err != nil {
 		t.Fatal(err)
 	}
@@ -853,9 +788,6 @@ func TestConnectorCustodyAssignsMonotonicGrants(t *testing.T) {
 	}
 }
 
-// TestConnectorConsentReplacesPendingConsent covers one pending consent per
-// Connection: a new authorize replaces the earlier one, so repeated calls
-// never grow the table, and a committed completion carries its grant.
 func TestConnectorConsentReplacesPendingConsent(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -908,10 +840,6 @@ func testConnectorConsent() store.ConnectorConsent {
 	}
 }
 
-// TestConnectorCommitIsFencedInsideTheTransaction covers two API replicas
-// committing one completion: the second commit sees the sealed committed
-// marker inside its own transaction and changes nothing, so custody keeps
-// one grant. Old tombstones are reaped with their grant counters.
 func TestConnectorCommitIsFencedInsideTheTransaction(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -960,10 +888,6 @@ func TestConnectorCommitIsFencedInsideTheTransaction(t *testing.T) {
 	}
 }
 
-// TestConnectorKeyActivationAuthenticatesCustody covers key rotation while
-// linked accounts exist: a candidate key that cannot open the retained
-// connector rows is refused even when no execution snapshot is retained,
-// and the current key still activates.
 func TestConnectorKeyActivationAuthenticatesCustody(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -979,7 +903,6 @@ func TestConnectorKeyActivationAuthenticatesCustody(t *testing.T) {
 	if err := orkaClient(t, s.store).ActivateSnapshotKey(ctx, testSnapshotKey); err != nil {
 		t.Fatalf("the current key must activate: %v", err)
 	}
-	// Pending rows are sealed under the key too.
 	if err := s.DeleteConnectorCredential(ctx, ref.ConnectionUID); err != nil {
 		t.Fatal(err)
 	}
@@ -991,10 +914,6 @@ func TestConnectorKeyActivationAuthenticatesCustody(t *testing.T) {
 	}
 }
 
-// TestConnectorCommitJudgesExpiryAndRevocationIdentity covers a commit that
-// stalled past the completion's lifetime (refused and the row dropped) and
-// a re-consent that re-issued the same token strings under another
-// revocation identity (the previous row is retired, not deduplicated).
 func TestConnectorCommitJudgesExpiryAndRevocationIdentity(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -1036,9 +955,6 @@ func TestConnectorCommitJudgesExpiryAndRevocationIdentity(t *testing.T) {
 	}
 }
 
-// TestConnectorDeletionLeavesNoCiphertextInFiles covers the crypto-shred:
-// after a disconnect neither the database file nor its write-ahead log
-// still holds the deleted row's wrapped data key or ciphertext.
 func TestConnectorDeletionLeavesNoCiphertextInFiles(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -1051,9 +967,6 @@ func TestConnectorDeletionLeavesNoCiphertextInFiles(t *testing.T) {
 	if err := s.store.db.QueryRow(`SELECT dek_ciphertext, ciphertext FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&dekCiphertext, &ciphertext); err != nil {
 		t.Fatal(err)
 	}
-	// A parked completion is sealed under the controller key itself, so its
-	// payload must leave the files with the disconnect as well; the
-	// finalizer deletes custody first and the parked rows after it.
 	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
 		t.Fatal(err)
 	}
@@ -1080,9 +993,6 @@ func TestConnectorDeletionLeavesNoCiphertextInFiles(t *testing.T) {
 	}
 }
 
-// A log truncation that could not finish is remembered and completed by the
-// next custody operation, and a shred that finds the row already gone still
-// truncates.
 func TestConnectorPendingLogTruncationIsFinishedLater(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -1111,10 +1021,6 @@ func TestConnectorPendingLogTruncationIsFinishedLater(t *testing.T) {
 	}
 }
 
-// TestConnectorRetireConnectorCredential covers material that lost a race
-// and cannot become the current row: it is kept sealed for disconnect (until
-// disconnect with a refresh token, until expiry without one), and a
-// tombstoned Connection refuses it.
 func TestConnectorRetireConnectorCredential(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -1138,9 +1044,6 @@ func TestConnectorRetireConnectorCredential(t *testing.T) {
 	}
 }
 
-// TestConnectorCompletionDropsLeaveNoLogCopy covers the paths that delete
-// a parked completion outside a disconnect: an expired one met at commit
-// and one consumed. Its sealed payload must leave the write-ahead log too.
 func TestConnectorCompletionDropsLeaveNoLogCopy(t *testing.T) {
 	ctx := context.Background()
 	for name, drop := range map[string]func(*connectorTestStore, store.ConnectorCompletion) error{
@@ -1185,10 +1088,6 @@ func TestConnectorCompletionDropsLeaveNoLogCopy(t *testing.T) {
 	}
 }
 
-// TestConnectorCommitDropsSupersededCompletions covers two parked
-// completions for one Connection (an older consent was approved, then a
-// newer one): once the newer one commits, the older one can never be
-// committed over it, while an older committed recovery record is kept.
 func TestConnectorCommitDropsSupersededCompletions(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -1226,9 +1125,6 @@ func TestConnectorCommitDropsSupersededCompletions(t *testing.T) {
 	}
 }
 
-// TestConnectorConsentsAreNumberedAndFenceCompletions covers overlapping
-// authorization flows whose callbacks finish out of order: consent order,
-// not callback arrival, decides which tokens may become custody.
 func TestConnectorConsentsAreNumberedAndFenceCompletions(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -1259,8 +1155,6 @@ func TestConnectorConsentsAreNumberedAndFenceCompletions(t *testing.T) {
 	}
 	ref := store.ConnectorCredentialRef{ConnectionUID: "uid-1", Namespace: "tenant", Name: "github-abc", SubjectDigest: "digest-a", Provider: "github"}
 
-	// The newer consent's callback parks first; the older one, arriving
-	// later, is refused instead of replacing it.
 	if err := park("newer", "gho_newer", consumedSecond.Sequence); err != nil {
 		t.Fatal(err)
 	}
@@ -1270,7 +1164,6 @@ func TestConnectorConsentsAreNumberedAndFenceCompletions(t *testing.T) {
 	if _, err := s.CommitConnectorCompletion(ctx, "newer", ref, store.ConnectorCredential{AccessToken: "gho_newer"}); err != nil {
 		t.Fatal(err)
 	}
-	// Once the newer consent is custody, no older consent can park again.
 	if err := park("older-again", "gho_older", consumedFirst.Sequence); !errors.Is(err, store.ErrConnectorConsentSuperseded) {
 		t.Fatalf("older park after commit err = %v, want ErrConnectorConsentSuperseded", err)
 	}
@@ -1278,8 +1171,6 @@ func TestConnectorConsentsAreNumberedAndFenceCompletions(t *testing.T) {
 		t.Fatalf("custody = %+v err = %v, want the newer grant", held, err)
 	}
 
-	// A newer park replaces an older uncommitted one, so a Connection holds
-	// at most one uncommitted completion.
 	if err := park("third", "gho_third", consumedSecond.Sequence+1); err != nil {
 		t.Fatal(err)
 	}
@@ -1291,9 +1182,6 @@ func TestConnectorConsentsAreNumberedAndFenceCompletions(t *testing.T) {
 	}
 }
 
-// TestConnectorCommitBoundsRetainedGrants covers repeated relinking: the
-// superseded grants kept for revocation are bounded, and a commit past the
-// bound is refused with custody unchanged.
 func TestConnectorCommitBoundsRetainedGrants(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -1326,9 +1214,6 @@ func TestConnectorCommitBoundsRetainedGrants(t *testing.T) {
 	}
 }
 
-// TestConnectorKeyActivationSkipsExpiredConsents covers key rotation after a
-// pending consent's TTL passed: it holds no token and can never be used, so
-// it does not block activating a key that cannot open it.
 func TestConnectorKeyActivationSkipsExpiredConsents(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -1343,9 +1228,6 @@ func TestConnectorKeyActivationSkipsExpiredConsents(t *testing.T) {
 	}
 }
 
-// TestConnectorReplaceBoundsRotatedRefreshGrants covers a long-lived link
-// whose provider rotates refresh tokens on every refresh: the grants kept
-// until disconnect are bounded, the oldest dropped first.
 func TestConnectorReplaceBoundsRotatedRefreshGrants(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -1378,9 +1260,6 @@ func TestConnectorReplaceBoundsRotatedRefreshGrants(t *testing.T) {
 	}
 }
 
-// TestConnectorRetireBoundsRefreshMaterial covers the fallback that retires
-// refreshed material custody could not store: it is bounded like any
-// rotated grant.
 func TestConnectorRetireBoundsRefreshMaterial(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()

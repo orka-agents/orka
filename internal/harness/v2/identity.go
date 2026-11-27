@@ -25,10 +25,6 @@ const (
 	ProfileDigestSchemaVersion uint32 = 1
 )
 
-// Fence binds a request to one exact supervisor boot, controller leadership
-// epoch, pool generation, runtime-session generation, and immutable runtime
-// profile. Runtime-session fields are omitted only for pool-wide operations such
-// as drain.
 type Fence struct {
 	RuntimeInstanceID          RuntimeInstanceID `json:"runtimeInstanceID"`
 	SupervisorBootID           SupervisorBootID  `json:"supervisorBootID"`
@@ -76,9 +72,6 @@ func (f Fence) Validate(requireSession bool) error {
 	return nil
 }
 
-// MutationMetadata is common to every mutating request. RequestDigest is the
-// digest of the complete request with this field omitted, as produced by
-// CanonicalRequestDigest.
 type MutationMetadata struct {
 	Fence                      Fence         `json:"fence"`
 	TaskUID                    TaskUID       `json:"taskUID,omitempty"`
@@ -171,8 +164,6 @@ const (
 	FenceMismatchProfileSchema            FenceMismatch = "profile_digest_schema"
 )
 
-// CompareFence compares the expected current fence with a request fence. A
-// non-empty result is stale and must be handled as HTTP 410 by the transport.
 func CompareFence(expected, request Fence, requireSession bool) FenceMismatch {
 	switch {
 	case expected.RuntimeInstanceID != request.RuntimeInstanceID:

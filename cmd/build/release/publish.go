@@ -29,7 +29,6 @@ func (w *workflow) createTag(data candidateBundle, directory string) error {
 	if err != nil {
 		return err
 	}
-	// Preserve the original tag-message representation for publication retries.
 	message := fmt.Sprintf(`{"candidateSHA256": %q, "qualificationSHA256": %q}`, candidateHash, qualificationHash)
 	existing, err := w.tagRef(data.Version)
 	if err != nil {
@@ -60,19 +59,13 @@ func (w *workflow) createTag(data candidateBundle, directory string) error {
 	return w.createTagRef(data.Version, tag.SHA)
 }
 
-// createTagRef creates refs/tags/<name> pointing at sha.
 func (w *workflow) createTagRef(name, sha string) error {
 	return w.api(repoAPI+"/git/refs", http.MethodPost,
 		map[string]string{"ref": "refs/tags/" + name, "sha": sha}, nil)
 }
 
-// storageModuleTagPrefix tags the nested storage contract module
-// (github.com/orka-agents/orka/pkg/storage) at each release, so a separately
-// built storage extension can require the contract at the release version.
 const storageModuleTagPrefix = "pkg/storage/"
 
-// createStorageModuleTag points pkg/storage/<version> at the released commit.
-// A retry accepts only an existing tag on that same commit.
 func (w *workflow) createStorageModuleTag(data candidateBundle) error {
 	name := storageModuleTagPrefix + data.Version
 	existing, err := w.tagRef(name)
@@ -98,8 +91,6 @@ func (w *workflow) registryDigest(ref string) (string, error) {
 		"docker", "buildx", "imagetools", "inspect", ref, "--format", "{{json .Manifest}}",
 	}})
 	if result.err != nil {
-		// Only a missing-manifest response establishes absence. Authentication,
-		// transport, and rate-limit failures must stop publication.
 		if !missingManifestRE.MatchString(result.stderr) || registryDeniedRE.MatchString(result.stderr) {
 			return "", fmt.Errorf("could not inspect release image %s", ref)
 		}
@@ -141,8 +132,6 @@ func (w *workflow) checkImageVersions(data candidateBundle) error {
 	return nil
 }
 
-// Validated version components have no leading zeros. Decimal comparison avoids
-// imposing an integer-size limit that the version format does not have.
 func compareVersions(first, second string) int {
 	a := strings.Split(strings.TrimPrefix(first, "v"), ".")
 	b := strings.Split(strings.TrimPrefix(second, "v"), ".")
@@ -261,8 +250,6 @@ func (w *workflow) publishChart(data candidateBundle, directory string) (commit,
 	if err != nil {
 		return "", "", err
 	}
-	// Helm refreshes timestamps each time. Preserve bytes when entries already
-	// match, while still repairing an absent or incomplete index.
 	timestamps := regexp.MustCompile(`(?m)^(?:    created:|generated:).*$`)
 	if len(previous) > 0 && string(timestamps.ReplaceAll(previous, nil)) == string(timestamps.ReplaceAll(current, nil)) {
 		if err := os.WriteFile(index, previous, 0o600); err != nil {
@@ -339,7 +326,6 @@ func (w *workflow) checkPages() error {
 }
 
 func (w *workflow) buildPages(commit string) error {
-	// Native-token pushes do not trigger Pages builds. Dispatch the Pages REST endpoint explicitly.
 	if err := w.api(repoAPI+"/pages/builds", http.MethodPost, map[string]any{}, nil); err != nil {
 		return err
 	}
@@ -498,7 +484,6 @@ func (w *workflow) archiveAsset(id int64, version, path string) error {
 			return err
 		}
 	}
-	// Verify completed uploads too, including those from an interrupted attempt.
 	temporary, err := os.MkdirTemp("", "orka-release-asset-")
 	if err != nil {
 		return err

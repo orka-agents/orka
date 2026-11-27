@@ -6,9 +6,6 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-// firstInvalidString returns the path of the first string in message that is
-// not valid UTF-8. Protobuf refuses to encode such a string, so the client
-// checks before sending and the server before answering.
 func firstInvalidString(message protoreflect.Message) (string, bool) {
 	var path string
 	found := false
@@ -25,8 +22,6 @@ func firstInvalidString(message protoreflect.Message) (string, bool) {
 	return path, found
 }
 
-// hasUnknownFields reports whether message, or any message inside it,
-// carries fields its descriptor does not define.
 func hasUnknownFields(message protoreflect.Message) bool {
 	if len(message.GetUnknown()) > 0 {
 		return true
@@ -58,9 +53,6 @@ func hasUnknownFields(message protoreflect.Message) bool {
 	return unknown
 }
 
-// walkFields calls visit for every populated scalar value in message and in
-// every message inside it, including list elements and map keys and values.
-// visit returns false to stop the walk.
 func walkFields(message protoreflect.Message, visit func(protoreflect.FieldDescriptor, protoreflect.Value) bool) bool {
 	keepGoing := true
 	message.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {

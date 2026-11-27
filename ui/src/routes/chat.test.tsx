@@ -45,7 +45,6 @@ describe('chat route', () => {
   it('renders ChatPage component', () => {
     const ChatComponent = Route.component!
     render(<ChatComponent />)
-    // ChatPage renders a message input area
     expect(screen.getByPlaceholderText(/message/i)).toBeInTheDocument()
   })
 })

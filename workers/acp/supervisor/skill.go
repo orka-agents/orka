@@ -15,12 +15,8 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// skillMountRoot is where the controller binds each skill read-only. Tests
-// replace it with a temporary folder.
 var skillMountRoot = harnessv2.RuntimeSkillMountRoot
 
-// skillsFromEnv parses the frozen skill list. An absent or empty value means
-// no skills and leaves the profile digest unchanged.
 func skillsFromEnv() ([]harnessv2.RuntimeSkill, error) {
 	raw := strings.TrimSpace(os.Getenv(EnvSkills))
 	if raw == "" {
@@ -39,59 +35,33 @@ func skillsFromEnv() ([]harnessv2.RuntimeSkill, error) {
 	return skills, nil
 }
 
-// Claude receives Orka's skills as one local plugin. Claude Code (2.1.293)
-// lists its skills as "<plugin>:<skill>".
 const (
 	claudeSkillPluginDirName = ".claude-skill-plugin"
 	claudeSkillPluginName    = "orka"
 )
 
-// claudeSkillPluginRoot is the plugin folder shared by every Claude session of
-// this runtime. It sits directly in the session base directory, next to the
-// session roots, so no session identity owns it or any folder above it.
 func claudeSkillPluginRoot(paths acp.SessionPaths) string {
 	return filepath.Join(filepath.Dir(paths.Root), claudeSkillPluginDirName)
 }
 
-// nativeSkillsDir returns the folder the provider scans for Orka's Agent
-// Skills, given the environment and options the supervisor sets for that
-// provider. Providers Orka can't limit to its own skills return an error; the
-// controller rejects their skills before planning.
 func nativeSkillsDir(provider string, paths acp.SessionPaths) (string, error) {
 	switch provider {
 	case providerKindClaude:
-		// Claude loads no settings file at all (settingSources is empty), so
-		// it never reads $CLAUDE_CONFIG_DIR/skills. The skills reach it as a
-		// local plugin instead: claude-agent-acp passes the plugins option to
-		// Claude Code as --plugin-dir, which loads <root>/skills/<name>/SKILL.md
-		// without any setting source.
 		return filepath.Join(claudeSkillPluginRoot(paths), "skills"), nil
 	case providerKindCodex:
-		// Codex (0.160.0) loads user skills from $HOME/.agents/skills; the
-		// $CODEX_HOME/skills root is deprecated.
 		return filepath.Join(paths.Home, ".agents", "skills"), nil
 	case providerKindOpencode:
-		// OPENCODE_CONFIG_DIR=$XDG_CONFIG_HOME/opencode; OpenCode (1.19.0)
-		// loads skills from $OPENCODE_CONFIG_DIR/skills/**/SKILL.md.
 		return filepath.Join(paths.Config, "opencode", "skills"), nil
 	default:
-		// Copilot CLI (1.0.96) in ACP mode can't be limited to Orka's skills.
 		return "", fmt.Errorf("ACP provider %q does not support Orka runtime skills", provider)
 	}
 }
 
-// skillCheckTimeout and loadSkill are replaced in tests.
 var (
 	skillCheckTimeout = skill.StartupCheckTimeout
 	loadSkill         = skill.Load
 )
 
-// VerifySkills validates every bound skill before the supervisor serves, so a
-// skill that can never be projected fails the Pod with a stable reason
-// instead of failing each session. The check is bounded: the controller sizes
-// the startup probe to outlast it, so a read that stalls is reported with a
-// stable reason instead of ending in an unexplained kubelet restart. A stalled
-// read cannot be interrupted, and the caller exits on any failure.
 func VerifySkills(cfg Config) error {
 	if len(cfg.Skills) == 0 {
 		return nil
@@ -99,8 +69,6 @@ func VerifySkills(cfg Config) error {
 	if _, err := nativeSkillsDir(cfg.Provider.Kind, acp.SessionPaths{Home: "/", Config: "/"}); err != nil {
 		return &toolbox.Failure{Reason: skill.ReasonUnsupported, Message: err.Error()}
 	}
-	// The goroutine can outlive this call after a timeout, so it must not
-	// read the replaceable package variables.
 	load, mountRoot, timeout := loadSkill, skillMountRoot, skillCheckTimeout
 	done := make(chan error, 1)
 	go func() {
@@ -122,12 +90,6 @@ func VerifySkills(cfg Config) error {
 	}
 }
 
-// materializeSessionSkills copies each validated skill into the session's
-// native skills folder. It runs before session ownership is finalized, so the
-// copies belong to the session identity; the read-only source mount is never
-// written. Each skill is read and validated again from the mount, so a
-// session never receives content that did not pass every check. Claude's
-// skills instead go into the shared plugin folder, see ensureClaudeSkillPlugin.
 func materializeSessionSkills(provider string, skills []harnessv2.RuntimeSkill, mountRoot string, paths acp.SessionPaths) error {
 	if len(skills) == 0 {
 		return nil
@@ -154,20 +116,11 @@ func materializeSessionSkills(provider string, skills []harnessv2.RuntimeSkill, 
 	return nil
 }
 
-// claudeSkillPlugins records the plugin folders this process has built and the
-// skills each holds. Every session of a runtime gets the same frozen skills.
 var claudeSkillPlugins struct {
 	sync.Mutex
 	built map[string]string
 }
 
-// ensureClaudeSkillPlugin builds Claude's skill plugin once per process. A
-// plugin can also carry hooks, agents, commands, and MCP servers, so the
-// session child must not be able to change it: the supervisor writes it
-// outside every session tree with folders 0755 and files 0644, and no session
-// identity owns any part of it or of the folder holding it. Children only read
-// it. Each skill is validated from the mount as it is written, and a plugin
-// left by an earlier process is replaced rather than trusted.
 func ensureClaudeSkillPlugin(skills []harnessv2.RuntimeSkill, mountRoot, root string) error {
 	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return fmt.Errorf("claude skill plugin folder %q must be a clean absolute path", root)

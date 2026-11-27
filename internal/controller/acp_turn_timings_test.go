@@ -29,8 +29,6 @@ type capturedTurnTimingsLine struct {
 	values map[string]any
 }
 
-// captureTurnTimingsLogger returns a context whose logger records each line's
-// verbosity and key/value pairs.
 func captureTurnTimingsLogger(t *testing.T) (context.Context, *[]capturedTurnTimingsLine) {
 	t.Helper()
 	lines := []capturedTurnTimingsLine{}
@@ -93,8 +91,6 @@ func TestACPTurnTimingsLogStepsInOrderWithTaskAge(t *testing.T) {
 	}
 }
 
-// An execution that stops before its prompt is accepted, such as a capacity
-// requeue, logs only at debug verbosity, and reports whether it failed.
 func TestACPTurnTimingsLogUnpromptedExecutionsAtDebug(t *testing.T) {
 	clock := &acpTurnTimingsClock{now: time.Unix(1000, 0)}
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "queued"}}
@@ -115,9 +111,6 @@ func TestACPTurnTimingsLogUnpromptedExecutionsAtDebug(t *testing.T) {
 	}
 }
 
-// Acceptance is recorded once, when first observed, and an accepted prompt
-// whose stream later fails still reports how long it streamed, at info
-// verbosity.
 func TestACPTurnTimingsRecordAcceptedPromptWhoseStreamFails(t *testing.T) {
 	clock := &acpTurnTimingsClock{now: time.Unix(1000, 0)}
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "stream-failed"}}
@@ -126,7 +119,6 @@ func TestACPTurnTimingsRecordAcceptedPromptWhoseStreamFails(t *testing.T) {
 	timings.mark(acpTurnStepSessionCreate)
 	clock.now = clock.now.Add(300 * time.Millisecond)
 	timings.markPromptAccepted()
-	// A repeated accepted event, or the failure path, does not re-record it.
 	clock.now = clock.now.Add(50 * time.Millisecond)
 	timings.markPromptAccepted()
 	clock.now = clock.now.Add(30 * time.Second)
@@ -147,8 +139,6 @@ func TestACPTurnTimingsRecordAcceptedPromptWhoseStreamFails(t *testing.T) {
 	}
 }
 
-// A failed stream whose summary shows an acceptance the event handler never
-// recorded still counts as prompted.
 func TestACPTurnTimingsFailedStreamAcceptedOnlyBySummary(t *testing.T) {
 	clock := &acpTurnTimingsClock{now: time.Unix(1000, 0)}
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "summary-accepted"}}
@@ -161,7 +151,6 @@ func TestACPTurnTimingsFailedStreamAcceptedOnlyBySummary(t *testing.T) {
 	}
 }
 
-// A rejected, unaccepted prompt records no stream step and stays at debug.
 func TestACPTurnTimingsFailedUnacceptedStreamRecordsNothing(t *testing.T) {
 	clock := &acpTurnTimingsClock{now: time.Unix(1000, 0)}
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "rejected"}}

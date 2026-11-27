@@ -47,10 +47,6 @@ func (h *InternalHandlers) internalCallerAuthorizer() internalCallerAuthorizer {
 	return internalCallerAuthorizer{k8sReader: reader, taskProvenanceProtected: h.taskProvenanceProtected}
 }
 
-// verifyNamespace checks that the authenticated caller's ServiceAccount namespace
-// matches the target namespace in the URL path. Task-, session-, plan-, result-,
-// message-, artifact-, status-, and event-scoped handlers must additionally use
-// the worker identity checks below.
 func (a internalCallerAuthorizer) verifyNamespace(c fiber.Ctx, namespace string) error {
 	userInfo := GetUserInfo(c)
 	if userInfo == nil {
@@ -67,8 +63,6 @@ func (a internalCallerAuthorizer) verifyNamespace(c fiber.Ctx, namespace string)
 		return fiber.NewError(fiber.StatusForbidden, "cross-namespace access denied")
 	}
 
-	// ServiceAccount usernames follow the format:
-	// system:serviceaccount:<namespace>:<name>.
 	parts := strings.Split(userInfo.Username, ":")
 	isServiceAccount := len(parts) == 4 && parts[0] == "system" && parts[1] == "serviceaccount" //nolint:goconst // "system" here is K8s SA prefix, not chat role
 	if isServiceAccount && parts[2] != namespace {
@@ -81,9 +75,6 @@ func (a internalCallerAuthorizer) verifyNamespace(c fiber.Ctx, namespace string)
 		return fiber.NewError(fiber.StatusForbidden, "cross-namespace access denied")
 	}
 
-	// Fail closed: namespace-scoped internal endpoints require a verifiable
-	// caller namespace. Principals without one (for example non-ServiceAccount
-	// TokenReview identities) must not pass for arbitrary namespaces.
 	if userInfo.Namespace == "" && !isServiceAccount {
 		log.Info("internal access denied for caller without namespace identity",
 			"targetNamespace", namespace,
@@ -96,11 +87,6 @@ func (a internalCallerAuthorizer) verifyNamespace(c fiber.Ctx, namespace string)
 	return nil
 }
 
-// verifyTaskCaller resolves the authenticated Pod through its owning Job to an
-// immutable Task UID, then verifies that UID is still the active Task addressed
-// by the request. It intentionally does not grant controller or harness service
-// accounts a name/annotation-based exception. Runtime callers must use their
-// capability-bound protocol.
 func (a internalCallerAuthorizer) verifyTaskCaller(
 	c fiber.Ctx,
 	namespace string,
@@ -185,8 +171,6 @@ func (a internalCallerAuthorizer) verifyUsageWriter(ctx context.Context, userInf
 	if err != nil {
 		return err
 	}
-	// Check the immutable Pod command as well as the current Task spec. A
-	// container Task must not gain accounting authority through a type change.
 	for _, container := range pod.Spec.Containers {
 		if container.Name == "worker" && slices.Equal(container.Command, []string{"/worker"}) &&
 			slices.Equal(container.Args, []string{"--mode=ai"}) {
@@ -276,9 +260,6 @@ func (a internalCallerAuthorizer) resolveTaskWorker(
 				continue
 			}
 			if task.Status.JobName == "" && task.Status.JobUID == "" && activeInternalWorkerTask(task) {
-				// Job creation precedes the status write that publishes its identity.
-				// Deny access until that write completes, but let a fast worker retry
-				// its result instead of treating the publication delay as permanent.
 				return nil, fiber.NewError(fiber.StatusServiceUnavailable, "task worker identity is not yet published")
 			}
 			if strings.TrimSpace(task.Status.JobName) != job.Name || task.Status.JobUID == "" || task.Status.JobUID != string(job.UID) {
@@ -401,8 +382,6 @@ func addTranscriptSessionReference(allowed map[string][]corev1alpha1.SessionRefe
 	if name == "" {
 		return
 	}
-	// Keep every distinct reference so another Task cannot widen the caller's
-	// history window for the same session.
 	if !slices.Contains(allowed[name], *ref) {
 		allowed[name] = append(allowed[name], *ref)
 	}
@@ -424,11 +403,6 @@ func coordinationRootTask(
 		seen[current.UID] = struct{}{}
 		parentName, parentUID, hasParent, valid := coordinationParentIdentity(current)
 		if !valid {
-			// A continuation of a delegated child inherits the parent labels
-			// but is owned, not controlled, by the Task it resumes. It shares
-			// that Task's tree when the link is proven from the predecessor's
-			// controller-written wait, as verifiedCoordinationParentIdentity
-			// requires; lineage annotations alone never place a Task in a tree.
 			previous := tasksByName[strings.TrimSpace(current.Annotations[labels.AnnotationContinuationOfName])]
 			if previous == nil || !previous.DeletionTimestamp.IsZero() || !taskwait.Continues(previous, current) {
 				return nil, false
@@ -466,12 +440,6 @@ func coordinationParentIdentity(task *corev1alpha1.Task) (string, types.UID, boo
 	return parentName, "", true, false
 }
 
-// verifiedCoordinationParentIdentity is coordinationParentIdentity for a Task
-// that may continue a parked turn. A continuation inherits its predecessor's
-// parent labels but is owned, not controlled, by that predecessor, so its
-// coordination parent is that of the original Task of its verified
-// continuation chain. Every link is proven by Predecessor from controller
-// state; an unproven link or a read failure never grants a parent.
 func (a internalCallerAuthorizer) verifiedCoordinationParentIdentity(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -596,8 +564,6 @@ func (a internalCallerAuthorizer) verifiedCoordinationParent(
 	return parent, nil
 }
 
-// verifiedCoordinationChild returns childName when it is a live child of
-// callerTask whose parent link is protected by Task provenance admission.
 func (a internalCallerAuthorizer) verifiedCoordinationChild(
 	ctx context.Context,
 	callerTask *corev1alpha1.Task,

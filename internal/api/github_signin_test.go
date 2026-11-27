@@ -39,12 +39,10 @@ import (
 
 const signInTestUserID = "852750"
 
-// revocations records the tokens fakeGitHub was asked to revoke.
 type revocations struct {
 	mu     sync.Mutex
 	tokens []string
-	// fail makes GitHub refuse every revocation.
-	fail bool
+	fail   bool
 }
 
 func (r *revocations) list() []string {
@@ -53,9 +51,6 @@ func (r *revocations) list() []string {
 	return append([]string(nil), r.tokens...)
 }
 
-// fakeGitHub knows the app client-id, the person alice (852750) with token
-// ghu_alice, a member of acme, and bob (1002) with ghu_bob, who is not. It
-// records revoked tokens in revoked, when set.
 func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +79,6 @@ func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 				return
 			}
 			if body.AccessToken == "ghu_check_down" {
-				// GitHub cannot check this token.
 				w.WriteHeader(http.StatusBadGateway)
 				return
 			}
@@ -92,8 +86,7 @@ func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 				"ghu_alice": {"id": 852750, "login": "alice"}, "ghu_alice_renewed": {"id": 852750, "login": "alice"},
 				"ghu_alice_refreshed": {"id": 852750, "login": "alice"}, "ghu_alice_left": {"id": 852750, "login": "alice"},
 				"ghu_bob": {"id": 1002, "login": "bob"}, "ghu_bob_refreshed": {"id": 1002, "login": "bob"},
-				"ghu_alice_unanswered": {"id": 852750, "login": "alice"},
-				// Alice's account, renamed after an earlier check.
+				"ghu_alice_unanswered":        {"id": 852750, "login": "alice"},
 				"ghu_alice_renamed_refreshed": {"id": 852750, "login": "alice-renamed"},
 			}
 			user, known := users[body.AccessToken]
@@ -107,7 +100,6 @@ func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 		if r.URL.Path == "/user/memberships/orgs/acme" {
 			switch r.Header.Get("Authorization") {
 			case "Bearer ghu_alice_unanswered":
-				// GitHub cannot answer for this token.
 				w.WriteHeader(http.StatusBadGateway)
 				return
 			case "Bearer ghu_alice", "Bearer ghu_alice_renewed", "Bearer ghu_alice_refreshed", "Bearer ghu_alice_renamed_refreshed":
@@ -122,9 +114,8 @@ func fakeGitHub(t *testing.T, revoked *revocations) *httptest.Server {
 }
 
 type fakeSignInCredentials struct {
-	token string
-	err   error
-	// unrefreshable holds a grant whose expiry Orka chose.
+	token         string
+	err           error
 	unrefreshable bool
 }
 
@@ -151,7 +142,6 @@ func newSignInHarness(t *testing.T) *connectorTestHarness {
 		GitHub:      githubauth.Client{APIURL: fakeGitHub(t, nil).URL},
 	}
 	h.handlers.watchNamespace = connectorTestNamespace
-	// Tests sign in more often than a person does; the limit has its own test.
 	h.handlers.signInLimiter = nil
 	h.app.Get("/api/v1/auth/config", h.handlers.GetAuthConfig)
 	h.app.Post("/api/v1/auth/github", h.handlers.SignInWithGitHub)
@@ -180,8 +170,6 @@ func (h *connectorTestHarness) signIn(body map[string]any) (int, SessionResponse
 	return resp.StatusCode, session
 }
 
-// asSession makes the harness's next requests carry the session's identity,
-// as the auth middleware resolves it.
 func (h *connectorTestHarness) asSession(token string) error {
 	ui, err := h.handlers.githubSignIn.authenticateSession(context.Background(), token)
 	if err != nil {
@@ -215,8 +203,6 @@ func TestGitHubSignInLinksTheAccountAndIssuesASession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The refresh token was used once to prove it is alice's: custody holds
-	// what GitHub issued from it.
 	held, err := h.store.GetConnectorCredential(context.Background(), ref)
 	if err != nil || held.AccessToken != "ghu_alice_refreshed" || held.RefreshToken != "ghr_alice_2" || held.ExpiresAt.IsZero() {
 		t.Fatalf("custody = %v", err)
@@ -226,8 +212,6 @@ func TestGitHubSignInLinksTheAccountAndIssuesASession(t *testing.T) {
 		t.Fatalf("session identity: %v %+v", err, h.identity)
 	}
 
-	// Signing in again with --no-host keeps the link and records the
-	// person declined a host.
 	h.identity = nil
 	status, again := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800, "noHost": true})
 	if status != http.StatusCreated || again.Connection != wantName || again.AgentHost {
@@ -241,10 +225,6 @@ func TestGitHubSignInLinksTheAccountAndIssuesASession(t *testing.T) {
 	}
 }
 
-// A host takes only a token that expires, and only a token the sign-in minted
-// by its refresh carries an expiry GitHub confirmed. A sign-in without a
-// refresh token, whatever expiresIn it claims, links the account without a
-// host; one with a refresh token starts it again.
 func TestGitHubSignInStartsAHostOnlyForAConfirmedExpiry(t *testing.T) {
 	h := newSignInHarness(t)
 	name := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
@@ -264,8 +244,6 @@ func TestGitHubSignInStartsAHostOnlyForAConfirmedExpiry(t *testing.T) {
 	if got := annotation(); got != corev1alpha1.ConnectionAgentHostDeclined {
 		t.Fatalf("annotation = %q, want the link to get no host", got)
 	}
-	// Custody, as a host reads it, holds the submitted token under a
-	// deadline Orka chose.
 	source := &credential.Source{Client: h.client, APIReader: h.client, Credentials: h.store, OAuth: h.handlers.connectors.OAuth}
 	hostGets := func() credential.HostCredential {
 		t.Helper()
@@ -279,7 +257,6 @@ func TestGitHubSignInStartsAHostOnlyForAConfirmedExpiry(t *testing.T) {
 		t.Fatalf("custody holds %q (refreshable %v), want the submitted token", held.AccessToken, held.Refreshable)
 	}
 
-	// A sign-in that cannot finish its link leaves the decline in place.
 	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{err: errors.New("custody unavailable")}
 	h.identity = nil
 	if status, _ := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice"}); status != http.StatusServiceUnavailable {
@@ -289,8 +266,6 @@ func TestGitHubSignInStartsAHostOnlyForAConfirmedExpiry(t *testing.T) {
 		t.Fatalf("annotation = %q, want the decline kept until the link is replaced", got)
 	}
 
-	// One with a refresh token replaces that grant with its own before the
-	// decline is lifted, so the host gets the token whose expiry GitHub set.
 	h.handlers.githubSignIn.Credentials = source
 	h.identity = nil
 	if status, session = h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice"}); status != http.StatusCreated || !session.AgentHost {
@@ -304,8 +279,6 @@ func TestGitHubSignInStartsAHostOnlyForAConfirmedExpiry(t *testing.T) {
 	}
 }
 
-// A refresh that names an expiry but leaves no refresh token gives a token
-// custody cannot refresh, which a host does not take; the sign-in starts none.
 func TestGitHubSignInStartsNoHostForATokenItCannotRefresh(t *testing.T) {
 	h := newSignInHarness(t)
 	h.identity = nil
@@ -323,9 +296,6 @@ func TestGitHubSignInStartsNoHostForATokenItCannotRefresh(t *testing.T) {
 	}
 }
 
-// A host-enabled sign-in that lifts the decline while a --no-host one waits
-// its turn does not cost that one its decline: each records its own under
-// the completion lock.
 func TestGitHubSignInKeepsTheDeclineOfAnOverlappingSignIn(t *testing.T) {
 	h := newSignInHarness(t)
 	h.identity = nil
@@ -333,9 +303,6 @@ func TestGitHubSignInKeepsTheDeclineOfAnOverlappingSignIn(t *testing.T) {
 		t.Fatalf("first sign-in: %d", status)
 	}
 	key := types.NamespacedName{Namespace: connectorTestNamespace, Name: connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)}
-	// The host-enabled sign-in runs while the --no-host one waits for the
-	// lock, so the waiting one finds the decline lifted at its first read
-	// under the lock.
 	h.handlers.apiReader = interceptor.NewClient(h.client.(client.WithWatch), interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 			if _, ok := obj.(*corev1alpha1.Connection); ok && k == key {
@@ -366,8 +333,6 @@ func TestGitHubSignInKeepsTheDeclineOfAnOverlappingSignIn(t *testing.T) {
 	}
 }
 
-// hookedSignInCredentials runs before when the sign-in checks the link it
-// holds, as a slow GitHub answer would let other writers act meanwhile.
 type hookedSignInCredentials struct {
 	fakeSignInCredentials
 	before func()
@@ -378,9 +343,6 @@ func (f hookedSignInCredentials) HostCredential(ctx context.Context, namespace, 
 	return f.fakeSignInCredentials.HostCredential(ctx, namespace, name, horizon)
 }
 
-// A sign-in writes its decline only to the Connection it read under the
-// lock: one deleted and recreated under the same name meanwhile keeps its
-// own --no-host decline.
 func TestGitHubSignInLeavesAReplacedConnectionsDeclineAlone(t *testing.T) {
 	h := newSignInHarness(t)
 	h.identity = nil
@@ -425,8 +387,6 @@ func TestGitHubSignInLeavesAReplacedConnectionsDeclineAlone(t *testing.T) {
 	}
 }
 
-// A write to the same Connection by another writer meanwhile, such as its
-// reconciler's, is read again and the decline lifted all the same.
 func TestGitHubSignInLiftsTheDeclineAfterAnotherWriterChangedTheLink(t *testing.T) {
 	h := newSignInHarness(t)
 	h.identity = nil
@@ -459,9 +419,6 @@ func TestGitHubSignInLiftsTheDeclineAfterAnotherWriterChangedTheLink(t *testing.
 	}
 }
 
-// Signing in again keeps a link that still holds the person's account, so
-// sign-ins never pile up the grants custody keeps until disconnect, and
-// revokes the tokens it did not need.
 func TestGitHubSignInAgainKeepsAWorkingLink(t *testing.T) {
 	h := newSignInHarness(t)
 	revoked := &revocations{}
@@ -496,8 +453,6 @@ func TestGitHubSignInAgainKeepsAWorkingLink(t *testing.T) {
 		t.Fatalf("revoked = %v, want each later sign-in's unused token", got)
 	}
 
-	// A link whose custody no longer yields the person's token is linked
-	// again from the sign-in.
 	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{token: "ghu_bob"}
 	h.identity = nil
 	if status, _ := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": "ghr_alice", "expiresIn": 28800}); status != http.StatusCreated {
@@ -512,10 +467,6 @@ func TestGitHubSignInAgainKeepsAWorkingLink(t *testing.T) {
 	}
 }
 
-// A sign-in that cannot tell whether the existing link still works, because
-// custody or GitHub cannot answer, replaces nothing: each replacement spends
-// one of the grants custody retains. It answers 503, and revokes the token
-// its refresh minted, which nothing stored.
 func TestGitHubSignInRetriesWhenItCannotCheckTheLink(t *testing.T) {
 	h := newSignInHarness(t)
 	revoked := &revocations{}
@@ -537,8 +488,7 @@ func TestGitHubSignInRetriesWhenItCannotCheckTheLink(t *testing.T) {
 	first := grant()
 	for outage, test := range map[string]struct {
 		credentials fakeSignInCredentials
-		// The token the sign-in's refresh minted, which nothing stored.
-		revoked []string
+		revoked     []string
 	}{
 		"custody": {credentials: fakeSignInCredentials{err: errors.New("custody cannot answer")}, revoked: []string{"ghu_alice_refreshed"}},
 		"github":  {credentials: fakeSignInCredentials{token: "ghu_check_down"}, revoked: []string{"ghu_alice_refreshed"}},
@@ -558,9 +508,6 @@ func TestGitHubSignInRetriesWhenItCannotCheckTheLink(t *testing.T) {
 	}
 }
 
-// A token the sign-in's refresh minted, which nothing else holds, is revoked
-// when the sign-in refuses it: for another account, or when GitHub cannot
-// check it.
 func TestGitHubSignInRevokesARefreshedTokenItRefuses(t *testing.T) {
 	h := newSignInHarness(t)
 	revoked := &revocations{}
@@ -601,9 +548,6 @@ func TestGitHubSignInRevokesARefreshedTokenItRefuses(t *testing.T) {
 	}
 }
 
-// A sign-in may bring the very token custody holds. When GitHub then cannot
-// check it, the sign-in answers 503 but must not revoke it: that would break
-// the link it is retrying for.
 func TestGitHubSignInKeepsCustodysTokenWhenItCannotCheckIt(t *testing.T) {
 	h := newSignInHarness(t)
 	revoked := &revocations{}
@@ -617,7 +561,6 @@ func TestGitHubSignInKeepsCustodysTokenWhenItCannotCheckIt(t *testing.T) {
 		t.Fatalf("first sign-in: %d", status)
 	}
 
-	// Custody holds ghu_alice; the second check of it, the reuse check, fails.
 	checks := 0
 	proxy := httputil.NewSingleHostReverseProxy(upstream)
 	flaky := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -646,8 +589,6 @@ func TestGitHubSignInKeepsCustodysTokenWhenItCannotCheckIt(t *testing.T) {
 	}
 }
 
-// Sign-in runs only through a provider that serves agent hosts: sessions
-// renew from the host link.
 func TestGitHubSignInNeedsAnAgentHostProvider(t *testing.T) {
 	h := newSignInHarness(t)
 	provider := &corev1alpha1.ConnectorProvider{}
@@ -667,8 +608,6 @@ func TestGitHubSignInNeedsAnAgentHostProvider(t *testing.T) {
 	}
 }
 
-// While two providers serve agent hosts, the controller provisions none, so
-// sign-in refuses rather than promise a host.
 func TestGitHubSignInRefusesWhileProvidersConflict(t *testing.T) {
 	h := newSignInHarness(t)
 	other := acceptedTestProvider()
@@ -683,8 +622,6 @@ func TestGitHubSignInRefusesWhileProvidersConflict(t *testing.T) {
 	}
 }
 
-// A sign-in that fails before anything is stored revokes the token it
-// obtained, since nothing else holds it.
 func TestGitHubSignInRevokesWhatItCouldNotStore(t *testing.T) {
 	h := newSignInHarness(t)
 	revoked := &revocations{}
@@ -713,8 +650,6 @@ func TestGitHubSignInRevokesWhatItCouldNotStore(t *testing.T) {
 	}
 }
 
-// Two sign-ins racing to create the person's Connection both finish: the
-// loser goes on with the winner's.
 func TestGitHubSignInRacingTheConnectionCreate(t *testing.T) {
 	h := newSignInHarness(t)
 	h.createConflict = &atomic.Bool{}
@@ -726,15 +661,11 @@ func TestGitHubSignInRacingTheConnectionCreate(t *testing.T) {
 	}
 }
 
-// Two first sign-ins that overlap commit one grant: the one that waited for
-// the other reuses what it linked.
 func TestOverlappingSignInsCommitOneGrant(t *testing.T) {
 	h := newSignInHarness(t)
 	upstream := fakeGitHub(t, nil)
 	var mu sync.Mutex
 	arrived, together := 0, make(chan struct{})
-	// Both sign-ins pass check-token together, so each reaches the link
-	// before either has committed.
 	barrier := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		if r.Method == http.MethodPost && strings.Contains(string(body), `"ghu_alice"`) {
@@ -784,8 +715,6 @@ func TestOverlappingSignInsCommitOneGrant(t *testing.T) {
 	}
 }
 
-// A token GitHub gave no lifetime still ends in custody, so a link that
-// cannot refresh stops, and membership is checked again on each refresh.
 func TestGitHubSignInBoundsATokenWithoutExpiry(t *testing.T) {
 	h := newSignInHarness(t)
 	h.identity = nil
@@ -808,8 +737,6 @@ func TestGitHubSignInBoundsATokenWithoutExpiry(t *testing.T) {
 	}
 }
 
-// A submitted lifetime is capped before it becomes a duration: one too large
-// for a Duration would otherwise overflow into an expiry already past.
 func TestGitHubSignInCapsAHugeSubmittedLifetime(t *testing.T) {
 	h := newSignInHarness(t)
 	h.identity = nil
@@ -832,8 +759,6 @@ func TestGitHubSignInCapsAHugeSubmittedLifetime(t *testing.T) {
 	}
 }
 
-// A Connection made elsewhere is linked only once it carries the custody
-// finalizer, which tombstones and revokes custody when it is deleted.
 func TestGitHubSignInWaitsForTheCustodyFinalizer(t *testing.T) {
 	h := newSignInHarness(t)
 	name := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
@@ -862,8 +787,6 @@ func TestGitHubSignInWaitsForTheCustodyFinalizer(t *testing.T) {
 	}
 }
 
-// A Connection made outside the API under the person's canonical name, but
-// for another provider, never takes the sign-in provider's grant.
 func TestGitHubSignInRefusesALinkBoundToAnotherProvider(t *testing.T) {
 	h := newSignInHarness(t)
 	revoked := &revocations{}
@@ -913,7 +836,6 @@ func TestGitHubSignInRefusesOtherAppsAndOutsiders(t *testing.T) {
 			t.Fatalf("%s: %d %+v, want %d and no session", name, status, session, test.want)
 		}
 	}
-	// A member's access token with someone else's refresh token links no one.
 	for name, refresh := range map[string]string{"another person's": "ghr_bob", "an unknown": "ghr_unknown"} {
 		if status, session := h.signIn(map[string]any{"accessToken": "ghu_alice", "refreshToken": refresh}); status != http.StatusUnauthorized ||
 			session.Token != "" {
@@ -949,7 +871,6 @@ func TestSessionRenewsOnceAndSignsOut(t *testing.T) {
 	if err := h.asSession(session.Token); err == nil {
 		t.Fatal("a renewed session must end")
 	}
-	// A session renews once: its successor replaced it.
 	h.identity = &original
 	if resp, _ := h.do(http.MethodPost, "/api/v1/auth/session/renew", nil); resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("renewing a renewed session = %d, want 401", resp.StatusCode)
@@ -966,13 +887,9 @@ func TestSessionRenewsOnceAndSignsOut(t *testing.T) {
 	}
 }
 
-// A link GitHub gives no refresh token for ends with its token, so its
-// session ends then too, and renewing it asks the person to sign in again
-// rather than failing as if GitHub could not be reached.
 func TestASessionWhoseLinkCannotRefreshEndsWithItsToken(t *testing.T) {
 	h := newSignInHarness(t)
 	h.identity = nil
-	// Custody cannot be read here, so the submitted token decides.
 	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{}
 	before := time.Now()
 	_, session := h.signIn(map[string]any{"accessToken": "ghu_alice"})
@@ -988,8 +905,6 @@ func TestASessionWhoseLinkCannotRefreshEndsWithItsToken(t *testing.T) {
 		t.Fatalf("renew = %d %s, want 401 asking to sign in again", resp.StatusCode, raw)
 	}
 
-	// A repeat sign-in that keeps a link which cannot refresh ends with that
-	// link's token, not the one just submitted, even one that can refresh.
 	kept := time.Now().Add(time.Hour)
 	h.identity = nil
 	h.handlers.githubSignIn.Credentials = keptSignInCredentials{expires: kept}
@@ -998,7 +913,6 @@ func TestASessionWhoseLinkCannotRefreshEndsWithItsToken(t *testing.T) {
 		t.Fatalf("sign-in %d ends at %v, want with the kept link's token at %v", status, session.ExpiresAt, kept)
 	}
 
-	// A link that can refresh keeps the full session.
 	h.identity = nil
 	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{token: "ghu_alice"}
 	before = time.Now()
@@ -1008,15 +922,12 @@ func TestASessionWhoseLinkCannotRefreshEndsWithItsToken(t *testing.T) {
 	}
 }
 
-// keptSignInCredentials holds a link that cannot refresh, ending at expires.
 type keptSignInCredentials struct{ expires time.Time }
 
 func (k keptSignInCredentials) HostCredential(context.Context, string, string, time.Duration) (credential.HostCredential, error) {
 	return credential.HostCredential{AccessToken: "ghu_alice_renewed", ExpiresAt: k.expires}, nil
 }
 
-// GitHub failing to answer a membership check is retried, never taken as
-// the person having left: sign-in and renewal answer 503, not 403.
 func TestMembershipThatCannotBeCheckedIsRetryable(t *testing.T) {
 	h := newSignInHarness(t)
 	revoked := &revocations{}
@@ -1025,8 +936,6 @@ func TestMembershipThatCannotBeCheckedIsRetryable(t *testing.T) {
 	if status, session := h.signIn(map[string]any{"accessToken": "ghu_alice_unanswered"}); status != http.StatusServiceUnavailable || session.Token != "" {
 		t.Fatalf("sign-in GitHub could not check = %d, want 503 and no session", status)
 	}
-	// A submitted token, which the client keeps and custody may hold, is
-	// never revoked.
 	if got := revoked.list(); len(got) != 0 {
 		t.Fatalf("revoked = %v, want the submitted token kept", got)
 	}
@@ -1050,14 +959,11 @@ func TestSessionRenewalChecksMembershipAgain(t *testing.T) {
 	if err := h.asSession(session.Token); err != nil {
 		t.Fatal(err)
 	}
-	// alice's refreshed token, but GitHub no longer places her in the org.
 	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{token: "ghu_alice_left"}
 	resp, _ := h.do(http.MethodPost, "/api/v1/auth/session/renew", nil)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("renew after leaving the org = %d, want 403", resp.StatusCode)
 	}
-	// A link that came to hold another account never renews this session,
-	// even for a member.
 	h.handlers.githubSignIn.Credentials = fakeSignInCredentials{token: "ghu_bob"}
 	if resp, _ := h.do(http.MethodPost, "/api/v1/auth/session/renew", nil); resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("renew with another account's token = %d, want 401", resp.StatusCode)
@@ -1067,8 +973,6 @@ func TestSessionRenewalChecksMembershipAgain(t *testing.T) {
 	}
 }
 
-// An Orka session reaches only the routes that act on the person's own
-// links, host and AHP tokens.
 func TestGitHubSessionsReachOnlyIdentityRoutes(t *testing.T) {
 	handlers := NewHandlers(HandlersConfig{})
 	app := fiber.New()
@@ -1078,7 +982,6 @@ func TestGitHubSessionsReachOnlyIdentityRoutes(t *testing.T) {
 	})
 	app.Get("/api/v1/tasks", handlers.authorizeExternalRoute("GET /api/v1/tasks"), func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
 	app.Get("/api/v1/connections", handlers.authorizeExternalRoute("GET /api/v1/connections"), func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
-	// The MCP endpoint is identity-only, but it is not a session's.
 	app.Get("/mcp", handlers.authorizeExternalRoute("POST /mcp"), func(c fiber.Ctx) error { return c.SendStatus(http.StatusOK) })
 	for path, want := range map[string]int{"/api/v1/tasks": http.StatusForbidden, "/api/v1/connections": http.StatusOK, "/mcp": http.StatusForbidden} {
 		resp, err := app.Test(httptest.NewRequest(http.MethodGet, path, nil))
@@ -1091,7 +994,6 @@ func TestGitHubSessionsReachOnlyIdentityRoutes(t *testing.T) {
 	}
 }
 
-// Every route a session may reach is an identity-only route that exists.
 func TestGitHubSessionRoutesAreIdentityOnly(t *testing.T) {
 	for route := range githubSessionRoutes {
 		policy, ok := externalAPIPolicies[route]
@@ -1104,8 +1006,6 @@ func TestGitHubSessionRoutesAreIdentityOnly(t *testing.T) {
 	}
 }
 
-// A session token is answered only by the session store, never tried as an
-// OIDC or ServiceAccount token.
 func TestSessionTokensAreNeverTriedElsewhere(t *testing.T) {
 	if _, err := authenticateToken(context.Background(), nil, sessionTokenPrefix+"anything", AuthConfig{}); err == nil {
 		t.Fatal("a session token must fail without sign-in sessions")
@@ -1122,15 +1022,12 @@ func TestSessionTokensAreNeverTriedElsewhere(t *testing.T) {
 	}
 }
 
-// failingSessions is a session store that cannot answer.
 type failingSessions struct{ store.AuthSessionStore }
 
 func (failingSessions) GetAuthSessionByHash(context.Context, string) (store.AuthSession, error) {
 	return store.AuthSession{}, errors.New("database is locked")
 }
 
-// A session store that cannot answer is not a verdict on the token: the
-// request gets 503, so a client keeps the session, never 401.
 func TestSessionLookupFailureIsNotAnInvalidToken(t *testing.T) {
 	cfg := GitHubSignInConfig{Enabled: true, Sessions: failingSessions{}}
 	if _, err := cfg.authenticateSession(context.Background(), sessionTokenPrefix+"live"); !errors.Is(err, errSessionStoreUnavailable) {
@@ -1150,8 +1047,6 @@ func TestSessionLookupFailureIsNotAnInvalidToken(t *testing.T) {
 	}
 }
 
-// Sign-in is unauthenticated, and each attempt spends the GitHub App's rate
-// limit: a client that keeps trying is refused before its token is checked.
 func TestGitHubSignInIsRateLimitedBeforeTheTokenCheck(t *testing.T) {
 	h := newSignInHarness(t)
 	upstream, err := url.Parse(fakeGitHub(t, nil).URL)
@@ -1184,9 +1079,6 @@ func TestGitHubSignInIsRateLimitedBeforeTheTokenCheck(t *testing.T) {
 	}
 }
 
-// Renewal spends the App's GitHub rate limit and returns a session that can
-// renew again: a person's chained renewals are limited as sign-ins are,
-// before anything is asked of GitHub.
 func TestSessionRenewalsAreRateLimited(t *testing.T) {
 	h := newSignInHarness(t)
 	h.identity = nil

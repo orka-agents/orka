@@ -12,9 +12,6 @@ import (
 )
 
 func TestInitAdoptsAndReapsOrphans(t *testing.T) {
-	// The orphan records its parent after it has been orphaned, then exits.
-	// The command exits 100 when init did not adopt it, and otherwise with
-	// the number of zombies init has left behind.
 	parent := filepath.Join(t.TempDir(), "parent")
 	cmd, output := initProcess(t, `
 ( sh -c 'sleep 0.1; set -- $(cat /proc/$$/stat); echo "$4" > "$0"' "$1" & )

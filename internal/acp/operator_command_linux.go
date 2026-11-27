@@ -29,8 +29,6 @@ func newOperatorChildCommand(cfg OperatorCommandConfig) (*exec.Cmd, error) {
 	)
 	args = append(args, cfg.Argv...)
 	cmd := exec.Command(helperCommand, args...)
-	// A terminal command is a session leader (Setsid also satisfies the exec
-	// helper's process-group fence); otherwise it leads its own group.
 	attr := &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	if cfg.TTY != nil {
 		attr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0, Pdeathsig: syscall.SIGKILL}
@@ -44,8 +42,6 @@ func newOperatorChildCommand(cfg OperatorCommandConfig) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
-// OpenOperatorPTY allocates a pseudo-terminal whose slave is owned by the
-// operator command identity.
 func OpenOperatorPTY(uid, gid int, rows, cols uint16) (*os.File, *os.File, error) {
 	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
 	if err != nil {
@@ -91,7 +87,6 @@ func OpenOperatorPTY(uid, gid int, rows, cols uint16) (*os.File, *os.File, error
 	return master, slave, nil
 }
 
-// ResizeOperatorPTY applies a terminal window size.
 func ResizeOperatorPTY(master *os.File, rows, cols uint16) error {
 	conn, err := master.SyscallConn()
 	if err != nil {
@@ -106,7 +101,6 @@ func ResizeOperatorPTY(master *os.File, rows, cols uint16) error {
 	return ioctlErr
 }
 
-// OperatorSignal maps an allowed operator signal name.
 func OperatorSignal(name string) (os.Signal, bool) {
 	switch name {
 	case "INT":

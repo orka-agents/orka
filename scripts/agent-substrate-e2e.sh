@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# MCP tool conformance against the unmodified official Substrate v1 pin.
 set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KIND_CLUSTER="${KIND_CLUSTER:-orka-agent-substrate-e2e}"
@@ -37,7 +36,6 @@ runtime_diagnostics() {
   local bootstrap_secret=""
   local ORKA_REDACT_SECRET_VARS=(bootstrap_secret)
   if [[ -f "${TMP_ROOT}/bootstrap-token" ]]; then bootstrap_secret="$(<"${TMP_ROOT}/bootstrap-token")"; fi
-  # Select diagnostic status fields; omit specs and native identity records.
   kubectl -n orka-system --request-timeout=15s get tools,substrateactorpools -o json 2>/dev/null |
     jq '[.items[] | {kind, name: .metadata.name, phase: .status.phase, state: .status.state,
       lifecycle: .status.lifecycle, message: .status.message,
@@ -57,7 +55,6 @@ job_diagnostics() {
   local ORKA_REDACT_SECRET_VARS=(bootstrap_secret)
   if [[ -f "${TMP_ROOT}/bootstrap-token" ]]; then bootstrap_secret="$(<"${TMP_ROOT}/bootstrap-token")"; fi
   log "Conformance diagnostics for job/${name}"
-  # Restrict metadata to status; Pod specs can contain projected credentials.
   kubectl -n orka-system --request-timeout=15s get pods -l "job-name=${name}" -o json 2>/dev/null |
     jq '[.items[] | {name: .metadata.name, phase: .status.phase, conditions: .status.conditions,
       containers: [.status.containerStatuses[]? | {name, state}]}]' | redact >&2 || true
@@ -122,8 +119,6 @@ build_image() {
   docker push "${ref}" >&2
   docker inspect --format '{{index .RepoDigests 0}}' "${ref}"
 }
-# One template-sized Actor: worker Pod limits leave room for exactly one
-# (gVisor reserves 64Mi of the worker's memory limit).
 NATIVE_ACTOR_CPU_MILLICORES=1000
 NATIVE_ACTOR_MEMORY_BYTES=1073741824
 native_template_manifest() {
@@ -139,12 +134,6 @@ native_template_manifest() {
      snapshotConfig:{preferredFidelity:"SNAPSHOT_FIDELITY_VOLUMES",goldenSnapshotConfig:{mode:"GOLDEN_SNAPSHOT_MODE_DISABLED"}}}
   '
 }
-# Orka's controller authenticates with its pod certificate. Grant it editor on
-# its Atespace and global viewer for worker placement reads; it is never a
-# bootstrap owner. "get access-policy" exits 0 with no output when a scope has
-# no policy, and "create" refuses an existing one, so read the policy as JSON
-# and either create it or merge the binding into it under its uid/version
-# preconditions.
 ensure_access_binding() {
   local role="$1" principal="$2" manifest="$3"
   shift 3
@@ -176,7 +165,6 @@ create_native_resources() {
   local worker_image="$1" mcp_image="$2"
   kubectl create namespace ate-demo --dry-run=client -o yaml | kubectl apply -f -
   bash "${ROOT_DIR}/scripts/lib/ensure-static-mode-namespace.sh" kubectl "${ORKA_NAMESPACE}" harness-v2
-  # Substrate's system NetworkPolicy admits API clients only from labeled namespaces.
   kubectl label namespace "${ORKA_NAMESPACE}" ate.dev/api-access=true --overwrite
   kubectl_ate get atespace orka-system >/dev/null 2>&1 || kubectl_ate create atespace orka-system
   grant_orka_native_access
@@ -289,7 +277,6 @@ main() {
   client="$(build_image tool-e2e-client cmd/orka-tool-e2e-client/Dockerfile)"
   registry_ip="$(docker inspect -f '{{with index .NetworkSettings.Networks "kind"}}{{.IPAddress}}{{end}}' kind-registry)"
   [[ -n "${registry_ip}" ]] || { echo 'shared registry is not reachable from kind' >&2; return 1; }
-  # Actor image pulls happen inside gVisor and use the registry's kind-network address.
   mcp="${mcp/localhost:${KIND_REGISTRY_PORT}/${registry_ip}:5000}"
   openssl rand -hex 32 >"${TMP_ROOT}/bootstrap-token"
   chmod 600 "${TMP_ROOT}/bootstrap-token"

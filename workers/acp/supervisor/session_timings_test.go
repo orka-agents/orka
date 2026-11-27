@@ -34,8 +34,6 @@ func TestParseCPUStatReadsCgroupV2AndV1(t *testing.T) {
 	}
 }
 
-// Throttled times always fit a Duration: a count whose Duration would overflow
-// saturates, and one beyond a signed 64-bit count is not reported.
 func TestParseCPUStatBoundsThrottledTime(t *testing.T) {
 	saturated, ok := parseCPUStat([]byte("nr_throttled 18446744073709551615\nthrottled_usec 9223372036854775807\n"))
 	if !ok || saturated.throttledPeriods != math.MaxUint64 || saturated.throttled != time.Duration(math.MaxInt64) {
@@ -71,7 +69,6 @@ func TestReadCPUThrottleUsesFirstReadableFile(t *testing.T) {
 	}
 }
 
-// fakeClock advances by each step it is given.
 type fakeClock struct{ now time.Time }
 
 func (c *fakeClock) Now() time.Time { return c.now }
@@ -113,7 +110,6 @@ func TestSessionStartTimingsRecordStagesAdapterAndThrottling(t *testing.T) {
 		t.Fatalf("throttling = %d periods, %d ms", line.Periods, line.Throttle)
 	}
 
-	// The span reports the same window: finish read the counters once.
 	attrs := map[string]int64{}
 	for _, attr := range timings.spanAttributes() {
 		attrs[string(attr.Key)] = attr.Value.AsInt64()
@@ -133,7 +129,6 @@ func TestSessionStartTimingsOmitUnknownThrottling(t *testing.T) {
 		if calls == 1 {
 			return cpuThrottleSample{throttledPeriods: 9}, true
 		}
-		// A lower reading means a different cgroup: report nothing.
 		return cpuThrottleSample{throttledPeriods: 1}, true
 	})
 	timings.finish()
@@ -147,9 +142,6 @@ func TestSessionStartTimingsOmitUnknownThrottling(t *testing.T) {
 	}
 }
 
-// A creation that fails partway reports its total through finish, so a slow
-// failing stage that never reached its mark still counts, with or without
-// readable throttling counters.
 func TestSessionStartTimingsTotalCoversFailedStage(t *testing.T) {
 	for _, readable := range []bool{true, false} {
 		clock := &fakeClock{now: time.Unix(1000, 0)}
@@ -158,10 +150,8 @@ func TestSessionStartTimingsTotalCoversFailedStage(t *testing.T) {
 		})
 		clock.now = clock.now.Add(40 * time.Millisecond)
 		timings.mark("sessionPaths")
-		// Workspace materialization runs for five seconds and fails.
 		clock.now = clock.now.Add(5 * time.Second)
 		timings.finish()
-		// Anything after finish is outside the window.
 		clock.now = clock.now.Add(time.Hour)
 
 		var buffer bytes.Buffer
@@ -202,8 +192,6 @@ func TestSnakeCase(t *testing.T) {
 	}
 }
 
-// A real create logs one line with its stage breakdown and the adapter's own
-// startup steps, and no request content.
 func TestSupervisorCreateLogsSessionStartTimings(t *testing.T) {
 	var logs bytes.Buffer
 	previous := slog.Default()
@@ -241,8 +229,6 @@ func TestSupervisorCreateLogsSessionStartTimings(t *testing.T) {
 	}
 }
 
-// captureSupervisorLogs sends the default slog logger to a JSON buffer for
-// the rest of the test.
 func captureSupervisorLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	logs := &bytes.Buffer{}
@@ -260,7 +246,6 @@ type createFailureLine struct {
 	Adapter map[string]int64 `json:"adapterMs"`
 }
 
-// createFailureLogLine returns the one session-creation-failed line.
 func createFailureLogLine(t *testing.T, logs *bytes.Buffer) createFailureLine {
 	t.Helper()
 	var found []createFailureLine
@@ -276,8 +261,6 @@ func createFailureLogLine(t *testing.T, logs *bytes.Buffer) createFailureLine {
 	return found[0]
 }
 
-// A create whose adapter handshake fails still logs the adapter stage and the
-// handshake steps it completed, so a slow failed startup is diagnosable.
 func TestSupervisorCreateFailureLogsAdapterTimings(t *testing.T) {
 	logs := captureSupervisorLogs(t)
 	server, cfg, profile := newTestServer(t, adapterSessionNewFailureMode)

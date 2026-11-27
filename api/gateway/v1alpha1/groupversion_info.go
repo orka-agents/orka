@@ -4,7 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package v1alpha1 contains API schema definitions for the gateway.orka.ai API group.
 // +kubebuilder:object:generate=true
 // +groupName=gateway.orka.ai
 package v1alpha1
@@ -16,13 +15,10 @@ import (
 )
 
 var (
-	// GroupVersion identifies the gateway API group and version.
 	GroupVersion = schema.GroupVersion{Group: "gateway.orka.ai", Version: "v1alpha1"}
 
-	// SchemeBuilder registers gateway API objects.
 	SchemeBuilder = &schemeBuilder{groupVersion: GroupVersion}
 
-	// AddToScheme adds gateway API objects to a runtime scheme.
 	AddToScheme = SchemeBuilder.AddToScheme
 )
 

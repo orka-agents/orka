@@ -59,24 +59,19 @@ type externalACPDispatchFixture struct {
 }
 
 type externalACPDispatchFixtureOptions struct {
-	beforeTerminal         func(harnessv2.StartPromptRequest, harnessv2.Event)
-	onCancel               func(harnessv2.CancelPromptRequest) harnessv2.CancelPromptResponse
-	contextTimeout         time.Duration
-	statusTransform        func(*harnessv2.StatusResponse)
-	profileTransform       func(*harnessv2.RuntimeProfile)
-	terminalEvents         map[harnessv2.PromptID]harnessv2.EventType
-	promptObserver         func(harnessv2.StartPromptRequest)
-	workspaceDeltaObserver func(harnessv2.CreateWorkspaceDeltaRequest)
-	// rejectPrompt answers a prompt with a retryable 429 rate_limited
-	// rejection, before the runtime sees it, while it returns true.
-	rejectPrompt func() bool
-	// failDelete fails RuntimeSession deletion as unproven while it returns true.
+	beforeTerminal                  func(harnessv2.StartPromptRequest, harnessv2.Event)
+	onCancel                        func(harnessv2.CancelPromptRequest) harnessv2.CancelPromptResponse
+	contextTimeout                  time.Duration
+	statusTransform                 func(*harnessv2.StatusResponse)
+	profileTransform                func(*harnessv2.RuntimeProfile)
+	terminalEvents                  map[harnessv2.PromptID]harnessv2.EventType
+	promptObserver                  func(harnessv2.StartPromptRequest)
+	workspaceDeltaObserver          func(harnessv2.CreateWorkspaceDeltaRequest)
+	rejectPrompt                    func() bool
 	failDelete                      func() bool
 	supportsPublicationFinalization bool
 	supportsBrokeredToolApprovals   bool
-	// registry is the broker registry the runtime's descriptors and the
-	// reconciler classify against; nil means the default registry.
-	registry *tools.Registry
+	registry                        *tools.Registry
 }
 
 type failAgentRuntimeReadWhileTaskSubmitting struct {
@@ -453,11 +448,6 @@ func newExternalACPDispatchFixtureWithOptions(
 	}
 }
 
-// newExternalRuntimeTestProxyServer serves a fixture proxy in full-duplex mode.
-// The proxies forward requests with their original bodies. In HTTP/1's
-// default mode, flushing a forwarded response (such as a prompt stream's
-// acceptance) closes that body, and the proxy transport's trailing EOF check
-// then fails and drops the upstream connection mid-stream.
 func newExternalRuntimeTestProxyServer(t *testing.T, name string, handler http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -471,11 +461,6 @@ func newExternalRuntimeTestProxyServer(t *testing.T, name string, handler http.H
 	return server
 }
 
-// lateEOFCheckBody blocks every read after the declared body length until
-// release is closed, so the test can confirm the upstream flushed a response
-// event while the proxy transport's trailing EOF check is still in flight, and
-// records the trailing read's result so a closed-body error cannot hide behind
-// an already-completed stream.
 type lateEOFCheckBody struct {
 	io.ReadCloser
 	remaining   int64
@@ -509,10 +494,6 @@ func (b *lateEOFCheckBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// A fixture proxy must forward a whole prompt stream even when the upstream
-// starts streaming before the proxy transport finishes its request-body EOF
-// check. Without full-duplex mode, the first flushed event closes the request
-// body, that check fails, and the stream is cut after acceptance.
 func TestExternalRuntimeTestProxyServerKeepsStreamWhenBodyEOFCheckIsLate(t *testing.T) {
 	const lines = 5
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -540,8 +521,6 @@ func TestExternalRuntimeTestProxyServerKeepsStreamWhenBodyEOFCheckIsLate(t *test
 			_, _ = fmt.Fprintf(w, "{\"sequence\":%d}\n", sequence)
 			w.(http.Flusher).Flush()
 			if sequence == 0 {
-				// Wait for the trailing EOF check to finish after the client
-				// observes the first flushed event before streaming the rest.
 				select {
 				case <-eofDone:
 				case <-r.Context().Done():
@@ -570,13 +549,8 @@ func TestExternalRuntimeTestProxyServerKeepsStreamWhenBodyEOFCheckIsLate(t *test
 		}
 		proxy.ServeHTTP(w, request)
 	})
-	// Release the trailing-EOF gate before server/upstream Cleanup runs so a
-	// failed or timed-out test never hangs shutting down handlers.
 	defer release()
 
-	// Pad the JSON object to an exact multiple of 4 KiB (the transport write
-	// buffer) so the complete JSON body flushes to the upstream before the
-	// trailing EOF check runs.
 	const targetPayloadBytes = 16 << 10
 	const wrapperLen = len(`{"prompt":""}`)
 	payload, err := json.Marshal(map[string]string{"prompt": strings.Repeat("x", targetPayloadBytes-wrapperLen)})
@@ -600,8 +574,6 @@ func TestExternalRuntimeTestProxyServerKeepsStreamWhenBodyEOFCheckIsLate(t *test
 	for scanner.Scan() {
 		received++
 		if received == 1 {
-			// The first streamed event arrived while the EOF check was still
-			// blocked; now release the EOF check so the remaining stream runs.
 			select {
 			case <-atEOF:
 			case <-ctx.Done():
@@ -720,8 +692,6 @@ func newExternalRuntimePromptProxy(
 	})
 }
 
-// newExternalRuntimeFaultProxy rejects prompts with a retryable 429 and
-// fails RuntimeSession deletion as unproven while the given hooks return true.
 func newExternalRuntimeFaultProxy(t *testing.T, upstream string, rejectPrompt, failDelete func() bool) *httptest.Server {
 	t.Helper()
 	target, err := url.Parse(upstream)
@@ -1551,9 +1521,6 @@ func TestACPDispatcherExternalReservationRechecksAdmissionGate(t *testing.T) {
 	fixture.dispatcher.AdmissionGate = NewACPAdmissionGate()
 	fixture.dispatcher.AdmissionGate.Close("planned drain", time.Now().UTC())
 
-	// reserveTask runs after dispatchOnce has scanned the queue and checked the
-	// gate once. Closing it here models a drain that starts between that scan and
-	// the per-runtime reservation barrier.
 	reserved, target, err := fixture.dispatcher.reserveTask(fixture.ctx, queued.DeepCopy())
 	if !errors.Is(err, ErrACPAdmissionClosed) {
 		t.Fatalf("reserveTask() error = %v, want ErrACPAdmissionClosed", err)
@@ -1990,8 +1957,6 @@ func TestACPDispatcherUsesRegisteredExternalMCPPolicy(t *testing.T) {
 	}
 }
 
-// agentRuntimeRewritingReader returns AgentRuntimes rewritten as an earlier
-// read would have seen them.
 type agentRuntimeRewritingReader struct {
 	client.Reader
 	rewrite func(*corev1alpha1.AgentRuntime)
@@ -2026,7 +1991,6 @@ func TestExternalRuntimeBindingRechecksCeilingAgainstFrozenRegistration(t *testi
 		},
 	}
 
-	// Planning reads an older registration that still denied the write tool.
 	olderRead := agentRuntimeRewritingReader{Reader: fixture.client, rewrite: func(runtime *corev1alpha1.AgentRuntime) {
 		runtime.Spec.Capabilities.MCPPolicy.DisallowedTools = []string{writeTool}
 	}}
@@ -2035,7 +1999,6 @@ func TestExternalRuntimeBindingRechecksCeilingAgainstFrozenRegistration(t *testi
 		t.Fatalf("planning against the older registration = %#v, want external path", plan)
 	}
 
-	// Binding freezes the current registration, which exposes the write tool.
 	_, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, task, agent)
 	if err == nil || !strings.Contains(err.Error(), `ceiling does not allow tool "external_write"`) || !isPermanentACPAgentConfigurationError(err) {
 		t.Fatalf("resolveExternalAgentExecutionCandidate() error = %v, want permanent ceiling rejection", err)
@@ -3203,9 +3166,6 @@ func TestExternalRuntimeFrozenCapabilityEnvelopeRejectsEveryLiveDriftClass(t *te
 	}
 }
 
-// An external runtime's snapshot freezes no Connections, so a connector-
-// backed tool on it is refused with a definitive reason at candidate
-// resolution instead of failing every call for want of a frozen Connection.
 func TestExternalRuntimeCandidateRefusesConnectorBackedTools(t *testing.T) {
 	fixture := newExternalACPDispatchFixture(t)
 	policy := &corev1alpha1.OutboundAccessPolicy{
@@ -3234,22 +3194,14 @@ func TestExternalRuntimeCandidateRefusesConnectorBackedTools(t *testing.T) {
 	if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "not supported on external v2 AgentRuntimes") {
 		t.Fatalf("resolveExternalAgentExecutionCandidate() = (%#v, %v), want a permanent connector refusal", candidate, err)
 	}
-	// A connector tool the policy denies is never exposed, so it is no
-	// reason to refuse the runtime.
 	denied := task.DeepCopy()
 	denied.Name, denied.UID = "external-connector-denied", types.UID("external-connector-denied-uid")
 	denied.Spec.AgentRuntime.DisallowedTools = []string{"gh_search"}
-	// (The fixture's registered policy then rejects the changed tool list on
-	// its own; what matters is that the refusal is no longer the connector.)
 	if _, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, denied, fixture.agent); err != nil && strings.Contains(err.Error(), "not supported on external v2 AgentRuntimes") {
 		t.Fatalf("resolveExternalAgentExecutionCandidate() with the connector tool denied = %v, want no connector refusal", err)
 	}
 }
 
-// GitHub built-ins under a linked account ride an external runtime only
-// when the requester's link leaves the registered policy exactly as
-// registered: a Ready link for every such tool, and write tools already in
-// the registered approval set. The candidate then freezes the link.
 func TestExternalRuntimeCandidateFreezesLinkedBuiltins(t *testing.T) {
 	registry := brokeredGitHubRegistry(t)
 	policy := testAgentRuntimeMCPPolicy()
@@ -3273,9 +3225,6 @@ func TestExternalRuntimeCandidateFreezesLinkedBuiltins(t *testing.T) {
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"list_pull_requests"}},
 		},
 	}
-	// No link: the registered policy would have to be narrowed, so the
-	// Task is refused for good rather than dispatched with a tool that
-	// could never run.
 	candidate, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, task, fixture.agent)
 	if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "cannot be narrowed per person") {
 		t.Fatalf("resolveExternalAgentExecutionCandidate() without a link = (%#v, %v), want a permanent refusal", candidate, err)
@@ -3286,8 +3235,6 @@ func TestExternalRuntimeCandidateFreezesLinkedBuiltins(t *testing.T) {
 			Subject: corev1alpha1.ConnectionSubject{Issuer: requester.Issuer, Subject: requester.Subject}, ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}, Mode: corev1alpha1.ConnectionModeReadWrite,
 		},
 	}
-	// Connection has no status subresource in this fake client, so the
-	// Ready status is created with the object.
 	connection.Status.GrantSequence = 1
 	connection.Status.Conditions = []metav1.Condition{
 		{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionTrue, Reason: corev1alpha1.ConnectionReasonLinked, ObservedGeneration: 2},
@@ -3310,17 +3257,12 @@ func TestExternalRuntimeCandidateFreezesLinkedBuiltins(t *testing.T) {
 		body.Connections[0].UID != "conn-uid" || body.Connections[0].GrantSequence != 1 {
 		t.Fatalf("snapshot connections = %+v, want the link frozen for the built-in", body.Connections)
 	}
-	// The session's descriptors come from the registered policy, so a Task
-	// that denies a linked built-in that policy exposes is refused for good
-	// instead of being bound with the tool anyway or retried forever.
 	denying := task.DeepCopy()
 	denying.Spec.AgentRuntime.DisallowedTools = []string{"list_pull_requests"}
 	candidate, err = fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, denying, fixture.agent)
 	if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "cannot be narrowed per task") {
 		t.Fatalf("resolveExternalAgentExecutionCandidate() with a conflicting Task deny = (%#v, %v), want a permanent refusal", candidate, err)
 	}
-	// A write tool the registration did not put behind approval is never
-	// carried, link or no link.
 	writePolicy := testAgentRuntimeMCPPolicy()
 	writePolicy.AllowedTools = []string{"create_pull_request", "list_pull_requests"}
 	writeFixture := newExternalACPDispatchFixtureWithOptions(t, "external-linked-write", writePolicy, externalACPDispatchFixtureOptions{registry: registry}, github.DeepCopy())
@@ -3340,9 +3282,6 @@ func TestExternalRuntimeCandidateFreezesLinkedBuiltins(t *testing.T) {
 	}
 }
 
-// A task-scoped prompt rejected with a retryable 429 is requeued only after
-// its RuntimeSession is retired and the cleanup receipt is recorded against
-// the binding that names it; the Task then retries on a fresh session.
 func TestACPDispatcherRateLimitedTaskScopedPromptRecordsCleanupBeforeRequeue(t *testing.T) {
 	var rejections atomic.Int32
 	fixture := newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(), externalACPDispatchFixtureOptions{
@@ -3387,10 +3326,6 @@ func TestACPDispatcherRateLimitedTaskScopedPromptRecordsCleanupBeforeRequeue(t *
 	}
 }
 
-// A controller takeover before the retained task-scoped RuntimeSession is
-// deleted must not drop its binding: recovery returns the Task to admission on
-// the new epoch still naming the unretired session, so the cleanup guard sees
-// it on the next dispatch.
 func TestACPDispatcherRecoveryKeepsUnretiredRateLimitedTaskScopedBinding(t *testing.T) {
 	var rejections atomic.Int32
 	fixture := newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(), externalACPDispatchFixtureOptions{
@@ -3438,11 +3373,6 @@ func TestACPDispatcherRecoveryKeepsUnretiredRateLimitedTaskScopedBinding(t *test
 	}
 }
 
-// When the rejected task-scoped RuntimeSession cannot be proven retired, the
-// requeued Task keeps naming it so its cleanup obligation is not lost. Every
-// later dispatch first retries deleting that exact retained generation: while
-// deletion keeps failing the binding stays untouched and no new generation is
-// created, and only a recorded receipt lets a new generation proceed.
 func TestACPDispatcherRateLimitedTaskScopedPromptKeepsUnretiredBinding(t *testing.T) {
 	var rejections atomic.Int32
 	var deleteFails atomic.Bool
@@ -3486,7 +3416,6 @@ func TestACPDispatcherRateLimitedTaskScopedPromptKeepsUnretiredBinding(t *testin
 		t.Fatal("unretired task-scoped RuntimeSession reported its cleanup as complete")
 	}
 
-	// The next dispatch reaches the same instance and deletion fails again.
 	attemptsBefore := deleteAttempts.Load()
 	held := fixture.dispatch(t, requeued)
 	if !retainsFirst(held) || held.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
@@ -3500,8 +3429,6 @@ func TestACPDispatcherRateLimitedTaskScopedPromptKeepsUnretiredBinding(t *testin
 		t.Fatal("the next dispatch did not retry deleting the retained generation")
 	}
 
-	// Once the exact retained generation is deleted, its receipt is recorded
-	// and a new generation proceeds to completion.
 	deleteFails.Store(false)
 	go func() { created <- <-fixture.createRequests }()
 	completed := fixture.dispatch(t, held)

@@ -37,15 +37,12 @@ type ProviderCapabilities struct {
 	Models                        []string `json:"models,omitempty"`
 	SupportsPermissions           bool     `json:"supportsPermissions"`
 	SupportsBrokeredToolApprovals bool     `json:"supportsBrokeredToolApprovals,omitempty"`
-	// SupportsNativePermissionAsk reports that the runtime can launch a
-	// RuntimeSession in NativePermissionsAsk mode and names each resulting
-	// permission request's native tool from structured fields.
-	SupportsNativePermissionAsk bool `json:"supportsNativePermissionAsk,omitempty"`
-	SupportsCancel              bool `json:"supportsCancel"`
-	SupportsTools               bool `json:"supportsTools"`
-	SupportsImages              bool `json:"supportsImages,omitempty"`
-	SupportsAudio               bool `json:"supportsAudio,omitempty"`
-	SupportsEmbeddedResources   bool `json:"supportsEmbeddedResources,omitempty"`
+	SupportsNativePermissionAsk   bool     `json:"supportsNativePermissionAsk,omitempty"`
+	SupportsCancel                bool     `json:"supportsCancel"`
+	SupportsTools                 bool     `json:"supportsTools"`
+	SupportsImages                bool     `json:"supportsImages,omitempty"`
+	SupportsAudio                 bool     `json:"supportsAudio,omitempty"`
+	SupportsEmbeddedResources     bool     `json:"supportsEmbeddedResources,omitempty"`
 }
 
 func (c ProviderCapabilities) Validate() error {
@@ -99,8 +96,6 @@ func DefaultProtocolLimits() ProtocolLimits {
 	}
 }
 
-// EffectiveMaxNativeSessionBytes preserves the old 512 KiB contract for runtimes
-// that predate the explicit native-session capability limit.
 func (l ProtocolLimits) EffectiveMaxNativeSessionBytes() int {
 	if l.MaxNativeSessionBytes == 0 {
 		return LegacyMaxNativeSessionBytes
@@ -208,9 +203,7 @@ type CapabilitiesResponse struct {
 	SupportsAgentSessionConfiguration bool                            `json:"supportsAgentSessionConfiguration,omitempty"`
 	SupportsNativeSessions            bool                            `json:"supportsNativeSessions,omitempty"`
 	SupportsFoundryRecovery           bool                            `json:"supportsFoundryRecovery,omitempty"`
-	// SupportsOperatorAccess advertises the operator exec and file routes.
-	// Callers must fail closed against supervisors that omit it.
-	SupportsOperatorAccess bool `json:"supportsOperatorAccess,omitempty"`
+	SupportsOperatorAccess            bool                            `json:"supportsOperatorAccess,omitempty"`
 }
 
 func (r CapabilitiesResponse) Validate() error {
@@ -264,26 +257,12 @@ const (
 
 const (
 	DrainReasonSessionIdentityCapacity = "session_identity_capacity"
-	// DrainReasonToolboxUnavailable drains a supervisor whose pool lost
-	// toolbox admission so its workload can be stopped once idle.
-	DrainReasonToolboxUnavailable = "toolbox_unavailable"
-	// DrainReasonWorkspaceRetirement drains a workspace runtime before a
-	// controller-authorized Stop or Delete. Nothing on the instance is
-	// preserved, so a later termination signal may exit promptly.
-	DrainReasonWorkspaceRetirement = "workspace_retirement"
-	// DrainReasonWorkspaceSuspend drains a workspace runtime before a
-	// controller-authorized data-only suspension.
-	DrainReasonWorkspaceSuspend = "workspace_suspend"
-	// DrainReasonWorkerEviction is self-reported by a supervisor whose host
-	// worker began graceful termination (an upgrade roll, node drain, or Spot
-	// reclaim). The supervisor keeps serving so the controller can drain it
-	// and have the provider suspend its data before the eviction window ends.
-	DrainReasonWorkerEviction = "worker_eviction"
+	DrainReasonToolboxUnavailable      = "toolbox_unavailable"
+	DrainReasonWorkspaceRetirement     = "workspace_retirement"
+	DrainReasonWorkspaceSuspend        = "workspace_suspend"
+	DrainReasonWorkerEviction          = "worker_eviction"
 )
 
-// WorkerEvictionSuspendWindow is the Agent Substrate worker shutdown budget:
-// after a worker Pod receives SIGTERM, each hosted Actor has this long to be
-// suspended before the worker kills it.
 const WorkerEvictionSuspendWindow = 30 * time.Minute
 
 type DrainStatus struct {
@@ -291,11 +270,7 @@ type DrainStatus struct {
 	Requested            bool      `json:"requested"`
 	RequestedAt          time.Time `json:"requestedAt,omitempty"`
 	Reason               string    `json:"reason,omitempty"`
-	// WorkerEvictionAt is when the supervisor's host worker signalled graceful
-	// termination. It is reported independently of Reason, which keeps the
-	// drain that first closed admission, so Core enforces the eviction deadline
-	// even when the signal arrives during a suspension or capacity drain.
-	WorkerEvictionAt time.Time `json:"workerEvictionAt,omitzero"`
+	WorkerEvictionAt     time.Time `json:"workerEvictionAt,omitzero"`
 }
 
 type RuntimeSessionStatus struct {
@@ -431,10 +406,6 @@ type PressureMetadata struct {
 	PIDCurrent            uint32 `json:"pidCurrent,omitempty"`
 }
 
-// SessionIdentityCapacity reports the finite, never-reused child identity
-// budget for one supervisor boot. ExhaustionReserve is deliberately excluded
-// from admission so the controller can replace the Pod before Remaining reaches
-// zero.
 type SessionIdentityCapacity struct {
 	Total             uint64 `json:"total"`
 	Remaining         uint64 `json:"remaining"`
@@ -585,18 +556,12 @@ const (
 	ErrorCodeRateLimited              ErrorCode = "rate_limited"
 	ErrorCodeSessionPoisoned          ErrorCode = "session_poisoned"
 	ErrorCodeNativeCaptureUnsupported ErrorCode = "native_capture_unsupported"
-	// ErrorCodeNativeCaptureNotStarted answers a capture reconciliation whose
-	// original operation this runtime incarnation never recorded, so no capture
-	// has started and the controller may begin a fresh one.
-	ErrorCodeNativeCaptureNotStarted ErrorCode = "native_capture_not_started"
-	// RetryReady proves capture failed after writer exit; a fresh operation may retry the retained private tree.
-	ErrorCodeNativeCaptureRetryReady ErrorCode = "native_capture_retry_ready"
-	ErrorCodeWorkspaceResumeLost     ErrorCode = "workspace_resume_lost"
-	ErrorCodeOutcomeUnknown          ErrorCode = "outcome_unknown"
-	ErrorCodeCleanupUnproven         ErrorCode = "cleanup_unproven"
+	ErrorCodeNativeCaptureNotStarted  ErrorCode = "native_capture_not_started"
+	ErrorCodeNativeCaptureRetryReady  ErrorCode = "native_capture_retry_ready"
+	ErrorCodeWorkspaceResumeLost      ErrorCode = "workspace_resume_lost"
+	ErrorCodeOutcomeUnknown           ErrorCode = "outcome_unknown"
+	ErrorCodeCleanupUnproven          ErrorCode = "cleanup_unproven"
 
-	// ErrorCodePromptNotAccepted proves idle adapter recovery failed before
-	// submitting the prompt. The runtime session is retired, not retryable.
 	ErrorCodePromptNotAccepted ErrorCode = "prompt_not_accepted"
 )
 

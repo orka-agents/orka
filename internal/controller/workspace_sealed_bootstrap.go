@@ -16,9 +16,6 @@ import (
 var errWorkspaceCredentialFenceConflict = errors.New("workspace supervisor credential bootstrap fence conflict")
 
 func seedSealedWorkspaceCredentials(ctx context.Context, transport *http.Client, endpoint, nonce string, signingSeed, plaintext []byte, expected harnessv2.SubstrateActorIdentity, recordChallenge ...func(harnessv2.SealedBootstrapChallenge) error) (bool, error) {
-	// Bootstrap never follows redirects. The provider route is the trusted
-	// transport boundary; the sealed body additionally binds the destination
-	// process across replacement between the challenge and credential write.
 	client := *transport
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -31,8 +28,6 @@ func seedSealedWorkspaceCredentials(ctx context.Context, transport *http.Client,
 	}
 	if response.StatusCode == http.StatusNotFound {
 		_ = response.Body.Close()
-		// The fully started supervisor has closed bootstrap. Admission still
-		// requires its authenticated v2 identity/capacity probe.
 		return true, nil
 	}
 	if response.StatusCode != http.StatusOK {

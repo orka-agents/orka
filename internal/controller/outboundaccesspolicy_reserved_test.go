@@ -23,8 +23,6 @@ import (
 	"github.com/orka-agents/orka/internal/outboundaccess"
 )
 
-// A policy naming the controller's own ServiceAccount is not accepted and
-// gets no TokenRequest grant.
 func TestOutboundAccessPolicyReconcilerRefusesTheControllerServiceAccount(t *testing.T) {
 	scheme := outboundPolicyControllerTestScheme(t)
 	policy := controllerServiceAccountPolicy("controller-token", "orka-controller")

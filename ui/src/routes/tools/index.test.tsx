@@ -59,7 +59,6 @@ describe('tools routes', () => {
     it('renders ToolDetail with toolName param', () => {
       const Component = ToolDetailRoute.component!
       render(<Component />)
-      // In loading state, shows skeleton
       expect(document.querySelector('.animate-pulse')).toBeInTheDocument()
     })
   })

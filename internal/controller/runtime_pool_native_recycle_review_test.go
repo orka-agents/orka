@@ -24,8 +24,6 @@ func (transport nativeRecycleClosedBootstrap) RoundTrip(request *http.Request) (
 	if request.Method != http.MethodGet || !strings.HasSuffix(request.URL.Path, harnessv2.CredentialBootstrapPath) {
 		transport.t.Fatal("recovered supervisor received a new credential bootstrap")
 	}
-	// Model an already bootstrapped supervisor. Production still independently
-	// attests the worker, binds its private credentials and verifies its v2 probe.
 	return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}, Request: request}, nil
 }
 

@@ -20,29 +20,16 @@ import (
 	"github.com/orka-agents/orka/test/utils"
 )
 
-// The Agent Runtime Lifecycle specs port scripts/agent-runtime-e2e.sh: the
-// built-in Codex, OpenCode, Claude, and Copilot runtimes on harness v2
-// RuntimePools behind the production provider proxy. With
-// E2E_LIVE_COPILOT_PROXY_BASE_URL set they use the live Vekil in vekil-system;
-// otherwise aimock stands in for Vekil and replays
-// agent_runtime_lifecycle.json. Mock mode adds journal checks the bash lane
-// cannot make: that each continuation, fork, and recovery replayed the prior
-// transcript to the model, and that each read reached the model as a tool
-// result. They run in their own CI job (label agent-runtime) because they
-// restart the controller and park, replace, and scale RuntimePools.
 const (
-	agentRuntimeRepoURL      = "https://github.com/orka-agents/orka.git"
-	agentRuntimeRepoRef      = "d03acb995b6014a6e855181c50b922b65ea8e7ff"
-	agentRuntimeRepoIdentity = "github.com/orka-agents/orka"
-	agentRuntimeLicenseLine  = "MIT License"
-	agentRuntimeMaxTurns     = 24
-	agentRuntimeConcurrency  = 6
-	agentRuntimeSettleBound  = 120 * time.Second
-	// agentRuntimeControllerDeployment is the Deployment make deploy installs.
+	agentRuntimeRepoURL              = "https://github.com/orka-agents/orka.git"
+	agentRuntimeRepoRef              = "d03acb995b6014a6e855181c50b922b65ea8e7ff"
+	agentRuntimeRepoIdentity         = "github.com/orka-agents/orka"
+	agentRuntimeLicenseLine          = "MIT License"
+	agentRuntimeMaxTurns             = 24
+	agentRuntimeConcurrency          = 6
+	agentRuntimeSettleBound          = 120 * time.Second
 	agentRuntimeControllerDeployment = "orka-controller-manager"
 
-	// Prompts from scripts/agent-runtime-e2e.sh. Each spec appends a marker so
-	// aimock can script it.
 	agentRuntimeBlockingPrompt = "Immediately use the Bash tool to run sleep 180 with a command timeout of at " +
 		"least 240 seconds (timeout_ms 240000). Do not return a final answer before the command completes. " +
 		"Do not modify repository files."
@@ -50,15 +37,12 @@ const (
 		"find. Compare their purpose and provide a detailed evidence-backed summary. Do not modify files."
 )
 
-// agentRuntimeResultDiagnostics are CLI warnings that must not leak into a
-// Task result.
 var agentRuntimeResultDiagnostics = regexp.MustCompile(
 	`Info: (Disabled tools|Unknown tool name in the tool excludedlist)|Warning: (Falling back from WebSockets|Model metadata for)`)
 
 type agentRuntimeProvider struct {
 	kind, model string
-	// mockNonce is the session nonce in mock mode, where the fixtures echo it.
-	mockNonce string
+	mockNonce   string
 }
 
 var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), func() {
@@ -78,7 +62,6 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		opencodeLimits  = &corev1alpha1.ModelTokenLimits{Context: 32768, Output: 4096}
 		timeoutDuration = 90 * time.Second
 
-		// State the Codex checks hand to each other, as the bash globals do.
 		codexAgent, codexToolAgent, codexSession, codexPool, codexNonce string
 		toolProfilePool                                                 string
 		readSmokeSessionUID                                             string
@@ -120,8 +103,6 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		ExpectWithOffset(1, applyManifestJSON(task.manifest(runID))).To(Succeed())
 	}
 
-	// expectTaskResult ports the release-mode result checks: the expected
-	// text in GET /api/v1/tasks/{task}/result and no CLI diagnostics.
 	expectTaskResult := func(task string, expected ...string) {
 		result := fetchTaskResultViaAPI(apiBaseURL, token, task)
 		for _, text := range expected {
@@ -131,11 +112,6 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 			"result of %s leaked a CLI diagnostic: %q", task, result)
 	}
 
-	// expectReplayed checks in mock mode that the requests aimock answered for
-	// promptMarker, whose own text lacks text, still carried it to the model,
-	// so the runtime replayed the prior transcript. aimock does not record
-	// bodies over its 64 KB journal cap (Copilot's are), and for those the
-	// RuntimeSession identity checks carry the proof, as in the bash lane.
 	expectReplayed := func(promptMarker, text string) {
 		if live {
 			return
@@ -164,10 +140,6 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		}, time.Minute, 2*time.Second).Should(Succeed())
 	}
 
-	// expectReadReachedModel checks in mock mode that aimock answered the
-	// prompt with the fixture that requires a tool result containing the
-	// LICENSE line, so the file content came back to the model whatever the
-	// API shape or body size.
 	expectReadReachedModel := func(promptMarker string) {
 		if live {
 			return
@@ -189,10 +161,6 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		ExpectWithOffset(1, found).To(BeTrue(), "LICENSE never reached the model for %s", promptMarker)
 	}
 
-	// readSmoke ports run_read_smoke for one provider: a read that starts a
-	// Session, a continuation preserving its identity (cold after recorded retirement),
-	// and a fork of the continuation. It returns the Agent, Session, pool, nonce,
-	// and the continued RuntimeSession identity.
 	readSmoke := func(provider agentRuntimeProvider) (string, string, string, string, string, int64) {
 		agent := name("acp-" + provider.kind)
 		task := name("acp-" + provider.kind + "-read")
@@ -216,9 +184,6 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		firstExecution := getACPTask(Default, task).Status.Execution
 		expectedGeneration := firstGeneration
 		if firstExecution.RuntimeSessionRecreationPending {
-			// Checkpoint settlement retires the writer even when the first native
-			// capture is unsupported. Continue the same logical Session at its
-			// recorded next generation, without assuming portable native state.
 			expectedGeneration++
 		}
 
@@ -267,13 +232,6 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		return agent, session, pool, nonce, continuedUID, continuedGeneration
 	}
 
-	// continueAfterAdapterExit kills the idle adapter behind the Session's
-	// RuntimeSession uid/generation, as an adapter crash between prompts would,
-	// and continues the Session. An adapter that advertises session/resume is
-	// restarted under the same RuntimeSession generation and resumes its own
-	// conversation. Copilot cannot resume, so the supervisor refuses its next
-	// prompt before writing it to the agent, and the continuation after that
-	// rebuilds the Session from its transcript at a later generation.
 	continueAfterAdapterExit := func(provider agentRuntimeProvider, agent, session, pool, nonce, uid string,
 		generation int64,
 	) {
@@ -324,10 +282,6 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		Expect(runtimeSessionAdapters(Default, snapshot, uid, generation)).To(ConsistOf(Not(Equal(killed))),
 			"the supervisor did not restart the %s adapter", provider.kind)
 		if provider.kind == claude.kind && !live {
-			// Claude Agent ACP sends one "Hi" request while answering
-			// session/resume. The supervisor resumes before granting the
-			// prompt provider access, so the proxy refuses it and it never
-			// reaches aimock.
 			By("checking the provider proxy refused the model request Claude makes while resuming")
 			requests, err := providerProxyMockLLM.journal()
 			Expect(err).NotTo(HaveOccurred())
@@ -342,10 +296,6 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		}
 	}
 
-	// removeProviderResources ports remove_provider_resources: delete the run's
-	// Tasks and archive their Sessions, stop and delete the provider's
-	// RuntimePools once nothing references them, delete the Agents, and
-	// release BranchClaims the run owned.
 	removeProviderResources := func(provider string, agents ...string) {
 		var tasks corev1alpha1.TaskList
 		kubectlJSON(Default, &tasks, "get", "tasks", "-n", namespace, "-l", agentRuntimeRunLabel+"="+runID)
@@ -433,8 +383,6 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		if !live && e2eFlagEnabled(mockLLMDisableEnvVar) {
 			Skip("Skipping: E2E_LIVE_COPILOT_PROXY_BASE_URL not set and " + mockLLMDisableEnvVar + " is set")
 		}
-		// The park and resume checks assume the production idle TTL: a
-		// shorter one scales a resumed pool back to zero before demand returns.
 		if e2eACPIdlePoolTTL < 10*time.Minute {
 			Skip(fmt.Sprintf("Skipping: needs E2E_ACP_IDLE_POOL_TTL of at least 10m (got %s); "+
 				"run with -ginkgo.label-filter=agent-runtime E2E_ACP_IDLE_POOL_TTL=15m", e2eACPIdlePoolTTL))
@@ -449,8 +397,6 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		Expect(err).NotTo(HaveOccurred())
 
 		if !live {
-			// Mock mode holds blocking prompts in the model call, so a shorter
-			// Task timeout still proves the deadline.
 			timeoutDuration = 30 * time.Second
 			projectDir, err := utils.GetProjectDir()
 			Expect(err).NotTo(HaveOccurred())
@@ -627,8 +573,6 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 			sessions[uid] = true
 		}
 		Expect(sessions).To(HaveLen(len(tasks)), "each concurrent Task needs its own RuntimeSession")
-		// Codex native capture also retires the earlier read-smoke Session;
-		// completed one-shot Tasks must not leave any runtime home resident.
 		waitRuntimePoolCountersZero(codexPool, 0)
 	})
 
@@ -648,8 +592,6 @@ var _ = Describe("Agent Runtime Lifecycle", Ordered, Label("agent-runtime"), fun
 		waitTaskRunningOnPool(task, toolProfilePool)
 		snapshot := captureRuntimePoolSnapshot(toolProfilePool, codex.kind, codex.model, corev1alpha1.WorkspaceIntentRead)
 		assertCancelledTask(task, snapshot, corev1alpha1.TaskExecutionReason("TaskTimeout"))
-		// Kubernetes timestamps have whole-second precision, so the deadline
-		// can land up to a second before timeoutDuration of wall-clock time.
 		Expect(time.Since(started)).To(BeNumerically(">=", timeoutDuration-time.Second),
 			"the prompt was cancelled before its Task timeout")
 		waitRuntimePoolCountersZero(toolProfilePool, 0)

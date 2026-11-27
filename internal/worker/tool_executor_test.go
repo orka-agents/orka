@@ -1076,7 +1076,7 @@ func TestToolExecutor_Execute_DefaultMethodPOST(t *testing.T) {
 		Spec: corev1alpha1.ToolSpec{
 			HTTP: &corev1alpha1.HTTPExecution{
 				URL:    server.URL,
-				Method: "", // Empty, should default to POST
+				Method: "",
 			},
 		},
 	}
@@ -1198,7 +1198,6 @@ func TestToolExecutor_Execute_AuthHeader(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Create temp secret file
 	tmpDir := t.TempDir()
 	secretDir := filepath.Join(tmpDir, "secret-name")
 	os.MkdirAll(secretDir, 0755)                                                //nolint:errcheck
@@ -1625,7 +1624,6 @@ func TestToolExecutor_Execute_AuthBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Create temp secret file
 	tmpDir := t.TempDir()
 	secretDir := filepath.Join(tmpDir, "secret-name")
 	os.MkdirAll(secretDir, 0755)                                                      //nolint:errcheck
@@ -1665,7 +1663,6 @@ func TestToolExecutor_Execute_AuthBody(t *testing.T) {
 }
 
 func TestToolExecutor_Execute_AuthBodyMissingKey(t *testing.T) {
-	// Create temp secret file
 	tmpDir := t.TempDir()
 	secretDir := filepath.Join(tmpDir, "secret-name")
 	os.MkdirAll(secretDir, 0755)                                                      //nolint:errcheck
@@ -1686,7 +1683,7 @@ func TestToolExecutor_Execute_AuthBodyMissingKey(t *testing.T) {
 					Key:  "api_key",
 				},
 				AuthInject:  "body",
-				AuthBodyKey: "", // Missing
+				AuthBodyKey: "",
 			},
 		},
 	}
@@ -1795,8 +1792,6 @@ func TestToolExecutor_Execute_HTTPErrorCarriesStatus(t *testing.T) {
 }
 
 func TestToolExecutor_Execute_HTTPErrorAfterRedirectIsMarked(t *testing.T) {
-	// The POST may have taken effect before redirecting to a result the
-	// caller may not read.
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /action", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/result", http.StatusSeeOther)
@@ -1913,7 +1908,6 @@ func TestToolExecutor_Execute_Timeout(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	// Verify shared client timeout was NOT mutated (per-request client used instead)
 	if executor.client.Timeout != 0 {
 		t.Errorf("Timeout = %v, want 0 (shared client should not be mutated)", executor.client.Timeout)
 	}
@@ -1960,14 +1954,12 @@ func TestToolExecutor_getSecretKey_MountedSecret(t *testing.T) {
 		t.Fatalf("getSecretKey() error = %v", err)
 	}
 
-	// Should trim whitespace
 	if value != "secret-value" {
 		t.Errorf("getSecretKey() = %q, want %q", value, "secret-value")
 	}
 }
 
 func TestToolExecutor_getSecretKey_K8sAPISecret(t *testing.T) {
-	// Create a fake Kubernetes client with a secret
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "k8s-secret",
@@ -1981,7 +1973,7 @@ func TestToolExecutor_getSecretKey_K8sAPISecret(t *testing.T) {
 	fakeClient := fake.NewSimpleClientset(secret) //nolint:staticcheck // NewClientset requires apply configs
 
 	executor := &ToolExecutor{
-		secretPath: "/nonexistent", // Mount doesn't exist
+		secretPath: "/nonexistent",
 		namespace:  "default",
 		k8sClient:  fakeClient,
 	}
@@ -2017,14 +2009,11 @@ func TestToolExecutor_getSecretKey_TaskSecretPath(t *testing.T) {
 	os.MkdirAll(taskSecretPath, 0755)                                                  //nolint:errcheck
 	os.WriteFile(filepath.Join(taskSecretPath, "my-key"), []byte("task-secret"), 0644) //nolint:errcheck
 
-	// The getSecretKey function checks /secrets/task/{key} as one of the paths
-	// We need to mock this properly
 	executor := &ToolExecutor{
 		secretPath: tmpDir,
 		namespace:  "default",
 	}
 
-	// This test verifies the mounted secret paths work
 	secretDir := filepath.Join(tmpDir, "my-secret")
 	os.MkdirAll(secretDir, 0755)                                                  //nolint:errcheck
 	os.WriteFile(filepath.Join(secretDir, "key"), []byte("mounted-secret"), 0644) //nolint:errcheck
@@ -2061,13 +2050,11 @@ func TestToolExecutor_Execute_EmptyArgs(t *testing.T) {
 		},
 	}
 
-	// Empty args
 	_, err := executor.Execute(context.Background(), tool, nil)
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	// Should create empty params map
 	_ = receivedBody
 }
 
@@ -2079,7 +2066,6 @@ func TestToolExecutor_Execute_DefaultAuthInject(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Create temp secret file
 	tmpDir := t.TempDir()
 	secretDir := filepath.Join(tmpDir, "secret-name")
 	os.MkdirAll(secretDir, 0755)                                                //nolint:errcheck
@@ -2099,7 +2085,7 @@ func TestToolExecutor_Execute_DefaultAuthInject(t *testing.T) {
 					Name: "secret-name",
 					Key:  "token",
 				},
-				AuthInject: "", // Empty, should default to header
+				AuthInject: "",
 			},
 		},
 	}
@@ -2109,7 +2095,6 @@ func TestToolExecutor_Execute_DefaultAuthInject(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	// Default should be header auth
 	if receivedAuth != "Bearer test-token" {
 		t.Errorf("Authorization = %s, want Bearer test-token", receivedAuth)
 	}
@@ -2147,13 +2132,11 @@ func TestToolExecutor_Execute_URLInterpolation(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	// Verify URL was interpolated
 	expectedPath := "/repos/myorg/myrepo/commits/abc123/check-runs"
 	if receivedPath != expectedPath {
 		t.Errorf("path = %q, want %q", receivedPath, expectedPath)
 	}
 
-	// Verify interpolated keys were removed from body
 	if receivedBody != nil {
 		if _, ok := receivedBody["owner"]; ok {
 			t.Error("body should not contain 'owner' after interpolation")
@@ -2198,13 +2181,11 @@ func TestToolExecutor_Execute_URLInterpolation_Partial(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	// Verify URL was interpolated (pull_number is numeric, should be converted to string)
 	expectedPath := "/repos/myorg/myrepo/pulls/42/merge"
 	if receivedPath != expectedPath {
 		t.Errorf("path = %q, want %q", receivedPath, expectedPath)
 	}
 
-	// Verify non-interpolated key remains in body
 	if receivedBody == nil {
 		t.Fatal("body should not be nil")
 	}
@@ -2212,7 +2193,6 @@ func TestToolExecutor_Execute_URLInterpolation_Partial(t *testing.T) {
 		t.Errorf("body merge_method = %v, want squash", receivedBody["merge_method"])
 	}
 
-	// Interpolated keys should be removed
 	if _, ok := receivedBody["owner"]; ok {
 		t.Error("body should not contain 'owner'")
 	}
@@ -2248,23 +2228,19 @@ func TestToolExecutor_Execute_URLInterpolation_NoPlaceholders(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	// URL should be unchanged
 	if receivedPath != "/api/search" {
 		t.Errorf("path = %q, want /api/search", receivedPath)
 	}
 
-	// All params should remain in body
 	if receivedBody["query"] != "test" {
 		t.Errorf("body query = %v, want test", receivedBody["query"])
 	}
 }
 
 func TestToolExecutor_Execute_ResponseSizeLimit(t *testing.T) {
-	// Create a chunked response larger than the configured limit.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		// Write 11MB of data without a Content-Length header.
-		chunk := make([]byte, 1024*1024) // 1MB
+		chunk := make([]byte, 1024*1024)
 		for range 11 {
 			w.Write(chunk) //nolint:errcheck
 		}
@@ -3258,9 +3234,6 @@ func TestGatewayMCPErrorHidesMessageAndPreservesClassification(t *testing.T) {
 	}
 }
 
-// A request carrying a person's linked-account credential never follows a
-// redirect: Go forwards custom headers across redirects, and the credential
-// is bound to the origin the provider declared.
 func TestToolHTTPClientDoesNotFollowRedirectsForConnectionCredentials(t *testing.T) {
 	var hits atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3288,8 +3261,6 @@ func TestToolHTTPClientDoesNotFollowRedirectsForConnectionCredentials(t *testing
 	}
 }
 
-// readySubstrateMCPConditions marks a test Tool's Actor verified for its
-// current (zero) generation.
 func readySubstrateMCPConditions() []metav1.Condition {
 	return []metav1.Condition{{Type: "Available", Status: metav1.ConditionTrue, Reason: "EndpointReachable"}}
 }

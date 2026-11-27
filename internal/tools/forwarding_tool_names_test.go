@@ -8,9 +8,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// TestForwardingToolNamesCoverTheBrokeredBuiltIns keeps the Tool type's
-// forwarding-name rule in step with the ACP broker: a forwarding Tool named
-// after a brokered built-in would be served as that built-in instead.
 func TestForwardingToolNamesCoverTheBrokeredBuiltIns(t *testing.T) {
 	raw, err := os.ReadFile("../../api/v1alpha1/tool_types.go")
 	if err != nil {

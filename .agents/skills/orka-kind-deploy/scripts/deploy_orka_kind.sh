@@ -183,8 +183,6 @@ echo "Controller image: $controller_image"
 # shellcheck source=scripts/lib/e2e-admission-tls.sh
 . "$repo_root/scripts/lib/e2e-admission-tls.sh"
 
-# The test CA and serving certificate last seven days. Their renewal must not
-# silently remove shared admission webhooks or bypass other controllers' trust.
 admission_tls="$("${kube_cmd[@]}" -n "$namespace" get secret orka-admission-tls --ignore-not-found -o json)"
 if [[ -n "$admission_tls" ]] && ! validate_admission_tls "$admission_tls" >/dev/null 2>&1; then
   echo "$namespace/orka-admission-tls has expired, missing, or invalid TLS data." >&2
@@ -211,7 +209,6 @@ orka_kind_registry_start "$cluster_name"
     ACP_COPILOT_RUNTIME_IMG="$copilot_image" ACP_OPENCODE_RUNTIME_IMG="$opencode_image"
 )
 
-# Bash clears errexit in command substitutions; keep failed tags from pushing stale images.
 controller_ref="$(set -e; orka_kind_registry_push "$controller_image" orka/controller)"
 publisher_ref="$(set -e; orka_kind_registry_push "$publisher_image" orka/workspace-publisher)"
 codex_ref="$(set -e; orka_kind_registry_push "$codex_image" orka/acp-codex-runtime)"
@@ -224,12 +221,10 @@ general_worker_ref="$(set -e; orka_kind_registry_push "$general_worker_image" or
 (
   cd "$repo_root"
   make install KUBECTL="$kubectl_wrapper"
-  # Reuse existing TLS on redeploy; rotating its CA would invalidate live webhooks.
   admission_tls="$("${kube_cmd[@]}" -n "$namespace" get secret orka-admission-tls --ignore-not-found -o name)"
   if [[ -z "$admission_tls" ]]; then
     orka_e2e_bootstrap_admission_tls "$kubectl_wrapper" "$namespace"
   fi
-  # The production overlay includes an ingress policy here even without a Vekil proxy.
   vekil_namespace="$("${kube_cmd[@]}" get namespace vekil-system --ignore-not-found -o name)"
   if [[ -z "$vekil_namespace" ]]; then
     "${kube_cmd[@]}" create namespace vekil-system

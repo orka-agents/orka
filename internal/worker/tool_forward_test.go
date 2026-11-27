@@ -140,8 +140,6 @@ func TestForwardingToolRefusals(t *testing.T) {
 }
 
 func TestForwardingToolRefusesAResultTooLargeOnceEncoded(t *testing.T) {
-	// "<" encodes as six bytes, so a body under the raw limit overflows the
-	// broker's result bound after JSON escaping.
 	body := strings.Repeat("<", 600<<10)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(body))
@@ -178,10 +176,6 @@ func TestForwardingToolCarriesTheLengthOfAHeadResponse(t *testing.T) {
 	}
 }
 
-// TestForwardingToolKeepsContinuationTokens covers ARM paging: a nextLink's
-// $skiptoken, in the body or a URL-valued header, survives redaction so the
-// next page can be requested, while the injected credential and other
-// secret-shaped values are still removed.
 func TestForwardingToolKeepsContinuationTokens(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -319,10 +313,6 @@ func TestRedactForwardedTextRemovesAPercentEncodedCredential(t *testing.T) {
 	}
 }
 
-// TestRedactForwardedTextRemovesACredentialInAnyURLPart covers an upstream
-// echoing the credential with non-standard escapes in an ordinary query value
-// or a path segment, as in a Location header or a JSON URL: no decoding
-// recovers it, and the bytes around it are kept.
 func TestRedactForwardedTextRemovesACredentialInAnyURLPart(t *testing.T) {
 	const secret = "opaque-example-value"
 	for text, want := range map[string]string{
@@ -345,10 +335,6 @@ func TestRedactForwardedTextRemovesACredentialInAnyURLPart(t *testing.T) {
 	}
 }
 
-// TestRedactForwardedBodyKeepsJSONValidForAnyCredentialPlacement covers a
-// credential the upstream echoes as a number, a string, a key, or nested:
-// the redacted body is always valid JSON, so a success status never carries
-// a body the runtime cannot decode.
 func TestRedactForwardedBodyKeepsJSONValidForAnyCredentialPlacement(t *testing.T) {
 	const secret = "123456789"
 	for _, body := range []string{
@@ -370,9 +356,6 @@ func TestRedactForwardedBodyKeepsJSONValidForAnyCredentialPlacement(t *testing.T
 	}
 }
 
-// TestRedactForwardedTextRestoresManyContinuationTokens covers a response
-// with thousands of paging links: every kept continuation parameter comes
-// back in place, in one pass over the text.
 func TestRedactForwardedTextRestoresManyContinuationTokens(t *testing.T) {
 	var text strings.Builder
 	for i := range 5000 {
@@ -383,8 +366,6 @@ func TestRedactForwardedTextRestoresManyContinuationTokens(t *testing.T) {
 	}
 }
 
-// writeForwardingTestTool is a forwarding Tool that allows writes, as the
-// broker hands it to the executor for its write tool: with the write class.
 func writeForwardingTestTool(url string) *corev1alpha1.Tool {
 	tool := forwardingTestTool(url)
 	tool.Spec.BrokeredToolClass = corev1alpha1.AgentRuntimeBrokeredToolClassWrite
@@ -392,9 +373,6 @@ func writeForwardingTestTool(url string) *corev1alpha1.Tool {
 	return tool
 }
 
-// TestForwardingToolSendsAWriteWithItsBody covers a forwarded write: the
-// upstream gets the method, the JSON body, and the credential, and the
-// credential is resolved as a write.
 func TestForwardingToolSendsAWriteWithItsBody(t *testing.T) {
 	var got *http.Request
 	var gotBody string
@@ -432,9 +410,6 @@ func TestForwardingToolSendsAWriteWithItsBody(t *testing.T) {
 	}
 }
 
-// TestForwardingToolRefusesWritesItWasNotGranted covers a write that reaches
-// the executor without both the write class and the Tool's writes setting,
-// and a read sent as the write tool.
 func TestForwardingToolRefusesWritesItWasNotGranted(t *testing.T) {
 	requests := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))

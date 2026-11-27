@@ -99,8 +99,6 @@ func TestWebhookCertificateSourceValidation(t *testing.T) {
 	}
 }
 
-// The fake replaces only API/cache transport; publication and certwatcher's
-// last-good cache are real. Invalid observed state must never serve that cache.
 func TestWebhookCertSyncerRejectsInvalidStateAndLoadsRotation(t *testing.T) {
 	now := time.Now()
 	valid := webhookTestSecret(t, now.Add(-time.Hour), now.Add(time.Hour))
@@ -189,8 +187,6 @@ func TestWebhookCertSyncerRejectsInvalidStateAndLoadsRotation(t *testing.T) {
 	}
 }
 
-// Model previously valid pairs that expired since the last sync. The TLS gate
-// and readiness must check wall-clock validity even with matching CA state.
 func TestWebhookCertSyncerRejectsExpiredLoadedCertificate(t *testing.T) {
 	now := time.Now()
 	for _, tt := range []struct {
@@ -291,8 +287,6 @@ func TestWebhookCertSyncerReloadsStaleWatcherOnUnchangedSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	stopWebhookTestWatcher(t, s.watcher)
-	// Model a late watcher read that replaces its cache with an old generation.
-	// Keep its background loop stopped so recovery can only come from sync.
 	for _, name := range []string{"tls.crt", "tls.key"} {
 		if err := os.WriteFile(filepath.Join(s.options.CertDir, name), old.Data[name], 0600); err != nil {
 			t.Fatal(err)
@@ -324,8 +318,6 @@ func TestWebhookCertSyncerReloadsStaleWatcherOnUnchangedSecret(t *testing.T) {
 	}
 }
 
-// New allocates an fsnotify watcher. Start only during cleanup to close it,
-// leaving explicit reads deterministic in tests that simulate stale state.
 func stopWebhookTestWatcher(t *testing.T, watcher *certwatcher.CertWatcher) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -375,7 +367,6 @@ func TestPublishWebhookCertificateReclaimsOrphans(t *testing.T) {
 	if err := os.Symlink("operator-owned", filepath.Join(dir, "..cert-not-a-directory")); err != nil {
 		t.Fatal(err)
 	}
-	// Fail after pre-publication cleanup: the active pair must remain available.
 	if err := os.Mkdir(filepath.Join(dir, "..data-next"), 0700); err != nil {
 		t.Fatal(err)
 	}

@@ -25,29 +25,18 @@ import (
 	"github.com/orka-agents/orka/test/utils"
 )
 
-// The model-free soul evals check what each runtime sends to inference, not
-// how a model follows a persona. The AI worker and the four built-in runtime
-// CLIs run against aimock; the complete request capture is the oracle that the
-// persona reached the model once, in its framing, after the role instructions,
-// and never as user content. Continuation keeps the pinned revision, and a
-// changed revision cannot reach a Session that was bound to the previous one.
 const (
 	soulEvalPersonaHeading = "## Agent persona (SOUL.md)"
 	soulEvalPersonaFooter  = "## End of Agent persona (SOUL.md)"
 	soulEvalTaskWait       = 5 * time.Minute
 )
 
-// soulEvalReadTools is the strict read-only native tool surface every built-in
-// runtime can enforce exactly.
 var soulEvalReadTools = []string{"Read", "Glob", "Grep"}
 
 func soulEvalMarker(runtime, stage string) string {
 	return "[e2e:soul-eval-" + runtime + "-" + stage + "]"
 }
 
-// soulEvalRevision is one persona revision. Its canary is unique per run and
-// revision, and its text keeps dollar syntax that must reach the model
-// literally.
 type soulEvalRevision struct {
 	configMap, canary, text string
 }
@@ -77,16 +66,6 @@ func applySoulEvalConfigMap(revision soulEvalRevision) {
 	})).To(Succeed())
 }
 
-// soulEvalCheck inspects every captured request. Agent requests carry tools or
-// the role instructions, and must carry the persona exactly once, framed after
-// the role inside the instruction field of their wire protocol. Orka composes
-// the role and persona into one string, so they must arrive in one instruction
-// string or content part: a split would change the frozen prompt bytes. Runtimes also
-// send tool-free auxiliary requests, such as title generation; one may copy the
-// complete Agent instructions, but no request may carry the persona without
-// them or carry a revision its Session was not bound to. At least one Agent
-// request must be served by the marker's fixture. Errors name properties and
-// counts only, never request or persona text.
 func soulEvalCheck(
 	requests []mockLLMEvalRequest, marker, role string, want soulEvalRevision, absent ...soulEvalRevision,
 ) error {
@@ -149,11 +128,6 @@ func soulEvalCheck(
 	return nil
 }
 
-// soulEvalInstructionTexts returns the instruction strings of the request's
-// wire protocol, chosen by its endpoint: Anthropic Messages system, Responses
-// instructions and developer/system input items, or Chat Completions
-// system/developer messages. Content parts count only with their protocol's
-// text type; an unknown endpoint has no instruction field.
 func soulEvalInstructionTexts(path string, body map[string]any) []string {
 	var texts []string
 	add := func(content any, partType string) {
@@ -183,7 +157,6 @@ func soulEvalInstructionTexts(path string, body map[string]any) []string {
 	case strings.HasSuffix(path, "/chat/completions"):
 		addRoles("messages", "text")
 	case strings.HasSuffix(path, "/responses"):
-		// Top-level instructions are a string; content parts live in input.
 		if instructions, ok := body["instructions"].(string); ok {
 			texts = append(texts, instructions)
 		}
@@ -194,8 +167,6 @@ func soulEvalInstructionTexts(path string, body map[string]any) []string {
 	return texts
 }
 
-// soulEvalStringsContaining decodes the body, so JSON escaping cannot hide or
-// split a persona.
 func soulEvalStringsContaining(value any, canary string) []string {
 	var found []string
 	switch value := value.(type) {
@@ -216,9 +187,6 @@ func soulEvalStringsContaining(value any, canary string) []string {
 	return found
 }
 
-// soulEvalParkRuntimePools stops every running RuntimePool. Each persona
-// revision has its own runtime profile and so its own pool, and idle pools
-// otherwise hold their runtime Pods past what a small CI node can schedule.
 func soulEvalParkRuntimePools() {
 	var pools corev1alpha1.RuntimePoolList
 	kubectlJSON(Default, &pools, "get", "runtimepools", "-n", namespace)
@@ -236,7 +204,6 @@ func soulEvalWaitTask(name, phase string) {
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(output).To(BeElementOf("Succeeded", "Failed", "Cancelled"))
 		if output != phase {
-			// A terminal phase is final; report a wrong one immediately.
 			StopTrying("Task reached terminal phase " + output).Now()
 		}
 	}, soulEvalTaskWait, 2*time.Second).Should(Succeed(), "Task %s should reach %s", name, phase)
@@ -276,11 +243,6 @@ var _ = Describe("Agent soul delivery model-free evals", Ordered, ContinueOnFail
 			DeferCleanup(deleteE2EObjects, "provider", provider)
 		})
 
-		// runSoulEval drives one runtime through delivery, continuation,
-		// revision drift in the bound Session, and a new Session for the
-		// revision. agent builds the Agent; task builds a Task for a Session.
-		// Built-in runtimes run on RuntimePools, which are parked around and
-		// between revisions.
 		runSoulEval := func(
 			runtime string, instance mockLLMInstance, pooled bool,
 			agent func(name, role string, soul map[string]any) map[string]any,
@@ -314,7 +276,6 @@ var _ = Describe("Agent soul delivery model-free evals", Ordered, ContinueOnFail
 			role := "SOUL_EVAL_ROLE_" + strings.ToUpper(runtime) + "_" + runID +
 				" Answer the request in one short sentence."
 			name := func(stage string) string { return runID + "-" + runtime + "-" + stage }
-			// run applies one Task and returns the requests its marker caused.
 			run := func(stage, session string, create bool, phase string) ([]mockLLMEvalRequest, mockLLMEvalSnapshot) {
 				marker := soulEvalMarker(runtime, stage)
 				before, err := instance.evalSnapshot()
@@ -344,7 +305,6 @@ var _ = Describe("Agent soul delivery model-free evals", Ordered, ContinueOnFail
 			Expect(soulEvalCheck(requests, soulEvalMarker(runtime, "second"), role, first, second)).To(Succeed())
 
 			if pooled {
-				// The new revision needs a new pool; free the first one's Pod.
 				parkRuntimePool(getACPTask(Default, name("second")).Status.Execution.RuntimePoolName)
 			}
 
@@ -401,8 +361,6 @@ var _ = Describe("Agent soul delivery model-free evals", Ordered, ContinueOnFail
 					func(name, agent, prompt, session string, create bool) map[string]any {
 						task := runtimeAgentTaskManifest(name, agent, prompt, 3, new(false), nil, session,
 							new(create), new(true))
-						// Codex accepts its full native surface or this strict
-						// read-only surface, never a partial tool policy.
 						runtime := task["spec"].(map[string]any)["agentRuntime"].(map[string]any)
 						runtime["allowedTools"] = soulEvalReadTools
 						return task

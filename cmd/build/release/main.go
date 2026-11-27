@@ -1,4 +1,3 @@
-// Command release prepares, qualifies, and publishes one immutable Orka release candidate.
 package main
 
 import (
@@ -36,7 +35,6 @@ func (w *workflow) execute(args []string) error {
 	if !found || len(values) != count {
 		return fmt.Errorf("invalid arguments for release command %q", name)
 	}
-	// Resolve artifact paths before preparation can change the checkout.
 	path := func(value string) string {
 		if filepath.IsAbs(value) {
 			return value

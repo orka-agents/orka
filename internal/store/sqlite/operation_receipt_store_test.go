@@ -15,7 +15,6 @@ import (
 
 var testWriteFence = store.ControllerEpochFence{Name: store.DefaultControllerEpochName, Epoch: 1, HolderID: "controller"}
 
-// advanceTestEpoch binds s to a test installation at fence's epoch.
 func advanceTestEpoch(t *testing.T, s *Store, fence store.ControllerEpochFence) string {
 	t.Helper()
 	info, err := s.Describe(t.Context())
@@ -33,7 +32,6 @@ func advanceTestEpoch(t *testing.T, s *Store, fence store.ControllerEpochFence) 
 	return info.DatasetID
 }
 
-// testEnvelope returns ctx with a new envelope for one call of method.
 func testEnvelope(t *testing.T, ctx context.Context, dataset, method string, issuedAt time.Time, request ...any) (context.Context, storagev1.WriteEnvelope) {
 	t.Helper()
 	digest, err := storagev1.RequestDigest(method, request...)
@@ -139,8 +137,6 @@ func TestAPrunedReceiptIsNotReportedAsAbortedAfterTheClockStepsBack(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, 1, removed)
 
-	// Repeated backward steps consume one cumulative allowance, rather than
-	// resetting it. Exercise the entire allowance after the commit is pruned.
 	const step = 30 * time.Second
 	for regression := time.Duration(0); regression < receiptClockStepAllowance; regression += step {
 		now = now.Add(-step)
@@ -245,8 +241,6 @@ func TestWriteOperationRequiresACatalogWriteMethod(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrValidation)
 }
 
-// A store that requires envelopes, as production does, refuses a contract
-// write without one and accepts it with one. Reads are unaffected.
 func TestRequireWriteEnvelopesRefusesWritesWithoutOne(t *testing.T) {
 	ctx := context.Background()
 	s := setupTestStore(t)
