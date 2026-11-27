@@ -115,17 +115,17 @@ func TestIngestPatchTaskControllerVerificationFailBeforePass(t *testing.T) {
 	_, summaryName := patchArtifactNames(fixture.finding.ID)
 	data, _, err := fixture.store.GetArtifact(ctx, store.ArtifactKey{
 		Owner:    store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)},
-		Filename: summaryName,
+		Filename: controllerVerificationArtifactName(summaryName),
 	})
 	if err != nil {
-		t.Fatalf("load summary artifact: %v", err)
+		t.Fatalf("load controller verification artifact: %v", err)
 	}
-	var summary security.PatchSummaryArtifact
-	if err := json.Unmarshal(data, &summary); err != nil {
-		t.Fatalf("unmarshal summary: %v", err)
+	var verification security.PatchControllerVerification
+	if err := json.Unmarshal(data, &verification); err != nil {
+		t.Fatalf("unmarshal controller verification: %v", err)
 	}
-	if summary.ControllerVerification == nil || summary.ControllerVerification.Status != patchVerifyStatusVerify || !summary.ControllerVerification.RequireFailBeforePass {
-		t.Fatalf("unexpected controller verification summary: %#v", summary.ControllerVerification)
+	if verification.Status != patchVerifyStatusVerify || !verification.RequireFailBeforePass {
+		t.Fatalf("unexpected controller verification artifact: %#v", verification)
 	}
 	if pr.patched == nil || !strings.Contains(pr.body, "Controller-verified fix (fail->pass)") {
 		t.Fatalf("PR body missing controller verification disclosure:\n%s", pr.body)
@@ -229,10 +229,37 @@ func TestIngestPatchTaskControllerVerificationRejectsBaseOrchestrationFailure(t 
 		t.Fatal(err)
 	}
 	baseTask.Status.Phase = corev1alpha1.TaskPhaseFailed
-	baseTask.Status.Message = "job failed"
+	baseTask.Status.Message = "job failed: container exited with code 143 (reason=Error)"
 	if err := fixture.reconciler.Update(ctx, baseTask); err != nil {
 		t.Fatal(err)
 	}
+	if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, task); err != nil {
+		t.Fatal(err)
+	}
+	assertPatchIngestState(t, fixture, scanRunPhaseFailed, findingStateOpen)
+}
+
+func TestIngestPatchTaskControllerVerificationFailsClosedOnInvalidSpecAndForeignTask(t *testing.T) {
+	ctx := context.Background()
+	var seenToken string
+	file := repositoryScanCommitFileResponse{
+		Filename:  "app.py",
+		Status:    "modified",
+		Additions: 1,
+		Deletions: 1,
+		Patch:     "@@ -1 +1 @@\n-unsafe()\n+safe()",
+	}
+	server, pr := newPatchCommitServerWithPullRequest(t, []repositoryScanCommitFileResponse{file}, &seenToken)
+	pr.commitDiff = testPatchFullDiff
+	fixture := patchFixtureWithForgeSecret(t, "verify-invalid-spec", server, true)
+	fixture.scan.Spec.PatchVerification = &corev1alpha1.RepositoryScanPatchVerificationSpec{
+		Image:   testPatchVerificationImage,
+		Command: "   ",
+	}
+	if err := fixture.store.SaveResult(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, repositoryScanPatchResultEnvelope(fixture, []string{"app.py"})); err != nil {
+		t.Fatal(err)
+	}
+	task := patchTaskForFixture(fixture, true)
 	if err := fixture.reconciler.ingestPatchTask(ctx, fixture.scan, task); err != nil {
 		t.Fatal(err)
 	}

@@ -482,6 +482,8 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	}
 
 	validationTask := opts.RepositoryMonitorValidation || isRepositoryMonitorValidationTask(task)
+	patchVerifyTask := isRepositoryScanPatchVerifyTask(task)
+	readOnlyWorkspace := validationTask || patchVerifyTask
 	jobName := buildTaskJobName(task)
 	execution := resolveExecution(task, agent)
 
@@ -549,13 +551,16 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	b.addTransactionTokenSecret(job, transactionTokenTask)
 
 	if taskNeedsWorkspace(task) {
-		b.addWorkspaceVolumes(job, task, validationTask)
+		b.addWorkspaceVolumes(job, task, readOnlyWorkspace)
 	} else if task.Spec.Type == corev1alpha1.TaskTypeAI {
 		addAIOutputWorkspace(job)
 	}
 
 	if taskNeedsWorkspaceInitContainer(task) {
 		b.addWorkspaceInitContainer(job, task, validationTask)
+	}
+	if patchVerifyTask {
+		applyRepositoryMonitorValidationStorageBounds(job)
 	}
 	if validationTask {
 		applyRepositoryMonitorValidationDefaultTolerations(&job.Spec.Template.Spec)
