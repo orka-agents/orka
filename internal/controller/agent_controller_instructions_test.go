@@ -141,8 +141,6 @@ func TestAgentDefaultInstructionsCodexNativeEnvelope(t *testing.T) {
 		agent.Spec.Runtime.DefaultReasoningEffort = agentReasoningEffortHigh
 		soul := &agentcontext.ResolvedSoul{Text: agentSoulWatchText}
 		configuration := harnessv2.AgentSessionConfiguration{Model: model, ReasoningEffort: effectiveACPReasoningEffort(agent)}
-		// Discover the actual native boundary through the planner's validator;
-		// do not duplicate its byte cap or its JSON/native-envelope estimate.
 		low, high := 0, harnessv2.MaxAgentSystemPromptBytes
 		for low < high {
 			mid := low + (high-low+1)/2

@@ -26,8 +26,6 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
-// The Task/ancestry unit tests isolate their own policy checks. The broker
-// regressions below exercise the real prompt guard and Kubernetes control store.
 func allowBrokeredTaskData(ctx context.Context, access func(context.Context) error) error {
 	return access(ctx)
 }
@@ -57,8 +55,6 @@ func TestBrokeredDataSerializesWithPromptSettlement(t *testing.T) {
 	for _, tool := range []tools.Tool{tools.NewSendMessageTool(), tools.NewCheckMessagesTool(), tools.NewSearchTranscriptTool()} {
 		t.Run(tool.Name(), func(t *testing.T) {
 			fixture := newBrokeredDataFixture(t, tool)
-			// A separate store instance proves this uses the durable Lease,
-			// rather than only the original store's in-process semaphore.
 			other, err := storekube.NewComposite(fixture.kube, "orka-system", fixture.data, storekube.WithAPIReader(fixture.kube))
 			require.NoError(t, err)
 			attempts := 0
@@ -73,7 +69,6 @@ func TestBrokeredDataSerializesWithPromptSettlement(t *testing.T) {
 			fixture.probe.beforeTransaction = func(ctx context.Context) error {
 				bounded, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
 				defer cancel()
-				// Authorization must still leave the SQLite writer available.
 				require.NoError(t, fixture.data.SaveResult(bounded, fixture.task.Namespace, "unrelated", []byte("progress")))
 				return checkSettlementBlocked(ctx)
 			}

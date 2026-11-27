@@ -50,7 +50,7 @@ func TestResponsesStreamPreservesRequestContext(t *testing.T) {
 	defer cancel()
 	app.Post(responsesPath, func(c fiber.Ctx) error {
 		c.SetContext(ctx)
-		defer cancel() // Match handler cleanup before Fiber invokes the writer.
+		defer cancel()
 		return handler.HandleResponses(c)
 	})
 	status, data := requestResponses(t, app, `{"model":"fixture/test-model","store":false,"stream":true,"input":"hello"}`, true)

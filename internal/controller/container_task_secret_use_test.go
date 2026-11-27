@@ -34,10 +34,8 @@ import (
 
 const (
 	secretUseTestSecretValue = "s3cr3t-value-never-logged"
-	// secretUseControllerNS differs from the Tasks' namespace so the tests
-	// check the exempt ServiceAccount against the controller's namespace.
-	secretUseControllerNS = "orka-controller-ns"
-	secretUseControllerSA = "orka-controller"
+	secretUseControllerNS    = "orka-controller-ns"
+	secretUseControllerSA    = "orka-controller"
 )
 
 func secretUseScheme(t *testing.T) *runtime.Scheme {
@@ -53,7 +51,6 @@ func secretUseScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-// shippedSecretUsePolicy loads the policy and binding this repository ships.
 func shippedSecretUsePolicy() (*admissionregistrationv1.ValidatingAdmissionPolicy, *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "container-task-secret-use-policy",
 		"container_task_secret_use_policy.yaml"))
@@ -510,8 +507,6 @@ func TestContainerTaskSecretUseScheduledRunWithCRDDefaults(t *testing.T) {
 	parent.Spec.ConcurrencyPolicy = corev1alpha1.ForbidConcurrent
 	parent.Spec.Args = []string{}
 	run := scheduledRunOf(parent)
-	// The API server defaults these on the run after the controller clears them,
-	// and omitempty drops explicitly empty slices on the persisted child.
 	run.Spec.ConcurrencyPolicy = corev1alpha1.ForbidConcurrent
 	run.Spec.Args = nil
 	deadline := int64(100)
@@ -522,7 +517,6 @@ func TestContainerTaskSecretUseScheduledRunWithCRDDefaults(t *testing.T) {
 func TestContainerTaskSecretUseAcceptsTheShippedPolicyAsTheAPIServerStoresIt(t *testing.T) {
 	objects := secretUsePolicyObjects()
 	policy := objects[0].(*admissionregistrationv1.ValidatingAdmissionPolicy)
-	// The API server fills in these defaults; they must not count as drift.
 	policy.Spec = normalizedPolicySpec(policy.Spec)
 	for i := range policy.Spec.Variables {
 		policy.Spec.Variables[i].Expression = strings.ReplaceAll(policy.Spec.Variables[i].Expression,

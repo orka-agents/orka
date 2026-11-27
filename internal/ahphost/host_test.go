@@ -31,16 +31,13 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// fakeBackend is a test-only session backend.
 type fakeBackend struct {
 	mu       sync.Mutex
 	disposed []string
 	released []string
 	reject   string
 	seen     []Principal
-	// onAgents runs once, while the root snapshot is taken under the hub lock.
 	onAgents func()
-	// prepared lists the principals whose connections were prepared.
 	prepared []Principal
 }
 
@@ -113,8 +110,6 @@ func (f *fakeBackend) ReleaseClientAction(_ context.Context, _ Principal, channe
 	f.released = append(f.released, channel)
 }
 
-// HandleClientAction answers a title change with one chat action every
-// supported version knows and one introduced after 0.9.0.
 func (f *fakeBackend) HandleClientAction(ctx context.Context, _ Principal, channel string, action ahptypes.StateAction, emit Emitter) {
 	if _, ok := action.Value.(*ahptypes.SessionTitleChangedAction); !ok {
 		return
@@ -151,9 +146,6 @@ func newTestEnv(t *testing.T, limits store.AHPJournalLimits) *testEnv {
 	return &testEnv{t: t, host: host, tokens: tokens, store: s, backend: backend, server: server}
 }
 
-// failingSessionStore refuses session catalog writes while fail is set, and
-// journal appends that carry actions, such as a new session's ready action,
-// while failActions is set.
 type failingSessionStore struct {
 	store.AHPStore
 	fail        atomic.Bool
@@ -175,9 +167,6 @@ func (s *failingSessionStore) AppendAHPJournal(ctx context.Context, userKey stri
 	return s.AHPStore.AppendAHPJournal(ctx, userKey, previousSeq, entries, states, limits)
 }
 
-// A session that cannot be catalogued, or then marked ready, is taken back:
-// catalog record, channels and backend session, so the URI can be created
-// again once the store works.
 func TestASessionThatCannotBeCataloguedIsTakenBack(t *testing.T) {
 	for name, flag := range map[string]func(*failingSessionStore) *atomic.Bool{
 		"catalog write": func(s *failingSessionStore) *atomic.Bool { return &s.fail },
@@ -217,7 +206,6 @@ func TestASessionThatCannotBeCataloguedIsTakenBack(t *testing.T) {
 	}
 }
 
-// failingSessionListStore refuses to list sessions while armed.
 type failingSessionListStore struct {
 	store.AHPStore
 	armed atomic.Bool
@@ -230,8 +218,6 @@ func (s *failingSessionListStore) ListAHPSessions(ctx context.Context, userKey s
 	return s.AHPStore.ListAHPSessions(ctx, userKey)
 }
 
-// A session count that cannot be updated does not fail the creation or
-// disposal it follows: both are already done, and a retry would be refused.
 func TestASessionCountThatCannotBeUpdatedFailsNothing(t *testing.T) {
 	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	require.NoError(t, err)
@@ -260,8 +246,6 @@ func TestASessionCountThatCannotBeUpdatedFailsNothing(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrNotFound, "the session is gone")
 }
 
-// An authorized action the host cannot journal is rejected, and the backend
-// is told, so it can let go of what it held for the action.
 func TestAnActionThatCannotBeAppliedIsReleased(t *testing.T) {
 	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	require.NoError(t, err)
@@ -295,7 +279,6 @@ func TestAnActionThatCannotBeAppliedIsReleased(t *testing.T) {
 	require.Equal(t, []string{"ahp-session:/one"}, backend.released)
 }
 
-// failingChannelReadStore refuses to read a channel's state while armed.
 type failingChannelReadStore struct {
 	store.AHPStore
 	channel string
@@ -309,8 +292,6 @@ func (s *failingChannelReadStore) GetAHPChannelState(ctx context.Context, userKe
 	return s.AHPStore.GetAHPChannelState(ctx, userKey, channel)
 }
 
-// A session whose state cannot be read is not disposed of: removing its
-// catalog record would leave its chat and changeset channels behind for good.
 func TestASessionWhoseStateCannotBeReadIsKeptForAnotherDispose(t *testing.T) {
 	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	require.NoError(t, err)
@@ -345,7 +326,6 @@ func TestASessionWhoseStateCannotBeReadIsKeptForAnotherDispose(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrNotFound, "the session's chat went with it")
 }
 
-// failingChannelDeleteStore refuses to delete channel states while armed.
 type failingChannelDeleteStore struct {
 	store.AHPStore
 	armed atomic.Bool
@@ -358,8 +338,6 @@ func (s *failingChannelDeleteStore) DeleteAHPChannelStates(ctx context.Context, 
 	return s.AHPStore.DeleteAHPChannelStates(ctx, userKey, channels)
 }
 
-// A disposal that fails partway leaves the session findable, so disposing of
-// it again removes everything it had.
 func TestADisposalThatFailsPartwayCanBeFinished(t *testing.T) {
 	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	require.NoError(t, err)
@@ -395,7 +373,6 @@ func TestADisposalThatFailsPartwayCanBeFinished(t *testing.T) {
 	}
 }
 
-// failingCleanupStore also refuses to delete channel states while armed.
 type failingCleanupStore struct {
 	*failingSessionStore
 	failDelete atomic.Bool
@@ -408,10 +385,6 @@ func (s *failingCleanupStore) DeleteAHPChannelStates(ctx context.Context, userKe
 	return s.failingSessionStore.DeleteAHPChannelStates(ctx, userKey, channels)
 }
 
-// A creation that fails, and whose cleanup the store also refuses, does not
-// keep the URI from being created again: what it left before it was cataloged
-// is cleared by the next creation, and what it left after stays listed, so
-// disposing of it clears it.
 func TestAFailedCreationThatCannotCleanUpLeavesTheURIUsable(t *testing.T) {
 	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	require.NoError(t, err)
@@ -435,7 +408,6 @@ func TestAFailedCreationThatCannotCleanUpLeavesTheURIUsable(t *testing.T) {
 	}
 	userKey := UserKey("https://issuer.example", "alice")
 
-	// The catalog record cannot be written: the channels stay, uncataloged.
 	failing.fail.Store(true)
 	failing.failDelete.Store(true)
 	require.Error(t, create("ahp-session:/one"))
@@ -445,7 +417,6 @@ func TestAFailedCreationThatCannotCleanUpLeavesTheURIUsable(t *testing.T) {
 	failing.failDelete.Store(false)
 	require.NoError(t, create("ahp-session:/one"))
 
-	// The session cannot be made ready: the cataloged session stays listed.
 	failing.failActions.Store(true)
 	failing.failDelete.Store(true)
 	require.Error(t, create("ahp-session:/two"))
@@ -457,8 +428,6 @@ func TestAFailedCreationThatCannotCleanUpLeavesTheURIUsable(t *testing.T) {
 	require.NoError(t, create("ahp-session:/two"))
 }
 
-// pausingSessionStore holds the first catalog read after it is armed, once the
-// read is done, until released: a summary sync slow to write its update.
 type pausingSessionStore struct {
 	store.AHPStore
 	armed   atomic.Bool
@@ -475,8 +444,6 @@ func (s *pausingSessionStore) GetAHPSession(ctx context.Context, userKey, sessio
 	return record, err
 }
 
-// A session disposed of while an action on it is still writing its summary
-// stays gone: the summary is not written back, so the URI can be used again.
 func TestADisposalWaitsForTheSummaryBeingWritten(t *testing.T) {
 	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	require.NoError(t, err)
@@ -522,8 +489,6 @@ func TestADisposalWaitsForTheSummaryBeingWritten(t *testing.T) {
 	createSession(t, client, "ahp-session:/one")
 }
 
-// An action stays applied once it is journaled: a catalog summary that cannot
-// be written then neither rejects it nor keeps its side effects from running.
 func TestAnActionIsAppliedThoughItsSummaryCannotBeWritten(t *testing.T) {
 	s, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	require.NoError(t, err)
@@ -553,14 +518,12 @@ func TestAnActionIsAppliedThoughItsSummaryCannotBeWritten(t *testing.T) {
 	require.NoError(t, err)
 	accepted := nextAction(t, session)
 	require.Nil(t, accepted.RejectionReason, "the journaled action is not rejected")
-	nextAction(t, chat) // the backend's handler ran and answered on the chat
+	nextAction(t, chat)
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
 	require.Empty(t, backend.released, "nothing is released as unapplied")
 }
 
-// A session cannot be named with a scheme the host routes to another kind of
-// channel: actions on it would go to a terminal or resource watch.
 func TestASessionCannotTakeAReservedScheme(t *testing.T) {
 	env := newTestEnv(t, store.AHPJournalLimits{})
 	client := env.connect(env.mint("alice").Token)
@@ -659,7 +622,6 @@ func TestDoorRefusesBeforeTheUpgrade(t *testing.T) {
 		return resp.StatusCode
 	}())
 
-	// A bearer header works, and so does a native client's non-web origin.
 	ctx := ctx5(t)
 	for _, header := range []http.Header{
 		{"Authorization": {"Bearer " + minted.Token}},
@@ -697,8 +659,6 @@ func TestInitializePingAndVersionNegotiation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "0.9.0", result.ProtocolVersion)
 
-	// The host answers, then closes. A client may report either first, so read
-	// the host's frames in the order it sent them.
 	future, err := ahpws.Connect(ctx, env.wsURL(minted.Token))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = future.Close(context.Background()) })
@@ -716,7 +676,6 @@ func TestInitializePingAndVersionNegotiation(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &response))
 	require.NotNil(t, response.Error, string(raw))
 	require.Equal(t, ahptypes.ErrorCodeUnsupportedProtocolVersion, response.Error.Code)
-	// The connection then closes with a close frame, which tells the client why.
 	_, err = future.Recv(ctx)
 	require.ErrorIs(t, err, ahp.ErrClosed, "the connection must close after an unsupported version")
 
@@ -809,10 +768,6 @@ func mustPrincipal(t *testing.T, env *testEnv, token string) Principal {
 	return principal
 }
 
-// Every connection that initializes or reconnects is prepared by the backend,
-// as its user, whichever channels it subscribes to: a client that never
-// subscribes to the root, which lists agents, still gets what an earlier
-// process left running picked up.
 func TestConnectionsArePreparedWithoutTheRoot(t *testing.T) {
 	env := newTestEnv(t, store.AHPJournalLimits{})
 	alice := env.mint("alice")
@@ -841,7 +796,6 @@ func TestReconnectRules(t *testing.T) {
 	createSession(t, first, "ahp-session:/one")
 	seq := init.ServerSeq
 
-	// A known client resumes with its negotiated version and gets what it missed.
 	again := env.connect(alice.Token)
 	result, err := again.Reconnect(ctx, "laptop", seq, []string{"ahp-session:/one", "ahp-session:/gone"})
 	require.NoError(t, err)
@@ -849,8 +803,6 @@ func TestReconnectRules(t *testing.T) {
 	require.True(t, ok, "a covered gap is replayed: %T", result.Value)
 	require.NotEmpty(t, replay.Actions)
 	require.Equal(t, []string{"ahp-session:/gone"}, replay.Missing)
-	// The session's addition went out as a root notification, which no
-	// replay carries: a client following the root gets snapshots instead.
 	rooted := env.connect(alice.Token)
 	result, err = rooted.Reconnect(ctx, "laptop", seq, []string{rootChannel, "ahp-session:/one"})
 	require.NoError(t, err)
@@ -858,7 +810,6 @@ func TestReconnectRules(t *testing.T) {
 	require.True(t, ok, "a gap with a root notification in it falls back to snapshots: %T", result.Value)
 	require.Len(t, missed.Snapshots, 2)
 
-	// An unknown client, or another user's client, must initialize again.
 	unknown := env.connect(alice.Token)
 	_, err = unknown.Reconnect(ctx, "never-seen", 0, []string{rootChannel})
 	require.Equal(t, ahptypes.ErrorCodeNotFound, rpcCode(t, err))
@@ -869,7 +820,6 @@ func TestReconnectRules(t *testing.T) {
 	_, err = thief.Initialize(ctx, "laptop", ahptypes.SupportedProtocolVersions(), nil)
 	require.Equal(t, ahptypes.ErrorCodePermissionDenied, rpcCode(t, err), "a clientId stays bound to its first user")
 
-	// A gap the journal no longer covers gets snapshots instead.
 	for i := range 5 {
 		_, err := first.Dispatch(ctx, "ahp-session:/one", ahptypes.StateAction{Value: &ahptypes.SessionTitleChangedAction{
 			Type: ahptypes.ActionTypeSessionTitleChanged, Title: strings.Repeat("x", i+1)}})
@@ -907,7 +857,6 @@ func TestExpiredTokensCloseTheirConnections(t *testing.T) {
 	env := newTestEnv(t, store.AHPJournalLimits{})
 	ctx := ctx5(t)
 	soon := time.Now().Add(1500 * time.Millisecond)
-	// Minted a minute before soon with the shortest lifetime, it expires at soon.
 	env.tokens.Now = func() time.Time { return soon.Add(-time.Minute) }
 	minted, err := env.tokens.Mint(ctx, MintRequest{Issuer: "https://issuer.example", Subject: "alice", TTL: time.Minute})
 	require.NoError(t, err)
@@ -941,7 +890,6 @@ func TestUsersAreIsolated(t *testing.T) {
 	require.Equal(t, ahptypes.ErrorCodeNotFound, rpcCode(t, err))
 	require.Zero(t, *init.Snapshots[0].State.Root.ActiveSessions)
 
-	// Bob may create a session with the same URI; it is his own.
 	createSession(t, bob, "ahp-session:/private")
 	require.NoError(t, bob.Request(ctx, "disposeSession", ahptypes.DisposeSessionParams{Channel: "ahp-session:/private"}, nil))
 	require.NoError(t, alice.Request(ctx, "listSessions", ahptypes.ListSessionsParams{Channel: rootChannel}, &list))
@@ -959,8 +907,6 @@ func TestAuthenticateIsRefusedWithoutAdvertisedResources(t *testing.T) {
 	require.Equal(t, ahptypes.ErrorCodeInvalidParams, rpcCode(t, err))
 }
 
-// An action committed while a subscription's snapshot is being taken must
-// reach the subscriber after the snapshot, never fall between the two.
 func TestSubscribeNeverMissesAConcurrentAction(t *testing.T) {
 	env := newTestEnv(t, store.AHPJournalLimits{})
 	minted := env.mint("alice")
@@ -978,7 +924,6 @@ func TestSubscribeNeverMissesAConcurrentAction(t *testing.T) {
 				Type: ahptypes.ActionTypeRootActiveSessionsChanged, ActiveSessions: 7}}
 			applied <- env.host.apply(context.Background(), principal, rootChannel, []ahptypes.StateAction{action}, nil)
 		}()
-		// Give the concurrent action time to wait on the hub lock.
 		time.Sleep(100 * time.Millisecond)
 	}
 	env.backend.mu.Unlock()
@@ -1005,8 +950,6 @@ func TestSessionURIsAreClaimedOneCreationAtATime(t *testing.T) {
 	again()
 }
 
-// An initialize or reconnect that repeats a channel gets one snapshot of it,
-// and one naming too many distinct channels is refused before any snapshot.
 func TestInitialSubscriptionsAreDistinctAndBounded(t *testing.T) {
 	env := newTestEnv(t, store.AHPJournalLimits{})
 	alice := env.mint("alice")
@@ -1042,9 +985,6 @@ func TestInitialSubscriptionsAreDistinctAndBounded(t *testing.T) {
 	require.NoError(t, err, "unknown channels within the bound are skipped as before")
 }
 
-// A page of sessions resumes after the last one the previous page held, not at
-// a position: a session created between pages neither repeats one already
-// listed nor pushes one off the list.
 func TestListSessionsPagesResumeAfterTheirLastSession(t *testing.T) {
 	env := newTestEnv(t, store.AHPJournalLimits{})
 	alice := env.connect(env.mint("alice").Token)
@@ -1065,7 +1005,6 @@ func TestListSessionsPagesResumeAfterTheirLastSession(t *testing.T) {
 	list := page(nil)
 	require.Len(t, list.Items, 1)
 	seen = append(seen, list.Items[0].Resource)
-	// A session created now sorts first, before the page already read.
 	createSession(t, alice, "ahp-session:/d")
 	for list.NextCursor != nil {
 		list = page(list.NextCursor)

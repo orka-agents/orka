@@ -14,10 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// stampedApplicationRows returns the application rows before, taken from a
-// store below schema version 5, as the version 5 step leaves them: results and
-// artifacts gain the write stamp (0, 0). Tables before does not hold are left
-// out.
 func stampedApplicationRows(t *testing.T, before map[string][]string) map[string][]string {
 	t.Helper()
 	after := maps.Clone(before)
@@ -42,9 +38,6 @@ func stampedApplicationRows(t *testing.T, before map[string][]string) map[string
 	return after
 }
 
-// A write envelope's sequence is unsigned, and SQLite stores the stamp as a
-// signed integer. A sequence it cannot store is refused rather than wrapped
-// into a stamp that orders before every other write.
 func TestOrderStampRefusesASequenceSQLiteCannotStore(t *testing.T) {
 	owner := store.ArtifactOwner{Namespace: "ns", TaskName: "task"}
 	artifact := store.SaveArtifactRequest{Owner: owner, Filename: "out.txt", ContentType: "text/plain", Data: []byte("output")}
@@ -81,8 +74,6 @@ func TestOrderStampRefusesASequenceSQLiteCannotStore(t *testing.T) {
 	}
 }
 
-// Results and artifacts stored before the write stamp have the stamp (0, 0)
-// after the upgrade, so the first stamped write for them replaces them.
 func TestStampedWritesReplaceRecordsStoredBeforeTheStamp(t *testing.T) {
 	path, db := schemaVersion4StoreDB(t, datasetOriginNew, true, "", false)
 	_, err := db.Exec(`INSERT INTO results(namespace, task_name, data) VALUES('tenant', 'task', ?)`, []byte("earlier result"))

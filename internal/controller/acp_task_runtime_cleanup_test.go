@@ -352,8 +352,6 @@ func newStandaloneRuntimeCleanupFixture(t *testing.T, rotated bool, transform fu
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Recovery advances mutable status; original runtime authority survives only
-	// in the immutable projection and exact authenticated resident boot.
 	task.Status.Execution.ControllerEpoch = owner.Epoch
 	if err := base.client.Status().Update(base.ctx, task); err != nil {
 		t.Fatal(err)

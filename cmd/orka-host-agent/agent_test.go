@@ -29,7 +29,6 @@ import (
 
 const testToken = "connection-token-0123456789abcdef"
 
-// fakeHost serves a minimal Agent Host Protocol endpoint gated by a token.
 type fakeHost struct {
 	server        *httptest.Server
 	methods       chan string
@@ -139,7 +138,6 @@ func TestStartupCompletesAHPHandshakeWithoutAuthenticating(t *testing.T) {
 	if got := get(t, routes, "/readyz"); got.Code != http.StatusOK {
 		t.Fatalf("readyz after startup = %d", got.Code)
 	}
-	// Later startup probes do not open another AHP session.
 	if got := get(t, routes, "/startupz"); got.Code != http.StatusOK {
 		t.Fatalf("second startupz = %d", got.Code)
 	}
@@ -150,8 +148,6 @@ func TestStartupCompletesAHPHandshakeWithoutAuthenticating(t *testing.T) {
 	}
 }
 
-// A restarted sidecar starts over after the host's startup probe has passed
-// for good, so its readiness probe completes the handshake instead.
 func TestARestartedSidecarStartsFromItsReadinessProbe(t *testing.T) {
 	host := newFakeHost(t, testToken)
 	agent := newAgent(host.port(t), writeFile(t, "token", testToken), "", io.Discard)
@@ -187,7 +183,6 @@ func TestReadinessFailsWhileTheHostDoesNotAnswer(t *testing.T) {
 
 func TestStatusStalenessUsesTheFileTimeAndRejectsTheFuture(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	// A host that writes no updatedAt is judged by when it last wrote the file.
 	status := writeFile(t, "idle.json", `{"idle":false,"idleSince":null}`)
 	agent := newAgent(1, "unused", status, io.Discard)
 	agent.now = func() time.Time { return now }
@@ -209,8 +204,6 @@ func TestStatusStalenessUsesTheFileTimeAndRejectsTheFuture(t *testing.T) {
 		t.Fatalf("an updatedAt an hour ahead must be stale: %+v %v", body, err)
 	}
 
-	// A fresh document whose idleSince is far ahead, as after a clock that
-	// jumped and came back, cannot say how long the host has been idle.
 	for since, stale := range map[time.Duration]bool{time.Minute: false, time.Hour: true} {
 		ahead := writeFile(t, "idle.json", `{"idle":true,"idleSince":"`+now.Add(since).Format(time.RFC3339)+
 			`","updatedAt":"`+now.Format(time.RFC3339)+`"}`)
@@ -333,8 +326,6 @@ func TestReadinessUsesAFreshStatusFileInsteadOfTheListener(t *testing.T) {
 	}
 	<-host.methods
 	<-host.methods
-	// The listener is gone, but a fresh status file means the host is alive,
-	// and the check never touches the listener.
 	host.server.Close()
 	if got := get(t, routes, "/readyz"); got.Code != http.StatusOK {
 		t.Fatalf("readyz with a fresh status file = %d", got.Code)

@@ -45,7 +45,6 @@ describe('ChatInput', () => {
     expect(screen.queryByRole('button', { name: 'Send message' })).not.toBeInTheDocument()
     fireEvent.change(textarea, { target: { value: 'next question' } })
     fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false })
-    // Drafting continues while the reply streams; only sending is blocked.
     expect(onSend).not.toHaveBeenCalled()
     expect(textarea).toHaveValue('next question')
   })
@@ -83,7 +82,6 @@ describe('ChatInput', () => {
   })
 
   it('sends once when Enter is pressed twice in the same tick', () => {
-    // The real onSend starts the turn synchronously by setting isStreaming.
     const onSend = vi.fn(() => useChatStore.setState({ isStreaming: true }))
     render(<ChatInput onSend={onSend} />)
     const textarea = screen.getByPlaceholderText('Message the meta agent...')
@@ -133,10 +131,8 @@ describe('ChatInput', () => {
   it('auto-resizes textarea on input change', () => {
     render(<ChatInput onSend={vi.fn()} />)
     const textarea = screen.getByPlaceholderText('Message the meta agent...') as HTMLTextAreaElement
-    // Mock scrollHeight for the auto-resize useEffect
     Object.defineProperty(textarea, 'scrollHeight', { value: 120, configurable: true })
     fireEvent.change(textarea, { target: { value: 'line1\nline2\nline3' } })
-    // The useEffect sets height to 'auto' then to Math.min(scrollHeight, 200) + 'px'
     expect(textarea.style.height).toBe('120px')
   })
 

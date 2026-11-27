@@ -58,8 +58,6 @@ var _ = Describe("Model Fallback Providers", Ordered, func() {
 		By("creating a fallback Provider CRD")
 		createProviderCRD(fallbackProviderName, "openai", "e2e-openai-secret", "api-key", e2eOpenAIBaseURL, model)
 
-		// aimock rejects the primary model with 401 and answers only the
-		// fallback model, so the worker must actually fail over.
 		fallbackModel := model
 		if e2eMockOpenAI {
 			fallbackModel = "gpt-4o-mini-e2e-fallback"

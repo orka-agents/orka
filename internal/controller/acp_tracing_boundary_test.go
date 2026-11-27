@@ -38,9 +38,6 @@ import (
 	"github.com/orka-agents/orka/workers/acp/supervisor"
 )
 
-// TestACPTraceBoundary proves the actual creation -> dispatcher -> HTTP ->
-// supervisor -> OTLP boundary, including two simultaneously executing children.
-// Kubernetes storage is in-process; no API-server behavior is changed or claimed.
 func TestACPTraceBoundary(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires isolated root fixture lane for production child UID/group fences")
@@ -103,8 +100,6 @@ func TestACPTraceBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = shutdown(context.Background()) }()
-	// Install inherited canaries after initialization: both exporters have frozen
-	// configuration, while real provider children must still exclude these values.
 	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=PRIVATE_HEADER_CANARY")
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "private=PRIVATE_RESOURCE_CANARY")
 
@@ -269,8 +264,6 @@ func checkACPTraceTrees(t *testing.T, spans []*tracepb.Span, tasks []*corev1alph
 	}
 }
 
-// This real ACP subprocess checks its own environment before reading any prompt.
-// The production exec helper, session UID/GID fences and stream client all run.
 func TestACPTraceProviderFixture(t *testing.T) {
 	if os.Getenv("ORKA_TRACE_FIXTURE") != "true" {
 		return

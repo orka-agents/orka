@@ -28,9 +28,6 @@ func reservedWriteTestTask(poolName, poolUID string) *corev1alpha1.Task {
 	}
 }
 
-// The Reserved write checks the pool binding on the uncached read its
-// optimistic patch is based on: it writes when the attempt is still bound to
-// the pool and writes nothing when the binding moved.
 func TestPatchReservedExecutionForPoolChecksTheBindingItWritesOn(t *testing.T) {
 	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: "pool-uid"}}
 	reserve := func(status *corev1alpha1.TaskExecutionStatus) { status.State = corev1alpha1.TaskExecutionStateReserved }
@@ -61,7 +58,6 @@ func TestPatchReservedExecutionForPoolChecksTheBindingItWritesOn(t *testing.T) {
 	}
 }
 
-// A scan reports how long after the first pending wakeup it started.
 func TestDispatcherWakeRecordsTheFirstPendingWakeup(t *testing.T) {
 	d := &ACPDispatcher{}
 	d.Wake()
@@ -77,7 +73,7 @@ func TestDispatcherWakeRecordsTheFirstPendingWakeup(t *testing.T) {
 }
 
 func TestMarkACPStepUsesTheContextTimer(t *testing.T) {
-	markACPStep(context.Background(), "ignored") // no timer: nothing to mark
+	markACPStep(context.Background(), "ignored")
 	steps := newACPDispatchScanTimer(time.Now, false)
 	ctx := withACPSteps(context.Background(), steps)
 	markACPStep(ctx, "sessionLease")
@@ -86,8 +82,6 @@ func TestMarkACPStepUsesTheContextTimer(t *testing.T) {
 	}
 }
 
-// Admission is timed only for a pool that is not yet admitting, and is
-// reported once, when its stored status serves and accepts.
 func TestRuntimeAdmissionTimingsRecordOnlyRealAdmissions(t *testing.T) {
 	clock := &steppingClock{now: time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)}
 	timings := &acpRuntimeAdmissionTimings{now: clock.Now, records: map[acpRuntimeAdmissionKey]*acpRuntimeAdmissionRecord{}}
@@ -99,7 +93,7 @@ func TestRuntimeAdmissionTimingsRecordOnlyRealAdmissions(t *testing.T) {
 	clock.Advance(300 * time.Millisecond)
 	timings.credentialsSeeded(pool, 2)
 	clock.Advance(200 * time.Millisecond)
-	timings.served(context.Background(), r.Client, pool, 2) // still starting: nothing reported
+	timings.served(context.Background(), r.Client, pool, 2)
 	if len(timings.records) != 1 {
 		t.Fatalf("records = %d, want the admission still open while the pool starts", len(timings.records))
 	}
@@ -108,7 +102,6 @@ func TestRuntimeAdmissionTimingsRecordOnlyRealAdmissions(t *testing.T) {
 	if len(timings.records) != 0 {
 		t.Fatal("serving did not report and close the admission")
 	}
-	// Steady-state reconciles of an admitting pool record nothing.
 	timings.startupObserved(pool, 2)
 	if len(timings.records) != 0 {
 		t.Fatal("a pool already serving and accepting opened an admission record")
@@ -123,8 +116,6 @@ func setRuntimePoolAdmitting(t *testing.T, c client.Client, pool *corev1alpha1.R
 	}
 	stored.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleServing
 	stored.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionAccepting
-	// This fake registers no RuntimePool status subresource, so Update
-	// stores the status.
 	if err := c.Update(context.Background(), stored); err != nil {
 		t.Fatal(err)
 	}
@@ -132,10 +123,6 @@ func setRuntimePoolAdmitting(t *testing.T, c client.Client, pool *corev1alpha1.R
 	pool.Status.AdmissionState = stored.Status.AdmissionState
 }
 
-// The pass sets its own copy of the pool to Serving before writing the
-// status. When that write fails or conflicts, the stored pool still starts:
-// the admission stays open, and the pass that lands the write reports it
-// once, with the retry's delay included.
 func TestRuntimeAdmissionTimingsWaitForThePersistedStatus(t *testing.T) {
 	clock := &steppingClock{now: time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)}
 	timings := &acpRuntimeAdmissionTimings{now: clock.Now, records: map[acpRuntimeAdmissionKey]*acpRuntimeAdmissionRecord{}}
@@ -144,7 +131,6 @@ func TestRuntimeAdmissionTimingsWaitForThePersistedStatus(t *testing.T) {
 	r := newUnitReconciler(newTestScheme(), pool)
 	timings.startupObserved(pool, 3)
 
-	// The failed write left only the pass's copy serving.
 	local := pool.DeepCopy()
 	local.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleServing
 	local.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionAccepting
@@ -165,10 +151,6 @@ func TestRuntimeAdmissionTimingsWaitForThePersistedStatus(t *testing.T) {
 	}
 }
 
-// A runtime admitted once is admitted again in the same workload sequence
-// when the pool closes and reopens, such as after an attachment changes the
-// workspace generation. The record marks that admission a readmission and
-// keeps the lifecycle the pool reopened from; a first start is not one.
 func TestRuntimeAdmissionTimingsMarkReadmissions(t *testing.T) {
 	timings := &acpRuntimeAdmissionTimings{now: time.Now, records: map[acpRuntimeAdmissionKey]*acpRuntimeAdmissionRecord{}}
 	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pool", UID: "pool-uid"}}

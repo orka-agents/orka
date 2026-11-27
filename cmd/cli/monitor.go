@@ -888,10 +888,6 @@ const (
 	monitorSummaryKeyType     = "type"
 )
 
-// monitorDoctorSummary reduces a RepositoryMonitor resource to the fields an
-// operator needs to judge workflow health: identity, repository, phase, run
-// timestamps, inventory counts, and conditions. The full resource (including
-// managed fields) remains available through "orka monitor get".
 func monitorDoctorSummary(monitor any) map[string]any {
 	root, _ := monitor.(map[string]any)
 	if root == nil {

@@ -93,8 +93,6 @@ func TestResumeGatewaySessionCleanupAfterRuntimeFailure(t *testing.T) {
 	_, err = s.GetBranchClaim(ctx, f.claim.ID)
 	require.NoError(t, err)
 	assertGatewaySessionCleanupUncommitted(t, ctx, s, persistence, f)
-	// Even knowledge of the exact Gateway operation does not authorize the
-	// general-purpose Session deletion endpoint to resume it.
 	require.ErrorIs(t, s.ReclaimSession(ctx, gatewayPublicSessionCleanupRequest(f, fence)), controlstore.ErrGatewayOwnedSession)
 	require.Equal(t, 1, calls)
 
@@ -134,9 +132,6 @@ func TestResumeGatewaySessionCleanupAfterStorageRollback(t *testing.T) {
 		return nil
 	}
 	s.sessionRuntimeCleanup = cleanup
-	// Fail after receipt insertion and turn/outbox deletion. The transaction
-	// must retain all SQLite recovery evidence despite completed runtime and
-	// Kubernetes ownership cleanup.
 	execSessionCleanupMutation(t, ctx, db, `CREATE TRIGGER fail_gateway_cleanup BEFORE DELETE ON sessions
 		BEGIN SELECT RAISE(ABORT, 'injected Gateway cleanup storage failure'); END`)
 	err := s.ReclaimGatewaySession(ctx, f.request)
@@ -263,8 +258,6 @@ func seedGatewaySessionCleanupState(t *testing.T, ctx context.Context, s *Store,
 	proof := controlstore.GatewaySessionCleanupProof{
 		GatewayUID: "gateway-owner-uid", BindingUID: "gateway-binding-uid", CreatedAt: testNow, TerminalCutoff: testNow.Add(30 * time.Minute),
 	}
-	// Model an earlier retention pass that removed bounded message/event
-	// history but left the finalized ACP turn and its Session foreign key.
 	execSessionCleanupMutation(t, ctx, db, `UPDATE sessions SET session_type = 'gateway', owner_type = 'gateway', owner_ref = ?, updated_at = ?
 		WHERE namespace = ? AND name = ?`, proof.GatewayUID+"/"+proof.BindingUID, testNow.Add(2*time.Minute), control.Namespace, name)
 	object, err := s.getSessionControlObject(ctx, control.Namespace, control.SessionName)

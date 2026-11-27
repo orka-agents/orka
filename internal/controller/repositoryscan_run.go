@@ -63,8 +63,6 @@ func (r *RepositoryScanReconciler) reconcileScanRunIdentity(ctx context.Context,
 
 const readyConditionType = "Ready"
 
-// readyCondition builds a "Ready" condition observed at generation with a
-// fresh transition time.
 func readyCondition(generation int64, status metav1.ConditionStatus, reason, message string) metav1.Condition {
 	return metav1.Condition{
 		Type:               readyConditionType,
@@ -111,8 +109,6 @@ func (r *RepositoryScanReconciler) createOrValidateScanStageTask(ctx context.Con
 			return fmt.Errorf("%w: existing security stage task does not match the admitted run", store.ErrConflict)
 		}
 	}
-	// Retirement may have listed Tasks between the preflight and Create. A new
-	// cancellation request fences that cleanup and makes this late Task retryable.
 	if err := r.validateScanStageRun(ctx, scan, run); err != nil {
 		return errors.Join(err, security.CancelScanRun(ctx, r.SecurityStore, r.Client, r.APIReader, scan, run,
 			"scan stage creation lost repository scan run ownership"))

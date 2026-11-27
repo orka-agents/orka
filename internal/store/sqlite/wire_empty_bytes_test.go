@@ -10,9 +10,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/wiretest"
 )
 
-// Empty result and receipt bytes are valid values, as they are in process:
-// over the wire, where nil and empty bytes look the same, SQLite still
-// receives a non-nil empty value for a present record.
 func TestEmptyResultBytesCrossTheWire(t *testing.T) {
 	ctx := t.Context()
 	s := setupTestStore(t)

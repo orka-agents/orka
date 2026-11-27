@@ -25,8 +25,6 @@ func readyKeylessProvider(name string) *corev1alpha1.Provider {
 	return provider
 }
 
-// Only the AI worker reaches a keyless Provider, through the controller's
-// relay with its ServiceAccount token; any other Task fails closed.
 func TestResolveProviderAcceptsAKeylessProviderOnlyForAIWorkers(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -48,7 +46,6 @@ func TestResolveProviderAcceptsAKeylessProviderOnlyForAIWorkers(t *testing.T) {
 		t.Fatalf("resolveProvider(container) = %v, want the keyless Provider refused", err)
 	}
 
-	// A read-only Task's Pod has no ServiceAccount token to reach the relay.
 	readOnly := task.DeepCopy()
 	readOnly.Annotations = map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}
 	if _, err := r.resolveProvider(context.Background(), readOnly, nil); err == nil || !strings.Contains(err.Error(), "spec.auth") {
@@ -98,7 +95,6 @@ func TestResolveProviderChecksKeylessFallbackProvidersByTaskType(t *testing.T) {
 		t.Fatalf("resolveProvider(read-only) = %v, want the keyless fallback refused", err)
 	}
 
-	// Agent Tasks use no Providers, so their fallbacks are not checked.
 	agentTask := task.DeepCopy()
 	agentTask.Spec.Type = corev1alpha1.TaskTypeAgent
 	if _, err := r.resolveProvider(context.Background(), agentTask, agent); err != nil {

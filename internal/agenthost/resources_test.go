@@ -30,7 +30,6 @@ func TestObjectNamesKeepAShortNameInTheConnectionSecret(t *testing.T) {
 }
 
 func TestObjectNamesStayValidAndDistinctForLongNames(t *testing.T) {
-	// A 253-character name whose 242nd character is a dot.
 	long := strings.Repeat("a", 241) + "." + strings.Repeat("b", 11)
 	other := strings.Repeat("a", 241) + "." + strings.Repeat("c", 11)
 	first := ObjectNames(namedHost(long, "uid-1"), "orka-agent-hosts")
@@ -78,8 +77,6 @@ func TestHostNetworkPolicyKeepsHTTPSToPublicAddresses(t *testing.T) {
 	}
 }
 
-// Node-local DNS caches listen on link-local addresses rather than in the
-// cluster DNS Pods, so DNS reaches both; link-local stays closed otherwise.
 func TestHostNetworkPolicyReachesNodeLocalDNS(t *testing.T) {
 	policy := HostNetworkPolicy(namedHost("alice", "uid-1"), ObjectNames(namedHost("alice", "uid-1"), "orka-agent-hosts"), "nonce",
 		validTemplate(), ControllerPeer{Namespace: "orka-system", PodLabels: map[string]string{"app": "orka"}})

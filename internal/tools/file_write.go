@@ -21,14 +21,12 @@ const (
 	modeAppend = "append"
 )
 
-// FileWriteTool implements file writing functionality
 type FileWriteTool struct {
 	workDir      string
 	maxFileSize  int64
 	allowedPaths []string
 }
 
-// FileWriteArgs are the arguments for the file write tool
 type FileWriteArgs struct {
 	Path       string `json:"path"`
 	Content    string `json:"content"`
@@ -36,7 +34,6 @@ type FileWriteArgs struct {
 	CreateDirs bool   `json:"create_dirs,omitempty"`
 }
 
-// FileWriteResult represents the file write result
 type FileWriteResult struct {
 	Path    string `json:"path"`
 	Size    int    `json:"size"`
@@ -44,7 +41,6 @@ type FileWriteResult struct {
 	Created bool   `json:"created"`
 }
 
-// NewFileWriteTool creates a new file write tool
 func NewFileWriteTool() *FileWriteTool {
 	workDir := os.Getenv(workerenv.WorkDir)
 	if workDir == "" {
@@ -53,7 +49,7 @@ func NewFileWriteTool() *FileWriteTool {
 
 	return &FileWriteTool{
 		workDir:     workDir,
-		maxFileSize: 1024 * 1024, // 1MB max
+		maxFileSize: 1024 * 1024,
 		allowedPaths: []string{
 			defaultWorkspacePath,
 			tempDirPath,
@@ -61,17 +57,14 @@ func NewFileWriteTool() *FileWriteTool {
 	}
 }
 
-// Name returns the tool name
 func (t *FileWriteTool) Name() string {
 	return fileWriteToolName
 }
 
-// Description returns the tool description
 func (t *FileWriteTool) Description() string {
 	return "Write content to a file in the workspace. Use this to create or modify files."
 }
 
-// Parameters returns the JSON Schema for parameters
 func (t *FileWriteTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -100,7 +93,6 @@ func (t *FileWriteTool) Parameters() json.RawMessage {
 	}`)
 }
 
-// Execute writes the file
 func (t *FileWriteTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var writeArgs FileWriteArgs
 	if err := json.Unmarshal(args, &writeArgs); err != nil {
@@ -118,7 +110,6 @@ func (t *FileWriteTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return "", fmt.Errorf("mode must be 'write' or 'append'")
 	}
 
-	// Default create_dirs to true — check if explicitly set to false via raw args
 	createDirs := true
 	var rawMap map[string]any
 	if err := json.Unmarshal(args, &rawMap); err == nil {
@@ -129,15 +120,10 @@ func (t *FileWriteTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		}
 	}
 
-	// Check content size
 	if int64(len(writeArgs.Content)) > t.maxFileSize {
 		return "", fmt.Errorf("content size %d exceeds maximum %d bytes", len(writeArgs.Content), t.maxFileSize)
 	}
 
-	// Resolve the path and select the configured allowed directory that will
-	// anchor every filesystem operation. The lexical check selects a root;
-	// os.Root enforces containment while following path components, including
-	// when symlinks change concurrently.
 	filePath := writeArgs.Path
 	if !filepath.IsAbs(filePath) {
 		filePath = filepath.Join(t.workDir, filePath)
@@ -149,20 +135,15 @@ func (t *FileWriteTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return "", fmt.Errorf("access denied: path outside allowed directories")
 	}
 
-	// Allowed paths are trusted, provisioned roots. OpenRoot pins the selected
-	// directory for this operation so descendant lookups cannot escape it.
 	root, err := os.OpenRoot(rootPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to open allowed directory: %w", err)
 	}
 	defer root.Close() //nolint:errcheck
 
-	// Check whether the target already exists through the same anchored root
-	// used for the write.
 	_, statErr := root.Stat(relativePath)
 	created := os.IsNotExist(statErr)
 
-	// Create parent directories if needed
 	if createDirs {
 		dir := filepath.Dir(relativePath)
 		if err := root.MkdirAll(dir, 0755); err != nil {
@@ -204,11 +185,6 @@ func (t *FileWriteTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	return string(output), nil
 }
 
-// allowedRoot returns the first configured allowed directory containing path
-// and path relative to that directory. filepath.Rel plus filepath.IsLocal
-// enforce component boundaries, unlike a raw string-prefix check which also
-// matches lexical siblings. Configured order is significant: the first match
-// defines the os.Root confinement boundary and later roots are not fallbacks.
 func (t *FileWriteTool) allowedRoot(path string) (rootPath, relativePath string, ok bool) {
 	for _, allowedPath := range t.allowedPaths {
 		rootPath = filepath.Clean(allowedPath)
@@ -221,5 +197,4 @@ func (t *FileWriteTool) allowedRoot(path string) (rootPath, relativePath string,
 	return "", "", false
 }
 
-// Ensure FileWriteTool implements Tool
 var _ Tool = (*FileWriteTool)(nil)

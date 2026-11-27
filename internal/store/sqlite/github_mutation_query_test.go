@@ -12,8 +12,6 @@ import (
 
 func TestGitHubMutationReadinessLookupUsesIndex(t *testing.T) {
 	s := setupTestStore(t)
-	// Match the global operation/head lookup and ordering used by
-	// ListGitHubMutationRecords for readiness ownership.
 	query := githubMutationRecordSelectSQL() + ` WHERE 1 = 1 AND operation = ? AND target_sha = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
 	rows, err := s.db.QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+query, "readiness_status", "head", 100, 0)
 	require.NoError(t, err)
@@ -78,7 +76,6 @@ func TestNewDBRequiresCurrentGitHubMutationReadinessIndex(t *testing.T) {
 	rejected, err := NewDB(s.dbPath)
 	require.ErrorContains(t, err, "idx_github_mutation_records_operation_sha is missing or incompatible")
 	require.Nil(t, rejected)
-	// The existing strict schema policy rejects the old layout without migration.
 	raw, err := sql.Open("sqlite", s.dbPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = raw.Close() })

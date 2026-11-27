@@ -26,8 +26,8 @@ func TestFormatAge(t *testing.T) {
 	tests := []struct {
 		name      string
 		timestamp string
-		wantExact string // exact match, or "" if we just want a suffix check
-		wantSfx   string // suffix to check
+		wantExact string
+		wantSfx   string
 	}{
 		{"empty", "", "<unknown>", ""},
 		{"invalid", "not-a-date", "not-a-date", ""},
@@ -62,7 +62,6 @@ func TestNewTaskCmd(t *testing.T) {
 		t.Errorf("Use = %q, want %q", cmd.Use, "task")
 	}
 
-	// Verify subcommands exist
 	subNames := make(map[string]bool)
 	for _, sub := range cmd.Commands() {
 		subNames[sub.Use] = true
@@ -77,7 +76,6 @@ func TestNewTaskCmd(t *testing.T) {
 func TestNewTaskCreateCmdFlags(t *testing.T) {
 	cmd := newTaskCreateCmd()
 
-	// Verify flags
 	for _, flagName := range []string{
 		"type", "agent", "provider", "timeout", "workspace-intent", "git-repo",
 		"read-credential", "read-credential-key", "publication-git-repo",
@@ -90,7 +88,6 @@ func TestNewTaskCreateCmdFlags(t *testing.T) {
 		}
 	}
 
-	// Verify default values
 	typeVal, _ := cmd.Flags().GetString("type")
 	if typeVal != "ai" {
 		t.Errorf("default type = %q, want %q", typeVal, "ai")
@@ -109,7 +106,6 @@ func TestNewTaskListCmdAliases(t *testing.T) {
 		t.Error("expected 'ls' alias on list command")
 	}
 
-	// Verify flags
 	if cmd.Flags().Lookup("status") == nil {
 		t.Error("missing flag 'status'")
 	}
@@ -121,7 +117,6 @@ func TestNewTaskListCmdAliases(t *testing.T) {
 func TestNewTaskGetCmdArgs(t *testing.T) {
 	cmd := newTaskGetCmd()
 	cmd.SetArgs([]string{})
-	// Without args, should error (requires exactly 1)
 	err := cmd.Execute()
 	if err == nil {
 		t.Error("expected error when no args provided")
@@ -166,10 +161,6 @@ func TestNewTaskLogsCmdFlags(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Task command execution with mock servers
-// ---------------------------------------------------------------------------
-
 func taskAPIServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -179,7 +170,6 @@ func taskAPIServer() *httptest.Server {
 				"metadata": map[string]any{"name": "task-abc123", "namespace": "default"},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == cliProvidersAPIPath:
-			// One ready Provider: ai tasks created without --provider use it.
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 				testProviderItemsKey: []map[string]any{{
 					"metadata":            map[string]any{"name": testProviderSecondary, "namespace": "default"},
@@ -789,7 +779,6 @@ func TestNewTaskLogsCmd_Follow(t *testing.T) {
 			if ok {
 				flusher.Flush()
 			}
-			// Close immediately to end stream
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -840,7 +829,6 @@ func TestNewTaskListCmd_WithStatusNoMatch(t *testing.T) {
 	root := newRootCmd()
 	root.SetArgs([]string{"task", "list", "--server", srv.URL, "--status", "Pending"})
 
-	// Should display "No tasks found." since no Pending tasks
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
 	}
@@ -943,13 +931,11 @@ func TestNewTaskCreateCmdInfersTypeAndProvider(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// --image without --type is a container task and must not reference a Provider.
 	root := newRootCmd()
 	root.SetArgs([]string{"task", "create", "--server", srv.URL, "--image", "busybox", "--command", "sh", "--arg", "-c", "--arg", "echo hi", "run the container"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("container Execute() error: %v", err)
 	}
-	// An ai task without --provider resolves the sole ready Provider.
 	root = newRootCmd()
 	root.SetArgs([]string{"task", "create", "--server", srv.URL, "summarize"})
 	if err := root.Execute(); err != nil {
@@ -990,9 +976,6 @@ func TestNewTaskCreateCmdExplainsAmbiguousProviders(t *testing.T) {
 	}
 }
 
-// TestResolveDefaultProviderPrefersReadyDefault mirrors the server resolver:
-// a ready Provider named "default" wins even when another ready Provider
-// exists; otherwise a sole ready Provider is used.
 func TestResolveDefaultProviderPrefersReadyDefault(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"items":[{"name":"openai","ready":true},{"name":"default","ready":true}]}`) //nolint:errcheck
@@ -1005,8 +988,6 @@ func TestResolveDefaultProviderPrefersReadyDefault(t *testing.T) {
 	}
 }
 
-// Without a namespace the server lists its own, and the error says so rather
-// than naming an empty namespace.
 func TestResolveDefaultProviderNamesServerNamespace(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := r.URL.Query()["namespace"]; ok {
@@ -1021,13 +1002,6 @@ func TestResolveDefaultProviderNamesServerNamespace(t *testing.T) {
 	}
 }
 
-// TestTaskCreateAgentTypeInference verifies --agent resolves the referenced
-// Agent before choosing the task type: a native AI Agent keeps the ai default
-// (the documented self-bootstrapping flow), a runtime Agent infers agent, and
-// an unreadable Agent conservatively falls back to ai.
-// TestTaskCreateRejectsAmbiguousImageAndAgent: --image and --agent imply
-// different task types; without an explicit --type the CLI must fail fast
-// instead of silently choosing container and carrying the agentRef along.
 func TestTaskCreateRejectsAmbiguousImageAndAgent(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -1046,8 +1020,6 @@ func TestTaskCreateRejectsAmbiguousImageAndAgent(t *testing.T) {
 	}
 }
 
-// TestTaskCreateAgentTypeSurfacesForbiddenLookup: a token without agents
-// read permission must not silently submit the wrong task type.
 func TestTaskCreateAgentTypeSurfacesForbiddenLookup(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)

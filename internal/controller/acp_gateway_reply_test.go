@@ -80,9 +80,6 @@ func TestACPReplyProviderDefaults(t *testing.T) {
 	}
 }
 
-// OpenCode is the runtime whose implicit allowlist is a bounded default list,
-// so an Agent with a tool ceiling can bind without an explicit allowlist and
-// still receive the implicit reply grant.
 func TestACPReplyImplicitGrantRespectsCeiling(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -109,9 +106,6 @@ func TestACPReplyImplicitGrantRespectsCeiling(t *testing.T) {
 	}
 }
 
-// The reply grant turns the implicit native set into an explicit allowlist,
-// which dispatch filters with exact-match deny entries. The grant is kept only
-// when that projected policy still fits the ceiling.
 func TestACPReplyGrantRevalidatesCeiling(t *testing.T) {
 	no := false
 	yes := true
@@ -266,8 +260,6 @@ func TestACPReplyExternalRegisteredOptIn(t *testing.T) {
 
 func TestACPReplyRestoredBindingDoesNotUpgrade(t *testing.T) {
 	r, task, agent := acpReplyPlanningFixture(t, true)
-	// Freeze the legacy policy, then make origin available. Restoration must
-	// consume the existing snapshot, not rerun optional tool injection.
 	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"Read"}}
 	require.NoError(t, r.Update(t.Context(), task))
 	_, err, _ := r.ensureAgentExecutionBinding(t.Context(), task, agent)

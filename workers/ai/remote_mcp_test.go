@@ -422,20 +422,12 @@ func TestNativeRemoteMCPStartupDeadlineIncludesDependencies(t *testing.T) {
 func TestNativeRemoteMCPDeadlineIncludesRevalidation(t *testing.T) {
 	for _, phase := range []string{"execution", "approval refresh"} {
 		t.Run(phase, func(t *testing.T) {
-			// The httptest server stays outside the bubble: its accept loop is
-			// blocked on network I/O, which would stop the fake clock forever.
-			// Without keep-alives, connections dialed in the bubble close after
-			// each response instead of idling on a network read.
 			f := newNativeRemoteFixture(t)
 			f.httpClient.Transport.(*http.Transport).DisableKeepAlives = true
 			f.tool.Spec.HTTP.Timeout = &metav1.Duration{Duration: 100 * time.Millisecond}
 			if err := f.client.Update(t.Context(), f.tool); err != nil {
 				t.Fatal(err)
 			}
-			// The bubble's fake clock advances only while every goroutine in it is
-			// durably blocked, so the successful preparation cannot spend the
-			// 100ms Tool budget on scheduling delays or httptest round trips.
-			// Only the blocked revalidation read lets the clock reach a deadline.
 			synctest.Test(t, func(t *testing.T) {
 				ctx, loaded, err := f.prepare(t)
 				if err != nil {

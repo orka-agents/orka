@@ -153,7 +153,6 @@ func TestCreatePullRequestTool_NoWorkspace(t *testing.T) {
 func TestCreatePullRequestTool_Success(t *testing.T) {
 	largeBody := strings.Repeat("x", 9000)
 
-	// Mock GitHub API
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
@@ -237,7 +236,6 @@ func TestCreatePullRequestTool_Success(t *testing.T) {
 		t.Errorf("unexpected status: %s", prResult.Status)
 	}
 
-	// Also verify the tool interface
 	publicTool := NewCreatePullRequestTool(k8sClient)
 	if publicTool.Name() != createPullRequestToolName {
 		t.Errorf("unexpected name: %s", publicTool.Name())
@@ -351,7 +349,6 @@ func TestCreatePullRequestTool_InvalidArgs(t *testing.T) {
 
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
-	// Missing required fields
 	args := json.RawMessage(`{"task_name": "t"}`)
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {

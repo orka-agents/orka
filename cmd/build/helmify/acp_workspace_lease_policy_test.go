@@ -12,9 +12,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// The raw policy's admission tests cover reserved Lease ownership. Helm must
-// render the same rules with its release identity and namespace, or those
-// guarantees do not reach Helm users.
 func TestStaticChartACPWorkspaceLeaseProtectionMatchesCanonicalPolicy(t *testing.T) {
 	canonical, err := os.ReadFile(
 		filepath.Join("..", "..", "..", "config", "admission", "acp_workspace_lease_protection.yaml"))
@@ -69,8 +66,6 @@ func TestStaticChartACPWorkspaceLeaseProtectionMatchesCanonicalPolicy(t *testing
 	}
 }
 
-// AKS refuses to stop a cluster while any fail-closed webhook intercepts
-// Leases, so Lease guards must stay admission policies.
 func TestSharedAdmissionWebhooksDoNotInterceptLeases(t *testing.T) {
 	manifest, err := os.ReadFile(
 		filepath.Join("..", "..", "..", "config", "orka-admission-webhooks", "validating_webhook.yaml"))

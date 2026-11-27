@@ -49,7 +49,6 @@ TEST_VALID_KEY="$(base64 <"${work}/tls.key" | tr -d '\n')"
 TEST_MISMATCHED_KEY="$(base64 <"${work}/mismatched.key" | tr -d '\n')"
 export TEST_VALID_CERT TEST_EXPIRED_CERT TEST_CA_BUNDLE TEST_NO_SAN_CERT TEST_VALID_KEY TEST_MISMATCHED_KEY
 
-# Exercise the real script and registry library; replace only external commands.
 cat >"${work}/bin/kubectl" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -150,7 +149,6 @@ case " $* " in
 esac
 STUB
 chmod +x "${work}/bin/"*
-# A bounded PATH lets the same test exercise hosts both with and without skopeo.
 for cmd in awk base64 bash cat chmod cp dirname git grep jq mktemp openssl rm tr; do
   ln -s "$(command -v "$cmd")" "${work}/bin/$cmd"
 done
@@ -187,7 +185,6 @@ if grep -F 'create secret generic orka-admission-tls' "${TEST_LOG}" >/dev/null; 
   echo 'rotated existing admission TLS' >&2
   exit 1
 fi
-# An unused expired CA in an otherwise valid bundle must not block renewal overlap.
 TEST_TLS_MODE=ca-bundle run_script --cluster skill-test
 for tls_mode in expired expired-ca missing malformed missing-key malformed-key mismatched-key invalid-base64-key wrong-type no-san; do
   if TEST_TLS_MODE="${tls_mode}" run_script --cluster skill-test; then
@@ -204,7 +201,6 @@ TEST_TLS_PRESENT=0 TEST_VEKIL_NAMESPACE_PRESENT=0 run_script --cluster skill-tes
 grep -F 'create secret generic orka-admission-tls' "${TEST_LOG}" >/dev/null
 grep -F 'create namespace vekil-system' "${TEST_LOG}" >/dev/null
 
-# A renamed context must still target the explicitly selected Kind cluster.
 TEST_CONTEXT='local-kind-alias' run_script --cluster skill-test --context local-kind-alias
 run_script --context kind-skill-test
 
@@ -219,7 +215,6 @@ if run_script; then
 fi
 if grep -F 'make ' "${TEST_LOG}" >/dev/null; then exit 1; fi
 
-# A failed push must never fall through to deploying a tag or stale reference.
 if TEST_FAIL_PUSH=1 run_script --cluster skill-test; then
   echo 'accepted a failed registry push' >&2
   exit 1
@@ -236,7 +231,6 @@ if TEST_FAIL_ROLLOUT=1 run_script --cluster skill-test; then
 fi
 [[ "$(<"${work}/repo/config/manager/kustomization.yaml")" == 'original kustomization' ]]
 
-# Docker-only hosts must not push a stale target tag after tagging the build fails.
 rm "${work}/bin/skopeo"
 run_script --cluster skill-test --controller-image custom-controller:kind
 grep -F 'docker tag custom-controller:kind 127.0.0.1:5001/orka/controller:e2e' "${TEST_LOG}" >/dev/null

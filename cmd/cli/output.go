@@ -28,15 +28,10 @@ func addOutputFlag(cmd *cobra.Command, defaultValue string) {
 	_ = cmd.RegisterFlagCompletionFunc("output", completeOutputFormat)
 }
 
-// completeOutputFormat suggests the shared output formats for flag
-// completion, filtered by the typed prefix. Commands that treat --output as
-// a destination path (such as task download) register their own flag and
-// never reach this function.
 func completeOutputFormat(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	return completeWithPrefix(toComplete, outputTable, outputJSON, outputYAML), cobra.ShellCompDirectiveNoFileComp
 }
 
-// completeWithPrefix keeps only the values that start with the typed prefix.
 func completeWithPrefix(prefix string, values ...string) []string {
 	if prefix == "" {
 		return values
@@ -75,7 +70,6 @@ func printStructured(cmd *cobra.Command, value any) error {
 	return printStructuredTo(cmd.OutOrStdout(), format, value)
 }
 
-// printStructuredTo encodes value as json or yaml onto w.
 func printStructuredTo(w io.Writer, format string, value any) error {
 	switch format {
 	case outputJSON:
@@ -97,9 +91,6 @@ func printStructuredTo(w io.Writer, format string, value any) error {
 }
 
 func printGenericTable(cmd *cobra.Command, value any) error {
-	// Typed client responses (a single resource struct) are rendered through
-	// their JSON shape so one object prints as a one-row table instead of
-	// "No resources found."
 	if _, isMap := value.(map[string]any); !isMap {
 		if _, isSlice := value.([]any); !isSlice {
 			if encoded, err := json.Marshal(value); err == nil {
@@ -141,10 +132,6 @@ func printGenericTable(cmd *cobra.Command, value any) error {
 	return w.Flush()
 }
 
-// genericTableColumns keeps the NAME column and every other column that at
-// least one row fills in, so resources without a namespace, status, or
-// timestamp (built-in tools, model IDs, secret metadata) do not print
-// dash-only columns.
 func genericTableColumns(headers []string, rows [][]string) []int {
 	columns := []int{0}
 	for col := 1; col < len(headers); col++ {
@@ -172,9 +159,6 @@ func pickColumns(row []string, columns []int) []string {
 
 const genericRowTitleLimit = 60
 
-// sanitizeTerminalText strips control and format runes from forge-supplied
-// text before it reaches the terminal: an untrusted issue or PR title must
-// not carry ANSI/OSC escapes into an operator's display.
 func sanitizeTerminalText(value string) string {
 	return strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || unicode.Is(unicode.Cf, r) {
@@ -184,9 +168,6 @@ func sanitizeTerminalText(value string) string {
 	}, value)
 }
 
-// genericRowName labels a row by its resource name, falling back to the
-// "#number title" form used by forge-backed records (monitor items,
-// commands, work actions) that carry no name of their own.
 func genericRowName(item map[string]any) string {
 	name := firstString(item, "name", "id")
 	if name == "" {
@@ -199,8 +180,6 @@ func genericRowName(item map[string]any) string {
 		label := "#" + number
 		if title := strings.TrimSpace(sanitizeTerminalText(firstString(item, "title"))); title != "" {
 			if len(title) > genericRowTitleLimit {
-				// Cut on a rune boundary so a multibyte character crossing
-				// the limit cannot become invalid UTF-8 in the table.
 				cut := genericRowTitleLimit
 				for cut > 0 && !utf8.RuneStart(title[cut]) {
 					cut--
@@ -225,17 +204,12 @@ func genericRowNamespace(item map[string]any) string {
 	return namespace
 }
 
-// genericRowStatus prefers the resource phase and appends the workflow
-// phase when a record tracks both (for example an "open" item that is
-// "approval_required").
 func genericRowStatus(item map[string]any) string {
 	status := firstString(item, "phase", "status", "state")
 	if status == "" {
 		status = nestedString(item, "status", "phase")
 	}
 	if status == "" {
-		// The restricted flat projection served to context-token callers
-		// carries readiness at the top level.
 		if ready, ok := item["ready"].(bool); ok {
 			if ready {
 				status = "Ready"
@@ -245,8 +219,6 @@ func genericRowStatus(item map[string]any) string {
 		}
 	}
 	if status == "" {
-		// Resources such as Providers expose readiness as status.ready
-		// instead of a phase.
 		if statusMap, ok := item["status"].(map[string]any); ok {
 			if ready, ok := statusMap["ready"].(bool); ok {
 				if ready {

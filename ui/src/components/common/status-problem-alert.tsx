@@ -1,7 +1,6 @@
 import { TriangleAlert } from 'lucide-react'
 import type { StatusProblem } from './status-problem'
 
-/** Detail-page alert naming the Ready=False reason and its message. */
 export function StatusProblemAlert({ problem }: { problem: StatusProblem }) {
   return (
     <div role="alert" className="flex items-start gap-3 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm">

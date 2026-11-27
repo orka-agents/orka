@@ -11,9 +11,6 @@ import (
 
 const maxControllerRuntimeSessionGeneration = uint64(math.MaxInt64)
 
-// ACPRuntimeSessionBinding is the controller-owned durable identity projected
-// into RuntimeSession status. Generation is incremented whenever the provider
-// session must be recreated rather than transparently recovered.
 type ACPRuntimeSessionBinding struct {
 	SessionUID         string
 	Generation         uint64
@@ -23,17 +20,9 @@ type ACPRuntimeSessionBinding struct {
 	WorkspaceDigest    string
 	MCPDigest          string
 	RecreationRequired bool
-	// PromptDelivered records that the provider process behind this binding
-	// accepted a prompt, so once-per-process prompt context (the toolbox
-	// note) is not repeated. It lives only in controller memory: creating a
-	// RuntimeSession clears it and a binding rebuilt from Task status starts
-	// false, so the context may repeat after a controller restart but is
-	// never skipped for a process that has not received a prompt.
-	PromptDelivered bool
+	PromptDelivered    bool
 }
 
-// ACPRuntimeSessionPlan explains whether the supervisor session can be reused
-// or must be recreated from the verified branch plus bounded transcript.
 type ACPRuntimeSessionPlan struct {
 	Binding           ACPRuntimeSessionBinding
 	Recreate          bool
@@ -41,9 +30,6 @@ type ACPRuntimeSessionPlan struct {
 	Reason            string
 }
 
-// PlanACPRuntimeSession selects the next monotonic RuntimeSession generation.
-// A profile rotation or proven runtime loss increments exactly once and always
-// requires canonical bootstrap; unchanged live state is reused.
 func PlanACPRuntimeSession(
 	session store.SessionControl,
 	current *ACPRuntimeSessionBinding,
@@ -134,9 +120,6 @@ func PlanACPRuntimeSession(
 	}, nil
 }
 
-// enforceACPRuntimeSessionGenerationFloor prevents a recreated provider
-// RuntimeSession from reusing a generation already committed on durable
-// workspace data. A reusable live binding at the exact floor remains valid.
 func enforceACPRuntimeSessionGenerationFloor(
 	plan ACPRuntimeSessionPlan,
 	floor uint64,
@@ -156,11 +139,6 @@ func enforceACPRuntimeSessionGenerationFloor(
 	return plan, nil
 }
 
-// bindACPRuntimeSessionWorkspace binds the exact prepared workspace identity to
-// a provider RuntimeSession. A live session may be reused only when repository,
-// source ref, verified baseline, intent, and relative root all match. Initial or
-// already-rotated sessions simply record the desired digest; a mismatch on a
-// reused live session advances the monotonic generation exactly once.
 func bindACPRuntimeSessionWorkspace(
 	binding ACPRuntimeSessionBinding,
 	reused bool,

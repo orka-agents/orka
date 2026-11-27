@@ -21,8 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/agentidentity"
 )
 
-// coordinationHandler serves discovery for Leases and records deletes of the
-// Agent use enforcement marker, answering them as an absent Lease.
 func coordinationHandler(deletes *atomic.Int32) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api", func(w http.ResponseWriter, _ *http.Request) {
@@ -52,8 +50,6 @@ func coordinationHandler(deletes *atomic.Int32) http.Handler {
 	return mux
 }
 
-// newEnforcementTestManager builds a manager only for registering runnables;
-// it has its own discovery server.
 func newEnforcementTestManager(t *testing.T) ctrl.Manager {
 	t.Helper()
 	discoveryAPI := httptest.NewServer(discoveryHandler())
@@ -65,9 +61,6 @@ func newEnforcementTestManager(t *testing.T) ctrl.Manager {
 	return mgr
 }
 
-// With Agent use authorization off, ending the enforcement period runs before
-// the manager starts. A connection error just after a node restart is retried
-// within the startup budget instead of failing startup.
 func TestEstablishAgentUseEnforcementPeriodRetriesTransientConnectErrors(t *testing.T) {
 	var deletes atomic.Int32
 	api := httptest.NewServer(coordinationHandler(&deletes))
@@ -97,7 +90,6 @@ func TestEstablishAgentUseEnforcementPeriodRetriesTransientConnectErrors(t *test
 	}
 }
 
-// A refused connection that outlasts the startup budget still fails startup.
 func TestEstablishAgentUseEnforcementPeriodFailsAfterTheBudget(t *testing.T) {
 	var deletes atomic.Int32
 	api := httptest.NewServer(coordinationHandler(&deletes))

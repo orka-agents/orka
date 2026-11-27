@@ -39,7 +39,6 @@ func TestRepositoryMonitorRepairLabelsAPI(t *testing.T) {
 	if repositoryMonitorAcceptsPullRequestEvent(monitor, repo, githubLabelTarget{IsPR: true, BaseBranch: "main", Labels: []string{"bug"}}, "") {
 		t.Fatal("pull request event without a review or repair label was accepted")
 	}
-	// Removing the last repair label reaches the controller so it retires the PR.
 	if !repositoryMonitorAcceptsPullRequestEvent(monitor, repo, githubLabelTarget{IsPR: true, BaseBranch: "main"}, "orka:fix-ci") {
 		t.Fatal("removal of a repair label was rejected")
 	}

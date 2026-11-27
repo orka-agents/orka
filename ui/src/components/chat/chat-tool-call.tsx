@@ -8,8 +8,6 @@ export function ChatToolCall({ message }: { message: ChatMessage }) {
   const isResult = message.role === 'tool_result'
   const success = message.toolSuccess
 
-  // A single status-dot color encodes the tool call's state, drawn from the
-  // shared status tokens (call = info/running, ok = succeeded, fail = failed).
   const dotClass = isResult
     ? success
       ? 'bg-status-succeeded'
@@ -19,7 +17,6 @@ export function ChatToolCall({ message }: { message: ChatMessage }) {
   const glyph = isResult ? (success ? '✓' : '✗') : '→'
 
   return (
-    // The indent lines up with message text from sm up; phones keep the width.
     <div className="my-1 sm:mx-12">
       <button
         onClick={() => setExpanded(!expanded)}

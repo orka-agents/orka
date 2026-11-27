@@ -119,10 +119,6 @@ func (c Classification) HTTPStatus() int {
 	}
 }
 
-// ClassifyOperation applies the v2 replay matrix. Callers pass the current
-// expected fence and, when present, the durable/tombstoned record for the exact
-// operation identity. It never authorizes replay: Fresh only means no matching
-// side-effect record was supplied.
 func ClassifyOperation(
 	expected Fence,
 	incoming MutationMetadata,
@@ -170,9 +166,6 @@ func ClassifyOperation(
 	}
 }
 
-// RuntimeSessionTombstone preserves exact-generation replay classification after
-// session deletion. It remains live until the controller durably retires that
-// RuntimeSession generation.
 type RuntimeSessionTombstone struct {
 	RuntimeSessionUID        RuntimeSessionUID `json:"runtimeSessionUID"`
 	RuntimeSessionGeneration uint64            `json:"runtimeSessionGeneration"`

@@ -13,14 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeReplicated is a synchronous-replicated watermark provider whose
-// failover keeps every committed write. HoldWrites makes new watermark writes
-// wait until the failover, which ends them with ErrOutcomeUnknown without
-// committing, as stopping the primary would. Its faults change how a held
-// write ends, which some combinations do correctly, or break the contract or
-// the harness.
 type fakeReplicated struct {
-	// The failover cases never bind the dataset.
 	storagev1.DatasetBindingStore
 	fakeReplicatedFaults
 
@@ -29,40 +22,20 @@ type fakeReplicated struct {
 	epoch       *storagev1.ControllerEpochMirrorState
 	watermark   int64
 	receipts    map[string]storagev1.OperationOutcome
-	// values holds the watermark each committed operation returned, for
-	// its replays.
-	values  map[string]int64
-	release chan struct{}
-	waiting int
+	values      map[string]int64
+	release     chan struct{}
+	waiting     int
 }
 
-// fakeReplicatedFaults change how a fakeReplicated ends a held write, which
-// the error and commit settings together do correctly or not, or break the
-// contract or the harness. The zero value breaks nothing.
 type fakeReplicatedFaults struct {
-	// holdless makes HoldWrites hold nothing, as a harness whose lock does
-	// not reach the database would.
-	holdless bool
-	// heldErr is what a held write returns once the failover ends it, in
-	// place of ErrOutcomeUnknown; heldSucceeds makes it return its
-	// watermark with no error instead.
-	heldErr      error
-	heldSucceeds bool
-	// commitHeld commits a held write, with its receipt, before it returns;
-	// advanceHeld advances the watermark for it but keeps no receipt.
+	holdless                bool
+	heldErr                 error
+	heldSucceeds            bool
 	commitHeld, advanceHeld bool
-	// emptyResolution makes ResolveOperation settle a missing receipt with
-	// an empty outcome and no error.
-	emptyResolution bool
-	// keepIncarnation makes a failover keep the incarnation.
-	keepIncarnation bool
-	// commitAborted commits a write whose operation settled as aborted.
-	commitAborted bool
-	// loseReceipts makes a failover drop every receipt while keeping the
-	// writes, and a replay of a write whose receipt it dropped record the
-	// receipt again and return the write's value, as an idempotent write
-	// does.
-	loseReceipts bool
+	emptyResolution         bool
+	keepIncarnation         bool
+	commitAborted           bool
+	loseReceipts            bool
 }
 
 func newFakeReplicated(faults fakeReplicatedFaults) func(*testing.T) *fakeReplicated {
@@ -169,15 +142,12 @@ func (p *fakeReplicated) AdvanceWriteWatermark(ctx context.Context) (storagev1.W
 	return storagev1.WriteWatermark{DatasetID: fakeDataset, Value: p.watermark}, nil
 }
 
-// commit advances the watermark for envelope's operation and keeps its
-// receipt.
 func (p *fakeReplicated) commit(envelope storagev1.WriteEnvelope) {
 	p.watermark++
 	p.values[envelope.OperationID] = p.watermark
 	p.receipts[envelope.OperationID] = committedOutcome(envelope)
 }
 
-// committedOutcome is the receipt of envelope's committed watermark write.
 func committedOutcome(envelope storagev1.WriteEnvelope) storagev1.OperationOutcome {
 	return storagev1.OperationOutcome{
 		OperationID: envelope.OperationID, Method: "AdvanceWriteWatermark", RequestDigest: envelope.RequestDigest,
@@ -191,8 +161,6 @@ func (p *fakeReplicated) GetWriteWatermark(context.Context) (storagev1.WriteWate
 	return storagev1.WriteWatermark{DatasetID: fakeDataset, Value: p.watermark}, nil
 }
 
-// holdWrites makes the next writes wait until the failover, and returns a
-// function that waits until n of them are waiting.
 func (p *fakeReplicated) holdWrites(t *testing.T) func(int) {
 	if p.holdless {
 		return func(int) {}
@@ -209,8 +177,6 @@ func (p *fakeReplicated) holdWrites(t *testing.T) func(int) {
 	}
 }
 
-// failover promotes the standby: committed writes stay, the incarnation
-// changes, and the held writes end.
 func (p *fakeReplicated) failover() *fakeReplicated {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -231,8 +197,6 @@ func reopenFakeReplicated(_ *testing.T, p *fakeReplicated) *fakeReplicated { ret
 
 func holdFakeReplicatedWrites(t *testing.T, p *fakeReplicated) func(int) { return p.holdWrites(t) }
 
-// fakeReplicatedHarness restarts a fakeReplicated by keeping it, and fails
-// it over by promoting its standby.
 var fakeReplicatedHarness = DurabilityHarness{
 	Restart: func(_ *testing.T, p storagev1.ProviderDescriber) storagev1.ProviderDescriber { return p },
 	Failovers: map[string]func(*testing.T, storagev1.ProviderDescriber) storagev1.ProviderDescriber{
@@ -243,21 +207,14 @@ var fakeReplicatedHarness = DurabilityHarness{
 	HoldWrites: func(t *testing.T, p storagev1.ProviderDescriber) func(int) { return p.(*fakeReplicated).holdWrites(t) },
 }
 
-// fakeReplicatedWrites is the write catalog of a fakeReplicated.
 var fakeReplicatedWrites = []writeCase[*fakeReplicated]{{
 	method: "AdvanceWriteWatermark", args: fixed(), observe: observeWatermark[*fakeReplicated],
 }}
 
-// A synchronous-replicated provider whose failover keeps every committed
-// write passes the durability cases, its failover included.
 func TestDurabilityPassesAProviderThatKeepsItsWrites(t *testing.T) {
 	runDurability(t, newFakeReplicated(fakeReplicatedFaults{}), fakeReplicatedWrites, fakeReplicatedHarness)
 }
 
-// A synchronous-replicated provider passes the writes-during-a-failover case
-// when the switch commits its held writes and reports them committed or
-// unknown, ends them with an unknown outcome without committing them, or
-// refuses them as unavailable or not ready without committing them.
 func TestWritesDuringFailoverPassAProviderThatSettlesThem(t *testing.T) {
 	for name, faults := range map[string]fakeReplicatedFaults{
 		"committed":                 {commitHeld: true, heldSucceeds: true},
@@ -274,15 +231,6 @@ func TestWritesDuringFailoverPassAProviderThatSettlesThem(t *testing.T) {
 
 const failingFailoverEnv = "STORAGETEST_FAILING_FAILOVER"
 
-// The durability cases fail a harness whose writes finish before the
-// failover begins, a provider that settles a write with an outcome that is
-// neither committed nor aborted, a harness that declares failovers without
-// HoldWrites, and an async-replicated provider that declares a failover.
-// They also fail a provider that breaks what a failover must keep: one whose
-// failover keeps the incarnation, loses a write that returned nil, loses a
-// receipt that a replay would record again, advances the watermark for a
-// write it kept no receipt for, or commits a write it refused as unavailable
-// or not ready, or one that settled as aborted.
 func TestDurabilityFailsAFailoverItCannotCheck(t *testing.T) {
 	duringFailover := func(faults fakeReplicatedFaults) func(t *testing.T) {
 		return func(t *testing.T) {
@@ -380,7 +328,6 @@ func TestDurabilityFailsAFailoverItCannotCheck(t *testing.T) {
 	}
 }
 
-// fakeAsync is fakeReplicated declaring the async-replicated class.
 type fakeAsync struct{ *fakeReplicated }
 
 func (p *fakeAsync) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {

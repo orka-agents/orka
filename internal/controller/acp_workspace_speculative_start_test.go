@@ -161,8 +161,6 @@ func TestACPWorkspaceSpeculativeStartAttachableOnlyForTheBootingRequest(t *testi
 	}
 }
 
-// speculativeExternalPoolFixture is an unattached, suspend-capable workspace
-// whose pending requester recorded a speculative start.
 func speculativeExternalPoolFixture(t *testing.T, deadline time.Time) *externalRuntimePoolFixture {
 	t.Helper()
 	f := newExternalRuntimePoolFixture(t)
@@ -197,14 +195,12 @@ func TestWorkspaceRuntimePoolReconcilerHoldsSpeculativeStartUntilDeadline(t *tes
 		t.Fatalf("requeue = %s, want the deadline %s", result.RequeueAfter, deadline.Sub(now))
 	}
 
-	// A controller restart rebuilds the hold from the workspace alone.
 	restarted := &WorkspaceRuntimePoolReconciler{Client: f.r.Client, APIReader: f.r.Client, Now: func() time.Time { return now }}
 	reconcileWorkspaceDemand(t, restarted, key)
 	if got := runtimePoolTestGetPool(t, f.r, f.pool).Spec.DesiredReplicas; got != 1 {
 		t.Fatalf("restarted controller released the pool: replicas=%d", got)
 	}
 
-	// Only the deadline ends an unclaimed start.
 	later := deadline.Add(time.Second)
 	expired := &WorkspaceRuntimePoolReconciler{Client: f.r.Client, APIReader: f.r.Client, Now: func() time.Time { return later }}
 	reconcileWorkspaceDemand(t, expired, key)
@@ -216,8 +212,6 @@ func TestWorkspaceRuntimePoolReconcilerHoldsSpeculativeStartUntilDeadline(t *tes
 func TestWorkspaceRuntimePoolReconcilerConfirmsStaleCacheBeforeScalingDown(t *testing.T) {
 	f := speculativeExternalPoolFixture(t, time.Now().Add(time.Minute))
 	key := client.ObjectKeyFromObject(f.workspace)
-	// The informer cache has not yet seen the speculative start that the
-	// Task controller wrote before activating the pool.
 	stale := interceptor.NewClient(f.r.Client.(client.WithWatch), interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 			if err := c.Get(ctx, key, obj, opts...); err != nil {
@@ -234,7 +228,6 @@ func TestWorkspaceRuntimePoolReconcilerConfirmsStaleCacheBeforeScalingDown(t *te
 	if got := runtimePoolTestGetPool(t, f.r, f.pool).Spec.DesiredReplicas; got != 1 {
 		t.Fatalf("a stale cache scaled the speculative pool down: replicas=%d", got)
 	}
-	// Without the hold on the API server either, the pool scales down.
 	f.patchWorkspaceAnnotations(t, func(annotations map[string]string) {
 		delete(annotations, acpWorkspaceSpeculativeStartAnnotation)
 	})
@@ -254,10 +247,6 @@ func (f *externalRuntimePoolFixture) patchWorkspaceAnnotations(t *testing.T, mut
 	}
 }
 
-// The speculative runtime passes the same attestation, sealed bootstrap, and
-// authenticated probe as any start, yet no prompt can reach it before the
-// requester holds the attachment. An unclaimed start retires through the
-// ordinary data-preserving path, idempotently.
 func TestSpeculativeRuntimeIsAttestedAndRetiresWhenUnclaimed(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -266,8 +255,6 @@ func TestSpeculativeRuntimeIsAttestedAndRetiresWhenUnclaimed(t *testing.T) {
 	}{
 		{name: "requester rejected and settled", wantAction: workspacev1alpha1.WorkloadRetirementSuspend,
 			end: func(t *testing.T, f *externalRuntimePoolFixture) func() time.Time {
-				// Settlement of a requester that never attached applies its
-				// frozen Suspend; that write also removes the start.
 				workspace := f.currentWorkspace(t)
 				base := workspace.DeepCopy()
 				workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
@@ -312,7 +299,6 @@ func TestSpeculativeRuntimeIsAttestedAndRetiresWhenUnclaimed(t *testing.T) {
 			if retired.Spec.Retirement.Action != test.wantAction || retired.Spec.Retirement.Sequence != workspace.Spec.Workload.Sequence {
 				t.Fatalf("retirement = %#v, want %s of the exact speculative request", retired.Spec.Retirement, test.wantAction)
 			}
-			// Retiring again changes nothing.
 			reconcileWorkspaceDemand(t, demand, key)
 			runtimePoolReconcile(t, f.r, f.pool)
 			if again := f.currentWorkspace(t); again.Spec.Retirement == nil || *again.Spec.Retirement != *retired.Spec.Retirement {
@@ -322,8 +308,6 @@ func TestSpeculativeRuntimeIsAttestedAndRetiresWhenUnclaimed(t *testing.T) {
 	}
 }
 
-// speculativeTaskFixture is a fresh session workspace materialized by its
-// first Task, with a RuntimePool plan the Task may create.
 type speculativeTaskFixture struct {
 	r    *TaskReconciler
 	task *corev1alpha1.Task
@@ -336,18 +320,14 @@ func newSpeculativeTaskFixture(t *testing.T) *speculativeTaskFixture {
 	return newSpeculativeTaskFixtureWith(t, nil)
 }
 
-// newSpeculativeTaskFixtureWith lets a test adjust the reconciler and the
-// frozen binding before the workspace is materialized.
 func newSpeculativeTaskFixtureWith(t *testing.T, configure func(*TaskReconciler, *ACPRuntimeWorkspaceBinding)) *speculativeTaskFixture {
 	t.Helper()
 	return newSpeculativeTaskFixtureFor(t, suspendableSubstrateFixture(t), configure)
 }
 
-// newSpeculativeTaskFixtureFor materializes the first turn of fixture's class.
 func newSpeculativeTaskFixtureFor(t *testing.T, fixture *acpClassFixture, configure func(*TaskReconciler, *ACPRuntimeWorkspaceBinding)) *speculativeTaskFixture {
 	t.Helper()
 	ctx := context.Background()
-	// A usable provider reports its adapter, heartbeat, and compatibility.
 	fixture.provider.Status.Adapter = &workspacev1alpha1.ExecutionWorkspaceAdapterStatus{Version: "v1"}
 	fixture.provider.Status.Conditions = append(fixture.provider.Status.Conditions,
 		metav1.Condition{Type: string(workspacev1alpha1.ConditionProviderHeartbeat), Status: metav1.ConditionTrue, ObservedGeneration: fixture.provider.Generation},
@@ -374,19 +354,14 @@ func newSpeculativeTaskFixtureFor(t *testing.T, fixture *acpClassFixture, config
 	plan := ACPRuntimePlan{PoolName: acpTestSessionPoolName, Workspace: binding, Image: base.Spec.Runtime.Image,
 		Digest: harnessv2.ProfileDigest(base.Spec.Runtime.Profile.Digest), Profile: profile}
 	f := &speculativeTaskFixture{r: r, plan: plan, key: types.NamespacedName{Namespace: task.Namespace, Name: acpClassWorkspaceName(task, binding)}}
-	// The creation pass materializes and links the workspace, then waits
-	// for core admission; that is where the Task records its start.
 	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || ready {
 		t.Fatalf("materialize = (%v, %v)", ready, err)
 	}
 	workspace := f.workspace(t)
 	admitTestACPWorkspace(t, r, workspace)
-	// The provider has observed the fresh workspace but reports no allocation.
 	f.patchStatus(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStatePending
 	})
-	// The fake client assigns the UID only at admission; repeat the link the
-	// creation pass makes against a real API server.
 	task = f.reloadTask(t, task)
 	if err := r.linkTaskToACPWorkspace(ctx, task, f.workspace(t)); err != nil {
 		t.Fatal(err)
@@ -457,7 +432,6 @@ func (f *speculativeTaskFixture) start(t *testing.T, task *corev1alpha1.Task, al
 func TestSpeculativeStartRecordsOnceAndActivatesThePool(t *testing.T) {
 	t.Parallel()
 	f := newSpeculativeTaskFixture(t)
-	// The creating write already recorded the start.
 	created := f.workspace(t).Annotations[acpWorkspaceSpeculativeStartAnnotation]
 	f.start(t, f.task, true, "")
 	workspace := f.workspace(t)
@@ -479,8 +453,6 @@ func TestSpeculativeStartRecordsOnceAndActivatesThePool(t *testing.T) {
 		t.Fatal("a speculative start attached the workspace")
 	}
 
-	// The deadline is written once and never extended, including after a
-	// controller restart that loses every in-memory record.
 	recorded := workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation]
 	restarted := &TaskReconciler{Client: f.r.Client, APIReader: f.r.APIReader, Scheme: f.r.Scheme,
 		WorkspaceProviderAPIEnabled: true, WorkspaceSettlementProtected: true}
@@ -489,8 +461,6 @@ func TestSpeculativeStartRecordsOnceAndActivatesThePool(t *testing.T) {
 		t.Fatalf("speculative start rewritten to %q", got)
 	}
 
-	// After expiry the Task neither re-records the start nor reactivates the
-	// pool: it attaches through the ordinary path.
 	f.patch(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Annotations[acpWorkspaceSpeculativeStartAnnotation] = formatACPWorkspaceSpeculativeStart(time.Now().Add(-time.Second), f.task.UID)
 	})
@@ -553,7 +523,6 @@ func TestSpeculativeStartRefusesIneligibleRequests(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			f := newSpeculativeTaskFixture(t)
-			// Start from a workspace whose creating write recorded no start.
 			f.patch(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
 				delete(w.Annotations, acpWorkspaceSpeculativeStartAnnotation)
 			})
@@ -572,8 +541,6 @@ func TestSpeculativeStartRefusesIneligibleRequests(t *testing.T) {
 	}
 }
 
-// bootSpeculativeWorkload stands in for the RuntimePool controller and the
-// provider: the speculative request is published and still booting.
 func (f *speculativeTaskFixture) bootSpeculativeWorkload(t *testing.T) {
 	t.Helper()
 	workspace := f.workspace(t)
@@ -589,8 +556,6 @@ func (f *speculativeTaskFixture) bootSpeculativeWorkload(t *testing.T) {
 	})
 }
 
-// installStagedAttachment stands in for the RuntimePool's publication write:
-// it installs the requester's staged attachment exactly as the pool does.
 func (f *speculativeTaskFixture) installStagedAttachment(t *testing.T, resume bool) *workspacev1alpha1.ExecutionWorkspaceAttachment {
 	t.Helper()
 	workspace := f.workspace(t)
@@ -632,9 +597,6 @@ func TestSpeculativeStartIsClaimedByExactlyOneAttachment(t *testing.T) {
 	f.start(t, f.task, true, "")
 	f.bootSpeculativeWorkload(t)
 
-	// A concurrent continuation of the same Session reaches the booting
-	// workspace first. The requester's staged attachment holds the one-writer
-	// Lease, so the rival waits.
 	rival := f.task.DeepCopy()
 	rival.ObjectMeta = metav1.ObjectMeta{Namespace: f.task.Namespace, Name: "rival-continuation", UID: "rival-continuation-uid"}
 	rival.Status = corev1alpha1.TaskStatus{}
@@ -648,7 +610,6 @@ func TestSpeculativeStartIsClaimedByExactlyOneAttachment(t *testing.T) {
 		t.Fatalf("rival took the attachment staged for the requester: %#v", got.Spec.Attachment)
 	}
 
-	// The publication installs the requester's staged attachment.
 	installed := f.installStagedAttachment(t, false)
 	if installed == nil || installed.TaskRef.UID != f.task.UID || installed.Epoch != 1 {
 		t.Fatalf("installed attachment = %#v, want the requester at epoch 1", installed)
@@ -660,14 +621,12 @@ func TestSpeculativeStartIsClaimedByExactlyOneAttachment(t *testing.T) {
 	if claimed.Spec.Workload == nil || claimed.Spec.Workload.Sequence != 1 {
 		t.Fatal("installing the attachment replaced its request")
 	}
-	// Nothing installs it twice, and the rival stays locked out.
 	if again, err := installableACPWorkspaceAttachmentIntent(ctx, f.r.APIReader, claimed, false, time.Now()); err != nil || again != nil {
 		t.Fatalf("second install = (%#v, %v)", again, err)
 	}
 	if err := validateACPClassWorkspaceAttachmentAttempt(claimed, rival, f.plan.Workspace, f.plan.PoolName, time.Now()); !errors.Is(err, ErrWorkspaceAttachmentLocked) {
 		t.Fatalf("rival attach error = %v, want the one-writer lock", err)
 	}
-	// The requester completes its handshake on the installed attachment.
 	acknowledgeTestACPWorkspaceAttachment(t, f.r, claimed)
 	if _, ready, err := f.r.ensureACPClassWorkspace(ctx, f.task, f.plan); err != nil || !ready {
 		t.Fatalf("requester ensure = (%v, %v), want ready on the installed attachment", ready, err)
@@ -678,8 +637,6 @@ func TestSpeculativeStartIsClaimedByExactlyOneAttachment(t *testing.T) {
 	}
 }
 
-// installableACPWorkspaceAttachmentIntent rechecks every fence of the staged
-// attachment against the exact object version the publication writes.
 func TestStagedAttachmentInstallRechecksEveryFence(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -779,9 +736,6 @@ func TestSpeculativeStartAttachmentWaitsForAdmissionAndProviderObservation(t *te
 	}
 }
 
-// A Task cancelled after its speculative start settles exactly like a
-// requester that never attached: an empty first-turn workspace is deleted,
-// and its linked pool is torn down with it.
 func TestCancelledFirstTurnAfterSpeculativeStartDeletesTheWorkspace(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -796,7 +750,6 @@ func TestCancelledFirstTurnAfterSpeculativeStartDeletesTheWorkspace(t *testing.T
 	if deleted.DeletionTimestamp.IsZero() {
 		t.Fatal("settlement kept the empty speculative workspace")
 	}
-	// The staged attachment it never installed is released with it.
 	if _, present := deleted.Annotations[acpWorkspaceAttachmentIntentAnnotation]; present {
 		t.Fatal("settlement kept the staged attachment")
 	}
@@ -815,15 +768,11 @@ func TestCancelledFirstTurnAfterSpeculativeStartDeletesTheWorkspace(t *testing.T
 	}
 }
 
-// suspendAfterFirstTurn stands in for the first Task's executed, committed
-// turn and its data-only suspension, leaving the stopped pool in place.
 func (f *speculativeTaskFixture) suspendAfterFirstTurn(t *testing.T) *corev1alpha1.RuntimePool {
 	t.Helper()
 	return f.suspendAfterFirstTurnWith(t, "first-rev")
 }
 
-// suspendAfterFirstTurnWith suspends the first turn under revision; only a
-// digest revision proves retained data a speculative resume may publish from.
 func (f *speculativeTaskFixture) suspendAfterFirstTurnWith(t *testing.T, revision string) *corev1alpha1.RuntimePool {
 	t.Helper()
 	ctx := context.Background()
@@ -850,7 +799,6 @@ func (f *speculativeTaskFixture) suspendAfterFirstTurnWith(t *testing.T, revisio
 		delete(w.Annotations, acpWorkspaceSpeculativeStartAnnotation)
 		delete(w.Annotations, acpWorkspaceAttachmentIntentAnnotation)
 	})
-	// The first turn's staged attachment was installed and later revoked.
 	f.releaseFirstTurnAttachment(t)
 	workspace = f.workspace(t)
 	admitTestACPWorkspace(t, f.r, workspace)
@@ -890,8 +838,6 @@ func (f *speculativeTaskFixture) releaseFirstTurnAttachment(t *testing.T) {
 	}
 }
 
-// Without verified retained data the continuation flips the workspace itself,
-// as before ADR 0057's RuntimePool-driven resume.
 func TestSpeculativeResumeStartsAtTheFlipAndRetiresWhenTheContinuationIsCancelled(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -899,7 +845,6 @@ func TestSpeculativeResumeStartsAtTheFlipAndRetiresWhenTheContinuationIsCancelle
 	pool := f.suspendAfterFirstTurn(t)
 	continuation := f.continuation(t, "speculative-continuation")
 
-	// The cold-resume flip and the speculative start land in the same pass.
 	if _, ready, err := f.r.ensureACPClassWorkspace(ctx, continuation, f.plan); err != nil || ready {
 		t.Fatalf("resume flip = (%v, %v), want pending", ready, err)
 	}
@@ -924,8 +869,6 @@ func TestSpeculativeResumeStartsAtTheFlipAndRetiresWhenTheContinuationIsCancelle
 		t.Fatal("the open speculative start was scaled down before the attachment")
 	}
 
-	// The continuation is cancelled before it attaches. Its settlement
-	// applies its frozen Suspend to the never-claimed runtime.
 	continuation = f.reloadTask(t, continuation)
 	if done, err := f.r.settleACPClassWorkspace(ctx, continuation); err != nil || !done {
 		t.Fatalf("settle cancelled continuation = (%v, %v), want completion", done, err)
@@ -943,8 +886,6 @@ func TestSpeculativeResumeStartsAtTheFlipAndRetiresWhenTheContinuationIsCancelle
 	if active, _ := f.pool(t); active.Spec.DesiredReplicas != 0 {
 		t.Fatal("the unclaimed speculative runtime kept its pool after settlement")
 	}
-	// The cancelled Task can never attach the resuspended workspace, and a
-	// repeated settlement is a no-op.
 	if err := validateACPClassWorkspaceAttachmentAttempt(resuspended, continuation, f.plan.Workspace, f.plan.PoolName, time.Now()); err == nil {
 		t.Fatal("a cancelled requester could attach after settlement")
 	}

@@ -34,14 +34,12 @@ func TestTruncateMessages_EmptyInput(t *testing.T) {
 
 func TestTruncateMessages_DropsMiddleKeepsFirstAndRecent(t *testing.T) {
 	msgs := []llm.Message{
-		{Role: "user", Content: "original request"},            // ~4 tokens
-		{Role: "assistant", Content: strings.Repeat("a", 100)}, // ~25 tokens — will be dropped
-		{Role: "user", Content: strings.Repeat("b", 100)},      // ~25 tokens — will be dropped
-		{Role: "assistant", Content: strings.Repeat("c", 100)}, // ~25 tokens
-		{Role: "user", Content: "latest question"},             // ~4 tokens
+		{Role: "user", Content: "original request"},
+		{Role: "assistant", Content: strings.Repeat("a", 100)},
+		{Role: "user", Content: strings.Repeat("b", 100)},
+		{Role: "assistant", Content: strings.Repeat("c", 100)},
+		{Role: "user", Content: "latest question"},
 	}
-	// Budget: enough for first + note + last two, but not all messages
-	// Total ~83 tokens. Budget 60 forces truncation but leaves room for note + recent blocks.
 	result := llm.TruncateMessages(msgs, 60)
 
 	if result[0].Content != "original request" {
@@ -69,18 +67,13 @@ func TestTruncateMessages_ToolCallsKeptAtomic(t *testing.T) {
 		{Role: "assistant", Content: "done"},
 		{Role: "user", Content: "now do more"},
 	}
-	// Budget large enough to keep everything
 	result := llm.TruncateMessages(msgs, 100000)
 	if len(result) != 5 {
 		t.Fatalf("expected 5 messages, got %d", len(result))
 	}
 
-	// Budget that forces dropping the tool call block
-	// first msg (~3 tokens) + last two (~5 tokens each) = ~13 tokens
-	// tool call block is ~4 tokens for assistant + ~3 for result = ~7 tokens
 	result = llm.TruncateMessages(msgs, 14)
 
-	// Verify tool call and tool result are either both present or both absent
 	hasToolCall := false
 	hasToolResult := false
 	for _, m := range result {
@@ -95,7 +88,6 @@ func TestTruncateMessages_ToolCallsKeptAtomic(t *testing.T) {
 		t.Error("tool call and tool result should be kept or dropped together")
 	}
 
-	// Verify truncation note content when truncation occurred
 	for _, m := range result {
 		if m.Role == oaiRoleSystem {
 			if !strings.Contains(m.Content, "truncated") {

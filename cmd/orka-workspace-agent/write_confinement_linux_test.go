@@ -37,10 +37,6 @@ func TestCommandWriteConfinementHelper(t *testing.T) {
 	outside := os.Getenv("ORKA_TEST_CONFINEMENT_OUTSIDE")
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	// Confinement is irreversible and applies to this process, so the test framework's own
-	// teardown (coverage flush, temp directory cleanup) would fail once it is applied and a
-	// passing helper would still exit non-zero. Report the outcome and exit before returning
-	// to the framework.
 	if err := checkCommandWriteConfinement(allowed, outside); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

@@ -13,7 +13,6 @@ import (
 
 var _ store.PublicationStore = (*Store)(nil)
 
-// CreatePublication persists immutable clean-room publication intent in Preparing.
 func (s *Store) CreatePublication(ctx context.Context, publication *store.Publication, fence store.ControllerEpochFence) (*store.Publication, error) {
 	normalized, fence, err := store.NormalizePublicationForCreate(publication, fence)
 	if err != nil {
@@ -87,7 +86,6 @@ func (s *Store) CreatePublication(ctx context.Context, publication *store.Public
 	return &normalized, nil
 }
 
-// GetPublication returns a publication and its exact receipts.
 func (s *Store) GetPublication(ctx context.Context, id string) (*store.Publication, error) {
 	id = strings.TrimSpace(id)
 	if err := store.ValidateControlIdentifier("publication ID", id); err != nil {
@@ -100,8 +98,6 @@ func (s *Store) GetPublication(ctx context.Context, id string) (*store.Publicati
 	return &publication, nil
 }
 
-// SetPublicationPRIntent persists the exact PR tuple after independent remote
-// verification has fixed the current head and before the first forge call.
 func (s *Store) SetPublicationPRIntent(ctx context.Context, request store.SetPublicationPRIntentRequest) (*store.Publication, error) {
 	request.ID = strings.TrimSpace(request.ID)
 	if err := store.ValidateControlIdentifier("publication ID", request.ID); err != nil {
@@ -185,8 +181,6 @@ func (s *Store) SetPublicationPRIntent(ctx context.Context, request store.SetPub
 	return &publication, nil
 }
 
-// SetPublicationPRReceipt commits the exact forge result before the
-// Publication leaves Verifying.
 func (s *Store) SetPublicationPRReceipt(ctx context.Context, request store.SetPublicationPRReceiptRequest) (*store.Publication, error) {
 	request.ID = strings.TrimSpace(request.ID)
 	if err := store.ValidateControlIdentifier("publication ID", request.ID); err != nil {
@@ -266,9 +260,6 @@ func (s *Store) SetPublicationPRReceipt(ctx context.Context, request store.SetPu
 	return &publication, nil
 }
 
-// TransitionPublication applies a fenced generation/version/state CAS and
-// validates that the persisted receipt exactly matches immutable intent.
-//
 //nolint:gocyclo // Receipt-specific validation and the publication CAS intentionally share one boundary.
 func (s *Store) TransitionPublication(ctx context.Context, transition store.PublicationTransition) (*store.Publication, error) {
 	transition.ID = strings.TrimSpace(transition.ID)

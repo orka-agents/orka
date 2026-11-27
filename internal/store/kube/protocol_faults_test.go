@@ -19,28 +19,15 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// These tests run the Kubernetes half of the outbox (P3) and Session cleanup
-// (P4) protocols over a store half that loses responses or delays requests,
-// and check that each protocol converges on one outcome without repeating a
-// side effect, and that a request the replaced controller issued cannot
-// change data once its successor took over.
-
 const protocolInstallation = "installation-protocol-faults"
 
-// storeFault is what faultyStoreHalf does with one store step.
 type storeFault int
 
 const (
-	// faultLose commits the step and then reports ErrOutcomeUnknown, as the
-	// storage client does when it cannot settle an operation.
 	faultLose storeFault = iota + 1
-	// faultDelay keeps the step in flight and reports ErrOutcomeUnknown; the
-	// test delivers it later with deliverDelayed.
 	faultDelay
 )
 
-// faultyStoreHalf is the store half one controller's Kubernetes store uses:
-// its storage client, with scripted faults for the protocol store steps.
 type faultyStoreHalf struct {
 	SQLitePersistence
 
@@ -66,7 +53,6 @@ func (f *faultyStoreHalf) count(method string) int {
 	return f.calls[method]
 }
 
-// step runs one store step under its scripted fault.
 func (f *faultyStoreHalf) step(method string, call func() error) error {
 	f.mu.Lock()
 	f.calls[method]++
@@ -89,7 +75,6 @@ func (f *faultyStoreHalf) step(method string, call func() error) error {
 	return nil
 }
 
-// deliverDelayed delivers every delayed step and returns their errors.
 func (f *faultyStoreHalf) deliverDelayed() []error {
 	f.mu.Lock()
 	delayed := f.delayed
@@ -156,9 +141,6 @@ func (f *faultyStoreHalf) CompleteSessionCleanup(ctx context.Context, request co
 	})
 }
 
-// fixedFence is the fence source of one controller's storage client: the
-// fence that controller acquired, which it keeps using until it learns it
-// was replaced.
 type fixedFence struct {
 	datasetID string
 	fence     storagev1.ControllerEpochFence
@@ -168,8 +150,6 @@ func (f fixedFence) WriteFence(context.Context, string) (string, storagev1.Contr
 	return f.datasetID, f.fence, nil
 }
 
-// protocolController is one controller: its Kubernetes store over its own
-// storage client and fence.
 type protocolController struct {
 	store   *Store
 	storage *storageclient.Client
@@ -204,9 +184,6 @@ func (c *runtimeCleanupCounter) count() int {
 	return c.calls
 }
 
-// newProtocolFaultFixture starts the replaced controller at epoch 1, with a
-// SQLite dataset that, as in production, refuses writes without an envelope
-// and was advanced to epoch 1.
 func newProtocolFaultFixture(t *testing.T) *protocolFaultFixture {
 	t.Helper()
 	ctx := context.Background()
@@ -246,8 +223,6 @@ func (f *protocolFaultFixture) controller(t *testing.T, fence controlstore.Contr
 	return &protocolController{store: kubeStore, storage: storage, half: half, fence: fence}
 }
 
-// advanceDataset advances the dataset to the epoch Kubernetes holds for
-// fence, as the epoch manager does before it opens the fence.
 func (f *protocolFaultFixture) advanceDataset(t *testing.T, fence controlstore.ControllerEpochFence) {
 	t.Helper()
 	ctx := context.Background()
@@ -269,8 +244,6 @@ func (f *protocolFaultFixture) advanceDataset(t *testing.T, fence controlstore.C
 	}
 }
 
-// takeover replaces the controller: the successor wins the Kubernetes
-// compare-and-swap and advances the dataset before it writes.
 func (f *protocolFaultFixture) takeover(t *testing.T) {
 	t.Helper()
 	epoch, err := f.replaced.store.CompareAndSwapControllerEpoch(context.Background(), controlstore.ControllerEpochCAS{
@@ -306,9 +279,6 @@ func protocolProjection(id string) *controlstore.OutboxProjection {
 	}
 }
 
-// P3: a lost enqueue, claim or completion response converges on one
-// delivered projection that was claimed and completed exactly as often as the
-// protocol requires.
 func TestOutboxProtocolConvergesAfterLostResponses(t *testing.T) {
 	ctx := context.Background()
 	fixture := newProtocolFaultFixture(t)
@@ -331,8 +301,6 @@ func TestOutboxProtocolConvergesAfterLostResponses(t *testing.T) {
 	if _, err := controller.store.ClaimOutboxProjections(ctx, claim); !errors.Is(err, controlstore.ErrOutcomeUnknown) {
 		t.Fatalf("claim with a lost response = %v, want ErrOutcomeUnknown", err)
 	}
-	// The lost claim holds its lease: a new claim before it expires finds
-	// nothing, and one after it expires reclaims the projection.
 	early := claim
 	early.Now = testNow.Add(30 * time.Second)
 	if claimed, err := controller.store.ClaimOutboxProjections(ctx, early); err != nil || len(claimed) != 0 {
@@ -370,8 +338,6 @@ func TestOutboxProtocolConvergesAfterLostResponses(t *testing.T) {
 	}
 }
 
-// P3: a completion the replaced controller issued that lands after the
-// takeover is refused, and the successor's claim and completion stand.
 func TestOutboxProtocolRefusesCompletionDelayedPastTakeover(t *testing.T) {
 	ctx := context.Background()
 	fixture := newProtocolFaultFixture(t)
@@ -417,8 +383,6 @@ func TestOutboxProtocolRefusesCompletionDelayedPastTakeover(t *testing.T) {
 	if err != nil || completed.State != controlstore.OutboxProjectionDelivered || completed.DeliveryDigest != testDigest("delivered-b") {
 		t.Fatalf("successor completion = %#v, %v", completed, err)
 	}
-	// A step the replaced controller starts after the takeover is refused by
-	// the Kubernetes epoch check before it reaches the store.
 	storeSteps := replaced.half.count("CompleteOutboxProjectionRecord")
 	if _, err := replaced.store.CompleteOutboxProjection(ctx, controlstore.CompleteOutboxProjectionRequest{
 		ID: "p3-delayed", Fence: replaced.fence, ExpectedVersion: completed.Version, LeaseOwner: "projector-a",
@@ -433,8 +397,6 @@ func TestOutboxProtocolRefusesCompletionDelayedPastTakeover(t *testing.T) {
 	}
 }
 
-// seedProtocolSession creates a Session with a transcript, a control record,
-// its coordination Lease and a Session-owned BranchClaim.
 func seedProtocolSession(t *testing.T, fixture *protocolFaultFixture, name string) controlstore.ReclaimSessionRequest {
 	t.Helper()
 	ctx := context.Background()
@@ -465,8 +427,6 @@ func seedProtocolSession(t *testing.T, fixture *protocolFaultFixture, name strin
 	}
 }
 
-// requireSessionReclaimed checks that the Session's Kubernetes records and
-// transcript are gone and that one completion records the operation.
 func requireSessionReclaimed(t *testing.T, fixture *protocolFaultFixture, request controlstore.ReclaimSessionRequest) {
 	t.Helper()
 	ctx := context.Background()
@@ -496,9 +456,6 @@ func requireSessionReclaimed(t *testing.T, fixture *protocolFaultFixture, reques
 	}
 }
 
-// P4: lost preparation and completion responses converge on one cleanup:
-// the runtime is retired once, and running the cleanup again after it
-// completed finds the completion and stops.
 func TestSessionCleanupProtocolConvergesAfterLostResponses(t *testing.T) {
 	for _, step := range []string{"PrepareSessionCleanup", "CompleteSessionCleanup"} {
 		t.Run(step, func(t *testing.T) {
@@ -531,9 +488,6 @@ func TestSessionCleanupProtocolConvergesAfterLostResponses(t *testing.T) {
 	}
 }
 
-// P4: a completion the replaced controller issued after deleting the
-// Kubernetes records, which lands after the takeover, is refused while the
-// intent is pending, and the successor resumes the cleanup from the intent.
 func TestSessionCleanupProtocolRefusesCompletionDelayedPastTakeover(t *testing.T) {
 	ctx := context.Background()
 	fixture := newProtocolFaultFixture(t)
@@ -563,9 +517,6 @@ func TestSessionCleanupProtocolRefusesCompletionDelayedPastTakeover(t *testing.T
 	}
 }
 
-// P4: a preparation the replaced controller issued that lands after the
-// successor ran the same cleanup to completion records no new intent, which
-// would otherwise block the reclaimed name again.
 func TestSessionCleanupProtocolRefusesPreparationDelayedPastTakeover(t *testing.T) {
 	ctx := context.Background()
 	fixture := newProtocolFaultFixture(t)

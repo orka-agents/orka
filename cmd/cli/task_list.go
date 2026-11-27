@@ -20,7 +20,6 @@ import (
 	"github.com/orka-agents/orka/internal/cli/client"
 )
 
-// taskListOptions holds the flags of `orka task list`.
 type taskListOptions struct {
 	status        string
 	transactionID string
@@ -110,8 +109,6 @@ With --watch the table is reprinted whenever a Task appears or changes phase.`,
 	return cmd
 }
 
-// parseSince accepts a duration ("10m") or an RFC 3339 timestamp and returns
-// the earliest creation time to keep. An empty value keeps everything.
 func parseSince(value string, now time.Time) (time.Time, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -129,10 +126,6 @@ func parseSince(value string, now time.Time) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("invalid --since %q: expected a duration such as 10m or an RFC 3339 timestamp", value)
 }
 
-// fetchTaskList lists tasks with the server-side selector and the
-// client-side status, transaction, and since filters. Any client-side
-// filter switches to the paged scan so a match on a later page is not
-// missed.
 func fetchTaskList(ctx context.Context, c *client.Client, opts taskListOptions, since time.Time) ([]client.TaskSummary, error) {
 	filtered := opts.status != "" || opts.transactionID != "" || !since.IsZero()
 	if !filtered {
@@ -167,9 +160,6 @@ func fetchTaskList(ctx context.Context, c *client.Client, opts taskListOptions, 
 	return tasks, nil
 }
 
-// taskListStateKey describes the set of Tasks and their phases, so a watch
-// reprints when a Task appears, disappears, or changes phase, and not when
-// its age ticks over.
 func taskListStateKey(tasks []client.TaskSummary) string {
 	sorted := append([]client.TaskSummary(nil), tasks...)
 	sortTasksByCreation(sorted)
@@ -180,9 +170,6 @@ func taskListStateKey(tasks []client.TaskSummary) string {
 	return strings.Join(parts, "\n")
 }
 
-// sortTasksByCreation orders rows oldest first so new Tasks appear at the
-// bottom. Rows without a parseable timestamp keep their relative order at
-// the end.
 func sortTasksByCreation(tasks []client.TaskSummary) {
 	sort.SliceStable(tasks, func(i, j int) bool {
 		ti, errI := time.Parse(time.RFC3339, tasks[i].Age)

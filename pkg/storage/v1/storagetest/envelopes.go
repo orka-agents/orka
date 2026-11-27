@@ -14,11 +14,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// envelope_gen.go holds the generated write methods of envelopedState and
-// envelopedArtifacts; `make generate` writes it with the storage client's
-// decorators, from the same provider interfaces and method catalog.
-
-// Option configures RunState and RunArtifacts.
 type Option func(*suiteOptions)
 
 type suiteOptions struct {
@@ -26,32 +21,13 @@ type suiteOptions struct {
 	maintenance               *MaintenanceHarness
 	durability                *DurabilityHarness
 	parallel                  bool
-	// recomputedDigests names the write methods whose request digests a
-	// transport recomputes.
-	recomputedDigests map[string]bool
+	recomputedDigests         map[string]bool
 }
 
-// Parallel runs the suite's families, including the ones a harness option
-// enables, in parallel with each other. Cases within a family still run in
-// order. The factory must then be safe for concurrent use, and each dataset
-// it returns must stay isolated from the others, as a schema per case on a
-// shared database is; a harness then acts on its dataset while the other
-// families use theirs. A harness's effects must stay just as isolated: one
-// that restarts or fails over a database the other families share would
-// disconnect them, so a suite with such a harness omits Parallel.
 func Parallel() Option {
 	return func(o *suiteOptions) { o.parallel = true }
 }
 
-// RecomputesRequestDigests runs the suite against a provider that serves the
-// named methods across a process boundary, through a transport that
-// recomputes each write's request digest from the decoded request and
-// refuses a mismatch with ErrValidation, as [storagev1.WriteEnvelope]
-// requires. A retry of one of those writes that reuses an operation ID with a
-// digest that does not match its arguments is then refused by the transport
-// before the provider compares it with the stored receipt, so the receipt
-// cases expect ErrValidation where an in-process provider returns
-// ErrDuplicateMismatch. Run the suite in process too, to cover that check.
 func RecomputesRequestDigests(methods ...string) Option {
 	return func(o *suiteOptions) {
 		if o.recomputedDigests == nil {
@@ -63,12 +39,6 @@ func RecomputesRequestDigests(methods ...string) Option {
 	}
 }
 
-// ProviderAttachesEnvelopes runs the suite against a provider that attaches
-// its own write envelopes, such as a client that wraps a provider. It skips
-// the suite's envelope wrapper and raw-provider missing-envelope rejection
-// cases, because attaching envelopes is this provider's responsibility.
-// Otherwise the suite attaches envelopes to ordinary writes and separately
-// tests missing-envelope rejection against the raw provider.
 func ProviderAttachesEnvelopes() Option {
 	return func(o *suiteOptions) { o.providerAttachesEnvelopes = true }
 }
@@ -81,55 +51,33 @@ func collectOptions(options []Option) suiteOptions {
 	return collected
 }
 
-// writeCall describes one call of a contract write method the suite sends.
 type writeCall struct {
 	method   string
 	contract string
-	// args are the arguments after the context, which the request digest
-	// covers.
-	args []any
-	// fence is the controller epoch fence the method takes as a parameter,
-	// or nil; the envelope carries it.
-	fence *storagev1.ControllerEpochFence
+	args     []any
+	fence    *storagev1.ControllerEpochFence
 }
 
-// envelopedState attaches a suite envelope to every state.v1 write sent
-// without one. Its write methods are generated; reads and administrative
-// methods are the provider's own.
 type envelopedState struct {
 	storagev1.StateProvider
 	ops *suiteEnvelopes
 }
 
-// envelopedArtifacts attaches a suite envelope to every artifacts.v1 write
-// sent without one, as envelopedState does.
 type envelopedArtifacts struct {
 	storagev1.ArtifactProvider
 	ops *suiteEnvelopes
 }
 
-// stateWithArtifacts preserves the optional artifact capability of a state
-// provider without shadowing its shared administrative methods. Both write
-// surfaces below use envelope-aware forwarding.
 type stateWithArtifacts struct {
 	storagev1.StateProvider
 	storagev1.ArtifactStore
 }
 
-// suiteEnvelopes builds the envelopes the suite attaches: the provider's
-// dataset, the controller epoch the dataset holds when the write is sent, a
-// new operation ID, the request digest, the current time and the next
-// sequence. A dataset that holds no epoch is given suiteFence's epoch first,
-// so a case that writes without managing epochs runs as the current
-// controller would.
 type suiteEnvelopes struct {
 	describer storagev1.ProviderDescriber
 	epochs    storagev1.ControllerEpochAdvancer
-	// establish gives a dataset that holds no epoch suiteFence's epoch.
 	establish func(ctx context.Context, datasetID string) error
-	// advanced records that establish advanced the dataset, which records
-	// suiteInstance on it at generation 0 without a binding record.
-	advanced atomic.Bool
+	advanced  atomic.Bool
 
 	mu        sync.Mutex
 	datasetID string
@@ -137,8 +85,6 @@ type suiteEnvelopes struct {
 
 func wrapState(provider storagev1.StateProvider) storagev1.StateProvider {
 	ops := &suiteEnvelopes{describer: provider, epochs: provider}
-	// SyncControllerEpochMirror binds no installation, so a case that
-	// manages epochs itself can still synchronize or advance the dataset.
 	ops.establish = func(ctx context.Context, _ string) error {
 		return provider.SyncControllerEpochMirror(ctx, mirroredEpoch(suiteFence.Epoch, suiteFence.HolderID))
 	}
@@ -156,18 +102,11 @@ func wrapState(provider storagev1.StateProvider) storagev1.StateProvider {
 func wrapArtifacts(provider storagev1.ArtifactProvider) storagev1.ArtifactProvider {
 	ops := &suiteEnvelopes{describer: provider, epochs: provider}
 	if mirror, ok := provider.(storagev1.ControllerEpochMirror); ok {
-		// A provider that also serves the state mirror gets the epoch as
-		// wrapState gives it, binding no installation, so the dataset
-		// binding cases still find the dataset unbound.
 		ops.establish = func(ctx context.Context, _ string) error {
 			return mirror.SyncControllerEpochMirror(ctx, mirroredEpoch(suiteFence.Epoch, suiteFence.HolderID))
 		}
 		return envelopedArtifacts{ArtifactProvider: provider, ops: ops}
 	}
-	// Otherwise the advance repeats exactly what the write catalog's own
-	// advance stores, so the two never conflict. It records the suite's
-	// installation on an unbound dataset, as every advance does, and the
-	// dataset binding cases account for it (see suiteAdvanced).
 	ops.establish = func(ctx context.Context, datasetID string) error {
 		_, err := provider.AdvanceControllerEpoch(ctx, storagev1.AdvanceControllerEpochRequest{
 			DatasetID: datasetID, Epoch: mirroredEpoch(suiteFence.Epoch, suiteFence.HolderID), InstallationID: suiteInstance,
@@ -180,17 +119,11 @@ func wrapArtifacts(provider storagev1.ArtifactProvider) storagev1.ArtifactProvid
 	return envelopedArtifacts{ArtifactProvider: provider, ops: ops}
 }
 
-// suiteAdvanced reports whether the suite gave provider's dataset its first
-// controller epoch through AdvanceControllerEpoch, which records
-// suiteInstance on the dataset at generation 0 without a binding record. It
-// does so only for an artifacts-only provider, which serves no state mirror.
 func suiteAdvanced(provider any) bool {
 	wrapped, ok := provider.(envelopedArtifacts)
 	return ok && wrapped.ops.advanced.Load()
 }
 
-// stateFactory and artifactFactory wrap a factory's providers unless the
-// provider attaches its own envelopes.
 func stateFactory(newProvider StateFactory, options suiteOptions) StateFactory {
 	if options.providerAttachesEnvelopes {
 		return newProvider
@@ -205,8 +138,6 @@ func artifactFactory(newProvider ArtifactFactory, options suiteOptions) Artifact
 	return func(t *testing.T) storagev1.ArtifactProvider { return wrapArtifacts(newProvider(t)) }
 }
 
-// run sends one write. A context that already carries an envelope belongs to
-// a case that tests envelopes itself, and the write runs with it unchanged.
 func (o *suiteEnvelopes) run(ctx context.Context, call writeCall, attempt func(context.Context) error) error {
 	if _, ok := storagev1.WriteEnvelopeFrom(ctx); ok {
 		return attempt(ctx)
@@ -234,9 +165,6 @@ func (o *suiteEnvelopes) run(ctx context.Context, call writeCall, attempt func(c
 	}))
 }
 
-// current returns the dataset ID and the fence of the epoch the dataset
-// holds, giving it suiteFence's epoch first when it holds none. Only that
-// first step is serialized, so concurrent cases still write concurrently.
 func (o *suiteEnvelopes) current(ctx context.Context) (string, storagev1.ControllerEpochFence, error) {
 	o.mu.Lock()
 	datasetID := o.datasetID

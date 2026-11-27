@@ -16,10 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// runMessageBudget checks the byte limits on inter-agent messages: a message's
-// content is capped when it is sent, and a batch is cut short by its content
-// bytes before any message in it is marked read, so a consumed batch always
-// fits one response.
 func runMessageBudget(t *testing.T, newProvider StateFactory) {
 	require.LessOrEqual(t, storagev1.MaxMessageContentBytes, storagev1.MaxMessageBatchBytes,
 		"any stored message fits a batch of its own")
@@ -27,7 +23,6 @@ func runMessageBudget(t *testing.T, newProvider StateFactory) {
 	t.Run("content is capped in bytes when a message is sent", func(t *testing.T) {
 		provider := newProvider(t)
 		ctx := t.Context()
-		// A two-byte rune makes the provider count bytes, not characters.
 		atLimit := strings.Repeat("é", storagev1.MaxMessageContentBytes/2)
 		require.Len(t, atLimit, storagev1.MaxMessageContentBytes)
 		sent := inboxMessage(atLimit)
@@ -89,8 +84,6 @@ func runMessageBudget(t *testing.T, newProvider StateFactory) {
 			t.Run(fmt.Sprintf("over by %d", overBy), func(t *testing.T) {
 				provider := newProvider(t)
 				ctx := t.Context()
-				// Full messages, then a short one that brings the total to the
-				// budget, then a one-byte message, overBy bytes longer.
 				sizes := []int{}
 				remaining := storagev1.MaxMessageBatchBytes
 				for remaining > storagev1.MaxMessageContentBytes {
@@ -158,8 +151,6 @@ func runMessageBudget(t *testing.T, newProvider StateFactory) {
 		require.NoError(t, provider.SendMessage(ctx, sent))
 
 		over := atLimit + "x"
-		// Two messages with a sender name this large each fit one request, but
-		// a batch of both would not fit one response.
 		huge := strings.Repeat("w", 9<<20)
 		for name, set := range map[string]func(*storagev1.Message){
 			"namespace":         func(m *storagev1.Message) { m.Namespace = over },
@@ -202,14 +193,10 @@ func runMessageBudget(t *testing.T, newProvider StateFactory) {
 	})
 }
 
-// budgetContent returns size bytes of content that differ from message to
-// message by index.
 func budgetContent(index, size int) string {
 	return strings.Repeat(string(rune('a'+index%26)), size)
 }
 
-// budgetMessageIDs returns the IDs of messages, so a failed comparison does not
-// print megabytes of content.
 func budgetMessageIDs(messages []storagev1.Message) []int64 {
 	ids := make([]int64, len(messages))
 	for i, message := range messages {

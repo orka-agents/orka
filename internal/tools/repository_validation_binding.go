@@ -33,9 +33,7 @@ const (
 	repositoryValidationBindingSummary         = "Repository validation command bound"
 	repositoryValidationBindingActor           = "controller"
 	repositoryValidationDefaultCredentialKey   = "token"
-	// RepositoryValidationCommandSecretKey is the only data key accepted in a
-	// controller-owned repository validation command Secret.
-	RepositoryValidationCommandSecretKey = "command"
+	RepositoryValidationCommandSecretKey       = "command"
 )
 
 var errRepositoryValidationBindingConflict = errors.New("repository validation command binding conflict")
@@ -60,23 +58,16 @@ type repositoryValidationWorkspaceIdentity struct {
 	ReadCredentialRef *corev1alpha1.WorkspaceCredentialReference `json:"readCredentialRef,omitempty"`
 }
 
-// IsRepositoryValidationCommandBindingInvalid reports whether validation
-// failed because the durable binding is missing or conflicts with the Task.
-// Other errors may be transient storage failures.
 func IsRepositoryValidationCommandBindingInvalid(err error) bool {
 	return errors.Is(err, errRepositoryValidationBindingMissing) ||
 		errors.Is(err, errRepositoryValidationBindingConflict)
 }
 
-// RepositoryValidationBindingStore is the least-privilege durable dependency
-// used to bind a review workspace and its validation command before execution.
 type RepositoryValidationBindingStore interface {
 	CreateMonitorEvent(context.Context, *store.MonitorEvent) error
 	ListMonitorEvents(context.Context, store.MonitorEventFilter) ([]store.MonitorEvent, string, error)
 }
 
-// RepositoryValidationReviewBindingEvent returns the append-only event that
-// freezes the review workspace before the review Task can call run_validation.
 func RepositoryValidationReviewBindingEvent(reviewTask *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor) (*store.MonitorEvent, error) {
 	if reviewTask == nil || monitor == nil || reviewTask.Spec.Workspace == nil {
 		return nil, fmt.Errorf("review task, repository monitor, and review workspace are required")
@@ -120,8 +111,6 @@ func RepositoryValidationReviewBindingEvent(reviewTask *corev1alpha1.Task, monit
 	}, nil
 }
 
-// EnsureRepositoryValidationReviewBinding persists the immutable review
-// workspace binding before the controller creates or adopts the review Task.
 func EnsureRepositoryValidationReviewBinding(ctx context.Context, bindingStore RepositoryValidationBindingStore, expected *store.MonitorEvent) error {
 	if bindingStore == nil || expected == nil {
 		return fmt.Errorf("repository validation review binding store is unavailable")
@@ -137,8 +126,6 @@ func EnsureRepositoryValidationReviewBinding(ctx context.Context, bindingStore R
 	return fmt.Errorf("persist repository validation review binding: %v; verification failed: %w", createErr, verifyErr)
 }
 
-// ValidateRepositoryValidationReviewBinding verifies that the live review Task
-// still has the controller-frozen workspace, monitor, image, and head identity.
 func ValidateRepositoryValidationReviewBinding(ctx context.Context, bindingStore RepositoryValidationBindingStore, reviewTask *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor) error {
 	expected, err := RepositoryValidationReviewBindingEvent(reviewTask, monitor)
 	if err != nil {
@@ -228,9 +215,6 @@ func repositoryValidationWorkspaceDigest(workspace *corev1alpha1.WorkspaceConfig
 
 func repositoryValidationReviewTaskSpecDigest(spec corev1alpha1.TaskSpec) (string, error) {
 	normalized := spec.DeepCopy()
-	// CRD defaulting fills these scheduling-only fields after creation. They do
-	// not affect a one-shot review Task, so normalize them before hashing while
-	// retaining every capability-bearing field in the digest.
 	normalized.ConcurrencyPolicy = ""
 	normalized.StartingDeadlineSeconds = nil
 	normalized.SuccessfulRunsHistoryLimit = nil
@@ -261,8 +245,6 @@ type repositoryValidationCommandBinding struct {
 	CommandDigest      string `json:"commandDigest"`
 }
 
-// RepositoryValidationCommandBinding is the controller-owned execution
-// provenance persisted before a repository validation Task is created.
 type RepositoryValidationCommandBinding struct {
 	MonitorNamespace   string
 	MonitorName        string
@@ -278,8 +260,6 @@ type RepositoryValidationCommandBinding struct {
 	CommandDigest      string
 }
 
-// FindRepositoryValidationCommandBinding finds the durable binding for one
-// deterministic validation Task name. A conflicting duplicate fails closed.
 func FindRepositoryValidationCommandBinding(ctx context.Context, bindingStore RepositoryValidationBindingStore, namespace, validationTaskName string) (*RepositoryValidationCommandBinding, error) {
 	if bindingStore == nil {
 		return nil, fmt.Errorf("repository validation command binding store is unavailable")
@@ -343,8 +323,6 @@ func FindRepositoryValidationCommandBinding(ctx context.Context, bindingStore Re
 	}
 }
 
-// MatchesReview reports whether a durable binding belongs to the exact review
-// Task and RepositoryMonitor that requested it.
 func (b *RepositoryValidationCommandBinding) MatchesReview(parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, image, headSHA string) bool {
 	if b == nil || parent == nil || monitor == nil {
 		return false
@@ -361,22 +339,14 @@ func (b *RepositoryValidationCommandBinding) MatchesReview(parent *corev1alpha1.
 		b.HeadSHA == strings.TrimSpace(headSHA)
 }
 
-// MatchesCommand reports whether command is the value accepted before the
-// validation Task was created.
 func (b *RepositoryValidationCommandBinding) MatchesCommand(command string) bool {
 	return b != nil && b.CommandDigest == RepositoryValidationCommandDigest(command)
 }
 
-// RepositoryValidationCommandSecretName returns the deterministic Secret name
-// used for one repository validation Task. Secret and Task names may match
-// because Kubernetes names are scoped by resource kind.
 func RepositoryValidationCommandSecretName(validationTaskName string) string {
 	return strings.TrimSpace(validationTaskName)
 }
 
-// ValidateRepositoryValidationCommandSecret verifies that the immutable Secret
-// belongs to the exact review and contains the command bound before Task
-// creation. It never returns or embeds the command value in an error.
 func ValidateRepositoryValidationCommandSecret(parent, validationTask *corev1alpha1.Task, secret *corev1.Secret, binding *RepositoryValidationCommandBinding) error {
 	if parent == nil || validationTask == nil || secret == nil || binding == nil {
 		return errRepositoryValidationBindingConflict
@@ -395,9 +365,6 @@ func ValidateRepositoryValidationCommandSecret(parent, validationTask *corev1alp
 	return nil
 }
 
-// ValidateRepositoryValidationOrphanCommandSecret verifies a command Secret
-// after its deterministic child Task has disappeared. Callers must first
-// verify the binding against the owning review Task and RepositoryMonitor.
 func ValidateRepositoryValidationOrphanCommandSecret(parent *corev1alpha1.Task, secret *corev1.Secret, binding *RepositoryValidationCommandBinding) error {
 	if parent == nil || secret == nil || binding == nil ||
 		!repositoryValidationCommandBindingMatchesParent(parent, binding) ||
@@ -443,8 +410,6 @@ func repositoryValidationCommandSecretDataMatches(secret *corev1.Secret, binding
 		binding.MatchesCommand(command)
 }
 
-// RepositoryValidationCommandBindingEvent returns the append-only event that
-// binds a review Task to the originally requested validation command.
 func RepositoryValidationCommandBindingEvent(parent *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, validationTask *corev1alpha1.Task, image, headSHA, command string) (*store.MonitorEvent, error) {
 	if parent == nil || monitor == nil || validationTask == nil {
 		return nil, fmt.Errorf("review task, repository monitor, and validation task are required")
@@ -492,8 +457,6 @@ func RepositoryValidationCommandBindingEvent(parent *corev1alpha1.Task, monitor 
 	}, nil
 }
 
-// RepositoryValidationCommandBindingFilter returns the narrow lookup used for
-// one command-binding event.
 func RepositoryValidationCommandBindingFilter(event *store.MonitorEvent) store.MonitorEventFilter {
 	if event == nil {
 		return store.MonitorEventFilter{Limit: 1}
@@ -515,8 +478,6 @@ func repositoryValidationCommandBindingEventID(namespace, validationTaskName str
 	return "mevt-validation-" + hex.EncodeToString(digest[:16])
 }
 
-// RepositoryValidationCommandBindingMatches reports whether a stored event
-// contains the exact controller-generated binding.
 func RepositoryValidationCommandBindingMatches(existing, expected *store.MonitorEvent) bool {
 	if existing == nil || expected == nil || existing.ID != expected.ID ||
 		existing.MonitorNamespace != expected.MonitorNamespace || existing.MonitorName != expected.MonitorName ||
@@ -532,15 +493,11 @@ func RepositoryValidationCommandBindingMatches(existing, expected *store.Monitor
 	return existingBinding == expectedBinding
 }
 
-// RepositoryValidationCommandDigest returns the durable digest used to bind a
-// reviewer-selected command to its validation Task.
 func RepositoryValidationCommandDigest(command string) string {
 	digest := sha256.Sum256([]byte(strings.TrimSpace(command)))
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
-// ValidateRepositoryValidationCommandBinding verifies that the durable event
-// still binds the validation Task to the command accepted by run_validation.
 func ValidateRepositoryValidationCommandBinding(ctx context.Context, bindingStore RepositoryValidationBindingStore, expected *store.MonitorEvent) error {
 	if bindingStore == nil || expected == nil {
 		return errRepositoryValidationBindingMissing

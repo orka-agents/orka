@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# Demo 40 — Security Scanning
-#
-# A RepositoryScan finds a real vulnerability in a real (forked) app, Orka
-# ranks the findings, requests a patch for the top one, the patch becomes
-# a branch, and the branch becomes a human-reviewable pull request.
-#
-# Pacing is controlled by DEMO_RECORD_PROFILE (presenter|docs|social|hero).
 
 set -Eeuo pipefail
 
@@ -16,10 +9,6 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=hack/demos/lib/manifests.sh
 . "${script_dir}/lib/manifests.sh"
 
-# ---------------------------------------------------------------------------
-# Setup (silent — uses legacy log() so the pre-warm phase doesn't bleed
-# into the cast).
-# ---------------------------------------------------------------------------
 require_demo_base
 require_security_demo_env
 source_demo_magic "$@"
@@ -39,27 +28,10 @@ demo_event "📥" "Applying analysis + remediation Agents and the RepositoryScan
 kubectl apply -f "${DEMO_WORKDIR}/security-agents.yaml"          >/dev/null
 kubectl apply -f "${DEMO_WORKDIR}/security-repositoryscan.yaml"  >/dev/null
 
-# ---------------------------------------------------------------------------
-# Stage-aware status hook — keeps viewers oriented during the multi-minute
-# scan by narrating each stage transition persistently AND showing a
-# rewriting heartbeat with the live stage counts.
-#
-# Stages (from internal/security and the orka.ai/security-stage label):
-#   threat-model  — first task; produces the canonical repo threat model
-#   discovery     — 5 parallel scope-focused tasks; use threat model as input
-#   validation    — per-finding; suppresses false positives
-#   patch         — per /patch request; opens branch + PR
-# ---------------------------------------------------------------------------
 _security_stage_status() {
   local scan_name="$1"
   local elapsed="$2"
-  # Everything here must go to stderr. The wait helpers capture their return
-  # value via `x="$(wait_for_... )"` with this hook running in the same command
-  # substitution; demo_announce_once prints to STDOUT, so an announce firing on
-  # the tick a wait resolves would be captured into the returned string and
-  # corrupt it. Force stderr.
   {
-    # One kubectl query → counts for all stages.
     local data
     data="$(kubectl -n "${DEMO_NAMESPACE}" get task \
               -l "orka.ai/security-target=${scan_name}" \
@@ -75,7 +47,6 @@ _security_stage_status() {
     patch_total=$(printf '%s\n' "${data}" | awk '$1=="patch"{n++} END{print n+0}')
     patch_done=$(printf '%s\n' "${data}" | awk '$1=="patch" && $2=="Succeeded"{n++} END{print n+0}')
 
-    # Persistent stage-transition events (once each).
     (( th_total  >= 1 )) && demo_announce_once "scan-tm-started"  "🧠" "Threat-model task started — building canonical repo context (longest single stage)"
     (( th_done   >= 1 )) && demo_announce_once "scan-tm-done"     "✅" "Threat model complete — discovery agents will use it as canonical input"
     (( di_total  >= 1 )) && demo_announce_once "scan-disc-start"  "🔍" "Discovery fan-out: parallel scope-focused passes across auth, data exposure, supply chain, app logic, recent commits"
@@ -84,7 +55,6 @@ _security_stage_status() {
     (( patch_total >= 1 )) && demo_announce_once "scan-patch-start" "🛠️ " "Remediation Task started — drafting the fix on a new branch"
     (( patch_done  >= 1 )) && demo_announce_once "scan-patch-done"  "✅" "Patch complete — branch + PR opened against ${DEMO_SECURITY_GIT_REPO}"
 
-    # Live heartbeat with counts.
     __demo_heartbeat 'scan/%s stages: threat-model %d/%d • discovery %d/%d • validation %d/%d • patch %d/%d • elapsed %ss' \
       "${scan_name}" "${th_done}" "${th_total:-1}" "${di_done}" "${di_total:-0}" \
       "${val_done}" "${val_total:-0}" "${patch_done}" "${patch_total:-0}" "${elapsed}"
@@ -105,17 +75,12 @@ else
 fi
 demo_event "🏆" "Top-ranked open finding: ${security_finding_id}"
 
-# ---------------------------------------------------------------------------
-# Narrated walkthrough.
-# ---------------------------------------------------------------------------
 DEMO_CHAPTER_TOTAL=7
 
-# Chapter 1 ------------------------------------------------------------------
 narrate "Security findings become first-class Kubernetes objects. One POST turns a finding into a real PR — scan -> finding -> patch -> branch -> PR, all in K8s."
 chapter "What this demo is doing" "🧑"
 demo_show_full "${DEMO_WORKDIR}/security-story.txt"
 
-# Chapter 2 ------------------------------------------------------------------
 narrate "Behind the scenes, the scan ran a 4-stage pipeline: first one threat-model task analyzed the repo (what does this app DO, where are the trust boundaries), then 5 parallel discovery passes — each handed that same threat model as canonical context — scanned scope by scope (auth, data exposure, supply chain, app logic, recent commits), then per-finding validators suppressed false positives. The findings you're about to see are ranked using the repo's own threat model, not just a generic linter ruleset."
 chapter "Apply the scan + remediation Agents" "🔍"
 demo_event "📥" "Applying analysis + remediation Agents and the RepositoryScan CR — three Kubernetes objects, no other infrastructure."
@@ -125,16 +90,11 @@ demo_pe "kubectl apply -f ${DEMO_WORKDIR}/security-repositoryscan.yaml"
 demo_event "📊" "RepositoryScan is the control object. Phase: Pending → Scanning → Ready. findingCounts updates as the pipeline runs."
 demo_pe "kubectl get repositoryscan ${DEMO_SECURITY_SCAN_NAME} -n ${DEMO_NAMESPACE}"
 
-# Chapter 3 ------------------------------------------------------------------
 narrate "Findings are severity-ranked; the top one becomes the work item."
 chapter "Inspect the open findings" "📋"
 demo_event "🔎" "Each Finding is a first-class object: severity, ID, title, source location, and the context that justified its ranking."
 log_info "Top 5 open findings ranked by severity:"
 demo_pe "orka_api GET \"/api/v1/security/repositories/${DEMO_SECURITY_SCAN_NAME}/findings?namespace=${DEMO_NAMESPACE}&state=open&limit=5\" | jq -r '.items[] | \"\\(.severity)\\t\\(.id)\\t\\(.title)\"' | column -t -s\$'\\t'"
-# Print the selected finding's row by itself so viewers can match the
-# `selected finding:` ID against a real row even if the scan added new
-# findings between selection time and now. Failure to look it up is
-# non-fatal — the patch flow still uses ${security_finding_id} either way.
 selected_row="$(orka_api GET "/api/v1/security/findings/${security_finding_id}?namespace=${DEMO_NAMESPACE}" 2>/dev/null \
   | jq -r '[.severity, .id, .title] | @tsv' 2>/dev/null || true)"
 if [[ -n "${selected_row}" ]]; then
@@ -143,19 +103,14 @@ if [[ -n "${selected_row}" ]]; then
 fi
 log_success "selected finding: ${security_finding_id}"
 
-# Chapter 4 ------------------------------------------------------------------
 narrate "One POST asks Orka to patch the finding — a remediation Task is born."
 chapter "Request a patch" "🛠️"
 demo_event "📮" "POST /api/v1/security/findings/<id>/patch — creates a Task whose owner reference points back to the Finding."
 demo_pe "orka_api POST \"/api/v1/security/findings/${security_finding_id}/patch?namespace=${DEMO_NAMESPACE}\" | jq '{id, status, branch}'"
 demo_event "🤖" "The remediation Agent now runs: read source, draft fix, run tests, open branch, open PR."
 
-# Chapter 5 ------------------------------------------------------------------
 narrate "Remediation runs; we wait for the patch proposal to land."
 chapter "Wait for the patch proposal" "⏳"
-# Retry on transient failures (e.g. upstream LLM 429). Each attempt POSTs
-# a fresh patch request; the wait helper polls until the latest patch
-# row reaches ready or failed.
 patch_attempts=0
 max_attempts="${DEMO_SECURITY_PATCH_MAX_ATTEMPTS:-3}"
 while (( patch_attempts < max_attempts )); do
@@ -174,7 +129,6 @@ demo_event "✅" "Patch proposal is ready — the remediation Task wrote a branc
 log_info "Patch proposals for ${security_finding_id}:"
 demo_pe "orka_api GET \"/api/v1/security/findings/${security_finding_id}/patches?namespace=${DEMO_NAMESPACE}\" | jq -r '.items[] | \"\\(.status)\\t\\(.branch)\\t\\(.taskName)\"' | column -t -s\$'\\t'"
 
-# Chapter 6 ------------------------------------------------------------------
 narrate "The patch becomes a real branch and a real PR for human review."
 chapter "Open the remediation pull request" "🚢"
 demo_event "🚀" "Branch pushed and PR opened automatically. From here it's a normal code review."
@@ -183,7 +137,6 @@ wait_for_security_pull_request "${security_finding_id}" "${DEMO_SECURITY_PR_TIME
   || die "pull request did not open for finding ${security_finding_id}"
 demo_event "🎉" "Pull request opened. Full audit chain: scan → finding → patch → branch → PR."
 
-# Chapter 7 ------------------------------------------------------------------
 narrate "Scan → finding → patch → branch → PR — every step replayable from the API."
 chapter "Remediation handoff" "✅"
 payoff_card_security "${security_finding_id}" "${DEMO_WORKDIR}/security-pr.json"

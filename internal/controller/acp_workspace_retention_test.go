@@ -50,7 +50,6 @@ func retentionTestWorkspace(t *testing.T, name string, mutate ...func(*workspace
 	workspace.Name = name
 	workspace.UID = types.UID(name + "-uid")
 	workspace.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour))
-	// Retention acts only once the core cleanup finalizer is installed.
 	workspace.Finalizers = append(workspace.Finalizers, executionWorkspaceFinalizer)
 	workspace.Spec.Lifecycle.IdleTimeout = &metav1.Duration{Duration: 30 * time.Minute}
 	workspace.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: 24 * time.Hour}
@@ -679,10 +678,6 @@ func TestACPWorkspaceRetentionRecoveredFenceHonorsActivation(t *testing.T) {
 	}
 }
 
-// A malformed controller-written last-detached-at stamp means the
-// admission-protected metadata was corrupted: idle retention must fail closed
-// on the bounded maxLifetime path instead of treating the workspace as
-// instantly idle-expired via the creation-time fallback.
 func TestACPWorkspaceRetentionFailsClosedOnMalformedIdleStamp(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1274,13 +1269,7 @@ func TestACPWorkspaceRetentionIgnoresForeignWorkspaces(t *testing.T) {
 func TestACPWorkspaceRetentionWaitsForEnforcedEpoch(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	// Revocation cleared the attachment but the adapter still enforces the
-	// epoch, and no detach instant is recorded: idle evaluation must wait
-	// instead of falling back to the creation timestamp and expiring a
-	// workspace whose Task simply ran longer than idleTimeout.
 	workspace := retentionTestWorkspace(t, "acp-ws-retention-g", func(w *workspacev1alpha1.ExecutionWorkspace) {
-		// The high-water mark alone never defers idle handling; the
-		// adapter-enforced epoch does.
 		w.Spec.AttachmentEpoch = 3
 		w.Status.AttachedEpoch = 3
 	})
@@ -1513,8 +1502,6 @@ func TestACPWorkspaceRetentionSuspendStampsFreshDetachInstant(t *testing.T) {
 	if time.Since(stamp) > time.Minute {
 		t.Fatalf("idle suspension must stamp a fresh detach instant so the suspended state earns a full retention interval, got %s", stamp)
 	}
-	// The freshly suspended workspace is not immediately expired by the next
-	// retention pass.
 	if result := reconcileRetention(t, c, current); result.RequeueAfter <= 0 {
 		t.Fatalf("freshly suspended workspace must requeue, got %+v", result)
 	}
@@ -1930,9 +1917,6 @@ func TestSettleACPClassWorkspacePreservesDetachClockBeforeAttachment(t *testing.
 func TestACPWorkspaceRetentionDeletesUncommittedDefaultSuspendWorkspaces(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	// A Task materialized the workspace and was cancelled before attachment:
-	// without the synchronous durable-session commit stamp, retention must
-	// delete the empty incarnation instead of making it resumable.
 	workspace := retentionTestWorkspace(t, "acp-ws-retention-k", func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
 		w.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
@@ -1978,8 +1962,6 @@ func TestExpireWorkspaceSkipsEventWhenDeleteAlreadyCompleted(t *testing.T) {
 	}
 }
 
-// A live cold-resume requester is active demand even while the observed state
-// remains Suspended; idle retention must wait for that exact Task.
 func TestACPWorkspaceRetentionWaitsForColdResumeInFlight(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2008,9 +1990,6 @@ func TestACPWorkspaceRetentionWaitsForColdResumeInFlight(t *testing.T) {
 	}
 }
 
-// A dead cold-resume requester must not turn stale observed suspension into
-// permanent demand. With no maxLifetime, idleTimeout still reclaims the
-// workspace from either provider transition state.
 func TestACPWorkspaceRetentionExpiresDeadColdResumeState(t *testing.T) {
 	t.Parallel()
 	for _, state := range []workspacev1alpha1.ExecutionWorkspaceState{
@@ -2037,8 +2016,6 @@ func TestACPWorkspaceRetentionExpiresDeadColdResumeState(t *testing.T) {
 	}
 }
 
-// A terminally failed suspension preserves no data and must not hold a quota
-// slot. Quarantine expires at the earliest configured idle or lifetime bound.
 func TestACPWorkspaceRetentionFailedAndQuarantinedHandling(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2066,7 +2043,6 @@ func TestACPWorkspaceRetentionFailedAndQuarantinedHandling(t *testing.T) {
 		t.Fatalf("quarantined workspace past maxLifetime must be deleting, got err=%v deleting=%v", getErr, deletingQuarantined.DeletionTimestamp)
 	}
 
-	// A recent quarantine survives until its idle deadline.
 	fresh := retentionTestWorkspace(t, "acp-ws-retention-o", func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
 		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
@@ -2090,8 +2066,6 @@ func TestACPWorkspaceRetentionFailedAndQuarantinedHandling(t *testing.T) {
 	}
 }
 
-// quotaSessionControlStore serves exactly the GetSessionControl lookup the
-// suspend-quota exclusion performs; sessions maps name -> immutable UID.
 type quotaSessionControlStore struct {
 	store.DurableControlStore
 	namespace string
@@ -2122,8 +2096,6 @@ func (s *quotaSessionTranscriptStore) GetSession(_ context.Context, namespace, n
 	return &store.SessionRecord{Namespace: namespace, Name: name, SessionType: defaultACPSessionType}, nil
 }
 
-// attachQuotaSessionStores wires minimal durable-session fakes so class
-// resolution can resolve immutable Session UIDs for quota exclusions.
 func attachQuotaSessionStores(r *TaskReconciler, sessions map[string]string) {
 	r.DurableControlStore = &quotaSessionControlStore{namespace: acpTestNamespace, sessions: sessions}
 	r.SessionManager = &SessionManager{store: &quotaSessionTranscriptStore{namespace: acpTestNamespace, sessions: sessions}}
@@ -2232,9 +2204,6 @@ func TestACPWorkspaceSuspendQuotaAdmitsOwnSessionContinuation(t *testing.T) {
 	}
 	fixture.pinProfileHash(t)
 	task := suspendableSessionTask()
-	// The last quota slot is held by this very session's suspended workspace:
-	// the continuation that would resume it must still be admitted, or it
-	// could never reach ensureACPClassWorkspace to free the slot.
 	own := acpAdapterWorkspace(t, "")
 	own.Name = "acp-ws-own-session-suspended"
 	own.UID = types.UID("own-session-suspended-uid")
@@ -2249,7 +2218,6 @@ func TestACPWorkspaceSuspendQuotaAdmitsOwnSessionContinuation(t *testing.T) {
 		t.Fatalf("a continuation of the suspended session must be admitted, got %v", err)
 	}
 
-	// A Task from another session still sees the exhausted cap.
 	foreignSession := acpClassTestTask(func(other *corev1alpha1.Task) {
 		other.Name = "other-session-task"
 		other.UID = types.UID("other-session-task-uid")
@@ -2264,9 +2232,6 @@ func TestACPWorkspaceSuspendQuotaAdmitsOwnSessionContinuation(t *testing.T) {
 		t.Fatalf("foreign-session admission error = %v, want retention cap exhaustion", err)
 	}
 
-	// A Session recreated under the same NAME resolves a different immutable
-	// UID: the old incarnation's suspended workspace still consumes the cap,
-	// so exclusion never matches on the reusable name alone.
 	attachQuotaSessionStores(r, map[string]string{acpTestSessionName: "session-uid-2"})
 	if _, err := r.resolveACPWorkspaceClass(ctx, task); err == nil ||
 		!strings.Contains(err.Error(), "retention cap") {
@@ -2355,7 +2320,6 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 	}
 	fixture.pinProfileHash(t)
 	task := suspendableSessionTask()
-	// An existing suspended workspace of the same class consumes the cap.
 	other := acpAdapterWorkspace(t, "")
 	other.Name = "acp-ws-existing-suspended"
 	other.UID = types.UID("existing-suspended-uid")
@@ -2365,14 +2329,11 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 	other.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	r := acpClassTestReconciler(t, append(fixture.objects(), task, other)...)
 
-	// Admission rejects a prospective Suspend beyond the cap.
 	if _, err := r.resolveACPWorkspaceClass(ctx, task); err == nil ||
 		!strings.Contains(err.Error(), "retention cap") {
 		t.Fatalf("admission error = %v, want retention cap exhaustion", err)
 	}
 
-	// With headroom the Task admits; settlement then re-checks the live count
-	// and keeps the frozen Suspend action pending when the cap is gone.
 	if err := r.Delete(ctx, other); err != nil {
 		t.Fatalf("free the cap: %v", err)
 	}
@@ -2420,7 +2381,6 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 		t.Fatalf("reload task: %v", err)
 	}
 
-	// Another suspended workspace appears before settlement; the cap is gone.
 	competitor := acpAdapterWorkspace(t, "")
 	competitor.Name = "acp-ws-competitor-suspended"
 	competitor.UID = types.UID("competitor-suspended-uid")
@@ -2467,15 +2427,10 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 	}
 }
 
-// Pending demand whose requesting Task disappeared (or settled terminally)
-// must not hold the workspace forever; live demand still defers idle expiry.
 func TestACPWorkspaceRetentionRetiresDeadPendingDemand(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	// Dead requester: the named Task does not exist, so the creation-stamped
-	// demand no longer blocks idle handling and the Delete-class workspace
-	// enters terminal cleanup.
 	dead := retentionTestWorkspace(t, "acp-ws-demand-dead", func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Annotations[acpWorkspaceResumeRequestedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano) + " vanished-task"
 		w.Annotations[acpWorkspaceLastDetachedAnnotation] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
@@ -2487,7 +2442,6 @@ func TestACPWorkspaceRetentionRetiresDeadPendingDemand(t *testing.T) {
 		t.Fatalf("dead-demand workspace must idle out, got err=%v deleting=%v", err, deleting.DeletionTimestamp)
 	}
 
-	// Live requester: demand defers idle expiry.
 	requester := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
 		Namespace: acpTestNamespace, Name: "live-requester", UID: types.UID("live-requester-uid"),
 	}}
@@ -2502,8 +2456,6 @@ func TestACPWorkspaceRetentionRetiresDeadPendingDemand(t *testing.T) {
 		t.Fatalf("live demand must defer idle expiry, got err=%v deleting=%v", err, kept.DeletionTimestamp)
 	}
 
-	// A replacement Task recycled under the requester's namespace/name is
-	// not the requester: the UID mismatch retires the stale demand.
 	replacement := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
 		Namespace: acpTestNamespace, Name: "recycled-requester", UID: types.UID("replacement-uid"),
 	}}
@@ -2518,9 +2470,6 @@ func TestACPWorkspaceRetentionRetiresDeadPendingDemand(t *testing.T) {
 		t.Fatalf("UID-mismatched demand must idle out, got err=%v deleting=%v", err, recycled.DeletionTimestamp)
 	}
 
-	// The intermediate legacy format carried only a mutable Task name. A live
-	// replacement under that name is not demand unless the exact Session scan
-	// independently proves it can continue this workspace incarnation.
 	legacyReplacement := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
 		Namespace: acpTestNamespace, Name: "legacy-recycled-requester", UID: types.UID("legacy-replacement-uid"),
 	}}
@@ -2540,9 +2489,6 @@ func TestACPWorkspaceRetentionRetiresDeadPendingDemand(t *testing.T) {
 	}
 }
 
-// A timestamp-only demand stamp from an older controller has no requester
-// identity. For an idle-only class, the live Session scan must retire it when
-// no continuation remains instead of relying on an absent maxLifetime.
 func TestACPWorkspaceRetentionRetiresLegacyPendingDemandWithoutMaxLifetime(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2594,10 +2540,6 @@ func TestACPWorkspaceRetentionFailsClosedOnEmptyPendingDemand(t *testing.T) {
 	}
 }
 
-// The single UID-bound demand stamp records only the LAST writer: when the
-// recorded requester settles terminally while another live continuation on
-// the same Session still waits, retention must keep the workspace instead of
-// expiring it out from under the surviving waiter.
 func TestACPWorkspaceRetentionHonorsSurvivingSessionContinuations(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2614,8 +2556,6 @@ func TestACPWorkspaceRetentionHonorsSurvivingSessionContinuations(t *testing.T) 
 	waiter := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: acpTestNamespace, Name: "lc-waiter", UID: types.UID("lc-waiter-uid"),
-			// The waiter was reconciled at least once and carries the
-			// controller-written link to this exact workspace incarnation.
 			Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: "acp-ws-demand-survivor"},
 			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: "acp-ws-demand-survivor-uid"},
 		},
@@ -2640,8 +2580,6 @@ func TestACPWorkspaceRetentionHonorsSurvivingSessionContinuations(t *testing.T) 
 		t.Fatalf("a live Session continuation must keep the workspace, got err=%v deleting=%v", err, kept.DeletionTimestamp)
 	}
 
-	// Once the surviving waiter settles terminally too, no demand remains and
-	// idle expiry proceeds.
 	currentWaiter := &corev1alpha1.Task{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: waiter.Namespace, Name: waiter.Name}, currentWaiter); err != nil {
 		t.Fatalf("read waiter: %v", err)
@@ -2658,9 +2596,6 @@ func TestACPWorkspaceRetentionHonorsSurvivingSessionContinuations(t *testing.T) 
 	}
 }
 
-// A terminally failed durable suspension keeps its quota slot. Present but
-// invalid protected markers also fail closed as potentially durable, while an
-// absent marker or an explicit durable-data-absent proof frees the slot.
 func TestCountSuspendedClassWorkspacesChargesDurableFailures(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2712,9 +2647,6 @@ func TestCountSuspendedClassWorkspacesChargesDurableFailures(t *testing.T) {
 	}
 }
 
-// A cold resume lifts DesiredState to Ready before the preserved runtime is
-// serving. Its prior Suspended/Suspending state must keep consuming capacity
-// until the adapter projects Ready or Attached, or proves the data absent.
 func TestCountSuspendedClassWorkspacesChargesColdResumesInFlight(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2846,9 +2778,6 @@ func TestACPWorkspaceSuspendedCapFailsClosedOnEmptyAnnotation(t *testing.T) {
 	}
 }
 
-// Demand binds to the workspace incarnation: a waiter already linked to a
-// DIFFERENT workspace (for example a recreated Session's fresh incarnation)
-// never counts as demand for this one.
 func TestLiveSessionContinuationRequiresExactIncarnation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -3035,9 +2964,6 @@ func retentionContinuationTask(
 	return task
 }
 
-// A transient quota-read failure must requeue the Task, never permanently
-// reject it: only actual cap exhaustion and real validation failures are
-// terminal.
 func TestSuspendQuotaReadFailureIsTransient(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -3055,7 +2981,6 @@ func TestSuspendQuotaReadFailureIsTransient(t *testing.T) {
 		t.Fatalf("quota-read outage must classify transient, got %v", err)
 	}
 
-	// The plan consumer requeues a transient plan instead of failing the Task.
 	result, planErr := r.rejectPlannedAgentExecution(ctx, task,
 		agentExecutionPlan{path: agentExecutionPathRejected, transientError: err})
 	if planErr == nil || result.RequeueAfter != 0 {
@@ -3070,10 +2995,6 @@ func TestSuspendQuotaReadFailureIsTransient(t *testing.T) {
 	}
 }
 
-// A requester that terminated before it ever executed against the workspace
-// must not destroy the retained repository while another live continuation is
-// queued on the same incarnation: settlement completes without the
-// destructive action and the successor's own frozen action governs.
 func TestSettleACPClassWorkspaceDefersDeleteToQueuedContinuation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -3084,8 +3005,6 @@ func TestSettleACPClassWorkspaceDefersDeleteToQueuedContinuation(t *testing.T) {
 	workspace.Spec.SessionRef = &workspacev1alpha1.ObjectIdentityReference{
 		Name: acpTestSessionName, UID: types.UID("session-uid-1"),
 	}
-	// The waiter's Suspend override must be class-allowed, or it would be
-	// rejected as a non-successor by the AllowedOnDetach validation.
 	workspace.Spec.Lifecycle.AllowedOnDetach = append(workspace.Spec.Lifecycle.AllowedOnDetach,
 		workspacev1alpha1.WorkspaceOnDetachSuspend)
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachDelete)
@@ -3109,23 +3028,15 @@ func TestSettleACPClassWorkspaceDefersDeleteToQueuedContinuation(t *testing.T) {
 	if err := r.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
 		t.Fatalf("the workspace must survive for the queued continuation: %v", err)
 	}
-	// The deferral transfers the successor's policy: the dead requester's
-	// Delete must not survive to destroy the retained workspace if the
-	// successor also terminates before attaching. The waiter's explicit
-	// Suspend override governs from here.
 	if got := current.Annotations[acpWorkspaceDetachActionAnnotation]; got != string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
 		t.Fatalf("deferred detach action = %q, want the successor's Suspend override", got)
 	}
-	// Restore Delete for the final-phase assertion below (the successor
-	// policy path is exercised above; the remaining check proves the
-	// destructive settle still runs once no continuation is left).
 	base := current.DeepCopy()
 	current.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachDelete)
 	if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil {
 		t.Fatalf("restore Delete action: %v", err)
 	}
 
-	// With the last continuation gone, the stored Delete executes normally.
 	if err := r.Delete(ctx, waiter); err != nil {
 		t.Fatalf("remove waiter: %v", err)
 	}
@@ -3139,11 +3050,6 @@ func TestSettleACPClassWorkspaceDefersDeleteToQueuedContinuation(t *testing.T) {
 	}
 }
 
-// Settlement receipts are monotonic by attachment epoch: a Task whose receipt
-// was displaced by a later Task's settlement must complete as done (and mark
-// itself durably) instead of re-applying its detach action to newer session
-// state; a foreign attachment likewise makes the done decision durable.
-//
 //nolint:gocyclo // The receipt-ordering cases form one settlement regression matrix.
 func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 	t.Parallel()
@@ -3167,7 +3073,6 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 		return workspace, task
 	}
 
-	// Displaced receipt from a later epoch: settle completes without acting.
 	workspace, task := shape("acp-ws-displaced")
 	workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] = formatACPWorkspaceSettlementReceipt("successor-uid", 5)
 	r := acpClassTestReconciler(t, append(fixture.objects(), workspace, task)...)
@@ -3191,9 +3096,6 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 		t.Fatal("the displaced settlement must mark the Task durably settled")
 	}
 
-	// An EARLIER-epoch receipt does not supersede: this Task's own action is
-	// still owed and settlement proceeds (revocation is not needed here: the
-	// workspace is unattached, so the Suspend patch lands).
 	workspace, task = shape("acp-ws-owed")
 	workspace.Spec.AttachmentEpoch = 5
 	workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] = formatACPWorkspaceSettlementReceipt("predecessor-uid", 1)
@@ -3214,9 +3116,6 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 		t.Fatalf("owed settlement receipt = (%q, %d, %v), want Task %q at its recorded epoch 3", receiptUID, receiptEpoch, receiptOK, task.UID)
 	}
 
-	// Retention can suspend between revocation and Task settlement. The
-	// fallback receipt must still use this Task's epoch, not a later
-	// continuation's workspace high-water epoch.
 	workspace, task = shape("acp-ws-already-suspended")
 	workspace.Spec.AttachmentEpoch = 5
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
@@ -3234,10 +3133,6 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 		t.Fatalf("already-suspended receipt = (%q, %d, %v), want Task %q at its recorded epoch 3", receiptUID, receiptEpoch, receiptOK, task.UID)
 	}
 
-	// A queued continuation can terminate before it ever attaches, leaving a
-	// recorded epoch of zero. If retention already suspended the workspace,
-	// settling that continuation must not replace a later attached Task's
-	// receipt with the epoch-zero receipt.
 	workspace, task = shape("acp-ws-unattached-already-suspended")
 	task.Annotations[acpTaskAttachmentEpochAnnotation] = "0"
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
@@ -3263,8 +3158,6 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 		t.Fatal("the unattached settlement must mark the Task durably settled")
 	}
 
-	// The same epoch-zero settlement must not suspend a workspace that a
-	// later attached Task has already settled and a continuation resumed.
 	workspace, task = shape("acp-ws-unattached-ready")
 	task.Annotations[acpTaskAttachmentEpochAnnotation] = "0"
 	workspace.Spec.AttachmentEpoch = 5
@@ -3293,9 +3186,6 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 		t.Fatal("the displaced unattached settlement must mark the Task durably settled")
 	}
 
-	// A UID-bound resume demand belongs to the current epoch-zero requester,
-	// not the predecessor named by the positive receipt. Its frozen Delete
-	// action must still run if it terminates before Attach.
 	workspace, task = shape("acp-ws-current-resume-requester")
 	task.Spec.Execution.Workspace.OnDetach = corev1alpha1.WorkspaceOnDetachPolicy(workspacev1alpha1.WorkspaceOnDetachDelete)
 	task.Annotations[acpTaskAttachmentEpochAnnotation] = "0"
@@ -3314,7 +3204,6 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 		t.Fatalf("current resume requester skipped its Delete action: %v", err)
 	}
 
-	// A foreign attachment makes the done decision durable on the Task.
 	workspace, task = shape("acp-ws-foreign-attached")
 	workspace.Spec.AttachmentEpoch = 7
 	workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
@@ -3337,9 +3226,6 @@ func TestSettleACPClassWorkspaceHonorsDisplacedReceipts(t *testing.T) {
 	}
 }
 
-// A terminally failed suspension that PROVED no durable data exists (the
-// adapter's proven-empty marker) frees its quota slot even on a durable
-// class; resume-loss failures that preserve a claim stay charged.
 func TestCountSuspendedClassWorkspacesFreesProvenEmptyFailures(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -3380,9 +3266,6 @@ func TestCountSuspendedClassWorkspacesFreesProvenEmptyFailures(t *testing.T) {
 	}
 }
 
-// A live Task that merely shares the Session name without requesting a
-// session-reused execution workspace can never attach the workspace and must
-// not count as demand.
 func TestLiveSessionContinuationIgnoresNonWorkspaceTasks(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -3407,10 +3290,6 @@ func TestLiveSessionContinuationIgnoresNonWorkspaceTasks(t *testing.T) {
 	}
 }
 
-// An unlinked continuation counts as demand only when its classRef resolves
-// to THIS workspace's class: a different class (or the legacy enabled path)
-// deliberately produces a separate workspace incarnation and must not defer
-// settlement or retention of this one.
 func TestLiveSessionContinuationRequiresMatchingClass(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -3431,8 +3310,6 @@ func TestLiveSessionContinuationRequiresMatchingClass(t *testing.T) {
 			}},
 		},
 	}
-	// The bound class exists at its frozen immutable identity: unlinked
-	// demand additionally verifies the live class UID against the binding.
 	boundClass := &workspacev1alpha1.ExecutionWorkspaceClass{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: acpTestNamespace, Name: workspace.Spec.ClassBinding.Name,
@@ -3468,9 +3345,6 @@ func TestLiveSessionContinuationRequiresMatchingClass(t *testing.T) {
 		t.Fatalf("a matching-class unlinked waiter must count as demand, got (%v, %v)", live, err)
 	}
 
-	// The class is deleted and recreated under the same name: the waiter's
-	// classRef now resolves the REPLACEMENT class and a different workspace
-	// incarnation, so it must not suppress this workspace's retention.
 	if err := c.Delete(ctx, boundClass); err != nil {
 		t.Fatalf("delete bound class: %v", err)
 	}
@@ -3628,10 +3502,6 @@ func TestDeferACPSettlementClearsPredecessorRevocationStamp(t *testing.T) {
 	}
 }
 
-// A queued waiter whose explicit onDetach override is outside the class's
-// AllowedOnDetach can never attach this workspace: it is NOT a successor, and
-// settlement must keep cleanup ownership instead of transferring a policy the
-// class forbids.
 func TestDeferACPSettlementRejectsPolicyForbiddenSuccessorOverride(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -3654,14 +3524,10 @@ func TestDeferACPSettlementRejectsPolicyForbiddenSuccessorOverride(t *testing.T)
 		return deferred, workspace, r
 	}
 
-	// AllowedOnDetach is [Delete]: a Suspend override is class-forbidden.
 	if deferred, _, _ := shape("acp-ws-forbidden-override", corev1alpha1.WorkspaceOnDetachPolicy(workspacev1alpha1.WorkspaceOnDetachSuspend)); deferred {
 		t.Fatal("a class-forbidden successor override must not defer settlement")
 	}
 
-	// A valid continuation queued BEHIND an ineligible one must still defer:
-	// settlement scans past the forbidden override instead of concluding no
-	// successor exists.
 	t.Run("scans past an ineligible candidate", func(t *testing.T) {
 		t.Parallel()
 		fixture := suspendableSubstrateFixture(t)
@@ -3695,9 +3561,6 @@ func TestDeferACPSettlementRejectsPolicyForbiddenSuccessorOverride(t *testing.T)
 	if current.Annotations[acpWorkspaceDetachActionAnnotation] != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
 		t.Fatalf("transferred detach action = %q, want the successor's allowed Delete", current.Annotations[acpWorkspaceDetachActionAnnotation])
 	}
-	// Ownership is transferred durably: the selected successor carries the
-	// cleanup finalizer and exact workspace link before the predecessor's
-	// settlement completes.
 	linkedSuccessor := &corev1alpha1.Task{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: acpTestNamespace, Name: "acp-ws-allowed-override-waiter"}, linkedSuccessor); err != nil {
 		t.Fatalf("read successor: %v", err)
@@ -3712,9 +3575,6 @@ func TestDeferACPSettlementRejectsPolicyForbiddenSuccessorOverride(t *testing.T)
 	}
 }
 
-// A successor-link conflict can leave the candidate's action on the
-// workspace. If that successor then disappears, the predecessor must restore
-// its own effective action before settling instead of preserving stale data.
 func TestSettleACPClassWorkspaceRestoresPolicyAfterSuccessorLinkConflict(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -3769,10 +3629,6 @@ func TestSettleACPClassWorkspaceRestoresPolicyAfterSuccessorLinkConflict(t *test
 	}
 }
 
-// A destructive successor policy must not land before its ownership link.
-// Otherwise an executed predecessor whose Suspend is quota-blocked can retry
-// after the link conflict and delete the retained workspace under the stale
-// successor action.
 func TestSettleACPClassWorkspaceKeepsSuspendUntilDeleteSuccessorLinks(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -3831,8 +3687,6 @@ func TestSettleACPClassWorkspaceKeepsSuspendUntilDeleteSuccessorLinks(t *testing
 	}
 }
 
-// Quota exhaustion reports why settlement is pending without deleting the
-// workspace or completing the Task's frozen Suspend action.
 func TestSettleACPClassWorkspaceReportsPendingQuota(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -3881,8 +3735,6 @@ func TestSettleACPClassWorkspaceReportsPendingQuota(t *testing.T) {
 	}
 }
 
-// A live queued continuation can take a still-Ready workspace directly when
-// an executed predecessor's frozen Suspend action cannot claim a quota slot.
 func TestSettleACPClassWorkspaceQuotaWaitDefersToSuccessor(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -3897,7 +3749,6 @@ func TestSettleACPClassWorkspaceQuotaWaitDefersToSuccessor(t *testing.T) {
 	workspace.Spec.Lifecycle.AllowedOnDetach = append(workspace.Spec.Lifecycle.AllowedOnDetach,
 		workspacev1alpha1.WorkspaceOnDetachSuspend)
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
-	// A frozen cap of zero makes any suspension quota-exhausted.
 	workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation] = "0"
 	workspace.Annotations[acpWorkspaceDurableAnnotation] = booleanTrueValue
 	workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
@@ -3926,10 +3777,6 @@ func TestSettleACPClassWorkspaceQuotaWaitDefersToSuccessor(t *testing.T) {
 	}
 }
 
-// liveACPSessionContinuationExists reports whether any live, non-terminal
-// Task in the workspace's namespace targets this exact workspace incarnation
-// through its Session. The reader uses the Task CRD's server-side selectable
-// field; list errors fail closed as outstanding demand.
 func liveACPSessionContinuationExists(
 	ctx context.Context,
 	reader client.Reader,

@@ -101,13 +101,10 @@ func TestResolveACPWorkspaceDefaultSuspendAfterDetach(t *testing.T) {
 	}
 }
 
-// defaultWindowFixture is a session-reused Substrate class whose profile sets
-// no window, with a 5m controller default.
 func defaultWindowFixture(t *testing.T) *speculativeTaskFixture {
 	t.Helper()
 	f := newSpeculativeTaskFixtureWith(t, func(r *TaskReconciler, binding *ACPRuntimeWorkspaceBinding) {
 		r.ACPWorkspaceDefaultSuspendAfterDetach = 5 * time.Minute
-		// The fixture's profile kind stands in for SubstrateWorkspaceProfile.
 		binding.Class.ParametersRef = &workspacev1alpha1.TypedObjectReference{Group: substrateWorkspaceProfileGroup, Kind: substrateWorkspaceProfileKind, Name: binding.Class.ParametersRef.Name}
 	})
 	return f
@@ -130,8 +127,6 @@ func TestDefaultWarmWindowIsFrozenIntoNewWorkspacesOnly(t *testing.T) {
 		t.Fatal("the controller default entered the frozen class binding")
 	}
 
-	// A later controller default applies to new workspaces only: the
-	// existing workspace keeps the window it froze and stays admissible.
 	f.r.ACPWorkspaceDefaultSuspendAfterDetach = 10 * time.Minute
 	if _, _, err := f.r.ensureACPClassWorkspace(ctx, f.task, f.plan); err != nil {
 		t.Fatalf("continuation under a changed default: %v", err)
@@ -147,7 +142,6 @@ func TestDefaultWarmWindowIsFrozenIntoNewWorkspacesOnly(t *testing.T) {
 		t.Fatalf("disabling the default removed the frozen window: %q", got)
 	}
 
-	// A profile window and a default-sourced window never mix.
 	explicit := *f.plan.Workspace
 	explicitClass := *explicit.Class
 	explicitClass.SuspendAfterDetach = (5 * time.Minute).String()
@@ -172,7 +166,6 @@ func TestDefaultWarmWindowNeverBackfillsAnExistingWorkspace(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	f := newSpeculativeTaskFixtureWith(t, func(r *TaskReconciler, binding *ACPRuntimeWorkspaceBinding) {
-		// The workspace predates the default.
 		binding.Class.ParametersRef = &workspacev1alpha1.TypedObjectReference{Group: substrateWorkspaceProfileGroup, Kind: substrateWorkspaceProfileKind, Name: binding.Class.ParametersRef.Name}
 	})
 	if _, present := f.workspace(t).Annotations[acpWorkspaceSuspendAfterDetachAnnotation]; present {

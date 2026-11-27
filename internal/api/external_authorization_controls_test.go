@@ -46,9 +46,6 @@ func (f *externalAuthorizationFixture) allowRoute(t *testing.T, route string, ad
 	t.Fatalf("no independent permission fixture for %s", route)
 }
 
-// CRUD controls use only the action's exact grant. A get or list grant is not
-// required for the handler's internal read during an update or deletion.
-// Monitor validation also needs access to the referenced reviewer Agent.
 func TestExternalAPIAuthorizedKubernetesCRUD(t *testing.T) {
 	for _, tc := range []struct {
 		path, spec, marker string
@@ -289,8 +286,6 @@ func TestExternalAPIProposalAppliedMemoryRequiresNamedRead(t *testing.T) {
 				Namespace: "default", ID: proposal.ID, Status: "accepted", Reviewer: "reviewer",
 			}))
 			if link == "applied-memory-id" {
-				// An accepted proposal that already names a memory exists only in
-				// retained rows: a new proposal cannot carry an apply outcome.
 				_, err := f.db.ExecContext(t.Context(), `UPDATE memory_proposals SET applied_memory_id = ? WHERE namespace = ? AND id = ?`,
 					"protected", "default", proposal.ID)
 				require.NoError(t, err)
@@ -545,8 +540,6 @@ func TestExternalAPIConsolidationApplyRequiresUpdateOnEveryTarget(t *testing.T) 
 	require.True(t, retired.Deleted)
 }
 
-// Only applying a proposal links a memory to it: a memory created with a
-// proposal's ID would otherwise block a consolidation proposal from applying.
 func TestMemoryCreateRefusesACallerSuppliedSourceProposal(t *testing.T) {
 	f := newExternalAuthorizationFixture(t)
 	proposal := &store.MemoryProposal{Namespace: "default", Type: store.MemoryProposalTypeMerge, Title: "Merge", Content: "merged",
@@ -621,9 +614,6 @@ func TestExternalAPIMemoryConsolidationTaskCreateRequiresTheCallersGrants(t *tes
 	}
 }
 
-// A consolidation run's Task result is only its structure; its full report
-// quotes the Sessions and memories it read, so reading it needs what
-// reading those needs.
 func TestExternalAPIMemoryConsolidationReportRequiresTheRunsInputs(t *testing.T) {
 	f := newExternalAuthorizationFixture(t)
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "consolidate", Namespace: "default", UID: "consolidate-uid"},

@@ -28,15 +28,6 @@ import (
 
 const cancellationRequestedStatus = "cancellation requested"
 
-// CancelChildTask records a cancel request on a Pending or Running child of
-// the calling Task for the native worker's cancel_task tool. The Task
-// controller then completes the child through its normal terminal path, which
-// revokes the worker Job, releases session locks, and records the outcome.
-// Cancellation intent is committed under the caller's task data fence before
-// publishing the Kubernetes request. Revocation before that commit refuses
-// cancellation; a committed intent may finish publishing after revocation. Agent
-// children are refused: their terminal status needs the controller epoch
-// mutation guard.
 func (h *InternalHandlers) CancelChildTask(c fiber.Ctx) error {
 	namespace := strings.TrimSpace(c.Params("namespace"))
 	taskName := strings.TrimSpace(c.Params("taskName"))
@@ -86,8 +77,6 @@ func (h *InternalHandlers) CancelChildTask(c fiber.Ctx) error {
 	return c.JSON(result)
 }
 
-// requestChildCancellation sets the cancel request on the verified child
-// unless it already finished, fenced on its UID and resourceVersion.
 func (h *InternalHandlers) requestChildCancellation(
 	ctx context.Context,
 	parent *corev1alpha1.Task,
@@ -109,7 +98,6 @@ func (h *InternalHandlers) requestChildCancellation(
 			}
 			return err
 		}
-		// The name may have been reused since the parent link was verified.
 		if child.UID != uid {
 			return fiber.NewError(fiber.StatusForbidden, "task is outside caller coordination scope")
 		}
@@ -146,9 +134,6 @@ func (h *InternalHandlers) requestChildCancellation(
 	return status, err
 }
 
-// childCancellationIntent is the durable authorization for one child's cancel
-// request. The event's dedupe key binds both Task UIDs, so retries retain the
-// first reason and a reused Task name cannot inherit the authorization.
 type childCancellationIntent struct {
 	ParentUID string `json:"parentUID"`
 	ChildUID  string `json:"childUID"`
@@ -168,9 +153,6 @@ func (h *InternalHandlers) recordChildCancellationIntent(ctx context.Context, pa
 	if err != nil {
 		return "", err
 	}
-	// This append checks the parent Job and cleanup fence in the same
-	// transaction as the intent. The Kubernetes patch below is only the
-	// publication of an action this commit already authorized.
 	persisted, _, err := intents.AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
 		Namespace: parent.Namespace, StreamType: store.ExecutionEventStreamTypeTask,
 		StreamID: parent.Name, TaskName: parent.Name, ToolName: promptToolCancel,
@@ -181,8 +163,6 @@ func (h *InternalHandlers) recordChildCancellationIntent(ctx context.Context, pa
 		return "", err
 	}
 	var committed childCancellationIntent
-	// The event sanitizer may redact display text such as ChildName. The
-	// UID tuple is the authority bound by the dedupe key above.
 	if persisted == nil || json.Unmarshal(persisted.Content, &committed) != nil ||
 		committed.ParentUID != intent.ParentUID || committed.ChildUID != intent.ChildUID {
 		return "", fmt.Errorf("invalid child cancellation intent")

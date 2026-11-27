@@ -51,8 +51,6 @@ func TestCreateTaskJobGatewayReplyDefersUntilDurableLink(t *testing.T) {
 	require.NotEqual(t, corev1alpha1.TaskPhaseFailed, task.Status.Phase)
 	require.NoError(t, s.MarkGatewayEventTaskCreated(t.Context(), "default", event.ID, task.Name, string(task.UID), "dispatch", now))
 	require.NoError(t, r.SessionManager.AcquireLock(t.Context(), task))
-	// Admission availability is not a planning-time origin discriminator. Freeze
-	// the tool into the real Job even if readiness/capability recovery is pending.
 	gateway.Status.Ready = false
 	gateway.Status.ObservedCapabilities = nil
 	require.NoError(t, r.Update(t.Context(), gateway))

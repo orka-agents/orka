@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
-# Exercise cleanup and preflight without a cluster or provider credentials.
 set -Eeuo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/orka-native-substrate-test.XXXXXX")"
 trap 'rm -rf "${test_root}"' EXIT
 source "${root}/scripts/agent-substrate-e2e.sh"
 
-# The v1 control plane is installed by the pinned ate-setup. Only the shared
-# test identity is a bootstrap owner, only Orka's controller may reach Actors
-# through the router, and egress credential injection stays off. A failed
-# install or rollout stops setup.
 (
   SUBSTRATE_DIR="${test_root}/substrate-checkout"
   mkdir -p "${SUBSTRATE_DIR}"
@@ -41,7 +36,6 @@ source "${root}/scripts/agent-substrate-e2e.sh"
   done
 )
 
-# A failed API read is not proof of deletion.
 kubectl() { return 7; }
 if wait_absent task gone; then
   echo 'cleanup treated an API error as absence' >&2
@@ -51,8 +45,6 @@ kubectl() { return 0; }
 wait_absent task gone
 unset -f kubectl
 
-# Terminal failure must not wait out the success deadline. Unknown or unreadable
-# status must not pass. These checks complete without sleeping or a cluster.
 job_status='{"status":{"conditions":[{"type":"Complete","status":"True"}]}}'
 kubectl() { printf '%s\n' "${job_status}"; }
 wait_job complete 0
@@ -76,8 +68,6 @@ if wait_job unreadable 0; then
   exit 1
 fi
 
-# Job logs pass through redaction before cleanup prints them. Never dump a Pod
-# spec, even when a container fails before it can produce logs.
 saved_run_dir="${TMP_ROOT}"
 TMP_ROOT="${test_root}/diagnostics"
 mkdir -p "${TMP_ROOT}"
@@ -117,8 +107,6 @@ chmod +x "${test_root}/tools/docker" "${test_root}/tools/git"
 export ORKA_SUBSTRATE_TEST_CALLS="${test_root}/unexpected-calls"
 original_path="${PATH}"
 export PATH="${test_root}/tools:${PATH}"
-# Calling in a conditional disables errexit inside a Bash function. The
-# preflight must still return failure before creating or installing anything.
 if substrate_prepare_upstream "${root}" "${test_root}/run" guarded-cluster 2>"${test_root}/error"; then
   echo 'preflight ignored an unavailable Docker engine' >&2
   exit 1
@@ -126,7 +114,6 @@ fi
 [[ ! -e "${ORKA_SUBSTRATE_TEST_CALLS}" ]]
 [[ ! -e "${test_root}/run" ]]
 grep -Fq 'Docker engine is unavailable' "${test_root}/error"
-# A working Docker stub cannot authorize a provider fork or a movable ref.
 printf '#!/usr/bin/env bash\nexit 0\n' >"${test_root}/tools/docker"
 for selection in fork branch; do
   if [[ "${selection}" == fork ]]; then
@@ -146,8 +133,6 @@ done
 unset SUBSTRATE_REPO SUBSTRATE_REF
 export PATH="${original_path}"
 
-# A reusable provider checkout must reject source files Git does not track,
-# as well as staged and unstaged changes to tracked files.
 provider_dir="${test_root}/provider"
 git init -q "${provider_dir}"
 printf 'package fixture\n' >"${provider_dir}/fixture.go"

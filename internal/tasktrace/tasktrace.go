@@ -19,7 +19,6 @@ const (
 	StatusFailed    = "failed"
 )
 
-// TaskMetadata supplies task summary state that is not part of the event stream.
 type TaskMetadata struct {
 	Namespace       string
 	Name            string
@@ -138,7 +137,6 @@ type TraceIssue struct {
 	Message  string `json:"message"`
 }
 
-// MetadataFromTask builds trace metadata from a Task CR without exposing secrets.
 func MetadataFromTask(task *corev1alpha1.Task) TaskMetadata {
 	if task == nil {
 		return TaskMetadata{}
@@ -169,8 +167,6 @@ func MetadataFromTask(task *corev1alpha1.Task) TaskMetadata {
 	return meta
 }
 
-// BuildTaskTrace creates a deterministic trace read model from task events.
-//
 //nolint:gocyclo // Event-to-trace mapping is intentionally centralized to keep ordering and warnings deterministic.
 func BuildTaskTrace(meta TaskMetadata, input []store.ExecutionEvent, generatedAt time.Time) TaskTrace {
 	eventsCopy := make([]store.ExecutionEvent, 0, len(input))
@@ -258,8 +254,6 @@ func BuildTaskTrace(meta TaskMetadata, input []store.ExecutionEvent, generatedAt
 			trace.ModelRequests[idx].EndSeq = event.Seq
 			trace.ModelRequests[idx].EndedAt = &endedAt
 			trace.ModelRequests[idx].Summary = prefer(trace.ModelRequests[idx].Summary, event.Summary)
-			// The completion reports the model that answered, which can be more
-			// specific than the requested one.
 			trace.ModelRequests[idx].Model = prefer(trace.ModelRequests[idx].Model, modelRequestModel(event))
 			trace.ModelRequests[idx].Provider = prefer(trace.ModelRequests[idx].Provider, modelRequestProvider(event))
 			if event.Type == events.ExecutionEventTypeModelRequestFailed {
@@ -398,9 +392,6 @@ func modelRequestID(event store.ExecutionEvent) string {
 	return firstContentString(event.Content, "modelRequestID", "model_request_id", "requestID", "id")
 }
 
-// modelRequestModel accepts the GenAI semantic-convention aliases that the
-// execution event API also reads, preferring the response model on
-// completion and failure events.
 func modelRequestModel(event store.ExecutionEvent) string {
 	if event.Type == events.ExecutionEventTypeModelRequestStarted {
 		return firstContentString(event.Content, "model", genai.AttrRequestModel, genai.AttrResponseModel)

@@ -49,8 +49,6 @@ func TestV2ApprovalAPICleanedCancellationCannotBeRevived(t *testing.T) {
 	require.Equal(t, store.CanonicalBytesDigest(denied.Result), saved.ResponseDigest)
 	require.Zero(t, f.count.Load())
 
-	// Ordinary timeline cleanup is allowed even while this Task remains.
-	// Terminal redelivery must replay its receipt, not reconstruct that history.
 	require.NoError(t, f.store.DeleteExecutionEvents(t.Context(), f.task.Namespace, events.ExecutionEventStreamTypeTask, f.task.Name))
 	replayed := f.start(t).result(t)
 	require.True(t, replayed.Replayed)

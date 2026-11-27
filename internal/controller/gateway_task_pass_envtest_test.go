@@ -14,8 +14,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Exercise server-assigned UIDs, generations, snapshot status CAS and reads,
-// rather than accepting client-written identity fields from a fake API.
 func gatewayPassAPIFixture(t *testing.T, endpoint string) (*TaskReconciler, *corev1alpha1.Task, *corev1alpha1.Agent) {
 	t.Helper()
 	api := newArchivedSessionAPIClient(t)

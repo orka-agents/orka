@@ -18,7 +18,6 @@ func TestSupervisorAgentKitPassesCompletedPromptConformance(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("supervisor workspace verification requires Linux")
 	}
-	// Uses the production supervisor and the existing immediate ACP child.
 	server, cfg, profile := newTestAgentKitServer(t)
 	parent := filepath.Dir(cfg.SessionBaseDir)
 	for _, dir := range []string{parent, filepath.Dir(parent)} {
@@ -29,8 +28,6 @@ func TestSupervisorAgentKitPassesCompletedPromptConformance(t *testing.T) {
 	var replayObservedSettlement atomic.Bool
 	handler := server.Handler()
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// A valid scheduler/network ordering: the prompt finishes before the
-		// controller's duplicate admission request arrives at the supervisor.
 		if r.Method == http.MethodPut &&
 			r.Header.Get("Accept") == "application/json" &&
 			strings.Contains(r.URL.Path, "/prompts/") &&

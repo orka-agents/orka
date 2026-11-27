@@ -98,18 +98,13 @@ func wakeTestWorkspace() *workspacev1alpha1.ExecutionWorkspace {
 func TestACPWorkspaceTaskWakeRequestsTargetGatedTasks(t *testing.T) {
 	workspace := wakeTestWorkspace()
 	reader := wakeTestReader(t,
-		// Linked and not yet settled: still gated (live or settling).
 		wakeTestTask("team", "linked", wakeTestLabel(acpExecutionWorkspaceLinkLabel, workspace.Name)),
 		wakeTestTask("team", "settling", wakeTestLabel(acpExecutionWorkspaceLinkLabel, workspace.Name),
 			wakeTestPhase(corev1alpha1.TaskPhaseSucceeded)),
-		// Linked but settled: its workspace gates are behind it.
 		wakeTestTask("team", "settled", wakeTestLabel(acpExecutionWorkspaceLinkLabel, workspace.Name), wakeTestSettled,
 			wakeTestPhase(corev1alpha1.TaskPhaseSucceeded)),
-		// A live Session continuation not yet linked (queued behind a predecessor).
 		wakeTestTask("team", "waiting", wakeTestSession("conversation")),
-		// Finished Session history that never linked is not gated.
 		wakeTestTask("team", "history", wakeTestSession("conversation"), wakeTestPhase(corev1alpha1.TaskPhaseFailed)),
-		// Unrelated Session, other workspace, other namespace.
 		wakeTestTask("team", "other-session", wakeTestSession("elsewhere")),
 		wakeTestTask("team", "other-workspace", wakeTestLabel(acpExecutionWorkspaceLinkLabel, "acp-ws-other")),
 		wakeTestTask("other", "linked", wakeTestLabel(acpExecutionWorkspaceLinkLabel, workspace.Name)),
@@ -124,7 +119,6 @@ func TestACPWorkspaceTaskWakeRequestsTargetGatedTasks(t *testing.T) {
 
 func TestACPWorkspaceTaskWakeRequestsIgnoreForeignWorkspaces(t *testing.T) {
 	workspace := wakeTestWorkspace()
-	// Neither the ACP controller label nor the ACP pool link: not ours.
 	delete(workspace.Annotations, acpExecutionWorkspacePoolAnnotation)
 	reader := wakeTestReader(t, wakeTestTask("team", "linked", wakeTestLabel(acpExecutionWorkspaceLinkLabel, workspace.Name)))
 	if got := acpWorkspaceTaskWakeRequests(reader)(context.Background(), workspace); len(got) != 0 {
@@ -189,9 +183,6 @@ func TestACPWorkspaceTaskWakePredicate(t *testing.T) {
 			w.Status.Conditions = append(w.Status.Conditions, metav1.Condition{Type: "Attached", Status: metav1.ConditionTrue})
 		}},
 		{name: "spec generation", want: true, mutate: func(w *workspacev1alpha1.ExecutionWorkspace) { w.Generation = 4 }},
-		// Two live Tasks of one Session each rewrite the resume demand while
-		// a suspension settles; waking on it would let them re-trigger each
-		// other with no delay.
 		{name: "resume demand rewritten by another waiting Task", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
 			w.Annotations[acpWorkspaceResumeRequestedAnnotation] = "2026-11-18T00:00:01Z other other-uid"
 		}},
@@ -281,11 +272,6 @@ func TestACPRuntimePoolTaskWakePredicate(t *testing.T) {
 	}
 }
 
-// The binding status write returns a newer resourceVersion than the cached
-// copy the reconcile started from. The first-pass workspace link (an
-// optimistic-lock patch) must start from the written object, not conflict on
-// the stale copy; a later pass whose cached copy still predates the binding
-// adopts the bound object too.
 func TestExecutionBindingLeavesTaskReadyForOptimisticWorkspaceLink(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -322,9 +308,6 @@ func TestExecutionBindingLeavesTaskReadyForOptimisticWorkspaceLink(t *testing.T)
 	}
 }
 
-// A cached copy that predates the binding while the API server already shows
-// the Task past its pending stage is never adopted into the pending pass: the
-// pass requeues and lifecycle handling re-enters once the cache catches up.
 func TestExecutionBindingRefusesToAdoptAnAdvancedTask(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

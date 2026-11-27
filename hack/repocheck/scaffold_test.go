@@ -18,9 +18,6 @@ import (
 	"testing"
 )
 
-// scaffoldMarkers lists every kubebuilder scaffold marker in the repository.
-// kubebuilder's create api, create webhook and edit commands insert code at
-// these comments, so each one must survive refactors.
 var scaffoldMarkers = []struct{ file, marker string }{
 	{"cmd/main.go", "// +kubebuilder:scaffold:imports"},
 	{"cmd/main.go", "// +kubebuilder:scaffold:scheme"},
@@ -36,10 +33,8 @@ var scaffoldMarkers = []struct{ file, marker string }{
 	{"test/e2e/e2e_test.go", "// +kubebuilder:scaffold:e2e-webhooks-checks"},
 }
 
-// scaffoldLine matches a whole-line scaffold marker comment.
 var scaffoldLine = regexp.MustCompile(`^(//|#) \+kubebuilder:scaffold:\S+$`)
 
-// scaffoldLines returns the trimmed scaffold marker lines in data.
 func scaffoldLines(data []byte) []string {
 	var lines []string
 	scanner := bufio.NewScanner(bytes.NewReader(data))
@@ -72,8 +67,6 @@ func TestKubebuilderScaffoldMarkersExist(t *testing.T) {
 	}
 }
 
-// TestKubebuilderScaffoldMarkerListIsComplete keeps scaffoldMarkers in step
-// with the tree, so a marker added by a kubebuilder upgrade is protected too.
 func TestKubebuilderScaffoldMarkerListIsComplete(t *testing.T) {
 	root := repoRoot(t)
 	listed := map[string]bool{}
@@ -86,7 +79,7 @@ func TestKubebuilderScaffoldMarkerListIsComplete(t *testing.T) {
 		}
 		data, err := os.ReadFile(filepath.Join(root, f.path))
 		if errors.Is(err, os.ErrNotExist) {
-			continue // deleted in the working tree but still staged
+			continue
 		}
 		if err != nil {
 			t.Fatal(err)

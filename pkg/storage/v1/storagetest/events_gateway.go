@@ -333,7 +333,6 @@ func admitGateway(t *testing.T, p storagev1.StateProvider, event storagev1.Gatew
 	return admitted
 }
 
-// linkGatewayTask admits, claims and links one event to a created Task.
 func linkGatewayTask(t *testing.T, p storagev1.StateProvider, event storagev1.GatewayEvent, taskUID string) storagev1.GatewayEvent {
 	t.Helper()
 	admitGateway(t, p, event)
@@ -356,7 +355,6 @@ func gatewayDelivery(event storagev1.GatewayEvent, id, kind string, now time.Tim
 	}
 }
 
-// requireRejected accepts either refusal a provider may use for a stale owner.
 func requireRejected(t *testing.T, err error) {
 	t.Helper()
 	require.Error(t, err)
@@ -733,7 +731,6 @@ func runGatewayCleanup(t *testing.T, newProvider StateFactory) {
 		want := make([]string, 0, len(suffixes))
 		for _, suffix := range suffixes {
 			event := linkGatewayTask(t, p, gatewayEvent(now.Add(-2*time.Hour), eventsTenant, suffix), "task-uid-"+suffix)
-			// An ACP Session identity keeps retention from reclaiming the transcript.
 			require.NoError(t, p.BindSessionCleanupIdentity(t.Context(), event.Namespace, event.SessionName, "session-uid-"+suffix))
 			delivered := gatewayDelivery(event, "gdl-"+suffix, "error", expiredAt)
 			delivered.State, delivered.ProviderMessageID, delivered.DeliveredAt = storagev1.GatewayDeliveryDelivered, "provider", &expiredAt

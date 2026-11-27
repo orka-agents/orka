@@ -56,11 +56,8 @@ export function ToolList() {
                         {tool.builtin ? 'Built-in' : 'Custom'}
                       </Badge>
                     </TableCell>
-                    {/* Narrower below xl so the Status column still fits beside the sidebar at 1024px. */}
                     <TableCell className="max-w-48 truncate xl:max-w-xs" title={tool.description}>{tool.description}</TableCell>
                     <TableCell>
-                      {/* Built-in tools have no availability check, so they
-                          report no status rather than a fixed "Available". */}
                       {tool.builtin ? (
                         <span className="text-muted-foreground" title="Built-in tools have no availability check">—</span>
                       ) : tool.available ? (

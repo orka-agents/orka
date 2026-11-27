@@ -39,25 +39,19 @@ const (
 	limitReachedCode     = "limit_reached"
 )
 
-// ToolExecutor executes orchestrator LLM tool calls by creating and managing
-// Kubernetes resources (Tasks, Agents, Tools, Sessions).
 type ToolExecutor struct {
-	client            client.Client
-	policyReader      client.Reader
-	kubeClient        kubernetes.Interface
-	sessionManager    *controller.SessionManager
-	namespace         string
-	provider          string
-	providerNamespace string
-	providerType      string
-	executionMode     executionmode.Mode
-	sessionID         string
-	// chatSessionEpoch pins the chat Session incarnation the turn runs in.
-	chatSessionEpoch string
-	taskSeq          atomic.Int32
-	// taskSeqMu guards seeding taskSeq from the Session's existing Tasks;
-	// taskSeqSeeded is set only after a successful lookup, so a failed one
-	// is retried by the next name instead of restarting numbering at 1.
+	client                    client.Client
+	policyReader              client.Reader
+	kubeClient                kubernetes.Interface
+	sessionManager            *controller.SessionManager
+	namespace                 string
+	provider                  string
+	providerNamespace         string
+	providerType              string
+	executionMode             executionmode.Mode
+	sessionID                 string
+	chatSessionEpoch          string
+	taskSeq                   atomic.Int32
 	taskSeqMu                 sync.Mutex
 	taskSeqSeeded             bool
 	tasksCreated              int
@@ -68,39 +62,30 @@ type ToolExecutor struct {
 	resultStore               store.ResultStore
 	gatewayEventStore         store.GatewayEventStore
 	userInfo                  *UserInfo
-	// requester is the signed-in person (issuer and subject) this turn acts
-	// for, or nil for callers without a verified personal identity.
-	requester      *corev1alpha1.RequestedBy
-	linkedAccounts tools.LinkedAccountCredentials
-	// authorizeConnectorRead gates list_connections for delegated tokens.
-	authorizeConnectorRead func() *tools.ChatToolError
-	// dashboardEnabled lets list_connections name the dashboard page.
-	dashboardEnabled bool
-	// createdTasks is shared by every tool call of this turn.
-	createdTasks            *tools.CreatedTasks
-	registry                *tools.Registry
-	allowedToolNames        map[string]struct{}
-	authorizeTaskCreate     func(context.Context, *corev1alpha1.Task) error
-	authorizeTaskDelete     func(context.Context, *corev1alpha1.Task) error
-	authorizeAgentCreate    func(context.Context, *corev1alpha1.Agent) error
-	authorizeAgentReference func(context.Context, *corev1alpha1.Agent) error
-	authorizeAgentUpdate    func(context.Context, *corev1alpha1.Agent) error
-	authorizeAgentDelete    func(context.Context, *corev1alpha1.Agent) error
-	authorizeSecretRead     func(context.Context, string, string) error
+	requester                 *corev1alpha1.RequestedBy
+	linkedAccounts            tools.LinkedAccountCredentials
+	authorizeConnectorRead    func() *tools.ChatToolError
+	dashboardEnabled          bool
+	createdTasks              *tools.CreatedTasks
+	registry                  *tools.Registry
+	allowedToolNames          map[string]struct{}
+	authorizeTaskCreate       func(context.Context, *corev1alpha1.Task) error
+	authorizeTaskDelete       func(context.Context, *corev1alpha1.Task) error
+	authorizeAgentCreate      func(context.Context, *corev1alpha1.Agent) error
+	authorizeAgentReference   func(context.Context, *corev1alpha1.Agent) error
+	authorizeAgentUpdate      func(context.Context, *corev1alpha1.Agent) error
+	authorizeAgentDelete      func(context.Context, *corev1alpha1.Agent) error
+	authorizeSecretRead       func(context.Context, string, string) error
 }
 
-// SetExecutionMode supplies the immutable installation mode used by trusted
-// Agent-producing chat tools.
 func (e *ToolExecutor) SetExecutionMode(mode executionmode.Mode) {
 	e.executionMode = mode
 }
 
-// SetPolicyReader supplies the authoritative reader used by coordination tools.
 func (e *ToolExecutor) SetPolicyReader(reader client.Reader) {
 	e.policyReader = reader
 }
 
-// NewToolExecutor creates a new ToolExecutor.
 func NewToolExecutor(c client.Client, sm *controller.SessionManager, namespace, sessionID, watchNamespace string, enforceNS bool, maxTasks int, toolTimeout time.Duration, rs store.ResultStore, kubeClientOpt ...kubernetes.Interface) *ToolExecutor {
 	var kubeClient kubernetes.Interface
 	if len(kubeClientOpt) > 0 {
@@ -124,9 +109,6 @@ func NewToolExecutor(c client.Client, sm *controller.SessionManager, namespace, 
 	}
 }
 
-// SetAllowedTools restricts execution to the tools exposed and authorized for
-// the current request. When SetAllowedTools is not called, execution is
-// unrestricted; an empty allowlist intentionally denies all tool calls.
 func (e *ToolExecutor) SetAllowedTools(allowedTools []llm.Tool) {
 	e.allowedToolNames = make(map[string]struct{}, len(allowedTools))
 	for _, tool := range allowedTools {
@@ -137,37 +119,30 @@ func (e *ToolExecutor) SetAllowedTools(allowedTools []llm.Tool) {
 	}
 }
 
-// SetTaskCreateAuthorizer installs an authorization hook for tools that create Tasks.
 func (e *ToolExecutor) SetTaskCreateAuthorizer(authorize func(context.Context, *corev1alpha1.Task) error) {
 	e.authorizeTaskCreate = authorize
 }
 
-// SetTaskDeleteAuthorizer installs an authorization hook for tools that delete Tasks.
 func (e *ToolExecutor) SetTaskDeleteAuthorizer(authorize func(context.Context, *corev1alpha1.Task) error) {
 	e.authorizeTaskDelete = authorize
 }
 
-// SetAgentCreateAuthorizer installs an authorization hook for tools that create Agents.
 func (e *ToolExecutor) SetAgentCreateAuthorizer(authorize func(context.Context, *corev1alpha1.Agent) error) {
 	e.authorizeAgentCreate = authorize
 }
 
-// SetAgentUpdateAuthorizer installs an authorization hook for tools that update Agents.
 func (e *ToolExecutor) SetAgentUpdateAuthorizer(authorize func(context.Context, *corev1alpha1.Agent) error) {
 	e.authorizeAgentUpdate = authorize
 }
 
-// SetAgentDeleteAuthorizer installs an authorization hook for tools that delete Agents.
 func (e *ToolExecutor) SetAgentDeleteAuthorizer(authorize func(context.Context, *corev1alpha1.Agent) error) {
 	e.authorizeAgentDelete = authorize
 }
 
-// SetSecretReadAuthorizer installs an authorization hook for tools that read Secrets.
 func (e *ToolExecutor) SetSecretReadAuthorizer(authorize func(context.Context, string, string) error) {
 	e.authorizeSecretRead = authorize
 }
 
-// ToolResult represents the result of a tool execution.
 type ToolResult struct {
 	Success    bool   `json:"success"`
 	Data       any    `json:"data,omitempty"`
@@ -176,8 +151,6 @@ type ToolResult struct {
 	Suggestion string `json:"suggestion,omitempty"`
 }
 
-// Execute dispatches a tool call to the appropriate handler and returns
-// the JSON-serialized result.
 func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (string, error) {
 	if e.allowedToolNames != nil {
 		if _, ok := e.allowedToolNames[toolCall.Name]; !ok {
@@ -195,10 +168,6 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		recordRejectedToolCall(ctx, toolCall, resultStr)
 		return resultStr, marshalErr
 	}
-	// Match the effective string values used by the tools when constructing
-	// Tasks. Registry.Execute treats a null declared field as omitted, so these
-	// checks do too, or a null schedule would read as "<nil>" and skip the
-	// session guard.
 	targetNamespace := e.namespace
 	if value := args[toolNamespaceArg]; value != nil && fmt.Sprint(value) != "" {
 		targetNamespace = fmt.Sprint(value)
@@ -207,8 +176,6 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	if value := args["sessionRef"]; value != nil {
 		sessionRef = fmt.Sprint(value)
 	}
-	// Scheduled parents do not acquire the session lock, and their future runs
-	// are not part of this chat turn's wait set.
 	var schedule string
 	if value := args["schedule"]; value != nil {
 		schedule = fmt.Sprint(value)
@@ -225,7 +192,6 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	toolCtx, cancel := context.WithTimeout(ctx, e.toolTimeout)
 	defer cancel()
 
-	// Set up ToolContext for registry-based tools
 	tc := &tools.ToolContext{
 		Client:                    e.client,
 		PolicyReader:              e.policyReader,
@@ -293,9 +259,6 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	authorizeExternalToolContext(tc, e.userInfo, e.gatewayEventStore)
 	toolCtx = tools.WithToolContext(toolCtx, tc)
 
-	// Marshal args to JSON for the Tool interface
-	// Execute via registry with the arguments as sent. Re-encoding the decoded
-	// map would round integers beyond float64 precision.
 	resultStr, err := e.registry.Execute(toolCtx, toolCall.Name, toolCall.Arguments)
 	if err != nil {
 		var argErr *tools.ToolArgumentError
@@ -310,23 +273,15 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		}
 	}
 
-	// Registry tools return JSON-marshaled ChatToolResult strings. Validate
-	// that shape before passing the original tool result through unchanged.
 	var tr ToolResult
 	if jsonErr := json.Unmarshal([]byte(resultStr), &tr); jsonErr == nil {
 		return resultStr, nil
 	}
 
-	// Fallback: wrap raw string as success
 	result := ToolResult{Success: true, Data: resultStr}
 	return marshalResult(result)
 }
 
-// ---- Task creation helpers ----
-
-// generateTaskName returns the next chat-<session>-<hash>-<seq> Task name. The
-// executor lives for one turn, so its first name continues after the Tasks that
-// earlier turns of this session created instead of restarting at 1.
 func (e *ToolExecutor) generateTaskName(ctx context.Context) string {
 	seqSuffix := e.nextTaskSeqSuffix(ctx)
 	prefix := sanitizeTaskNameComponent(e.sessionID)
@@ -335,7 +290,6 @@ func (e *ToolExecutor) generateTaskName(ctx context.Context) string {
 	}
 	hashSuffix := e.taskNameHash()
 
-	// Kubernetes task names must fit DNS label rules (max 63 chars).
 	const taskNameOverhead = len("chat-") + len("-") + len("-")
 	maxPrefixLen := max(63-taskNameOverhead-len(hashSuffix)-len(seqSuffix), 1)
 	if len(prefix) > maxPrefixLen {
@@ -348,16 +302,11 @@ func (e *ToolExecutor) generateTaskName(ctx context.Context) string {
 	return fmt.Sprintf("chat-%s-%s-%s", prefix, hashSuffix, seqSuffix)
 }
 
-// taskNameHash distinguishes sessions whose sanitized names collide.
 func (e *ToolExecutor) taskNameHash() string {
 	hash := sha256.Sum256([]byte(e.sessionID))
 	return hex.EncodeToString(hash[:])[:8]
 }
 
-// nextTaskSeqSuffix numbers this turn's Tasks after those earlier turns of
-// the Session created. When the Session's Tasks cannot be listed it returns a
-// random suffix, which cannot collide with a numbered name, and the next call
-// retries the lookup.
 func (e *ToolExecutor) nextTaskSeqSuffix(ctx context.Context) string {
 	e.taskSeqMu.Lock()
 	defer e.taskSeqMu.Unlock()
@@ -373,11 +322,8 @@ func (e *ToolExecutor) nextTaskSeqSuffix(ctx context.Context) string {
 	return strconv.FormatInt(int64(e.taskSeq.Add(1)), 10)
 }
 
-// latestSessionTaskSeq returns the highest sequence number among the Tasks
-// labeled with this chat session, or 0 when there are none.
 func (e *ToolExecutor) latestSessionTaskSeq(ctx context.Context) (int32, error) {
 	opts := []client.ListOption{client.MatchingLabels{labels.LabelChatSession: e.sessionID}}
-	// Chat tools can only create Tasks in these namespaces when restricted.
 	switch {
 	case e.watchNamespace != "":
 		opts = append(opts, client.InNamespace(e.watchNamespace))
@@ -405,10 +351,8 @@ func (e *ToolExecutor) latestSessionTaskSeq(ctx context.Context) (int32, error) 
 
 func (e *ToolExecutor) taskLabels() map[string]string {
 	taskLabels := map[string]string{
-		labels.LabelCreatedBy:   "orchestrator",
-		labels.LabelChatSession: e.sessionID,
-		// The chat may create Tasks in other namespaces; its Session stays
-		// in the chat's own.
+		labels.LabelCreatedBy:            "orchestrator",
+		labels.LabelChatSession:          e.sessionID,
 		labels.LabelChatSessionNamespace: e.namespace,
 	}
 	if e.chatSessionEpoch != "" {
@@ -439,8 +383,6 @@ func sanitizeTaskNameComponent(s string) string {
 
 	return strings.Trim(b.String(), "-")
 }
-
-// ---- Error handling helpers ----
 
 func toolError(errType, message, suggestion string) ToolResult {
 	return ToolResult{

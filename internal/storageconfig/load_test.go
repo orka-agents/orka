@@ -12,10 +12,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// Golden digests pin the canonical encoding: SHA-256 over the domain string,
-// a NUL byte and the compact JSON of the bindings in contract order. They were
-// computed independently of this package. Changing the encoding changes the
-// digest of every unchanged configuration.
 const (
 	goldenDefaultDigest = "sha256:e1ad870685945b74a7cb6b7080bce6656a5d452c1ce23c24f56987730d2783be"
 	goldenAdapterDigest = "sha256:b23fd30f6ee62f4fd3611c09d15b96ecdcae790a32f2840a7477440491b4d99b"

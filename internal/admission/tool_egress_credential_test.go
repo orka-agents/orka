@@ -61,7 +61,6 @@ func TestToolEgressCredentialRequiresCallerSecretAccess(t *testing.T) {
 	require.Equal(t, admissionTestNamespace, authorizer.namespace)
 	require.Equal(t, caller, authorizer.caller)
 
-	// Every spec update reauthorizes every referenced Secret.
 	authorizer.secrets = nil
 	updated := egressCredentialTool("github", "slack")
 	response = validator.Handle(context.Background(), workspaceClassAdmissionRequest(t, admissionv1.Update, caller, updated, tool, ""))
@@ -74,12 +73,10 @@ func TestToolEgressCredentialRequiresCallerSecretAccess(t *testing.T) {
 	require.False(t, response.Allowed)
 	require.Contains(t, response.Result.Message, "cannot get secrets")
 
-	// An authorizer that cannot check Secrets fails closed.
 	validator = newWorkspaceClassUseValidator(scheme, &capturedClassUse{}, workspaceClassTool)
 	response = validator.Handle(context.Background(), workspaceClassAdmissionRequest(t, admissionv1.Create, caller, tool, nil, ""))
 	require.False(t, response.Allowed)
 
-	// Tools without egress credentials never invoke Secret authorization.
 	authorizer = &capturedSecretUse{}
 	validator = newWorkspaceClassUseValidator(scheme, authorizer, workspaceClassTool)
 	response = validator.Handle(context.Background(), workspaceClassAdmissionRequest(t, admissionv1.Create, caller, egressCredentialTool(), nil, ""))

@@ -36,7 +36,6 @@ var _ = Describe("Multi-Agent Coordination", Ordered, func() {
 		By("cleaning up coordination test resources")
 		cmd := exec.Command("kubectl", "delete", "task", coordTaskName, "-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
-		// Clean up child tasks
 		cmd = exec.Command("kubectl", "delete", "tasks", "-l", fmt.Sprintf("orka.ai/parent-task=%s", coordTaskName),
 			"-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
@@ -206,8 +205,6 @@ func coordinationMockText(marker, toolResultContains, content string) map[string
 	}
 }
 
-// waitForCoordinationChild returns the child Task of parent whose prompt
-// carries marker.
 func waitForCoordinationChild(parent, marker string, timeout time.Duration) string {
 	var name string
 	EventuallyWithOffset(1, func(g Gomega) {
@@ -236,10 +233,6 @@ func waitForCoordinationChild(parent, marker string, timeout time.Duration) stri
 	return name
 }
 
-// expectCoordinationToolResult waits until a toolName result containing want
-// reached the model in the conversation marked by marker. Unlike
-// expectMockLLMToolResult it checks every call, since coordinators call
-// wait_for_tasks more than once.
 func expectCoordinationToolResult(marker, toolName, want string, timeout time.Duration) {
 	EventuallyWithOffset(1, func(g Gomega) {
 		requests, err := mockLLMRequestsFor(marker)

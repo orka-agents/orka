@@ -183,7 +183,6 @@ func TestContextTokenWorkspaceFailuresRejectRefOverridingBranchConstraint(t *tes
 	require.Len(t, failures, 1)
 	require.Contains(t, failures[0], "overrides the branch constrained by token context")
 
-	// A ref allowed by an explicit token ref constraint remains accepted.
 	token = &ContextToken{TransactionContext: map[string]any{"branch": "main", "ref": "abc123"}}
 	failures = contextTokenWorkspaceFailures(token, &corev1alpha1.WorkspaceConfig{
 		GitRepo: "https://github.com/example/repo", Branch: "main", Ref: "abc123",
@@ -1836,10 +1835,6 @@ func TestContextTokenTaskToolCredentialFailuresUsesToolProvenance(t *testing.T) 
 	}
 }
 
-// The controller MCP broker serves its built-ins to a built-in ACP runtime,
-// so an explicit allowlist naming one needs no Tool resource. A name the broker
-// does not serve still must resolve, and the token's tool context still bounds
-// the allowlist.
 func TestContextTokenTaskCreateAcceptsBrokeredBuiltInsInBuiltInRuntimeAllowlist(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
@@ -1868,8 +1863,6 @@ func TestContextTokenTaskCreateAcceptsBrokeredBuiltInsInBuiltInRuntimeAllowlist(
 			require.NoError(t, err)
 			require.Empty(t, failures)
 
-			// Classification grants nothing: a token restricting tools
-			// elsewhere still refuses the brokered name.
 			restricted := &ContextToken{Scopes: token.Scopes, TransactionContext: map[string]any{"allowedTools": []any{"Read"}}}
 			require.Contains(t, strings.Join(contextTokenTaskCreateFailures(restricted, cfg, authzCtx), "\n"),
 				fmt.Sprintf("tool %q is not allowed by token context", name))
@@ -2008,8 +2001,6 @@ func TestContextTokenTaskToolFailuresAcceptsGenericDenyAll(t *testing.T) {
 	require.Empty(t, failures)
 }
 
-// A transaction token creates a memory consolidation run only with the
-// scopes its run's access needs.
 func TestContextTokenMemoryConsolidationFailures(t *testing.T) {
 	cfg, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
 	require.NoError(t, err)

@@ -125,9 +125,6 @@ func TestAgentRuntimeRecoveryEnrollmentAndTakeoverWithAPIServer(t *testing.T) {
 	}
 }
 
-// The real EndpointSlice API rejects loopback addresses. Listen only on a
-// concrete local IPv4 interface so enrollment still exercises the real HTTP
-// dial pins and the API's unmodified physical identity records.
 func recoveryAPITestListenAddress(t *testing.T) string {
 	t.Helper()
 	addresses, err := net.InterfaceAddrs()

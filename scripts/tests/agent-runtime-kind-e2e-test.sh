@@ -2,9 +2,6 @@
 # shellcheck disable=SC2016 # This test intentionally matches literal shell expressions.
 set -Eeuo pipefail
 
-# scripts/tests suites rely on 'set -e' stopping on failed (( )) arithmetic,
-# which macOS's stock bash 3.2 does not honor; failures would be silently
-# masked there. Require a modern bash (for example: brew install bash).
 if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "error: this test suite requires bash >= 4; found ${BASH_VERSION}" >&2
   exit 1
@@ -100,8 +97,6 @@ export ACP_E2E_CLAUDE_MODEL='claude-test'
 export ACP_E2E_COPILOT_MODEL='gpt-copilot-test'
 live_acp_kind_validate_vekil_catalog "${catalog_file}"
 
-# Vekil advertises native upstream endpoints even when its Anthropic API
-# translates requests through Chat or Responses.
 for claude_endpoint in /chat/completions /responses; do
   jq --arg endpoint "${claude_endpoint}" \
     '(.data[] | select(.id == "claude-test") | .supported_endpoints) = [$endpoint]' \

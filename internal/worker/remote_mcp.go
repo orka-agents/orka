@@ -31,16 +31,10 @@ const (
 	remoteMCPTextContent    = "text"
 )
 
-// SetRemoteMCPPreparationFence installs the native Task's frozen-dependency
-// validation before use. It runs after credentials and transport are resolved,
-// but before the first MCP request, for both discovery and invocation.
 func (e *ToolExecutor) SetRemoteMCPPreparationFence(fence func(context.Context, *corev1alpha1.Tool) error) {
 	e.remotePreparationFence = fence
 }
 
-// VerifyRemoteMCPTool verifies the operator-reviewed descriptor under the same
-// Task authority and gateway transport used for calls. It exposes no server
-// instructions or metadata and retains no protocol session between operations.
 func (e *ToolExecutor) VerifyRemoteMCPTool(ctx context.Context, tool *corev1alpha1.Tool) error {
 	if err := aitools.ValidateRemoteMCPConfiguration(tool); err != nil {
 		return err
@@ -83,8 +77,6 @@ func (e *ToolExecutor) prepareRemoteMCPRequest(ctx context.Context, tool *corev1
 	if err != nil || params == nil {
 		return preparedToolRequest{}, errors.New("remote MCP arguments must be a JSON object")
 	}
-	// Discovery has no call arguments. Validate real calls before any credential
-	// reads or exchanges, and never expose validator errors containing input data.
 	if !verifyOnly {
 		if err := aitools.ValidateRemoteMCPNumericBudget(params); err != nil {
 			return preparedToolRequest{}, err
@@ -111,7 +103,7 @@ func (e *ToolExecutor) prepareRemoteMCPRequest(ctx context.Context, tool *corev1
 	if err != nil {
 		return preparedToolRequest{}, errors.New("invalid remote MCP endpoint")
 	}
-	req.GetBody = nil // Never make an automatically replayable call.
+	req.GetBody = nil
 	for k, v := range h.Headers {
 		req.Header.Set(k, v)
 	}
@@ -126,8 +118,6 @@ func (e *ToolExecutor) prepareRemoteMCPRequest(ctx context.Context, tool *corev1
 	if !prepared.gateway || prepared.direct || prepared.connection || strings.TrimSpace(prepared.transactionToken) == "" || strings.TrimSpace(req.Header.Get(transactiontoken.HeaderName)) == "" {
 		return preparedToolRequest{}, errors.New("remote MCP requires a gateway with Task transaction authority")
 	}
-	// Validate only after the final resolution. The request and TLS material below
-	// stay frozen: resolving again after this fence would reopen the startup race.
 	if e.remotePreparationFence != nil {
 		if err := e.remotePreparationFence(ctx, tool); err != nil {
 			return preparedToolRequest{}, err
@@ -143,8 +133,6 @@ func (e *ToolExecutor) remoteMCPSecret(ctx context.Context, ref corev1alpha1.Sec
 	if err := outboundaccess.ValidateCredentialAuthority(true, e.credentialScopeAllowed, e.credentialSecret, []string{ref.Name}, false); err != nil {
 		return "", err
 	}
-	// Legacy mounted task/agent files are keyed only by key, not by Secret name.
-	// Remote credentials must come from the exact namespace/name/key API selector.
 	if e.k8sClient == nil {
 		return "", errors.New("remote MCP credential client is unavailable")
 	}
@@ -163,8 +151,6 @@ func (e *ToolExecutor) remoteMCPSecret(ctx context.Context, ref corev1alpha1.Sec
 }
 
 func (e *ToolExecutor) bindRemoteMCPTransport(p preparedToolRequest, record bool) error {
-	// Freeze the effective dial endpoint, original authority, TLS and named
-	// resource credential. Token exchanges may mint a fresh Task token per session.
 	headers := p.request.Header.Clone()
 	headers.Del(transactiontoken.HeaderName)
 	data, err := json.Marshal(struct {
@@ -191,8 +177,6 @@ func (e *ToolExecutor) bindRemoteMCPTransport(p preparedToolRequest, record bool
 	return nil
 }
 
-// RemoteMCPTimeout returns the shared budget for native validation and remote
-// execution, defaulting to 30 seconds and capped at two minutes.
 func RemoteMCPTimeout(tool *corev1alpha1.Tool) time.Duration {
 	timeout := 30 * time.Second
 	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil {
@@ -204,14 +188,11 @@ func RemoteMCPTimeout(tool *corev1alpha1.Tool) time.Duration {
 func (e *ToolExecutor) executeRemoteMCPSession(ctx context.Context, httpClient *http.Client, p preparedToolRequest, verifyOnly bool) (result string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, RemoteMCPTimeout(p.remote))
 	defer cancel()
-	// Exchange/parser errors below contain only local diagnostics, never server
-	// error bodies or credential-bearing transport errors. Preserve that context.
 	defer func() {
 		if err != nil {
 			err = fmt.Errorf("remote MCP session: %w", err)
 		}
 	}()
-	// The admitted transport supplies the only credentials. Never inherit a jar.
 	clientCopy := *httpClient
 	clientCopy.Jar = nil
 	httpClient = &clientCopy
@@ -361,7 +342,6 @@ func verifyRemoteMCPDescriptor(ctx context.Context, httpClient *http.Client, p p
 				OutputSchema json.RawMessage `json:"outputSchema,omitempty"`
 				Annotations  json.RawMessage `json:"annotations,omitempty"`
 			}
-			// Description, title, annotations and outputSchema never enter model definitions.
 			if err := decodeRemoteMCPObject(rawTool, &selectedDescriptor); err != nil {
 				return err
 			}
@@ -385,10 +365,6 @@ func verifyRemoteMCPDescriptor(ctx context.Context, httpClient *http.Client, p p
 	return errors.New("remote MCP discovery exceeds page limit")
 }
 
-// remoteMCPExchange keeps the existing prepared raw-JSON/gateway request path,
-// but rejects interactions, metadata and ambiguous envelopes before accepting
-// the terminal response. It does not drain an SSE stream after that response:
-// Streamable HTTP servers SHOULD close then, but are not required to do so.
 func remoteMCPExchange(httpClient *http.Client, req *http.Request, id string) (json.RawMessage, http.Header, error) {
 	req.GetBody = nil
 	resp, err := httpClient.Do(req)
@@ -457,8 +433,6 @@ func remoteMCPExchange(httpClient *http.Client, req *http.Request, id string) (j
 func readRemoteMCPEvent(body io.Reader) ([]byte, error) {
 	scanner := bufio.NewScanner(io.LimitReader(body, remoteMCPResponseLimit+1))
 	scanner.Buffer(make([]byte, 4096), remoteMCPResponseLimit)
-	// A CR completes the line immediately. Swallow its optional LF on the next
-	// scan, including across reads, without waiting for more data or EOF.
 	skipLF := false
 	scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
 		advance := 0
@@ -492,7 +466,6 @@ func readRemoteMCPEvent(body io.Reader) ([]byte, error) {
 		if value, ok := strings.CutPrefix(line, "data:"); ok {
 			data = append(data, strings.TrimPrefix(value, " "))
 		} else if line == "id" || strings.HasPrefix(line, "id:") || line == "retry" || strings.HasPrefix(line, "retry:") {
-			// IDs and retry delays are metadata; this client neither resumes nor reconnects.
 			continue
 		} else if line != "" && !strings.HasPrefix(line, ":") && line != "event: message" && line != "event:message" {
 			return nil, errors.New("unsupported remote MCP stream event")
@@ -507,8 +480,6 @@ func readRemoteMCPEvent(body io.Reader) ([]byte, error) {
 	return nil, errors.New("remote MCP stream ended without a response")
 }
 
-// validateRemoteMCPJSON rejects duplicate members and excessive nesting before
-// any projection or schema comparison can erase that ambiguity.
 func validateRemoteMCPJSON(raw []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
@@ -558,8 +529,6 @@ func validateRemoteMCPJSON(raw []byte) error {
 
 type canonicalRemoteNumber string
 
-// Normalize decimal notation without binary64 or allocating an exponent-sized
-// integer. This compares 1, 1.0 and 1e0 equally while distinguishing large values.
 func canonicalRemoteMCPNumbers(value any) any {
 	switch v := value.(type) {
 	case json.Number:
@@ -623,7 +592,6 @@ func decodeRemoteMCPObject(raw []byte, target any) error {
 	if fields == nil {
 		return errors.New("remote MCP object is required")
 	}
-	// encoding/json matches struct fields case-insensitively; MCP names are exact.
 	typ := reflect.TypeOf(target).Elem()
 	allowed := make(map[string]bool, typ.NumField())
 	for field := range typ.Fields() {

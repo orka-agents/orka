@@ -102,11 +102,6 @@ func (s *Server) installACPArtifactAuthorizationBroker() {
 
 //nolint:gocyclo // Artifact grants keep identity, ownership, and capability checks in one authorization boundary.
 func (s *Server) issueACPArtifactAuthorization(c fiber.Ctx) error {
-	// Authenticate on the provider bearer resolved from the non-secret pool
-	// namespace/UID headers before consuming the body: runtimes can reach
-	// this endpoint, so an unauthenticated peer must be rejected without being
-	// allowed to stream — or drip-feed a declared-length — request body and
-	// occupy controller handlers.
 	poolNamespace := strings.TrimSpace(string(c.Request().Header.Peek(harnessv2.MCPBrokerPoolNamespaceHeader)))
 	poolUID := strings.TrimSpace(string(c.Request().Header.Peek(harnessv2.MCPBrokerPoolUIDHeader)))
 	if poolNamespace == "" || poolUID == "" {
@@ -124,8 +119,6 @@ func (s *Server) issueACPArtifactAuthorization(c fiber.Ctx) error {
 	if err := json.Unmarshal(c.Body(), &request); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{apiFieldError: apiErrorInvalidRequest})
 	}
-	// The body's pool identity must match the pre-authenticated headers so a
-	// valid bearer for one pool cannot authorize an artifact for another.
 	if request.Namespace != poolNamespace || string(request.Metadata.Fence.RuntimePoolUID) != poolUID {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 	}
@@ -139,9 +132,6 @@ func (s *Server) issueACPArtifactAuthorization(c fiber.Ctx) error {
 	}
 	capabilityHeader := string(c.Request().Header.Peek(harnessv2.OperationCapabilityHeader))
 	if provider.pool != nil {
-		// Verify with a fresh timestamp: provider resolution above performs
-		// Kubernetes I/O, and a capability that expired while it ran must not be
-		// accepted against the stale pre-resolution clock.
 		if err := harnessv2.VerifyOperationCapability(provider.operationCapabilitySecret, capabilityHeader, request.Metadata, true, time.Now().UTC()); err != nil {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 		}
@@ -419,9 +409,6 @@ func (s *Server) authorizeExternalACPArtifactRequest(
 		return err
 	}
 
-	// Re-resolve after consuming the body. This closes races where the
-	// registration, its conformed Secret versions, or a colliding provider
-	// appears after preauthentication.
 	currentProvider, err := s.resolveArtifactRuntimeProviderByIdentity(
 		ctx, request.Namespace, string(request.Metadata.Fence.RuntimePoolUID),
 	)
@@ -444,8 +431,6 @@ func (s *Server) authorizeExternalACPArtifactRequest(
 	); err != nil {
 		return err
 	}
-	// Verify last, against the freshly resolved frozen capability Secret. Any
-	// expiry or Secret rotation during the preceding reads fails closed.
 	if err := harnessv2.VerifyOperationCapability(
 		authority.operationCapabilitySecret, capabilityHeader, request.Metadata, true, time.Now().UTC(),
 	); err != nil {
@@ -639,10 +624,6 @@ func externalArtifactSnapshotSecretMatches(
 		len(frozen.Keys) == 1 && frozen.Keys[0] == reference.Key
 }
 
-// resolveArtifactRuntimePoolByIdentity resolves the RuntimePool and its exact
-// active-instance controller-auth Secret from a non-secret pool namespace and
-// UID. It is called with header-supplied identity so the caller's bearer can be
-// authenticated before the request body is read.
 func (s *Server) resolveArtifactRuntimePoolByIdentity(ctx context.Context, poolNamespace, poolUID string) (*corev1alpha1.RuntimePool, *corev1.Secret, error) {
 	reader := s.authorizationReader()
 	pool, err := findArtifactRuntimePoolByIdentity(ctx, reader, poolNamespace, poolUID)
@@ -680,9 +661,6 @@ func resolveArtifactRuntimePoolAuthSecret(
 	}); err != nil {
 		return nil, err
 	}
-	// During graceful epoch replacement both the draining instance's Secret
-	// and the next epoch's Secret exist; select the one mounted by the
-	// pool's exact active instance instead of requiring one Secret globally.
 	epoch := strconv.FormatInt(pool.Status.ActiveInstance.ControllerEpoch, 10)
 	legacySuffix := "auth-e" + epoch
 	var matched []*corev1.Secret
@@ -774,9 +752,6 @@ func constantAPIStringEqual(left, right string) bool {
 const envWorkspacePublisherControllerTokenFile = "ORKA_WORKSPACE_PUBLISHER_CONTROLLER_TOKEN_FILE"
 
 func (s *Server) issuePublisherArtifactAuthorization(c fiber.Ctx) error {
-	// Authenticate from headers before consuming the body: runtime Pods can
-	// reach this endpoint, so unauthenticated peers must be rejected without
-	// being allowed to stream request bodies.
 	expectedBearer, err := readSecretAtEnvPath(envWorkspacePublisherControllerTokenFile, 16)
 	if err != nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{apiFieldError: apiErrorArtifactAuthorizationUnavailable})
@@ -860,12 +835,6 @@ func (s *Server) authorizePublisherWorkspaceUpload(ctx context.Context, request 
 		return fmt.Errorf("workspace Task is unavailable")
 	}
 	execution := task.Status.Execution
-	// Task status and the external-effect lease are committed through separate
-	// Kubernetes objects. The fresh Task projection can therefore advance once
-	// to Submitting while the exact workspace effect still reads InFlight. Keep
-	// that observed handoff tolerant, but reject every later and terminal state.
-	// authorizePublisherParentEffect separately enforces the live current-epoch
-	// lease for this exact workspace preparation operation.
 	if (!taskStateAllowsWorkspacePreparation(execution.State) && execution.State != corev1alpha1.TaskExecutionStateSubmitting) ||
 		execution.PromptID == "" || request.Metadata.OperationID != "workspace-prepare-"+execution.PromptID {
 		log.Info("publisher artifact authorization denied", "reason", "workspace_task_state_mismatch", "parentOperation", request.ParentOperation, "namespace", request.Metadata.Namespace, "operationID", request.Metadata.OperationID, "executionState", execution.State, "promptIDMatches", request.Metadata.OperationID == "workspace-prepare-"+execution.PromptID)
@@ -1037,12 +1006,6 @@ func (s *Server) authorizePublisherParentEffect(
 	return nil
 }
 
-// externalEffectLeaseActive reports whether an in-flight external effect still
-// holds a live lease under the controller's current durable fence. The
-// publisher broker paths authenticate on a shared bearer with no per-request
-// epoch capability, so a lease from a superseded controller epoch must stop
-// authorizing broker access immediately even when its wall-clock expiry has not
-// elapsed yet.
 func externalEffectLeaseActive(effect *store.ExternalEffect, fence store.ControllerEpochFence, now time.Time) bool {
 	if effect == nil || strings.TrimSpace(effect.LeaseOwner) == "" || effect.ControllerEpoch <= 0 {
 		return false

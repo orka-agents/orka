@@ -26,8 +26,6 @@ func enableAgentUseAuthorization(t *testing.T) {
 	t.Cleanup(func() { agentUseAuthorization.Store(previous) })
 }
 
-// agentUseClientset allows `use` on the listed namespace/name Agents, allows
-// every other review, and records the Agent use reviews it saw.
 func agentUseClientset(allowed ...string) (*kubefake.Clientset, *[]authorizationv1.ResourceAttributes) {
 	grants := map[string]bool{}
 	for _, key := range allowed {
@@ -87,7 +85,6 @@ func TestTaskCreateRequiresAgentUse(t *testing.T) {
 	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(), nil, allowed, user,
 		agentUseTask(&corev1alpha1.AgentReference{Name: "reviewer"})))
 
-	// A Task without an Agent needs no grant.
 	require.NoError(t, authorizeKubernetesTaskCreate(context.Background(), nil, denied, user, agentUseTask(nil)))
 }
 
@@ -132,8 +129,6 @@ func TestAgentRefsUseChecksOnlyNewlyNamedAgents(t *testing.T) {
 	})
 	requireForbidden(t, authorizeAgentRefsUse(context.Background(), clientset, user, "team-a", "repositoryscan", "scan", scanRefs, nil))
 
-	// A stored reference the controller cannot resolve is not the Agent its
-	// corrected name runs, so the correction is checked.
 	for _, stale := range []corev1alpha1.AgentReference{{Name: "patcher "}, {Name: "patcher", Namespace: " team-a"}} {
 		requireForbidden(t, authorizeAgentRefsUse(context.Background(), clientset, user, "team-a", "repositoryscan", "scan",
 			[]corev1alpha1.AgentReference{{Name: "patcher"}}, []corev1alpha1.AgentReference{stale}))
@@ -158,7 +153,6 @@ func TestCreateRepositoryMonitorEnforcesAgentUse(t *testing.T) {
 		"a caller with no verifiable identity cannot name an Agent once use is enforced")
 }
 
-// agentUseReviews allows every review and records each Agent use review spec.
 func agentUseReviews() (*kubefake.Clientset, *[]authorizationv1.SubjectAccessReviewSpec) {
 	seen := &[]authorizationv1.SubjectAccessReviewSpec{}
 	clientset := kubefake.NewClientset()
@@ -191,8 +185,6 @@ func TestAgentUseReviewsExternalCallersByIssuerAndSubject(t *testing.T) {
 	for _, authType := range []string{AuthTypeOIDC, AuthTypeContextToken} {
 		t.Run(authType, func(t *testing.T) {
 			clientset, seen := agentUseReviews()
-			// A display name that collides with a controller ServiceAccount and
-			// a system group must not reach the review unqualified.
 			user := &UserInfo{
 				Username: "system:serviceaccount:orka-system:orka-controller",
 				Subject:  "subject-1", Issuer: "https://issuer.example",

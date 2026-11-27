@@ -226,8 +226,6 @@ func captureCLISecurityChildTasks(ctx context.Context, reader client.Reader, par
 	return snapshot, nil
 }
 
-// Parent deletion uses normal garbage collection and Task finalization. This
-// observer proves absence without adding a finalizer or claiming a receipt.
 func waitCLISecurityChildTasksDeleted(ctx context.Context, reader client.Reader, snapshot *cliSecurityTaskSnapshot, interval time.Duration) error {
 	if snapshot == nil || snapshot.parentUID == "" {
 		return errors.New("exact security parent deletion identity is required")
@@ -268,8 +266,6 @@ func waitCLISecurityChildTasksDeleted(ctx context.Context, reader client.Reader,
 	})
 }
 
-// repositoryScanManifest returns a minimal REST-compatible RepositoryScan.
-// The API requires spec.repoURL and spec.analysisAgentRef.name; branch and validationMode are fixed for stable e2e reads.
 func repositoryScanManifest(name, repoURL, analysisAgent string) string {
 	return fmt.Sprintf(`
 apiVersion: core.orka.ai/v1alpha1
@@ -285,8 +281,6 @@ spec:
 `, name, repoURL, analysisAgent)
 }
 
-// repositoryMonitorManifest returns a minimal REST-compatible RepositoryMonitor.
-// The API requires spec.repoURL plus spec.agents.reviewer.name when pull-request monitoring is enabled.
 func repositoryMonitorManifest(name, repoURL, reviewerAgent string) string {
 	return fmt.Sprintf(`
 apiVersion: core.orka.ai/v1alpha1

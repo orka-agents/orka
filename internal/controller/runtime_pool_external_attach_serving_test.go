@@ -10,8 +10,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// servedExternalPool serves the first instance and lets the next pass record
-// the admitted state.
 func servedExternalPool(t *testing.T) *externalRuntimePoolFixture {
 	t.Helper()
 	f := newExternalRuntimePoolFixture(t)
@@ -24,8 +22,6 @@ func servedExternalPool(t *testing.T) *externalRuntimePoolFixture {
 	return f
 }
 
-// attachWithGenerationLag writes an attachment and bumps the generation the
-// way the API server does, before core re-admits it or the provider observes it.
 func (f *externalRuntimePoolFixture) attachWithGenerationLag(t *testing.T, mutate func(*workspacev1alpha1.ExecutionWorkspace)) {
 	t.Helper()
 	workspace := f.currentWorkspace(t)
@@ -68,8 +64,6 @@ func TestAttachmentOnlyGenerationChangeKeepsTheRuntimeServing(t *testing.T) {
 		t.Fatalf("the runtime was re-probed or re-bootstrapped: probes %d->%d seeds %d->%d", probes, f.supervisor.probeCalls, seeds, f.seeds)
 	}
 
-	// Core re-admits and the provider observes the attachment: the ordinary
-	// serving path resumes without ever having closed.
 	workspace := f.currentWorkspace(t)
 	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 	if err := f.r.Update(context.Background(), workspace); err != nil {
@@ -87,7 +81,6 @@ func TestAttachmentOnlyGenerationChangeKeepsTheRuntimeServing(t *testing.T) {
 	}
 }
 
-// Anything beyond the attachment closes and re-admits as before.
 func TestNonAttachmentGenerationChangesStillCloseTheRuntime(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -131,8 +124,6 @@ func TestNonAttachmentGenerationChangesStillCloseTheRuntime(t *testing.T) {
 	t.Run("no admitted record yet", func(t *testing.T) {
 		f := newExternalRuntimePoolFixture(t)
 		f.serve(t)
-		// Clear the admitted record to simulate a pool whose status transitioned
-		// before the annotation was persisted.
 		pool := runtimePoolTestGetPool(t, f.r, f.pool)
 		delete(pool.Annotations, externalRuntimeServedAnnotation)
 		if err := f.r.Update(context.Background(), &pool); err != nil {
@@ -146,8 +137,6 @@ func TestNonAttachmentGenerationChangesStillCloseTheRuntime(t *testing.T) {
 	})
 }
 
-// The admitted record binds the exact active instance: a pool whose active
-// boot no longer matches it is not considered serving the admitted runtime.
 func TestAttachmentOnlyLagRequiresTheAdmittedBoot(t *testing.T) {
 	f := servedExternalPool(t)
 	f.attachWithGenerationLag(t, nil)
@@ -166,11 +155,6 @@ func TestAttachmentOnlyLagRequiresTheAdmittedBoot(t *testing.T) {
 	}
 }
 
-// TestAttachmentOnlyLagDispatchBoundary distinguishes uninterrupted same-holder
-// bearer rotation from revocation, different holder, and stale queued work:
-// keeping the pool Serving across an attachment-only generation lag never
-// allows a Task whose attachment is unacknowledged, revoked, or owned by a
-// different holder to pass acpWorkspacePoolReadinessFailure and queue/dispatch.
 func TestAttachmentOnlyLagDispatchBoundary(t *testing.T) {
 	now := metav1.Now().Time
 	makeWorkspace := func() (*workspacev1alpha1.ExecutionWorkspace, *corev1alpha1.RuntimePool) {
@@ -199,21 +183,16 @@ func TestAttachmentOnlyLagDispatchBoundary(t *testing.T) {
 
 	t.Run("same holder bearer rotation blocks re-queueing until observed and re-admitted", func(t *testing.T) {
 		w, pool := makeWorkspace()
-		// Simulate same-holder bearer rotation: epoch advances 2 -> 3, generation
-		// bumps, core admission & provider observation lag behind.
 		w.Spec.AttachmentEpoch = 3
 		w.Spec.Attachment.Epoch = 3
 		w.Generation++
 		if !externalAttachmentOnlyLag(pool, w) {
 			t.Fatal("expected pool to remain Serving during same-holder bearer rotation lag")
 		}
-		// While the rotation lags, a fresh Task queueing pass still sees
-		// errACPWorkspaceRecoveryPending (cannot bypass handshake).
 		err := acpWorkspacePoolReadinessFailure(w, pool, string(w.UID), "task-a-uid", now)
 		if err == nil {
 			t.Fatal("expected readiness gate to hold new queueing while rotation generation lags")
 		}
-		// A different holder cannot queue at all (hard refusal, not recovery pending).
 		errOther := acpWorkspacePoolReadinessFailure(w, pool, string(w.UID), "task-b-uid", now)
 		if errOther == nil || errOther.Error() != "the linked workspace is attached to a different Task" {
 			t.Fatalf("different holder error = %v, want different-Task refusal", errOther)
@@ -222,7 +201,6 @@ func TestAttachmentOnlyLagDispatchBoundary(t *testing.T) {
 
 	t.Run("revocation blocks dispatch even while pool stays serving during lag", func(t *testing.T) {
 		w, pool := makeWorkspace()
-		// Settlement revokes attachment (Attachment=nil) and bumps generation.
 		w.Spec.Attachment = nil
 		w.Generation++
 		err := acpWorkspacePoolReadinessFailure(w, pool, string(w.UID), "task-a-uid", now)

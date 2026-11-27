@@ -504,9 +504,6 @@ func TestMarkRepositoryMonitorCommandWorkActionRetryPendingKeepsFinishedAction(t
 	}
 }
 
-// completingWriteStore completes the action just before a caller's write of
-// it reaches the store, as the controller can between that caller's read and
-// its write.
 type completingWriteStore struct {
 	store.RepositoryMonitorStore
 }

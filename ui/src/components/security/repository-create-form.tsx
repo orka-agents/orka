@@ -13,11 +13,8 @@ import { everyScheduleError, isCredentialFreeGitHubRepositoryURL, isCronSchedule
 import { useUIStore } from '@/stores/ui'
 import type { Agent } from '@/schemas/agent'
 
-// Radix Select items cannot use an empty value, so clearing uses a sentinel.
 const noPatchAgent = '__none__'
 
-// Scans run as agent Tasks, which need a runtime (a built-in type or an
-// external runtimeRef); every scan with a native Agent would fail.
 function hasRuntime(agent: Agent) {
   const runtime = agent.spec.runtime
   return Boolean(runtime && ('type' in runtime ? runtime.type : runtime.runtimeRef))
@@ -118,13 +115,10 @@ export function RepositoryCreateForm() {
               <Input id="security-repo-url" value={repoURL} onChange={(event) => setRepoURL(event.target.value)} placeholder="https://github.com/org/repo" required />
             </div>
 
-            {/* grid-cols-1 (minmax(0, 1fr)) keeps the phone column from growing to the longest agent name. */}
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <label htmlFor="security-analysis-agent" className="text-sm font-medium">Analysis Agent</label>
                 <Select disabled={agentsLoading || noAgentsInNamespace} value={analysisAgentRef} onValueChange={setAnalysisAgentRef}>
-                  {/* Field-wide and capped there, so a long agent name truncates
-                      instead of overlapping the next field or leaving the card. */}
                   <SelectTrigger id="security-analysis-agent" className="w-full max-w-full">
                     <span className="min-w-0 truncate"><SelectValue placeholder={agentsLoading ? 'Loading agents...' : 'Select analysis agent'} /></span>
                   </SelectTrigger>

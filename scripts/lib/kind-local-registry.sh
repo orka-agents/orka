@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Shared helpers for publishing immutable test images to a registry reachable by
-# both the host and nodes in one Kind cluster.
 
 orka_kind_registry_name() {
   local cluster="$1"
@@ -22,10 +20,6 @@ orka_kind_registry_start() {
       --label "ai.orka.test.owner=${owner}" \
       -p 127.0.0.1::5000 registry:2 >/dev/null || return 1
   elif [[ "$(docker inspect -f '{{.State.Running}}' "${ORKA_KIND_REGISTRY_NAME}" 2>/dev/null)" == "true" ]]; then
-    # Reuse the running registry: recreating it would change the host port
-    # and discard every image a previous step already pinned by digest
-    # (cluster-up.sh, install-agent-sandbox.sh, and demo-images run in
-    # separate invocations against the same cluster).
     :
   else
     docker rm -f "${ORKA_KIND_REGISTRY_NAME}" >/dev/null 2>&1 || true
@@ -41,8 +35,6 @@ orka_kind_registry_start() {
     echo "unexpected Kind registry port mapping: ${port_output}" >&2
     return 1
   }
-  # Keep the host-side reference on IPv4. Docker may resolve localhost to ::1
-  # first, while the registry port is intentionally bound only to 127.0.0.1.
   ORKA_KIND_REGISTRY_ADDR="127.0.0.1:${host_port}"
 
   local deadline=$((SECONDS + 30))

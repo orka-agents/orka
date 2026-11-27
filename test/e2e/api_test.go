@@ -107,7 +107,6 @@ var _ = Describe("REST API Endpoints", Ordered, func() {
 	It("should reject unauthenticated requests", func() {
 		req, err := http.NewRequest("GET", apiBaseURL+"/api/v1/tasks", nil)
 		Expect(err).NotTo(HaveOccurred())
-		// No Authorization header
 
 		resp, err := http.DefaultClient.Do(req)
 		Expect(err).NotTo(HaveOccurred())

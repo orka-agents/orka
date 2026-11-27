@@ -33,37 +33,15 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-// DefaultContainerTaskSecretUsePolicyName names the ValidatingAdmissionPolicy,
-// and its binding, that requires the `use` verb on every Secret a container
-// Task names (config/container-task-secret-use-policy).
 const DefaultContainerTaskSecretUsePolicyName = "container-task-secret-use.orka.ai"
 
-// ErrContainerTaskSecretUseUnavailable reports that the controller could not
-// confirm the Secret use policy is in force because of a transient read error.
-// The dispatch is retried rather than failed.
 var ErrContainerTaskSecretUseUnavailable = errors.New("container Task Secret use policy could not be confirmed")
 
-// ContainerTaskSecretUsePolicy lets operator-authorized container Tasks
-// receive the Secrets they name without the cluster-wide direct Secret mount
-// switch. Admission requires the identity that writes such a Task to hold
-// `use` on each Secret; Orka never grants that verb to the controller or to a
-// worker, so Tasks created by agents, tools, chat, or the API cannot qualify.
-// The controller delivers only after it has confirmed the policy is bound.
 type ContainerTaskSecretUsePolicy struct {
-	// Enabled turns the mode on.
-	Enabled bool
-	// PolicyName names the ValidatingAdmissionPolicy and its binding.
-	PolicyName string
-	// Reader reads the policy, its binding, and scheduled parents uncached.
-	Reader client.Reader
-	// ControllerNamespace is the namespace of the controller's ServiceAccount,
-	// the one identity the policy exempts. Empty means the Task's namespace,
-	// which is the same in a standard installation.
-	ControllerNamespace string
-	// ControllerServiceAccount is the name of the controller's own
-	// ServiceAccount. When set, policy drift checks require the policy's
-	// scheduled-run exemption to match this exact ServiceAccount rather than
-	// any ServiceAccount in ControllerNamespace.
+	Enabled                  bool
+	PolicyName               string
+	Reader                   client.Reader
+	ControllerNamespace      string
 	ControllerServiceAccount string
 }
 
@@ -74,8 +52,6 @@ func (p ContainerTaskSecretUsePolicy) policyName() string {
 	return DefaultContainerTaskSecretUsePolicyName
 }
 
-// containerTaskSecretNames returns the distinct Secret names a Task asks to
-// receive through spec.secretRef and spec.env[].valueFrom.secretKeyRef.
 func containerTaskSecretNames(task *corev1alpha1.Task) []string {
 	if task == nil {
 		return nil
@@ -98,10 +74,6 @@ func containerTaskSecretNames(task *corev1alpha1.Task) []string {
 	return names
 }
 
-// scheduledRunSpec returns a Task's spec without the scheduling fields. The
-// controller copies a scheduled Task's spec into each run with these fields
-// cleared, and the API server then applies their CRD defaults to the run, so
-// they are cleared on both sides before a run is compared with its parent.
 func scheduledRunSpec(scheduled *corev1alpha1.Task) corev1alpha1.TaskSpec {
 	spec := *scheduled.Spec.DeepCopy()
 	spec.Schedule = ""
@@ -114,11 +86,6 @@ func scheduledRunSpec(scheduled *corev1alpha1.Task) corev1alpha1.TaskSpec {
 	return spec
 }
 
-// containerTaskSecretUseGranted reports whether a container Task may receive
-// the Secrets it names under the Secret use policy. It returns false with no
-// error when the mode does not apply, so the direct Secret mount switch keeps
-// its behavior. A Task that names Secrets but does not qualify returns an
-// error that fails the Task, naming the field and Secret, never a value.
 func (b *JobBuilder) containerTaskSecretUseGranted(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
 	if b == nil || !b.ContainerTaskSecretUse.Enabled || b.directSecrets.secretMounts || !isUntrustedComputeTask(task) {
 		return false, nil
@@ -147,8 +114,6 @@ func (b *JobBuilder) containerTaskSecretUseGranted(ctx context.Context, task *co
 	if err != nil {
 		return false, err
 	}
-	// Admission checks only writes made after the policy is in force, so a
-	// Task, or for a run its scheduled Task, written earlier was never checked.
 	for _, admitted := range []*corev1alpha1.Task{task, parent} {
 		if admitted != nil && !admitted.CreationTimestamp.After(enforcedSince) {
 			return false, fmt.Errorf("container Task %q was created before the container Task Secret use admission policy "+
@@ -160,10 +125,6 @@ func (b *JobBuilder) containerTaskSecretUseGranted(ctx context.Context, task *co
 	return true, nil
 }
 
-// containerTaskSecretUseIneligible returns why a Task's provenance rules it
-// out, or "". Admission already refuses these writers; this keeps the
-// guarantee for Tasks created by agents, tools, chat, or the API from resting
-// on admission alone. Scheduled runs are checked against their parent.
 func containerTaskSecretUseIneligible(task *corev1alpha1.Task) string {
 	switch {
 	case task.Labels[labels.LabelChatSession] != "":
@@ -194,9 +155,6 @@ func ownerTaskReference(task *corev1alpha1.Task) *metav1.OwnerReference {
 	return nil
 }
 
-// checkScheduledRunSecretReferences requires a scheduled run to name exactly
-// the Secrets its scheduled Task names, and that Task to be a root Task. It
-// returns the scheduled Task, or nil for a Task that is not a run.
 func (b *JobBuilder) checkScheduledRunSecretReferences(
 	ctx context.Context, reader client.Reader, task *corev1alpha1.Task,
 ) (*corev1alpha1.Task, error) {
@@ -223,24 +181,14 @@ func (b *JobBuilder) checkScheduledRunSecretReferences(
 	if reason := containerTaskSecretUseIneligible(parent); reason != "" || ownerTaskReference(parent) != nil {
 		return nil, fmt.Errorf("scheduled Task %q cannot pass Secrets to its runs because it was created by another Task or an agent", parent.Name)
 	}
-	// The run must be the copy the controller made: same image, command,
-	// Secrets and everything else that decides what receives the Secrets.
 	if !equality.Semantic.DeepEqual(scheduledRunSpec(parent), scheduledRunSpec(task)) {
 		return nil, fmt.Errorf("scheduled run's spec differs from its scheduled Task %q, so it cannot receive Secrets", parent.Name)
 	}
 	return parent, nil
 }
 
-// containerTaskSecretUsePropagation is how long after the policy or its
-// binding last changed the controller still treats a write as possibly
-// unchecked, while API servers load the change.
 const containerTaskSecretUsePropagation = 30 * time.Second
 
-// checkContainerTaskSecretUseBinding confirms the admission policy and a Deny
-// binding for it exist and cover every Task write in namespace, so the mode
-// never delivers while admission is not checking the writers. It returns the
-// time from which admission is known to have been enforcing: the latest
-// change to either object plus a propagation window.
 func (b *JobBuilder) checkContainerTaskSecretUseBinding(
 	ctx context.Context, reader client.Reader, namespace string,
 ) (time.Time, error) {
@@ -276,11 +224,6 @@ func (b *JobBuilder) checkContainerTaskSecretUseBinding(
 	return latestChange(&policy.ObjectMeta, &binding.ObjectMeta).Add(containerTaskSecretUsePropagation), nil
 }
 
-// containerTaskSecretUseCoverageGap returns why the policy and binding might
-// not check every Task write in namespace, or "". The policy must be the one
-// this release ships; anything about the binding the controller cannot prove
-// covers the namespace, such as an object selector, an exclusion, or a
-// namespace selector other than the namespace's own name, counts as a gap.
 func containerTaskSecretUseCoverageGap(
 	policy *admissionregistrationv1.ValidatingAdmissionPolicy,
 	binding *admissionregistrationv1.ValidatingAdmissionPolicyBinding,
@@ -307,16 +250,11 @@ func selectorEmpty(selector *metav1.LabelSelector) bool {
 	return selector == nil || (len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0)
 }
 
-// selectorIsNamespace reports whether selector matches exactly the namespace
-// by its immutable name label.
 func selectorIsNamespace(selector *metav1.LabelSelector, namespace string) bool {
 	return len(selector.MatchExpressions) == 0 && len(selector.MatchLabels) == 1 &&
 		selector.MatchLabels[corev1.LabelMetadataName] == namespace
 }
 
-// specChanges remembers, per object UID, the generation last seen and the
-// time from which that generation is known to have been in place, so
-// metadata-only writes after a spec change do not move the cutoff again.
 var specChanges = struct {
 	sync.Mutex
 	seen map[types.UID]specChange
@@ -327,14 +265,6 @@ type specChange struct {
 	since      time.Time
 }
 
-// latestChange returns the latest time the objects' specs may have changed.
-// An object still at its first generation changed when it was created. For a
-// later generation, Kubernetes does not record a durable spec-change timestamp
-// (managedFields tracks current field ownership rather than change history), so
-// the controller records the time it first observes that generation and keeps
-// it while the generation stays the same. Metadata-only writes, such as a chart
-// upgrade relabelling the policy, leave the generation alone and do not move
-// the cutoff.
 func latestChange(objects ...*metav1.ObjectMeta) time.Time {
 	var latest time.Time
 	for _, object := range objects {
@@ -355,8 +285,6 @@ func generationSince(object *metav1.ObjectMeta) time.Time {
 	if seen, ok := specChanges.seen[object.UID]; ok && object.UID != "" && seen.generation == object.Generation {
 		return seen.since
 	}
-	// Generation > 1 has no trustworthy durable spec-change timestamp on the
-	// object, so fail closed from the time this process first observes it.
 	since := time.Now()
 	if object.CreationTimestamp.After(since) {
 		since = object.CreationTimestamp.Time
@@ -370,8 +298,6 @@ func generationSince(object *metav1.ObjectMeta) time.Time {
 //go:embed container_task_secret_use_policy.yaml
 var shippedContainerTaskSecretUsePolicy []byte
 
-// controllerUsernameLiteral matches the one installation-specific value in
-// the shipped policy: the quoted username of the controller's ServiceAccount.
 var controllerUsernameLiteral = regexp.MustCompile(`'system:serviceaccount:([^':]+):([^':]+)'`)
 
 const controllerUsernamePlaceholder = "'system:serviceaccount:ORKA_NAMESPACE:CONTROLLER_SA'"
@@ -385,10 +311,6 @@ var expectedSecretUsePolicySpec = sync.OnceValues(func() (admissionregistrationv
 	return normalizedPolicySpec(policy.Spec), nil
 })
 
-// containerTaskSecretUsePolicyDrift returns why an installed policy is not
-// the shipped one, or "". The only value an installation may change is the
-// controller's own ServiceAccount (controllerNamespace/controllerServiceAccount).
-// Fields the API server defaults are compared after the same defaulting.
 func containerTaskSecretUsePolicyDrift(
 	policy *admissionregistrationv1.ValidatingAdmissionPolicy,
 	controllerNamespace, controllerServiceAccount string,
@@ -418,7 +340,6 @@ func containerTaskSecretUsePolicyDrift(
 	return ""
 }
 
-// normalizedPolicySpec applies the defaults the API server gives a policy.
 func normalizedPolicySpec(spec admissionregistrationv1.ValidatingAdmissionPolicySpec) admissionregistrationv1.ValidatingAdmissionPolicySpec {
 	if spec.FailurePolicy == nil {
 		spec.FailurePolicy = ptr.To(admissionregistrationv1.Fail)

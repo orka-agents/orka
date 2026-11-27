@@ -13,10 +13,6 @@ import (
 
 var _ store.GatewaySessionCleanupCandidateStore = (*Store)(nil)
 
-// reclaimGatewayTranscriptTx preserves retention when no ACP coordinator is
-// configured. It handles only transcripts without any ACP identity or records.
-// All deletion and completion writes share the maintenance transaction; no
-// runtime or Kubernetes authority can be retired by this path.
 func reclaimGatewayTranscriptTx(ctx context.Context, tx *sql.Tx, namespace, sessionName string, now, terminalCutoff time.Time) (bool, error) {
 	var ownerRef string
 	var createdAt time.Time
@@ -68,9 +64,6 @@ func reclaimGatewayTranscriptTx(ctx context.Context, tx *sql.Tx, namespace, sess
 	return true, nil
 }
 
-// ListGatewaySessionCleanupCandidates also finds Sessions whose event records
-// were compacted in an earlier maintenance pass. Runtime retirement must not
-// depend on the continued presence of that bounded event history.
 func (s *Store) ListGatewaySessionCleanupCandidates(ctx context.Context, filter store.GatewaySessionCleanupFilter) (store.GatewaySessionCleanupPage, error) {
 	if filter.Limit < 1 || filter.Limit > 100 {
 		return store.GatewaySessionCleanupPage{}, store.ValidationErrorf("Gateway Session cleanup candidate limit must be between 1 and 100")
@@ -124,7 +117,7 @@ func (s *Store) ListGatewaySessionCleanupCandidates(ctx context.Context, filter 
 		page.NextNamespace, page.NextSessionName = candidate.Namespace, candidate.SessionName
 		parts := strings.Split(ownerRef, "/")
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			continue // No exact Gateway/Binding identity authorizes this row.
+			continue
 		}
 		candidate.Proof.GatewayUID, candidate.Proof.BindingUID = parts[0], parts[1]
 		candidate.Proof.CreatedAt = candidate.Proof.CreatedAt.UTC()

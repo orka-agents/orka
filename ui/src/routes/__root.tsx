@@ -15,14 +15,10 @@ function RootComponent() {
     document.documentElement.classList.toggle('dark', theme === 'dark')
   }, [theme])
 
-  // A #token= fragment captured at app start is a sign-in request, so it goes
-  // to the login page even over an existing token.
   const signingIn = !token || hasPendingHashToken()
 
   useEffect(() => {
     if (signingIn && location.pathname !== '/login') {
-      // Come back here after signing in, and keep the fragment in the address
-      // bar: a connector consent callback carries its completion token there.
       rememberLoginReturn(location.pathname + location.searchStr)
       const hash = location.hash
       navigate({ to: '/login', ...(hash && { hash }) })

@@ -21,9 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-// A keyless Provider's slot carries no credential: the Job freezes which
-// Provider the slot was built for, and the worker reaches it through the
-// controller's relay. Key-based slots keep their Secret.
 func TestJobBuilderRelaysKeylessProviderSlots(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
@@ -57,8 +54,7 @@ func TestJobBuilderRelaysKeylessProviderSlots(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAI,
 			AI:   &corev1alpha1.AISpec{Prompt: "hello"},
-			// A Task cannot claim a relay slot for itself.
-			Env: []corev1.EnvVar{{Name: workerenv.AIProviderRelay, Value: `{"fallback-0":{"namespace":"default","name":"keyed","uid":"uid-keyed"}}`}},
+			Env:  []corev1.EnvVar{{Name: workerenv.AIProviderRelay, Value: `{"fallback-0":{"namespace":"default","name":"keyed","uid":"uid-keyed"}}`}},
 		},
 	}
 
@@ -134,8 +130,6 @@ func TestJobBuilderReservesTheProviderRelayWithoutKeylessProviders(t *testing.T)
 	}
 }
 
-// A fallback recorded as relayed keeps no key, even when its Provider switches
-// to a Secret between the env assembly and the Secret injection.
 func TestJobBuilderKeepsARelayedFallbackKeylessWhenItsProviderChanges(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)

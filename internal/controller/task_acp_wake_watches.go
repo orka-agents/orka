@@ -30,18 +30,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// The Task controller's ACP workspace gates (core admission, the provider's
-// attachment acknowledgement, revocation and detach settlement, a predecessor's
-// release, RuntimePool replacement) wait on ExecutionWorkspace and RuntimePool
-// objects that other controllers and the provider write. These watches wake
-// exactly the Tasks whose gates read the changed object, so a handshake is
-// noticed when it lands instead of on the next fallback poll. They only wake
-// reconciles earlier: every gate still re-reads and re-verifies its inputs,
-// and the RequeueAfter polls stay as the fallback for a missed event.
-
-// acpTaskSessionNameIndex indexes Tasks by spec.sessionRef.name in the
-// informer cache. The same name is a CRD selectable field, so uncached
-// readers can use the identical field selector against the API server.
 func acpTaskSessionNameIndex(object client.Object) []string {
 	task, ok := object.(*corev1alpha1.Task)
 	if !ok || task.Spec.SessionRef == nil {
@@ -54,10 +42,6 @@ func acpTaskSessionNameIndex(object client.Object) []string {
 	return []string{name}
 }
 
-// registerACPTaskWakeWatches indexes Tasks by Session and adds the
-// ExecutionWorkspace and RuntimePool watches to the Task controller. The
-// workspace watch is registered only when its CRD is served, like the
-// RuntimePool controller's.
 func registerACPTaskWakeWatches(ctx context.Context, mgr manager.Manager, b *builder.Builder) (*builder.Builder, error) {
 	if err := mgr.GetFieldIndexer().IndexField(ctx, &corev1alpha1.Task{}, acpTaskSessionNameField, acpTaskSessionNameIndex); err != nil {
 		return nil, err
@@ -83,11 +67,6 @@ func registerACPTaskWakeWatches(ctx context.Context, mgr manager.Manager, b *bui
 	), nil
 }
 
-// acpWorkspaceTaskWakeRequests maps an ExecutionWorkspace to the Tasks whose
-// workspace gates read it: the attached Task, the Task whose pending resume
-// or materialization demand it records, its owning per-Task Task, every
-// linked Task that has not yet settled its detach action, and the live Tasks
-// of its Session that may still be queued behind it before linking.
 func acpWorkspaceTaskWakeRequests(reader client.Reader) handler.MapFunc {
 	return func(ctx context.Context, object client.Object) []reconcile.Request {
 		workspace, ok := object.(*workspacev1alpha1.ExecutionWorkspace)
@@ -130,9 +109,6 @@ func acpWorkspaceTaskWakeRequests(reader client.Reader) handler.MapFunc {
 	}
 }
 
-// acpRuntimePoolTaskWakeRequests maps a RuntimePool to the live Tasks queued
-// on it (which rebind when it is replaced or stops admitting) and to the Tasks
-// linked to its execution workspace, whose readiness gate reads the pool.
 func acpRuntimePoolTaskWakeRequests(reader client.Reader) handler.MapFunc {
 	return func(ctx context.Context, object client.Object) []reconcile.Request {
 		pool, ok := object.(*corev1alpha1.RuntimePool)
@@ -164,9 +140,6 @@ func acpRuntimePoolTaskWakeRequests(reader client.Reader) handler.MapFunc {
 	}
 }
 
-// addLinkedACPWorkspaceTasks adds every Task carrying the workspace link
-// whose detach action has not settled. A settled Task's workspace gates are
-// all behind it, so a long-lived Session workspace does not wake its history.
 func addLinkedACPWorkspaceTasks(ctx context.Context, reader client.Reader, namespace, workspaceName string, add func(string)) {
 	tasks := &corev1alpha1.TaskList{}
 	if err := reader.List(ctx, tasks, client.InNamespace(namespace),
@@ -181,9 +154,6 @@ func addLinkedACPWorkspaceTasks(ctx context.Context, reader client.Reader, names
 	}
 }
 
-// acpTaskMayWaitOnWorkspace reports whether a Session Task can still be
-// gated by the named workspace: it has not settled, and it is live, deleting,
-// or linked to that workspace and settling.
 func acpTaskMayWaitOnWorkspace(task *corev1alpha1.Task, workspaceName string) bool {
 	if task.Annotations[acpTaskWorkspaceSettledAnnotation] != "" {
 		return false
@@ -206,10 +176,6 @@ func sortedTaskWakeRequests(set map[types.NamespacedName]struct{}) []reconcile.R
 	return requests
 }
 
-// acpWorkspaceTaskWakePredicate passes creates and deletes, and updates that
-// change something a Task workspace gate reads. Pure resourceVersion or
-// managedFields churn, condition message rewording, and endpoint or
-// connection-secret refreshes do not wake Tasks.
 func acpWorkspaceTaskWakePredicate() predicate.Predicate {
 	return predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
@@ -224,13 +190,6 @@ func acpWorkspaceTaskWakePredicate() predicate.Predicate {
 	}
 }
 
-// acpWorkspaceTaskWrittenDemandAnnotations are workspace annotations that
-// waiting Tasks themselves rewrite: the resume/materialization demand record
-// and the frozen detach action. No Task gate waits for another Task to change
-// them, and two live Tasks of one Session can each rewrite them in turn while
-// a suspension settles. Waking on them would let those Tasks re-trigger each
-// other without any delay; their changes are left to the fallback poll and
-// to the spec and status changes that accompany every real handshake.
 var acpWorkspaceTaskWrittenDemandAnnotations = []string{
 	acpWorkspaceResumeRequestedAnnotation,
 	acpWorkspaceDetachActionAnnotation,
@@ -249,10 +208,6 @@ func acpWorkspaceTaskGateChanged(oldWorkspace, newWorkspace *workspacev1alpha1.E
 		conditionGatesChanged(oldStatus.Conditions, newStatus.Conditions)
 }
 
-// acpRuntimePoolTaskWakePredicate passes creates and deletes, and updates to
-// a pool's identity, lifecycle, admission, or active instance. Capacity
-// accounting churn (reservations, prompt counts) and health-probe timestamp
-// refreshes do not wake Tasks; the dispatcher owns capacity admission.
 func acpRuntimePoolTaskWakePredicate() predicate.Predicate {
 	return predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
@@ -278,8 +233,6 @@ func acpRuntimePoolTaskGateChanged(oldPool, newPool *corev1alpha1.RuntimePool) b
 		!reflect.DeepEqual(activeInstanceIdentity(oldStatus.ActiveInstance), activeInstanceIdentity(newStatus.ActiveInstance))
 }
 
-// activeInstanceIdentity drops LastObservedTime, which every successful
-// health probe refreshes; the instance and fence fields remain compared.
 func activeInstanceIdentity(instance *corev1alpha1.RuntimePoolActiveInstanceStatus) *corev1alpha1.RuntimePoolActiveInstanceStatus {
 	if instance == nil {
 		return nil
@@ -289,8 +242,6 @@ func activeInstanceIdentity(instance *corev1alpha1.RuntimePoolActiveInstanceStat
 	return identity
 }
 
-// annotationsEqualIgnoring reports whether the two annotation maps are equal
-// once the ignored keys are removed from both.
 func annotationsEqualIgnoring(oldAnnotations, newAnnotations map[string]string, ignored []string) bool {
 	relevant := func(annotations map[string]string) map[string]string {
 		filtered := make(map[string]string, len(annotations))
@@ -313,8 +264,6 @@ func objectMetadataGateChanged(oldObject, newObject client.Object, ignoredAnnota
 		!annotationsEqualIgnoring(oldObject.GetAnnotations(), newObject.GetAnnotations(), ignoredAnnotations)
 }
 
-// conditionGatesChanged compares the condition fields gates decide on: type,
-// status, reason, and observed generation.
 func conditionGatesChanged(oldConditions, newConditions []metav1.Condition) bool {
 	if len(oldConditions) != len(newConditions) {
 		return true

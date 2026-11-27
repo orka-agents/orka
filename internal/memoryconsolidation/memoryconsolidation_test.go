@@ -52,16 +52,13 @@ func TestWindowStartsAtTheCursorButNeverBeforeMaxLookback(t *testing.T) {
 	require.Equal(t, end.Add(-MaxLookback), start, "a cursor is followed back at most MaxLookback")
 }
 
-// fakeSource serves a run's inputs. Its changed-Session listing returns the
-// listed Sessions in the order given, as the store's query orders them.
 type fakeSource struct {
 	sessions    []store.SessionMetadata
 	transcripts map[string][]store.SessionMessage
 	memories    []store.Memory
 	loaded      []int
-	// eligible, when set, is how many Sessions changed in all.
-	eligible  int
-	proposals []store.MemoryProposal
+	eligible    int
+	proposals   []store.MemoryProposal
 }
 
 func (f *fakeSource) ListMemoryConsolidationSessions(_ context.Context, _ string, _, _ time.Time, limit int) ([]store.SessionMetadata, int, error) {
@@ -221,7 +218,6 @@ func TestValidateBoundsOperationsAndRetirement(t *testing.T) {
 		}
 		return op
 	}
-	// Eight memories: a run removes at most two.
 	kept, rejected, _ := Validate(Submission{Operations: []Operation{retire("mem-a"), retire("mem-b", "mem-c"), retire("mem-d")}},
 		validationInput(), nil, 10)
 	require.Len(t, kept, 2)
@@ -298,7 +294,6 @@ func TestValidateBoundsARejectionsReason(t *testing.T) {
 }
 
 func TestReportEncodeAbridgesToFit(t *testing.T) {
-	// Escaped control characters encode six bytes each.
 	text := func(n int) string { return strings.Repeat("\x01", n) }
 	report := Report{Summary: text(MaxSummaryChars)}
 	for range MaxRejected {
@@ -427,8 +422,6 @@ func TestCollectInputsMarksEveryLimitItReaches(t *testing.T) {
 	require.True(t, collect(longMessage).Truncated, "a message cut to its limit")
 }
 
-// Applying a proposal takes its tags from the first "Tags:" line of its
-// description, so the model's reason can never name the tags applied.
 func TestProposalsApplyOnlyTheValidatedTags(t *testing.T) {
 	for name, op := range map[string]Operation{
 		"with validated tags": {Type: OperationAdd, Content: "x", Tags: []string{"release"},
@@ -450,10 +443,6 @@ func TestProposalsApplyOnlyTheValidatedTags(t *testing.T) {
 	}
 }
 
-// The run's data is charged for everything it encodes: escapes, and every
-// field name, ID and timestamp, not only the text. Many short messages, or
-// text heavy in HTML and code, still encode within the budgets, and text that
-// spells the data block's tags in any case cannot close or open a block.
 func TestUserMessageDataStaysWithinTheBudgetItWasCountedIn(t *testing.T) {
 	src := &fakeSource{transcripts: map[string][]store.SessionMessage{}}
 	for i := range MaxInputSessions {
@@ -506,8 +495,6 @@ func TestValidateKeepsAnOperationThatRepeatsItsCitations(t *testing.T) {
 	require.Equal(t, []store.MemoryProposalSource{{SessionName: "session-a"}, {SessionName: "session-a", MessageID: "m1"}}, kept[0].Sources)
 }
 
-// The limits line says which operations use the removal budget, so a model
-// does not hold back a supersede, which removes nothing.
 func TestUserMessageSaysASupersedeRemovesNothing(t *testing.T) {
 	message, err := UserMessage(validationInput(), "", Settings{MaxOperations: 3})
 	require.NoError(t, err)
@@ -577,14 +564,10 @@ func TestValidateDoesNotRepeatAnOpenProposal(t *testing.T) {
 		return []store.MemoryProposalTarget{{MemoryID: id, Generation: 1}}
 	}
 	kept, rejected, _ := Validate(Submission{Operations: []Operation{
-		// The same fact as the pending add, spelled differently.
 		{Type: OperationAdd, Content: "  the staging cluster is  orka-staging-west ", Sources: source},
-		// A change to a memory a pending proposal already changes.
 		{Type: OperationRetire, Targets: target("mem-a")},
-		// A better form of the pending add: supersede the stale memory, and cover it.
 		{Type: OperationSupersede, Content: "The staging cluster is orka-staging-west, renamed from east.", Targets: target("mem-b"),
 			Covers: []string{"pending-add", "invented", "pending-add"}},
-		// A better supersede of the same memory covers the pending one.
 		{Type: OperationSupersede, Content: "Use Go 1.26 for every build.", Targets: target("mem-a"), Covers: []string{"pending-supersede"}},
 	}}, input, nil, 10)
 
@@ -629,12 +612,9 @@ func TestValidateLetsACoveringChangeReplaceButNotRepeat(t *testing.T) {
 	}
 	source := []store.MemoryProposalSource{{SessionName: "session-a"}}
 	kept, rejected, _ := Validate(Submission{Operations: []Operation{
-		// Supersede the outdated memory with the pending add's content, in its place.
 		{Type: OperationSupersede, Content: "use go 1.26", Targets: []store.MemoryProposalTarget{{MemoryID: "mem-b", Generation: 1}},
 			Covers: []string{"pending-add"}},
-		// The same retirement again, naming the original, is still a repeat.
 		{Type: OperationRetire, Targets: []store.MemoryProposalTarget{{MemoryID: "mem-c", Generation: 1}}, Covers: []string{"pending-retire"}},
-		// The same add again, covering the original, is a repeat too.
 		{Type: OperationAdd, Content: "Use Go 1.26", Sources: source, Covers: []string{"pending-add"}},
 	}}, input, nil, 10)
 	require.Len(t, kept, 1)
@@ -686,7 +666,6 @@ func TestValidateRepeatsARetirementWhateverItsOpenProposalSays(t *testing.T) {
 	kept, rejected, _ := Validate(Submission{Operations: []Operation{
 		{Type: OperationRetire, Content: "anything", Targets: []store.MemoryProposalTarget{{MemoryID: "mem-c", Generation: 1}},
 			Covers: []string{"pending-retire"}},
-		// A retirement's text is not proposed content.
 		{Type: OperationAdd, Content: "Stale: nobody uses this anymore", Sources: source},
 	}}, input, nil, 10)
 	require.Len(t, rejected, 1)
@@ -697,8 +676,6 @@ func TestValidateRepeatsARetirementWhateverItsOpenProposalSays(t *testing.T) {
 	require.Equal(t, OperationAdd, kept[0].Type)
 }
 
-// A proposal ID is chosen by whoever created the proposal and is named in the
-// covering proposal's description, so it can never add a tag line there.
 func TestProposalsNeverTakeTagsFromACoveredProposalID(t *testing.T) {
 	input := validationInput()
 	input.Proposals = []InputProposal{
@@ -751,7 +728,6 @@ func TestCoversDropLongIDsAndGoWhenAReportIsAbridged(t *testing.T) {
 
 func TestCollectInputsCountsAProposalSeenInBothListsOnce(t *testing.T) {
 	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
-	// Accepted between the pending and accepted reads: both lists return it.
 	src := &fakeSource{proposals: []store.MemoryProposal{
 		{ID: "moving", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusPending, Content: "fact", CreatedAt: at},
 		{ID: "moving", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusAccepted, Content: "fact", CreatedAt: at},

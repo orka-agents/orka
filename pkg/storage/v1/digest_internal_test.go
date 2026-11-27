@@ -6,9 +6,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestCanonicalJSONIsPinned pins canonical JSON byte for byte: keys sorted,
-// encoding/json's escaping, and every number exactly as written, so a change
-// in either shows up here rather than as silently different request digests.
 func TestCanonicalJSONIsPinned(t *testing.T) {
 	for input, want := range map[string]string{
 		` { "b" : [1.0, 2.50, 1e2, -0.0, 1E+21, 1e-7], "a" : null } `: `{"a":null,"b":[1.0,2.50,1e2,-0.0,1E+21,1e-7]}`,

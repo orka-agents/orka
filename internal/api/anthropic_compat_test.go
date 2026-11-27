@@ -56,8 +56,6 @@ func setupTestAnthropicHandler(objs ...runtime.Object) (*AnthropicCompatHandler,
 	return handler, app
 }
 
-// --- Tests: parseAnthropicContent ---
-
 func TestParseAnthropicContent(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -138,8 +136,6 @@ func TestParseAnthropicContent_ArrayDetails(t *testing.T) {
 	}
 }
 
-// --- Tests: parseAnthropicSystem ---
-
 func TestParseAnthropicSystem(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -202,8 +198,6 @@ func TestParseAnthropicSystem(t *testing.T) {
 		})
 	}
 }
-
-// --- Tests: convertAnthropicMessages ---
 
 func TestConvertAnthropicMessages(t *testing.T) { //nolint:gocyclo
 	tests := []struct {
@@ -341,7 +335,6 @@ func TestConvertAnthropicMessages(t *testing.T) { //nolint:gocyclo
 			},
 			wantLen: 2,
 			check: func(t *testing.T, msgs []llm.Message) {
-				// tool_result messages come first, then text
 				toolMsg := msgs[0]
 				textMsg := msgs[1]
 				if toolMsg.Role != testRoleTool || toolMsg.ToolCallID != "tu_1" {
@@ -379,8 +372,6 @@ func TestConvertAnthropicMessages_InvalidContent(t *testing.T) {
 		t.Fatal("expected error for invalid content")
 	}
 }
-
-// --- Tests: convertAnthropicTools ---
 
 func TestConvertAnthropicTools(t *testing.T) {
 	tests := []struct {
@@ -452,8 +443,6 @@ func TestConvertAnthropicTools_FieldMapping(t *testing.T) {
 		t.Errorf("parameters = %s, want %s", result[0].Parameters, anthropicTools[0].InputSchema)
 	}
 }
-
-// --- Tests: convertToAnthropicResponse ---
 
 func TestConvertToAnthropicResponse(t *testing.T) {
 	tests := []struct {
@@ -653,8 +642,6 @@ func TestAnthropicToolLoopFormatting_StripsGoalStateSentinel(t *testing.T) {
 	}
 }
 
-// --- Tests: anthropicError ---
-
 func TestAnthropicError(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -719,8 +706,6 @@ func TestAnthropicError(t *testing.T) {
 		})
 	}
 }
-
-// --- Tests: HandleMessages validation ---
 
 func TestHandleMessages_MissingModel(t *testing.T) {
 	handler, app := setupTestAnthropicHandler()
@@ -867,13 +852,10 @@ func TestHandleMessages_ProviderSlashModel(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Should get past provider resolution (not 400)
 	if resp.StatusCode == 400 {
 		t.Errorf("did not expect 400; provider/model resolution should have succeeded")
 	}
 }
-
-// --- Tests: HandleListModels ---
 
 func TestAnthropicHandleListModels_Empty(t *testing.T) {
 	handler, app := setupTestAnthropicHandler()
@@ -1008,8 +990,6 @@ func TestAnthropicCompat_ContextTokenAuthorizationFiltersListModels(t *testing.T
 		}
 	}
 }
-
-// --- Mock provider for tool loop tests ---
 
 type mockAnthropicProvider struct {
 	responses    []*llm.CompletionResponse
@@ -1537,8 +1517,6 @@ func TestHandleStreamingMessages_DoesNotStreamPrematureCoordinatorText(t *testin
 	}
 }
 
-// --- Tests: injectOrkaTools ---
-
 func TestInjectOrkaTools_BuiltinTools(t *testing.T) {
 	req := &llm.CompletionRequest{}
 	injectOrkaTools(req)
@@ -1568,11 +1546,9 @@ func TestInjectOrkaTools_PreservesClientTools(t *testing.T) {
 
 	injectOrkaTools(req)
 
-	// Client tool should still be first
 	if req.Tools[0].Name != "my_custom_tool" {
 		t.Errorf("first tool = %q, want my_custom_tool", req.Tools[0].Name)
 	}
-	// Built-in tools should also be present
 	names := map[string]bool{}
 	for _, tool := range req.Tools {
 		names[tool.Name] = true
@@ -1582,23 +1558,11 @@ func TestInjectOrkaTools_PreservesClientTools(t *testing.T) {
 			t.Errorf("expected built-in tool %q not found after injection", expected)
 		}
 	}
-	// Total should be client + builtins
 	if len(req.Tools) < 1+len(builtinProxyTools) {
 		t.Errorf("expected at least %d tools, got %d", 1+len(builtinProxyTools), len(req.Tools))
 	}
 }
 
-// TestInjectOrkaTools_CoordinatorToolsAllRegistered guards against a class of
-// outages where coordinatorProxyTools lists a tool name that is not registered
-// in DefaultRegistry. When that happens ToLLMTools silently drops the tool, the
-// model never sees it in its tool list, but the system prompt still tells the
-// model to call it. The chat-to-PR demo finished all the real work and then
-// blew up with "tool create_pull_request is not available in this request"
-// because exactly this drift had crept in.
-//
-// The test calls every registration path the controller's main.go uses so the
-// assertion is "all advertised tools are reachable in DefaultRegistry once the
-// controller is fully wired", not "this single registration path covers them".
 func TestInjectOrkaTools_CoordinatorToolsAllRegistered(t *testing.T) {
 	handler, _ := setupTestAnthropicHandler()
 	tools.RegisterProxyPRTools(handler.client)
@@ -1618,43 +1582,12 @@ func TestInjectOrkaTools_CoordinatorToolsAllRegistered(t *testing.T) {
 	}
 }
 
-// --- Tests: runNonStreamingToolLoop ---
-
-// Demo 10 run 2026-06-01 07:40 PT regressed: coordinator stopped at iter 9
-// emitting "## Progress Summary" + "Hard-limit budget remaining" markdown
-// (instead of a tool_use) right after wait_for_task on the discovery
-// container task. This terminated the SSE stream — validation, review, PR
-// never ran.
-//
-// Two structural fixes in this commit:
-//
-//  1. anthropic_tool_loop.go (and anthropic_streaming.go) used to inject
-//     "[System: Progress check — summarize what you've done so far and what
-//     remains.]" every 5 iterations. That message literally instructed the
-//     model to emit the progress-summary pattern we'd then blame it for.
-//     REMOVED in both files.
-//
-//  2. The "no tool calls → return" branch in both paths now requires the
-//     response to contain the literal goalStateSentinel
-//     ("<ORKA_GOAL_STATE_REACHED>"). Without it, the server treats the text
-//     as a premature progress summary, injects a "continue with tool_use"
-//     reminder, and re-loops up to ChatConfig.MaxPrematureEndRetries times
-//     before giving up and returning the response anyway.
-//
-// This test pins behavior (1)+(2) for the non-streaming path. Streaming
-// equivalent: TestStreamingToolLoop_PrematureEndIsRetried below.
 func TestRunNonStreamingToolLoop_PrematureEndIsRetried(t *testing.T) {
 	_, _ = setupTestAnthropicHandler()
 	mock := &mockAnthropicProvider{
 		responses: []*llm.CompletionResponse{
-			// Iteration 0: model emits markdown progress summary, no tool_use.
-			// Without the safety net, this would be returned to the client.
 			{Content: "## Progress Summary\n\nI've done X.\n\n### Remaining\n1. Y", StopReason: "end_turn"},
-			// Iteration 1 (re-prompt): model still hasn't included sentinel.
-			// Still no tool_use; still must retry.
 			{Content: "Continuing... I'll do Y next.", StopReason: "end_turn"},
-			// Iteration 2 (re-prompt): model finally emits the sentinel + body.
-			// This response must be returned to the client without further re-prompting.
 			{Content: "<ORKA_GOAL_STATE_REACHED>\nPR ready: https://example.test/pr/1", StopReason: "end_turn"},
 		},
 	}
@@ -1676,9 +1609,6 @@ func TestRunNonStreamingToolLoop_PrematureEndIsRetried(t *testing.T) {
 	}
 }
 
-// If the model never emits the sentinel, the loop must still terminate after
-// MaxPrematureEndRetries+1 attempts. Otherwise a stubborn model could pin a
-// chat session forever.
 func TestRunNonStreamingToolLoop_PrematureEndExhaustsBudget(t *testing.T) {
 	_, _ = setupTestAnthropicHandler()
 	mock := &mockAnthropicProvider{
@@ -1686,7 +1616,6 @@ func TestRunNonStreamingToolLoop_PrematureEndExhaustsBudget(t *testing.T) {
 			{Content: "summary 1", StopReason: "end_turn"},
 			{Content: "summary 2", StopReason: "end_turn"},
 			{Content: "summary 3 (final, but still no sentinel)", StopReason: "end_turn"},
-			// If a 4th call happens, the test fails.
 			{Content: "should not happen", StopReason: "end_turn"},
 		},
 	}
@@ -1700,7 +1629,6 @@ func TestRunNonStreamingToolLoop_PrematureEndExhaustsBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Initial call + 2 retries = 3 calls. The 3rd response is returned as-is.
 	if mock.callIdx != 3 {
 		t.Errorf("expected 3 LLM calls, got %d", mock.callIdx)
 	}
@@ -1802,11 +1730,8 @@ func TestRunNonStreamingToolLoop_IterationLimit(t *testing.T) {
 
 	mock := &mockAnthropicProvider{
 		responses: []*llm.CompletionResponse{
-			// Iteration 0: tool call
 			{StopReason: oaiStopReasonToolUse, ToolCalls: []llm.ToolCall{{ID: "tc_1", Name: "test_tool", Arguments: json.RawMessage(`{}`)}}},
-			// Iteration 1: tool call
 			{StopReason: oaiStopReasonToolUse, ToolCalls: []llm.ToolCall{{ID: "tc_2", Name: "test_tool", Arguments: json.RawMessage(`{}`)}}},
-			// Iteration 2: hits limit, summary call
 			{Content: "Summary of work done.", StopReason: "end_turn"},
 		},
 	}
@@ -1942,8 +1867,6 @@ func TestRunNonStreamingToolLoop_RejectsToolNotExposedInRequest(t *testing.T) {
 	}
 }
 
-// --- Tests: executeToolCall ---
-
 func TestExecuteToolCall_UnknownTool(t *testing.T) {
 	result := executeToolCall(context.Background(), llm.ToolCall{
 		ID:        "tc_1",
@@ -1966,9 +1889,8 @@ func TestExecuteToolCall_UnknownTool(t *testing.T) {
 
 func TestExecuteToolCall_Timeout(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
+	cancel()
 
-	// Use an unknown tool so the registry returns an error, validating the timeout/error path
 	result := executeToolCall(ctx, llm.ToolCall{
 		ID:        "tc_1",
 		Name:      "nonexistent_timeout_tool",
@@ -2029,9 +1951,6 @@ func TestAnthropicCompat_ContextTokenAuthorizationRejectsDisallowedProvider(t *t
 }
 
 func TestHandleStreamingMessages_MaxTokensTextTerminatesWithMaxTokens(t *testing.T) {
-	// A text-only response truncated by the caller's max_tokens budget must be
-	// delivered with stop_reason max_tokens instead of entering the
-	// premature-end retry loop and ending as end_turn.
 	mock := &mockAnthropicProvider{
 		streamChunks: []llm.StreamChunk{
 			{Content: "partial answer that ran out of"},
@@ -2066,8 +1985,6 @@ func TestHandleStreamingMessages_MaxTokensTextTerminatesWithMaxTokens(t *testing
 	}
 }
 
-// The final no-tools call at the iteration limit must be truncated to the
-// session budget like every other step, since the loop keeps the whole history.
 func TestRunNonStreamingToolLoop_IterationLimitRequestIsTruncated(t *testing.T) {
 	_, _ = setupTestAnthropicHandler()
 	mock := &mockAnthropicProvider{responses: []*llm.CompletionResponse{{Content: "summary", StopReason: "end_turn"}}}

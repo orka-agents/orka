@@ -14,8 +14,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// lostReleaseResponse commits the first storage hold release and then
-// reports an error, as a status update whose response is lost does.
 type lostReleaseResponse struct {
 	*kubestore.Store
 	releases atomic.Int32
@@ -33,9 +31,6 @@ func (s *lostReleaseResponse) ReleaseStorageHold(
 	return nil
 }
 
-// A release whose update committed but whose response was lost is retried;
-// the retry finds the release recorded, and the manager reopens its fences
-// instead of stopping.
 func TestReleaseWithALostResponseReopensTheFences(t *testing.T) {
 	authority, kubeClient := newKubernetesControllerEpochAuthority(t)
 	original := newRecordingEpochDataset("dataset-a")
@@ -50,7 +45,6 @@ func TestReleaseWithALostResponseReopensTheFences(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A copy taken after epoch 1 lost epoch 2, so the successor holds.
 	restored := newRecordingEpochDataset("dataset-a")
 	restored.requests = original.advanceRequests()[:1]
 	records := &lostReleaseResponse{Store: authority}

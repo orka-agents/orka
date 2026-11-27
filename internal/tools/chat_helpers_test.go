@@ -30,15 +30,9 @@ func TestChatGetIntArgSaturates(t *testing.T) {
 	}
 }
 
-// A chat turn stopped while it creates a Task still learns the Create's
-// outcome: the Create runs on a context the turn's stop does not end, so the
-// Task is committed before the turn reports done, where a Session cancel's
-// list finds it. A turn already stopped starts no Create at all.
 func TestCreateChatTaskOutlivesTheStoppedTurn(t *testing.T) {
 	base := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
 	turn, stop := context.WithCancel(context.Background())
-	// The turn is stopped while the Create is in flight; the client abandons
-	// a Create whose context is cancelled, as a real API call does.
 	c := interceptor.NewClient(base, interceptor.Funcs{
 		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 			stop()

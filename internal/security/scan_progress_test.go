@@ -53,7 +53,6 @@ func TestScanStageProgressGroupsByLabelInPipelineOrder(t *testing.T) {
 	if len(review.FailedTasks) != 2 || review.FailedTasks[0] != "goof-review-slice-2" || review.FailedTasks[1] != "goof-review-slice-6" {
 		t.Fatalf("review failed tasks = %v", review.FailedTasks)
 	}
-	// Stages the scan has not reached are present with zero counts.
 	if got[3].Tasks != 0 || got[4].Tasks != 0 || got[3].Label != "validate findings" {
 		t.Fatalf("unreached stages = %+v %+v", got[3], got[4])
 	}

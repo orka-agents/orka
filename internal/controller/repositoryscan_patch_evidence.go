@@ -30,34 +30,15 @@ import (
 )
 
 const (
-	// repositoryScanPublishedCommitMaxFiles bounds the files a remediation
-	// commit may touch; GitHub's commit endpoint returns at most 300 files.
-	repositoryScanPublishedCommitMaxFiles = 300
-	// repositoryScanPublishedCommitPageSize is GitHub's documented per_page
-	// maximum for the commit files listing.
+	repositoryScanPublishedCommitMaxFiles    = 300
 	repositoryScanPublishedCommitPageSize    = 100
 	repositoryScanForgeCredentialKey         = defaultACPWorkspaceCredentialKey
 	repositoryScanNonCanonicalTargetReason   = "repository scan publication target is not a canonical GitHub repository"
 	repositoryScanArtifactStoreNotConfigured = "artifact store is not configured"
-	// artifactContentTypeJSON and artifactContentTypeDiff label stored
-	// controller artifacts.
-	artifactContentTypeJSON = "application/json"
-	artifactContentTypeDiff = "text/x-diff"
+	artifactContentTypeJSON                  = "application/json"
+	artifactContentTypeDiff                  = "text/x-diff"
 )
 
-// verifyPatchTaskEvidence produces the patch diff and summary artifacts for a
-// succeeded patch task. Two contracts are accepted:
-//
-//   - Artifact contract: both artifacts already exist in the artifact store
-//     (written by a harness that uploads workspace artifacts) and verify
-//     against each other.
-//   - Harness-v2 result contract: the task's terminal result is an
-//     identity-bound orka.security.patch.v1 envelope. The reviewable diff is
-//     never taken from agent output; it is derived from the exact commit the
-//     governed publication proved on the remote, fetched with the forge
-//     credential, and the envelope's changedFiles must match it exactly. Both
-//     artifacts are then persisted under the standard names so the API and
-//     dashboard keep one contract.
 func (r *RepositoryScanReconciler) verifyPatchTaskEvidence(
 	ctx context.Context,
 	scan *corev1alpha1.RepositoryScan,
@@ -78,22 +59,10 @@ func (r *RepositoryScanReconciler) verifyPatchTaskEvidence(
 		if err != nil || reason != "" {
 			return verified, reason, err
 		}
-		// Pre-existing artifacts are internally consistent but unproven:
-		// the namespace-scoped internal upload API (or a stale earlier
-		// attempt) could have seeded a mutually consistent diff/summary
-		// pair for unrelated content. Bind them to the exact published
-		// commit before accepting them as review evidence.
 		reason, err = r.verifyArtifactDiffMatchesPublishedCommit(ctx, scan, task, diffName, publication)
 		if err != nil || reason != "" {
 			return patchVerificationResult{}, reason, err
 		}
-		// Worker-written artifacts are raw. Persist the validated summary
-		// and the credential-redacted diff so the durable evidence carries
-		// the same guarantees as the result-contract branch below: a
-		// remediation that removed a checked-in credential must not keep it
-		// in the referenced artifacts. The sanitized diff still binds to the
-		// published commit on later reconciles (see the dual comparison in
-		// verifyArtifactDiffMatchesPublishedCommit).
 		if err := r.persistSanitizedPatchArtifacts(ctx, task, diffName, summaryName, verified.summary); err != nil {
 			return patchVerificationResult{}, "", err
 		}
@@ -140,10 +109,6 @@ func (r *RepositoryScanReconciler) verifyPatchTaskEvidence(
 	if err != nil {
 		return patchVerificationResult{}, "", err
 	}
-	// The published diff can legitimately carry a removed credential on a
-	// deleted line; redact credential shapes (and strip controls) so the
-	// durable artifact never preserves the secret the remediation removed.
-	// Path and changed-file checks above ran on the unmodified diff.
 	diff = repositoryMonitorReviewContextSanitize(diff)
 	if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: diffName, ContentType: artifactContentTypeDiff, Data: []byte(diff)}); err != nil {
 		return patchVerificationResult{}, "", err
@@ -154,9 +119,6 @@ func (r *RepositoryScanReconciler) verifyPatchTaskEvidence(
 	return patchVerificationResult{diffArtifact: diffName, summaryArtifact: summaryName}, "", nil
 }
 
-// persistSanitizedPatchArtifacts rewrites pre-existing patch artifacts in
-// their validated form: the normalised summary and the credential-redacted
-// diff. Path and content binding already ran on the unmodified diff.
 func (r *RepositoryScanReconciler) persistSanitizedPatchArtifacts(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -185,9 +147,6 @@ func (r *RepositoryScanReconciler) persistSanitizedPatchArtifacts(
 	return nil
 }
 
-// repositoryScanHTTPClient returns the reconciler's client or a bounded
-// default. http.DefaultClient has no timeout, and a stalled GitHub response
-// would block the scan reconcile worker indefinitely.
 func (r *RepositoryScanReconciler) repositoryScanHTTPClient() *http.Client {
 	if r.HTTPClient != nil {
 		return r.HTTPClient
@@ -195,9 +154,6 @@ func (r *RepositoryScanReconciler) repositoryScanHTTPClient() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}
 }
 
-// verifyArtifactDiffMatchesPublishedCommit fails closed unless the stored
-// diff artifact touches exactly the file set of the publication's verified
-// commit, fetched fresh with the forge credential.
 func (r *RepositoryScanReconciler) verifyArtifactDiffMatchesPublishedCommit(
 	ctx context.Context,
 	scan *corev1alpha1.RepositoryScan,
@@ -235,22 +191,6 @@ func (r *RepositoryScanReconciler) verifyArtifactDiffMatchesPublishedCommit(
 	if !sameStringSet(artifactPaths, commitPaths) {
 		return "patch diff artifact does not match the published commit", nil
 	}
-	// Filenames alone are spoofable: an unrelated diff touching the same
-	// paths would pass the set check. Bind the content too — each file's
-	// complete hunk body (path headers, positions, context, and every changed
-	// line, however it is prefixed) must be identical to the published
-	// commit's. Index headers, which legitimately vary between diff generators
-	// without changing the represented patch, are excluded.
-	// File-mode transitions must match the commit's full Git diff. Rename,
-	// copy, similarity, and binary metadata remains unsupported.
-	// Stored artifacts come in two provenances: the result-contract path
-	// persists the commit diff credential-redacted, while legacy
-	// harness-written artifacts are raw — so the stored diff must match the
-	// fresh commit diff in either its raw or its sanitized form (both are
-	// exact commit-derived representations; the sanitizer is deterministic).
-	// Without the sanitized comparison, the second reconcile of an already
-	// verified proposal would fail solely because [REDACTED] differs from
-	// the credential the remediation removed.
 	if !samePatchHunks(string(diffData), commitDiff) &&
 		!samePatchHunks(string(diffData), repositoryMonitorReviewContextSanitize(commitDiff)) {
 		return "patch diff artifact content does not match the published commit", nil
@@ -258,8 +198,6 @@ func (r *RepositoryScanReconciler) verifyArtifactDiffMatchesPublishedCommit(
 	return "", nil
 }
 
-// patchHunksByFile binds each file's canonical old/new path headers to its
-// verbatim hunk body, from the first "@@" line to the next file header.
 var recognizedDiffMetadataPattern = regexp.MustCompile(`^(?:index [0-9a-f]+\.\.[0-9a-f]+(?: [0-7]{6})?|--- .+|\+\+\+ .+)$`)
 var patchModeMetadataPattern = regexp.MustCompile(`^(?:old mode|new mode|new file mode|deleted file mode) [0-7]{6}$`)
 
@@ -320,9 +258,6 @@ func patchHunksByFile(diff string) (map[string]repositoryScanFilePatch, bool) {
 			} else {
 				invalidBlock = true
 			}
-			// Any repeated file block — hunkless or not — invalidates the
-			// diff: a second header for the same path could hide arbitrary
-			// content the comparison would never see.
 			if current != "" {
 				if _, exists := seenPaths[current]; exists {
 					duplicate = true
@@ -358,9 +293,6 @@ func patchHunksByFile(diff string) (map[string]repositoryScanFilePatch, bool) {
 			newHeader = strings.TrimPrefix(line, "+++ ")
 			continue
 		}
-		// Outside hunks, only recognized diff metadata may appear: a
-		// fabricated reviewer-facing line smuggled before the first hunk
-		// would otherwise render in the artifact yet escape comparison.
 		if !recognizedDiffMetadataLine(line) {
 			unknownPrefix = true
 		}
@@ -369,8 +301,6 @@ func patchHunksByFile(diff string) (map[string]repositoryScanFilePatch, bool) {
 	return hunks, !duplicate && !unknownPrefix && !invalidBlock
 }
 
-// recognizedDiffMetadataLine reports whether a pre-hunk line is standard git
-// diff metadata.
 func recognizedDiffMetadataLine(line string) bool {
 	if strings.TrimSpace(line) == "" {
 		return true
@@ -404,9 +334,6 @@ func (r *RepositoryScanReconciler) patchArtifactsPresent(ctx context.Context, ta
 	return true, nil
 }
 
-// repositoryScanForgeToken reads the scan's forge credential. The token never
-// leaves the controller: it authenticates the read of the published commit and
-// is not persisted or logged.
 func (r *RepositoryScanReconciler) repositoryScanForgeToken(ctx context.Context, scan *corev1alpha1.RepositoryScan) (string, string, error) {
 	if scan.Spec.ForgeCredentialRef == nil || strings.TrimSpace(scan.Spec.ForgeCredentialRef.Name) == "" {
 		return "", "spec.forgeCredentialRef is required to verify the published patch", nil
@@ -448,23 +375,12 @@ type repositoryScanCommitResponse struct {
 	Files []repositoryScanCommitFileResponse `json:"files"`
 }
 
-// errRepositoryScanPublishedCommitTransient marks a GitHub read that failed
-// for a reason expected to clear on its own (transport error, throttling, or
-// a server-side error). It is returned as a reconcile error so the patch
-// verification is retried rather than settled as a failed proposal.
 var errRepositoryScanPublishedCommitTransient = errors.New("published patch commit could not be read from GitHub; retrying")
 
-// repositoryScanGitHubStatusTransient reports the response statuses that are
-// retried: request timeout, rate limiting, and every server-side error.
-// Other non-2xx statuses (for example 401, 403, 404, 422) are terminal for
-// the proposal.
 func repositoryScanGitHubStatusTransient(status int) bool {
 	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
 }
 
-// fetchRepositoryScanPublishedDiff binds GitHub's full diff, including file
-// modes, to the complete paginated file list and line counts for the same SHA.
-// The JSON file patches alone cannot prove executable-bit changes.
 func (r *RepositoryScanReconciler) fetchRepositoryScanPublishedDiff(ctx context.Context, owner, repository, sha, token string) (string, []string, string, error) {
 	files, reason, err := r.fetchRepositoryScanPublishedCommit(ctx, owner, repository, sha, token)
 	if err != nil || reason != "" {
@@ -507,8 +423,6 @@ func (r *RepositoryScanReconciler) fetchRepositoryScanPublishedDiff(ctx context.
 		return "", nil, "published patch diff does not match the commit file listing", nil
 	}
 	for path, patch := range expected {
-		// Only the full diff has mode metadata. Its paths and text must
-		// still match the independently checked JSON representation.
 		if got, ok := actual[path]; !ok || got.content != patch.content {
 			return "", nil, "published patch diff does not match the commit file listing", nil
 		}
@@ -524,9 +438,6 @@ func (r *RepositoryScanReconciler) fetchRepositoryScanPublishedCommit(ctx contex
 	if baseURL == "" {
 		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
 	}
-	// The commit endpoint paginates its files array; per_page's documented
-	// maximum is 100, so pages are followed explicitly up to the supported
-	// file-count bound and anything beyond fails closed.
 	var files []repositoryScanCommitFileResponse
 	maxPages := repositoryScanPublishedCommitMaxFiles / repositoryScanPublishedCommitPageSize
 	for page := 1; ; page++ {
@@ -542,10 +453,6 @@ func (r *RepositoryScanReconciler) fetchRepositoryScanPublishedCommit(ctx contex
 		repositoryMonitorSetGitHubHeaders(req, token)
 		resp, err := r.repositoryScanHTTPClient().Do(req)
 		if err != nil {
-			// A transport failure is transient: surface it as a reconcile
-			// error so controller-runtime retries the verification instead
-			// of persisting the proposal as failed. The underlying error may
-			// carry the request URL, so it is logged rather than returned.
 			log.FromContext(ctx).Error(err, "published patch commit request failed", "owner", owner, "repository", repository, "sha", sha)
 			return nil, "", errRepositoryScanPublishedCommitTransient
 		}
@@ -565,7 +472,6 @@ func (r *RepositoryScanReconciler) fetchRepositoryScanPublishedCommit(ctx contex
 		if err := json.Unmarshal(body, &commit); err != nil {
 			return nil, "published patch commit response is not valid JSON", nil
 		}
-		// Every page must identify the same verified commit.
 		if !strings.EqualFold(strings.TrimSpace(commit.SHA), sha) {
 			return nil, "published patch commit response does not match the verified commit", nil
 		}
@@ -583,18 +489,12 @@ func (r *RepositoryScanReconciler) fetchRepositoryScanPublishedCommit(ctx contex
 	return files, "", nil
 }
 
-// repositoryScanDiffFromPublishedCommit renders the published commit's file
-// patches as one canonical git diff. Renames, copies, and files without a
-// textual patch (binary or oversized) cannot be reviewed as a patch and fail
-// closed.
 func repositoryScanDiffFromPublishedCommit(files []repositoryScanCommitFileResponse) (string, []string, string) {
 	var diff strings.Builder
 	paths := make([]string, 0, len(files))
 	seen := make(map[string]struct{}, len(files))
 	for _, file := range files {
 		path := strings.TrimSpace(file.Filename)
-		// Trimming must not rewrite identity: a legal filename with leading
-		// or trailing whitespace would otherwise verify as a different path.
 		if path != file.Filename {
 			return "", nil, "published patch commit contains a whitespace-altered file path"
 		}
@@ -611,15 +511,10 @@ func repositoryScanDiffFromPublishedCommit(files []repositoryScanCommitFileRespo
 		if strings.TrimSpace(file.Patch) == "" {
 			return "", nil, "published patch commit contains a file without a text patch: " + path
 		}
-		// GitHub can serve a nonempty but truncated patch for a large
-		// change; a fragment whose line totals disagree with the reported
-		// counts would hide part of the actual commit from the evidence.
 		if !patchMatchesLineCounts(file.Patch, file.Additions, file.Deletions) {
 			return "", nil, "published patch commit contains an inconsistent file patch: " + path
 		}
 		fmt.Fprintf(&diff, "diff --git a/%s b/%s\n", path, path)
-		// This JSON representation binds text and change kind. The full
-		// Git diff supplies mode metadata before evidence is accepted.
 		switch strings.ToLower(strings.TrimSpace(file.Status)) {
 		case "added":
 			fmt.Fprintf(&diff, "--- /dev/null\n+++ b/%s\n", path)
@@ -643,13 +538,6 @@ const (
 	repositoryScanPullRequestTitleField = "title"
 )
 
-// decorateSecurityPatchPullRequest gives the publisher-created remediation
-// pull request a reviewer-facing title and body derived from the finding and
-// the verified patch summary. It is best-effort and idempotent: only a PR
-// that still carries its exact publisher-created title and body is updated.
-// The publisher's reconciliation markers remain at the end so the PR
-// remains recognizable to the clean-room publisher, and any failure is
-// logged without affecting the proposal.
 func (r *RepositoryScanReconciler) decorateSecurityPatchPullRequest(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, findingID string, prNumber int, generation int64, summaryArtifact string) {
 	logger := log.FromContext(ctx).WithValues("namespace", task.Namespace, "task", task.Name, "finding", findingID, "pullRequest", prNumber)
 	if prNumber <= 0 || r.SecurityStore == nil || r.ArtifactStore == nil {
@@ -739,11 +627,7 @@ func (r *RepositoryScanReconciler) decorateSecurityPatchPullRequest(ctx context.
 	logger.Info("remediation pull request decorated with the finding")
 }
 
-// repositoryScanPublisherPresentation recognizes only unedited publisher text,
-// including publications made before Task-authored presentation was supported.
 func repositoryScanPublisherPresentation(task *corev1alpha1.Task, generation int64, current repositoryScanPullRequestResponse) (string, string, bool) {
-	// An explicit Task title belongs to its author. A body-only override still
-	// gets the finding title, but decoration must leave that body untouched.
 	if task.Spec.Workspace != nil && task.Spec.Workspace.PRTitle != "" {
 		return "", "", false
 	}
@@ -765,8 +649,6 @@ func repositoryScanPublisherPresentation(task *corev1alpha1.Task, generation int
 	return intent.Title, markers, true
 }
 
-// Accept only the publisher's footer, with its optional Session ownership
-// marker last. Additional text is a human edit, not disposable metadata.
 func repositoryScanPublisherMarkersValid(markers string) bool {
 	lines := strings.Split(markers, "\n\n")
 	prefixes := []string{repositoryScanIntentMarkerPrefix, publisher.PullRequestMarkerPrefix + "session.v1 key="}

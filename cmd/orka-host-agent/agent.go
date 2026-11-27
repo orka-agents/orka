@@ -35,13 +35,9 @@ import (
 const (
 	maxTokenBytes  = 4096
 	maxStatusBytes = 64 << 10
-	// staleAfter marks an idle status the host has not refreshed recently.
-	// Hosts rewrite it at least every five minutes; twice that absorbs write
-	// and clock jitter, so a host that keeps to the contract never flaps.
-	staleAfter = 10 * time.Minute
+	staleAfter     = 10 * time.Minute
 )
 
-// handshaker completes an AHP initialize and ping at a WebSocket URL.
 type handshaker func(ctx context.Context, target string) error
 
 type agent struct {
@@ -67,9 +63,6 @@ func (a *agent) routes() http.Handler {
 	return mux
 }
 
-// startupz answers the host container's startup probe. It completes one AHP
-// handshake without authenticating, so it never claims a single-user host,
-// and then stops talking AHP so it cannot keep the host from being idle.
 func (a *agent) startupz(w http.ResponseWriter, r *http.Request) {
 	if !a.ensureStarted(r.Context()) {
 		writeText(w, http.StatusServiceUnavailable, "host is not answering the Agent Host Protocol")
@@ -78,9 +71,6 @@ func (a *agent) startupz(w http.ResponseWriter, r *http.Request) {
 	writeText(w, http.StatusOK, "started")
 }
 
-// ensureStarted completes the startup handshake once. The host's startup
-// probe usually does it, but a restarted sidecar starts over after that probe
-// has passed for good, so the readiness and liveness probes do it then.
 func (a *agent) ensureStarted(ctx context.Context) bool {
 	if a.started.Load() {
 		return true
@@ -101,11 +91,6 @@ func (a *agent) ensureStarted(ctx context.Context) bool {
 	return true
 }
 
-// readyz answers the readiness and liveness probes after startup. A host
-// that reports idle status is alive while it keeps that status fresh, which
-// leaves its listener untouched; hosts may log every connection that never
-// completes a handshake. Otherwise readyz checks that the loopback listener
-// accepts connections. It never opens an AHP session.
 func (a *agent) readyz(w http.ResponseWriter, r *http.Request) {
 	if !a.ensureStarted(r.Context()) {
 		writeText(w, http.StatusServiceUnavailable, "not started")
@@ -129,7 +114,6 @@ func (a *agent) readyz(w http.ResponseWriter, r *http.Request) {
 	writeText(w, http.StatusOK, "ready")
 }
 
-// status serves the host's idle status, limited to the fields Orka reads.
 func (a *agent) status(w http.ResponseWriter, _ *http.Request) {
 	if a.statusFile == "" {
 		writeText(w, http.StatusNotFound, "this host does not report idle status")
@@ -145,10 +129,6 @@ func (a *agent) status(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-// readStatus reads and parses the host's idle status file. The host does not
-// choose staleness; the agent judges it from updatedAt, or from the file's
-// modification time when the host writes none. A time further in the future
-// than staleAfter is as untrustworthy as an old one.
 func (a *agent) readStatus() (agenthost.IdleStatus, error) {
 	file, err := os.Open(a.statusFile)
 	if err != nil {
@@ -173,8 +153,6 @@ func (a *agent) readStatus() (agenthost.IdleStatus, error) {
 	}
 	age := a.now().Sub(updated)
 	parsed.Stale = age > staleAfter || age < -staleAfter
-	// So is an idleSince that far ahead: idle time would count from the
-	// future, and the host would not suspend until then.
 	if parsed.IdleSince != nil && parsed.IdleSince.Sub(a.now()) > staleAfter {
 		parsed.Stale = true
 	}
@@ -202,8 +180,6 @@ func (a *agent) listenAddress() string {
 	return net.JoinHostPort("127.0.0.1", strconv.Itoa(a.listenPort))
 }
 
-// ahpHandshake offers every protocol version the AHP Go client supports,
-// then pings. It never sends authenticate.
 func ahpHandshake(ctx context.Context, target string) error {
 	transport, err := ahpws.Connect(ctx, target)
 	if err != nil {
@@ -249,7 +225,6 @@ func readToken(path string) (string, error) {
 	return token, nil
 }
 
-// redact removes the token, raw and query-escaped, from an error message.
 func redact(err error, token string) error {
 	message := err.Error()
 	for _, secret := range []string{token, url.QueryEscape(token)} {

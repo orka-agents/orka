@@ -30,9 +30,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-// blockingApprovalReceiver holds every request until released and then
-// answers 503, standing in for a slow, failing receiver. It reports the
-// stored Task as it was when each request arrived.
 type blockingApprovalReceiver struct {
 	server  *httptest.Server
 	arrived chan *corev1alpha1.Task
@@ -40,7 +37,6 @@ type blockingApprovalReceiver struct {
 	once    sync.Once
 }
 
-// unblock releases every held request, now and later.
 func (r *blockingApprovalReceiver) unblock() { r.once.Do(func() { close(r.release) }) }
 
 func newBlockingApprovalReceiver(t *testing.T, read func() *corev1alpha1.Task) *blockingApprovalReceiver {
@@ -52,22 +48,14 @@ func newBlockingApprovalReceiver(t *testing.T, read func() *corev1alpha1.Task) *
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	t.Cleanup(receiver.server.Close)
-	// Cleanups run last-registered first, so a failing test releases a held
-	// request before the server waits for it to finish.
 	t.Cleanup(receiver.unblock)
 	return receiver
 }
 
-// A pending approval notice never holds back the Task's own phase work: the
-// reconcile persists the phase transition and returns while the receiver
-// still hangs, the delivery runnable attempts the notice against the
-// persisted phase, and the next reconcile waits for the notice's retry
-// backoff.
 func TestTaskReconcilerAdvancesThePhaseBeforeASlowApprovalReceiver(t *testing.T) {
 	task := newApprovalWebhookTask(corev1alpha1.TaskPhasePending, bothApprovalEvents...)
 	task.Spec.Type = corev1alpha1.TaskTypeContainer
 	task.Finalizers = []string{labels.TaskFinalizer}
-	// A recorded outcome makes the Pending phase handler complete the Task.
 	task.Status.ExecutionOutcome = &corev1alpha1.TaskWorkloadExecutionOutcome{
 		Phase: corev1alpha1.TaskPhaseFailed, Message: "recorded outcome",
 	}
@@ -92,9 +80,6 @@ func TestTaskReconcilerAdvancesThePhaseBeforeASlowApprovalReceiver(t *testing.T)
 	startTestWebhookDispatcher(t, reconciler, 1)
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
 
-	// The reconcile returns without waiting for the receiver, which holds
-	// every request until it is released below; an inline send would wait
-	// out the request timeout here.
 	started := time.Now()
 	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
 		t.Fatal(err)
@@ -140,8 +125,6 @@ func TestTaskReconcilerAdvancesThePhaseBeforeASlowApprovalReceiver(t *testing.T)
 	}
 }
 
-// A phase handler that fails does not stop the approval notice of a finished
-// Task, and its error is still reported.
 func TestTaskReconcilerDeliversApprovalNoticesWhenThePhaseWorkFails(t *testing.T) {
 	task := newApprovalWebhookTask(corev1alpha1.TaskPhaseSucceeded, bothApprovalEvents...)
 	task.Spec.Type = corev1alpha1.TaskTypeContainer
@@ -177,10 +160,6 @@ func TestTaskReconcilerDeliversApprovalNoticesWhenThePhaseWorkFails(t *testing.T
 	}
 }
 
-// The delivery pass that settles the last pending notice writes Task
-// status, which reconciles the Task again under the manager, so the phase
-// work that ran before the attempt, such as parent history enforcement, runs
-// again. Afterwards the reconcile no longer schedules delivery.
 func TestTaskReconcilerReconcilesAgainWhenTheLastApprovalNoticeSettles(t *testing.T) {
 	task := newApprovalWebhookTask(corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskWebhookEventApprovalRequested)
 	task.Spec.Type = corev1alpha1.TaskTypeContainer
@@ -220,9 +199,6 @@ func TestTaskReconcilerReconcilesAgainWhenTheLastApprovalNoticeSettles(t *testin
 	}
 }
 
-// A parked turn that Succeeded still has its sign-off notices delivered by
-// the Task reconciler, after its phase work, while its terminal notice stays
-// deferred.
 func TestTaskReconcilerDeliversParkedSignOffNoticesAfterThePhaseWork(t *testing.T) {
 	task := parkedTestTask(corev1alpha1.TaskWaitKindApproval, corev1alpha1.TaskPhaseSucceeded)
 	task.Spec.WebhookEvents = []corev1alpha1.TaskWebhookEvent{corev1alpha1.TaskWebhookEventApprovalRequested}
@@ -261,10 +237,6 @@ func TestTaskReconcilerDeliversParkedSignOffNoticesAfterThePhaseWork(t *testing.
 	}
 }
 
-// The reconcile itself retires deselected approval notices when it observes
-// an opt-out, before anything is handed to the delivery runnable, so a notice
-// waiting out its retry backoff is never sent after the event is selected
-// again.
 func TestTaskReconcilerRetiresDeselectedApprovalNoticesBeforeHandoff(t *testing.T) {
 	task := newApprovalWebhookTask(corev1alpha1.TaskPhasePending, bothApprovalEvents...)
 	task.Spec.Type = corev1alpha1.TaskTypeContainer
@@ -280,9 +252,6 @@ func TestTaskReconcilerRetiresDeselectedApprovalNoticesBeforeHandoff(t *testing.
 	}
 	startTestWebhookDispatcher(t, reconciler, 1)
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
-	// The delivery runnable writes status concurrently, so a reconcile can
-	// lose an optimistic-concurrency race and is retried, as the controller
-	// would.
 	reconcile := func() {
 		t.Helper()
 		for range 20 {
@@ -328,7 +297,6 @@ func TestTaskReconcilerRetiresDeselectedApprovalNoticesBeforeHandoff(t *testing.
 		t.Fatalf("head notice = %+v, want pending in its retry backoff", head.TaskWebhookDelivery)
 	}
 
-	// Opt out of requests while the head waits out its backoff.
 	selectEvents(corev1alpha1.TaskWebhookEventApprovalResolved)
 	reconcile()
 	if head := h.task().Status.ApprovalWebhooks.Notices[0]; head.State != corev1alpha1.TaskWebhookDeliveryFailed {
@@ -340,7 +308,6 @@ func TestTaskReconcilerRetiresDeselectedApprovalNoticesBeforeHandoff(t *testing.
 	if head := h.task().Status.ApprovalWebhooks.Notices[0]; head.State != corev1alpha1.TaskWebhookDeliveryFailed {
 		t.Fatalf("head notice = %s after re-selecting, want it to stay retired", head.State)
 	}
-	// The terminal notice goes to the same receiver; count approval notices.
 	requested := slices.DeleteFunc(eventTypes(h.receipts()), func(eventType string) bool { return eventType != "task.approval_requested" })
 	if len(requested) != 1 {
 		t.Fatalf("approval request notices = %d, want only the attempt from before the opt-out", len(requested))

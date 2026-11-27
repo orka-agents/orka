@@ -20,8 +20,6 @@ interface ValidationSummaryProps {
   artifacts?: ArtifactMetadata[]
 }
 
-// Status presentation is text + icon, never color alone. Each label is rendered
-// (or carried via sr-only) so screen readers and colorblind users get the state.
 const STATUS_META: Record<
   CheckStatus,
   { Icon: typeof CheckCircle2; label: string; color: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }
@@ -40,11 +38,6 @@ const ROLLUP_LABEL: Record<RollupStatus, string> = {
   unknown: 'Derived health unknown',
 }
 
-/**
- * Derived runtime health summary. This surfaces health inferred from real
- * Task/trace data and is explicitly NOT a formal evaluation — missing data
- * reads as "unknown", never a false pass. Pure props; no fetching.
- */
 export function ValidationSummary({ task, trace, approvals, artifacts }: ValidationSummaryProps) {
   const checks = deriveRuntimeChecks({ task, trace, approvals, artifacts })
   const rollup = rollupStatus(checks)
@@ -53,8 +46,6 @@ export function ValidationSummary({ task, trace, approvals, artifacts }: Validat
   return (
     <Card>
       <CardHeader className="pb-2">
-        {/* In a narrow column the rollup badge wraps below the title, and its
-            label wraps too, instead of overflowing the card. */}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle className="text-sm font-medium">Derived checks</CardTitle>
           <Badge variant={banner.variant} className={cn('shrink gap-1 whitespace-normal', rollup !== 'fail' && banner.color)}>

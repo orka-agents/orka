@@ -10,7 +10,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// GetControllerEpoch returns the current durable controller epoch.
 func (s *Store) GetControllerEpoch(ctx context.Context, name string) (*store.ControllerEpoch, error) {
 	name, err := store.NormalizeControllerEpochName(name)
 	if err != nil {
@@ -23,9 +22,6 @@ func (s *Store) GetControllerEpoch(ctx context.Context, name string) (*store.Con
 	return &epoch, nil
 }
 
-// CompareAndSwapControllerEpoch creates or advances the controller epoch with
-// exact version/epoch CAS semantics. A same-holder, same-digest retry of an
-// already committed target epoch is idempotent.
 func (s *Store) CompareAndSwapControllerEpoch(ctx context.Context, change store.ControllerEpochCAS) (*store.ControllerEpoch, error) {
 	change.Name = strings.TrimSpace(change.Name)
 	name, err := store.NormalizeControllerEpochName(change.Name)
@@ -126,10 +122,6 @@ func (s *Store) CompareAndSwapControllerEpoch(ctx context.Context, change store.
 	return &current, nil
 }
 
-// SyncControllerEpochMirror records the exact Kubernetes-authoritative epoch
-// used to fence SQLite payload mutations. It may move a stale mirror forward
-// after a crash between authoritative acquisition and mirror persistence, but
-// never rewinds or replaces conflicting evidence at the same epoch.
 func (s *Store) SyncControllerEpochMirror(ctx context.Context, authoritative store.ControllerEpoch) error {
 	name, err := store.NormalizeControllerEpochName(authoritative.Name)
 	if err != nil {

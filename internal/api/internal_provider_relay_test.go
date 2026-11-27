@@ -24,6 +24,7 @@ import (
 	"github.com/valyala/fasthttp"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -63,8 +64,7 @@ type providerRelayHarness struct {
 	upstream   *httptest.Server
 	mu         sync.Mutex
 	requests   []relayUpstreamRequest
-	// respond replaces the upstream's default answer when set.
-	respond http.HandlerFunc
+	respond    http.HandlerFunc
 }
 
 func (h *providerRelayHarness) upstreamRequests() []relayUpstreamRequest {
@@ -74,10 +74,9 @@ func (h *providerRelayHarness) upstreamRequests() []relayUpstreamRequest {
 }
 
 type providerRelayFixture struct {
-	task     *corev1alpha1.Task
-	provider *corev1alpha1.Provider
-	relayEnv string
-	// noIdentities builds the handlers without a Provider identity source.
+	task         *corev1alpha1.Task
+	provider     *corev1alpha1.Provider
+	relayEnv     string
 	noIdentities bool
 }
 
@@ -138,14 +137,12 @@ func newProviderRelayHarness(t *testing.T, mutate func(*providerRelayFixture)) *
 		config.ProviderIdentities = h.identities
 	}
 	handlers := NewInternalHandlers(nil, nil, nil, nil, nil, config)
-	// As NewServer configures it.
 	app := fiber.New(fiber.Config{BodyLimit: defaultAPIRequestBodyLimit, StreamRequestBody: true})
 	app.Use(func(ctx fiber.Ctx) error {
 		ctx.Locals(UserInfoContextKey, internalCallerAuthWorkerUser("pod-a", "pod-uid"))
 		return ctx.Next()
 	})
 	app.All("/internal/v1/tasks/:namespace/:taskName/providers/:slot/*", handlers.RelayProviderRequest)
-	// The server's per-route read and write bounds, as NewServer installs them.
 	app.Server().HeaderReceived = func(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
 		return requestBodyConfigWithNativeSessionLimit(header, 0)
 	}
@@ -217,9 +214,7 @@ func TestProviderRelayRefusesRequestsOutsideTheAzurePaths(t *testing.T) {
 		{http.MethodPost, "/internal/v1/tasks/default/task-a/providers/primary/openai/responses?api-version=1&api-version=2", http.StatusBadRequest},
 		{http.MethodGet, "/internal/v1/tasks/default/task-a/providers/primary/openai/responses", http.StatusMethodNotAllowed},
 		{http.MethodPost, "/internal/v1/tasks/default/task-a/providers/secondary/openai/responses", http.StatusBadRequest},
-		// The Job relays only the primary slot.
 		{http.MethodPost, "/internal/v1/tasks/default/task-a/providers/fallback-0/openai/responses", http.StatusForbidden},
-		// Another Task's relay is not this worker's.
 		{http.MethodPost, "/internal/v1/tasks/default/task-b/providers/primary/openai/responses", http.StatusForbidden},
 	} {
 		response, body := h.do(t, tc.method, tc.target, nil)
@@ -279,12 +274,9 @@ func TestProviderRelayBoundsConcurrentRequests(t *testing.T) {
 	<-h.handlers.providerRelaySlots
 	response, body = h.do(t, http.MethodPost, relayChatPath, nil)
 	require.Equal(t, http.StatusOK, response.StatusCode, body)
-	// The finished request returned its slot.
 	require.Len(t, h.handlers.providerRelaySlots, providerRelayMaxConcurrent-1)
 }
 
-// The transport decodes only the gzip it asked for; any other encoding would
-// reach the worker without its header, so it is refused.
 func TestProviderRelayRefusesEncodedResponses(t *testing.T) {
 	h := newProviderRelayHarness(t, nil)
 	h.mu.Lock()
@@ -300,8 +292,6 @@ func TestProviderRelayRefusesEncodedResponses(t *testing.T) {
 	require.Empty(t, h.handlers.providerRelaySlots, "the refused response kept its slot")
 }
 
-// A worker that stops reading a streamed answer loses it when the relay's
-// deadline passes, and the slot is returned.
 func TestProviderRelayReleasesTheSlotOfAWorkerThatStopsReading(t *testing.T) {
 	previous := providerRelayTimeout
 	providerRelayTimeout = time.Second
@@ -332,15 +322,12 @@ func TestProviderRelayReleasesTheSlotOfAWorkerThatStopsReading(t *testing.T) {
 	_, err = fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: controller\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
 		relayChatPath, len(body), body)
 	require.NoError(t, err)
-	// The worker never reads the answer.
 	require.Eventually(t, func() bool { return len(h.handlers.providerRelaySlots) == 1 }, 5*time.Second, 10*time.Millisecond,
 		"the relay never started streaming")
 	require.Eventually(t, func() bool { return len(h.handlers.providerRelaySlots) == 0 }, 10*time.Second, 50*time.Millisecond,
 		"a worker that stopped reading kept its relay slot")
 }
 
-// A worker that stops sending its request body loses the connection when the
-// relay's read timeout passes, before it takes a slot or reaches the Provider.
 func TestProviderRelayDropsAStalledUpload(t *testing.T) {
 	previous := providerRelayReadTimeout
 	providerRelayReadTimeout = time.Second
@@ -355,7 +342,6 @@ func TestProviderRelayDropsAStalledUpload(t *testing.T) {
 	conn, err := net.Dial("tcp", listener.Addr().String())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
-	// Announce a body and send only part of it.
 	_, err = fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: controller\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"messages\"",
 		relayChatPath)
 	require.NoError(t, err)
@@ -370,6 +356,7 @@ func TestProviderRelayDropsAStalledUpload(t *testing.T) {
 
 func TestProviderRelayRouteMatchesOnlyTheRelay(t *testing.T) {
 	require.True(t, isProviderRelayPath("/internal/v1/tasks/default/task-a/providers/primary/openai/responses"))
+	require.True(t, isProviderRelayPath("/INTERNAL/v1/tasks/default/task-a/providers/primary/openai/responses"))
 	for _, path := range []string{
 		"/internal/v1/tasks/default/task-a/providers/primary",
 		"/internal/v1/tasks/default/task-a/result",
@@ -379,8 +366,6 @@ func TestProviderRelayRouteMatchesOnlyTheRelay(t *testing.T) {
 	}
 }
 
-// An answer the Provider cuts off after its headers reaches the worker as a
-// failed body, not as a complete one.
 func TestProviderRelayFailsATruncatedAnswer(t *testing.T) {
 	h := newProviderRelayHarness(t, nil)
 	h.mu.Lock()
@@ -390,7 +375,6 @@ func TestProviderRelayFailsATruncatedAnswer(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "data: {\"type\":\"response.created\"}\n\n")
 		w.(http.Flusher).Flush()
-		// Drop the connection before the rest of the declared body.
 		conn, _, err := http.NewResponseController(w).Hijack()
 		if err == nil {
 			_ = conn.Close()
@@ -416,8 +400,6 @@ func TestProviderRelayFailsATruncatedAnswer(t *testing.T) {
 	require.Eventually(t, func() bool { return len(h.handlers.providerRelaySlots) == 0 }, 5*time.Second, 10*time.Millisecond)
 }
 
-// The size bound and a failed read both end the body with an error, and the
-// relay finishes the request once, however often fasthttp closes it.
 func TestRelayResponseBodyEndsWithAnErrorAndFinishesOnce(t *testing.T) {
 	var finished []error
 	body := &relayResponseBody{body: io.NopCloser(strings.NewReader("0123456789")), remaining: 4,
@@ -438,4 +420,55 @@ func TestRelayResponseBodyEndsWithAnErrorAndFinishesOnce(t *testing.T) {
 	require.Equal(t, "ok", string(data))
 	require.NoError(t, body.Close())
 	require.Equal(t, []error{nil}, finished)
+}
+
+func TestProviderRelayRefusesOversizedChunkedBody(t *testing.T) {
+	h := newProviderRelayHarness(t, nil)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = h.app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	t.Cleanup(func() { _ = h.app.Shutdown() })
+
+	oversized := strings.Repeat("a", providerRelayMaxRequestBytes+64)
+	req, err := http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+relayChatPath, io.NopCloser(strings.NewReader(oversized)))
+	require.NoError(t, err)
+	req.ContentLength = -1
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
+	require.Empty(t, h.upstreamRequests())
+	require.Zero(t, h.identities.calls)
+}
+
+func TestProviderRelayRevalidatesTaskAfterTokenAcquisition(t *testing.T) {
+	h := newProviderRelayHarness(t, nil)
+	origIdentities := h.handlers.providerIdentities
+	taskKey := types.NamespacedName{Namespace: "default", Name: "task-a"}
+	h.handlers.providerIdentities = relayTokenFunc(func(ctx context.Context, identity, baseURL string) (string, error) {
+		token, err := origIdentities.Token(ctx, identity, baseURL)
+		if err != nil {
+			return "", err
+		}
+		live := &corev1alpha1.Task{}
+		if getErr := h.handlers.k8sClient.Get(ctx, taskKey, live); getErr != nil {
+			return "", getErr
+		}
+		live.Status.Phase = corev1alpha1.TaskPhaseCancelled
+		if updErr := h.handlers.k8sClient.Update(ctx, live); updErr != nil {
+			return "", updErr
+		}
+		return token, nil
+	})
+	response, body := h.do(t, http.MethodPost, relayChatPath, nil)
+	require.Equal(t, http.StatusForbidden, response.StatusCode, body)
+	require.Empty(t, h.upstreamRequests())
+}
+
+type relayTokenFunc func(ctx context.Context, identity, baseURL string) (string, error)
+
+func (f relayTokenFunc) Token(ctx context.Context, identity, baseURL string) (string, error) {
+	return f(ctx, identity, baseURL)
 }

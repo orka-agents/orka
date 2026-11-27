@@ -44,7 +44,6 @@ func statusServer(healthy, ready bool, tasks []client.TaskSummary, agents []clie
 			}
 			json.NewEncoder(w).Encode(map[string]any{"status": status}) //nolint:errcheck
 		case tasksAPIPath:
-			// Build items list from summaries (simplified)
 			items := make([]map[string]any, len(tasks))
 			for i, t := range tasks {
 				items[i] = map[string]any{
@@ -117,7 +116,6 @@ func TestNewStatusCmd_UnreachableServer(t *testing.T) {
 	root.AddCommand(cmd)
 	root.SetArgs([]string{"status", "--server", "http://127.0.0.1:1"})
 
-	// Should not error — it prints the error inline
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
 	}
@@ -150,7 +148,6 @@ func TestNewStatusCmd_TaskErrors(t *testing.T) {
 	root.AddCommand(cmd)
 	root.SetArgs([]string{"status", "--server", srv.URL})
 
-	// Errors are printed to stderr, not returned
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
 	}

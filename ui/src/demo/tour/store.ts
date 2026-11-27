@@ -7,7 +7,6 @@ function hasSeenTour(): boolean {
   try {
     return localStorage.getItem(seenKey) !== null
   } catch {
-    // Without storage every visit is a first visit.
     return false
   }
 }
@@ -16,15 +15,12 @@ function rememberTourSeen() {
   try {
     localStorage.setItem(seenKey, '1')
   } catch {
-    // The tour opens again on the next visit.
   }
 }
 
 interface TourState {
   open: boolean
-  /** Index into TOUR_STEPS. */
   step: number
-  /** The narrow-screen panel is folded down to one line. */
   collapsed: boolean
   start: () => void
   goTo: (step: number) => void
@@ -32,7 +28,6 @@ interface TourState {
   setCollapsed: (collapsed: boolean) => void
 }
 
-/** The tour opens by itself on a first visit and from the sidebar after that. */
 export const useTourStore = create<TourState>()((set) => ({
   open: !hasSeenTour(),
   step: 0,

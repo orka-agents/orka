@@ -7,7 +7,6 @@ import (
 	"io"
 )
 
-// RunOperatorFileHelper is only supported on Linux.
 func RunOperatorFileHelper(_ []string, _ io.Reader, stdout io.Writer) int {
 	writeOperatorFileStatus(stdout, operatorFileStatus{Code: operatorFileCodeInvalid, Error: "operator file copies are only supported on Linux"})
 	return 1

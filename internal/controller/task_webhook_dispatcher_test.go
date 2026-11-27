@@ -25,9 +25,6 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// attachTestWebhookDispatcher gives r the delivery runnable SetupWithManager
-// would register, without starting its workers. Tests run its queued passes
-// with drain.
 func attachTestWebhookDispatcher(t *testing.T, r *TaskReconciler) *taskWebhookDispatcher {
 	t.Helper()
 	r.webhookDeliveries = newTaskWebhookDispatcher(r.WebhookNotifier, uncachedReader(r.APIReader, r.Client), r.Status(), 1)
@@ -35,16 +32,12 @@ func attachTestWebhookDispatcher(t *testing.T, r *TaskReconciler) *taskWebhookDi
 	return r.webhookDeliveries
 }
 
-// drain runs, in the caller's goroutine, every queued delivery pass that is
-// due now. Passes the dispatcher scheduled for later are left queued.
 func (d *taskWebhookDispatcher) drain(ctx context.Context) {
 	for d.queue.Len() > 0 {
 		d.processNext(ctx)
 	}
 }
 
-// startTestWebhookDispatcher gives r a running delivery runnable with the
-// given number of workers, stopped when the test ends.
 func startTestWebhookDispatcher(t *testing.T, r *TaskReconciler, workers int) {
 	t.Helper()
 	r.webhookDeliveries = newTaskWebhookDispatcher(r.WebhookNotifier, uncachedReader(r.APIReader, r.Client), r.Status(), workers)
@@ -60,8 +53,6 @@ func startTestWebhookDispatcher(t *testing.T, r *TaskReconciler, workers int) {
 	})
 }
 
-// hangingWebhookReceiver accepts every request and answers none until the
-// test ends, like a receiver that hangs past the request timeout.
 type hangingWebhookReceiver struct {
 	server  *httptest.Server
 	arrived chan struct{}
@@ -81,8 +72,6 @@ func newHangingWebhookReceiver(t *testing.T) *hangingWebhookReceiver {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	t.Cleanup(receiver.server.Close)
-	// Cleanups run last-registered first: release held requests before the
-	// server waits for them and before the dispatcher stops.
 	t.Cleanup(func() { receiver.once.Do(func() { close(receiver.release) }) })
 	return receiver
 }
@@ -101,12 +90,6 @@ func completedWebhookTask(name, webhookURL string) *corev1alpha1.Task {
 	}
 }
 
-// A receiver that hangs must not hold the Task reconcile worker. Before the
-// delivery runnable, the reconciler sent each attempt inline, so every Task
-// waited behind a hanging receiver's request timeout. Here the reconcile of
-// the slow Task, of another Task with a webhook and of a Task without one all
-// return while the slow receiver still holds its request, and the other
-// Task's notice is delivered meanwhile.
 func TestHangingWebhookReceiverDoesNotBlockOtherTasks(t *testing.T) {
 	hanging := newHangingWebhookReceiver(t)
 	fast := newWebhookReceiver(t, http.StatusOK)
@@ -139,8 +122,6 @@ func TestHangingWebhookReceiverDoesNotBlockOtherTasks(t *testing.T) {
 		return current
 	}
 
-	// Reconcile the slow Task until its notice is handed off and the
-	// receiver holds the attempt.
 	deadline := time.After(20 * time.Second)
 	for arrived := false; !arrived; {
 		reconcile(slowTask)
@@ -153,7 +134,6 @@ func TestHangingWebhookReceiverDoesNotBlockOtherTasks(t *testing.T) {
 		}
 	}
 
-	// While it hangs, other Tasks reconcile and the other notice is sent.
 	reconcile(plainTask)
 	for delivered := false; !delivered; {
 		reconcile(fastTask)
@@ -170,8 +150,6 @@ func TestHangingWebhookReceiverDoesNotBlockOtherTasks(t *testing.T) {
 		t.Fatalf("fast receiver receipts = %d, want 1", got)
 	}
 
-	// The slow Task's own reconcile returns too, waiting out the persisted
-	// lease of the attempt in flight, which is not repeated.
 	slow := stored(slowTask)
 	delivery := slow.Status.WebhookDelivery
 	if delivery == nil || delivery.State != corev1alpha1.TaskWebhookDeliveryPending || delivery.Attempts != 1 || delivery.NextAttemptTime == nil {
@@ -187,8 +165,6 @@ func TestHangingWebhookReceiverDoesNotBlockOtherTasks(t *testing.T) {
 	}
 }
 
-// concurrentWriteHarness sends one terminal notice while another writer
-// changes the Task between the attempt's claim and its result.
 type concurrentWriteHarness struct {
 	t        *testing.T
 	r        *TaskReconciler
@@ -219,8 +195,6 @@ func (h *concurrentWriteHarness) read() *corev1alpha1.Task {
 	return current
 }
 
-// attemptDuring runs one attempt, with write committed after its claim and
-// before its result, and returns the Task afterwards.
 func (h *concurrentWriteHarness) attemptDuring(write func(context.Context, *corev1alpha1.Task) error) *corev1alpha1.Task {
 	h.t.Helper()
 	status := &conflictOnceTaskStatus{rereadingTaskStatus: rereadingTaskStatus{writer: h.r.Status(), reader: h.r.Client}}
@@ -242,8 +216,6 @@ func (h *concurrentWriteHarness) attemptDuring(write func(context.Context, *core
 	return current
 }
 
-// afterLease checks that the stale attempt left its claim pending, then
-// runs the next pass once the claim's lease ends.
 func (h *concurrentWriteHarness) afterLease(stale *corev1alpha1.Task) *corev1alpha1.Task {
 	h.t.Helper()
 	first := stale.Status.WebhookDelivery
@@ -257,9 +229,6 @@ func (h *concurrentWriteHarness) afterLease(stale *corev1alpha1.Task) *corev1alp
 	return h.read()
 }
 
-// An attempt's result survives a status write that another writer, such as
-// the Task reconciler, committed while the request was in flight, as long as
-// the Task still renders the notice that was sent.
 func TestWebhookAttemptResultSurvivesAnUnrelatedStatusWrite(t *testing.T) {
 	h := newConcurrentWriteHarness(t)
 	current := h.attemptDuring(func(ctx context.Context, task *corev1alpha1.Task) error {
@@ -275,10 +244,6 @@ func TestWebhookAttemptResultSurvivesAnUnrelatedStatusWrite(t *testing.T) {
 	}
 }
 
-// When the concurrent write changed the Task's terminal state, the sent
-// notice is stale: its result is not recorded, and once the claim's lease
-// ends the notice is superseded by one that carries the newer state, as ADR
-// 0042 requires.
 func TestWebhookAttemptResultIsNotRecordedForAChangedTerminalState(t *testing.T) {
 	h := newConcurrentWriteHarness(t)
 	stale := h.attemptDuring(func(ctx context.Context, task *corev1alpha1.Task) error {
@@ -298,9 +263,6 @@ func TestWebhookAttemptResultIsNotRecordedForAChangedTerminalState(t *testing.T)
 	}
 }
 
-// A Task whose spec is still mutable may move its receiver while an attempt
-// is in flight. The body does not cover the URL, so the old receiver's
-// success is not recorded, and the same notice is retried at the new one.
 func TestWebhookAttemptResultIsNotRecordedForAMovedReceiver(t *testing.T) {
 	h := newConcurrentWriteHarness(t)
 	stale := h.attemptDuring(func(ctx context.Context, task *corev1alpha1.Task) error {
@@ -316,8 +278,6 @@ func TestWebhookAttemptResultIsNotRecordedForAMovedReceiver(t *testing.T) {
 	}
 }
 
-// conflictOnceTaskStatus runs beforeResult just before the second status
-// write, which records the first attempt's result after its claim.
 type conflictOnceTaskStatus struct {
 	rereadingTaskStatus
 	writes       int
@@ -337,8 +297,6 @@ func (s *conflictOnceTaskStatus) Update(ctx context.Context, obj ctrlclient.Obje
 	return err
 }
 
-// reconcileThenDeliver runs one Task reconcile and then the webhook delivery
-// passes it queued, as the manager's delivery workers would.
 func reconcileThenDeliver(ctx context.Context, r *TaskReconciler, request ctrl.Request) (ctrl.Result, error) {
 	result, err := r.Reconcile(ctx, request)
 	if r.webhookDeliveries != nil {
@@ -347,9 +305,6 @@ func reconcileThenDeliver(ctx context.Context, r *TaskReconciler, request ctrl.R
 	return result, err
 }
 
-// A Task deleted while one of its approval notices is in flight stays behind
-// its finalizer. The pass must not go on to send its terminal notice once
-// recording the approval result has observed the deletion.
 func TestWebhookDeliveryStopsAfterObservingDeletion(t *testing.T) {
 	var r *TaskReconciler
 	var task *corev1alpha1.Task

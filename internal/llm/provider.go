@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 )
 
@@ -182,19 +183,14 @@ func promptTokens(input int, cached, cacheWrite *int64, excludesCache bool) int 
 }
 
 type ProviderConfig struct {
-	APIKey string
-	// BearerToken, when set, authenticates every request with a short-lived
-	// token instead of APIKey; see NewBearerHTTPClient. Exactly one of
-	// APIKey and BearerToken is set.
-	BearerToken BearerTokenSource
-	// Relay, when set, sends every request through the Orka controller,
-	// which authenticates it to the Provider; see
-	// NewControllerRelayHTTPClient. APIKey and BearerToken are then unset.
+	APIKey              string
+	BearerToken         BearerTokenSource
 	Relay               *ControllerRelay
 	BaseURL             string
 	ProviderType        string
 	AzureAPIVersion     string
 	AzureDeploymentName string
+	HTTPTransport       http.RoundTripper
 }
 
 type ProviderFactory func(config ProviderConfig) (Provider, error)

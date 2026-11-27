@@ -173,8 +173,6 @@ func TestTaskStatusUnknownOutcomeKeepsReplayPolicyInDefaultView(t *testing.T) {
 	}
 }
 
-// A Task held on an approval reports Running; --verbose and -o json still say
-// what it waits on, as the default view does.
 func TestTaskStatusVerboseAndJSONShowWhatATaskWaitsOn(t *testing.T) {
 	srv := taskStatusServer(t, map[string]any{
 		"metadata": map[string]any{"name": "deploy", "namespace": "team-a"},

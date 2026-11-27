@@ -100,8 +100,6 @@ func TestReadOnlyWorkspaceDeniesChildWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The supervisor materializes with umask 077. ".claude" is a protected
-	// path whose exact modes workspace validation compares with the baseline.
 	for _, dir := range []string{"dir", ".claude"} {
 		if err := os.Mkdir(filepath.Join(paths.Workspace, dir), 0o700); err != nil {
 			t.Fatal(err)

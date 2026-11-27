@@ -69,14 +69,9 @@ const (
 	codeExecKubernetesRuntimeClassNameEnv = workerenv.CodeExecKubernetesRuntimeClass
 	codeExecKubernetesAppArmorProfileEnv  = workerenv.CodeExecKubernetesAppArmor
 
-	// Keep completed Jobs long enough for the executor to observe status and stream logs.
-	// The executor still deletes all resources after each run; this TTL is only a
-	// fallback for completed Jobs if the worker exits before cleanup. A zero TTL can
-	// race the Job TTL controller in live clusters and delete Jobs before results are read.
 	codeExecKubernetesFinishedTTLSeconds = int32(60)
 )
 
-// KubernetesJobCodeExecutor runs code in a short-lived Kubernetes Job.
 type KubernetesJobCodeExecutor struct {
 	resolveClients func(context.Context) (kubernetesCodeExecClients, error)
 	logStreamer    podLogStreamer
@@ -170,7 +165,6 @@ func (s kubeClientPodLogStreamer) Stream(ctx context.Context, namespace, podName
 	return s.client.CoreV1().Pods(namespace).GetLogs(podName, opts).Stream(ctx)
 }
 
-// Execute runs the request in Kubernetes.
 func (e *KubernetesJobCodeExecutor) Execute(ctx context.Context, req CodeExecutionRequest) CodeExecResult {
 	start := time.Now()
 	result := CodeExecResult{ExitCode: -1}
@@ -642,7 +636,6 @@ func codeExecKubernetesShouldPersistResult(req CodeExecutionRequest) bool {
 	return strings.TrimSpace(req.RunID) != "" && strings.TrimSpace(req.InputHash) != ""
 }
 
-// Container exit codes are non-negative; this executor reserves -1 for infrastructure failures.
 func codeExecKubernetesShouldPersistObservedResult(result CodeExecResult) bool {
 	return !result.TimedOut && result.ExitCode != -1
 }
@@ -660,7 +653,6 @@ func (e *KubernetesJobCodeExecutor) loadStoredResult(ctx context.Context, c crcl
 
 	stored := &corev1.ConfigMap{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: jobName}, stored); err != nil {
-		// Cache access is optional; a caller may still authorize a new Job.
 		if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
 			return CodeExecResult{}, false, nil
 		}
@@ -758,8 +750,6 @@ func (e *KubernetesJobCodeExecutor) storeResult(ctx context.Context, c crclient.
 			return fmt.Errorf("existing stored result %s/%s did not persist replacement", namespace, jobName)
 		}
 	}
-	// The result is already durable; cleanup must not turn a successful store
-	// into a failed execution result.
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), codeExecKubernetesStoreResultTimeout)
 	defer cleanupCancel()
 	_ = e.cleanupExpiredStoredResultsIfDue(cleanupCtx, c, namespace, time.Now())

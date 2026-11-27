@@ -31,8 +31,6 @@ func (r *telemetryGRPCReceiver) Export(ctx context.Context, request *collectortr
 	return &collectortrace.ExportTraceServiceResponse{}, nil
 }
 
-// telemetryGRPCMetricsReceiver accepts the GenAI metrics a generic OTLP
-// endpoint also enables.
 type telemetryGRPCMetricsReceiver struct {
 	collectormetrics.UnimplementedMetricsServiceServer
 }
@@ -102,8 +100,6 @@ func TestSupervisorTelemetryGRPCEndpoint(t *testing.T) {
 	}
 }
 
-// OTEL_METRICS_EXPORTER=none keeps a generic endpoint for traces from becoming
-// the metrics collector.
 func TestSupervisorTelemetryMetricsExporterNone(t *testing.T) {
 	t.Setenv("ORKA_ENABLE_TELEMETRY", "true")
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
@@ -128,8 +124,6 @@ func TestSupervisorTelemetryMetricsExporterNone(t *testing.T) {
 	}
 }
 
-// A separate process captures the SDK's actual initialization diagnostics without
-// changing global logging hooks in the test process.
 func TestSupervisorTelemetryRejectsUnsafeEnvironment(t *testing.T) {
 	if os.Getenv("ORKA_TELEMETRY_PREFLIGHT_FIXTURE") == "true" {
 		tracer, shutdown, err := NewTelemetryFromEnv()

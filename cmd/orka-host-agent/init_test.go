@@ -17,8 +17,6 @@ import (
 	"time"
 )
 
-// initHelperEnv makes the test binary run as "orka-host-agent init" instead of
-// running tests, so each test gets an init process of its own.
 const initHelperEnv = "ORKA_HOST_AGENT_TEST_INIT"
 
 func TestMain(m *testing.M) {
@@ -33,7 +31,6 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// initProcess returns an init process that runs a shell script.
 func initProcess(t *testing.T, script string, args ...string) (*exec.Cmd, *bytes.Buffer) {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), os.Args[0], append([]string{"--", "/bin/sh", "-c", script, "sh"}, args...)...)
@@ -72,7 +69,6 @@ func TestInitReturnsTheCommandsExitCode(t *testing.T) {
 
 func TestInitForwardsSignalsAndWaitsForTheCommand(t *testing.T) {
 	ready := filepath.Join(t.TempDir(), "ready")
-	// The command takes its time to stop and exits with its own status.
 	cmd, output := initProcess(t, `trap 'sleep 0.3; exit 7' TERM; : > "$1"; while :; do sleep 0.05; done`, ready)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -85,7 +81,6 @@ func TestInitForwardsSignalsAndWaitsForTheCommand(t *testing.T) {
 			t.Fatalf("the command never started; output: %s", output)
 		}
 	}
-	// A second signal while the command is stopping must not end init early.
 	for range 2 {
 		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 			t.Fatal(err)

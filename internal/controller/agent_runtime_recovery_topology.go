@@ -79,9 +79,6 @@ func validateAgentRuntimeRecoveryPodSpec(spec corev1.PodSpec, containerName, pro
 	return validateRecoveryVolumes(spec.Volumes, *supervisor, foundry)
 }
 
-// validateAgentRuntimeRecoveryPodSpec also resolves supervisor Secret references:
-// disabling automount does not prevent a legacy service account token Secret
-// from being mounted or supplied through an explicit environment variable.
 func (r *AgentRuntimeReconciler) validateAgentRuntimeRecoveryPodSpec(ctx context.Context, namespace string, spec corev1.PodSpec, containerName, provider string) error {
 	if err := validateAgentRuntimeRecoveryPodSpec(spec, containerName, provider); err != nil {
 		return err
@@ -98,7 +95,6 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeRecoveryPodSpec(ctx context
 		if err := r.endpointReader().Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, secret); err != nil {
 			return fmt.Errorf("resolve runtime recovery supervisor Secret: %w", err)
 		}
-		// Type alone determines admission; never inspect or expose Secret data.
 		if secret.Type == corev1.SecretTypeServiceAccountToken {
 			return errors.New("runtime recovery supervisor cannot reference a service account identity token Secret")
 		}
@@ -169,7 +165,6 @@ func validateRecoveryVolumes(volumes []corev1.Volume, supervisor corev1.Containe
 		if volume.EmptyDir == nil && volume.Secret == nil && volume.ConfigMap == nil && volume.Projected == nil && volume.DownwardAPI == nil {
 			return errors.New("runtime recovery supports only Pod-local ephemeral volumes and read-only configuration")
 		}
-		// Explicit token projections are independent of the Pod's automount setting.
 		if volume.Projected != nil && recoveryContainerMounts(supervisor, volume.Name) {
 			for _, source := range volume.Projected.Sources {
 				if source.ServiceAccountToken != nil {

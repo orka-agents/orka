@@ -91,14 +91,10 @@ type Provider struct {
 func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 	switch {
 	case config.Relay != nil:
-		// The controller relays only Azure OpenAI's Entra flow, and the
-		// worker must not send a credential of its own next to it.
 		if config.ProviderType != providerTypeAzureOpenAI || config.APIKey != "" || config.BearerToken != nil {
 			return nil, llm.ErrBearerTokenUnsupported
 		}
 	case config.BearerToken != nil:
-		// Token authentication is Azure OpenAI's Entra flow; a key must not
-		// be sent next to it.
 		if config.ProviderType != providerTypeAzureOpenAI || config.APIKey != "" {
 			return nil, llm.ErrBearerTokenUnsupported
 		}
@@ -115,11 +111,13 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		}
 		httpClient = relayClient
 	case config.BearerToken != nil:
-		bearerClient, err := llm.NewBearerHTTPClient(config.BaseURL, config.BearerToken)
+		bearerClient, err := llm.NewBearerHTTPClientWithTransport(config.BaseURL, config.BearerToken, config.HTTPTransport)
 		if err != nil {
 			return nil, err
 		}
 		httpClient = bearerClient
+	case config.HTTPTransport != nil:
+		httpClient = &http.Client{Transport: config.HTTPTransport}
 	}
 	opts := []option.RequestOption{
 		option.WithMiddleware(llm.UsageHTTPMiddleware),
@@ -135,9 +133,6 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		if config.BearerToken == nil && config.Relay == nil {
 			opts = append(opts, azure.WithAPIKey(config.APIKey))
 		} else {
-			// openai-go needs an Azure authentication mode. The pinned
-			// bearer client or the controller relay attaches the token, so
-			// the SDK's own credential fetches none.
 			opts = append(opts, azure.WithTokenCredential(transportAuthenticated{}))
 		}
 		if strings.HasPrefix(strings.ToLower(endpoint), "http://") {
@@ -1584,8 +1579,6 @@ func isUnsupportedStreamOptionsError(err error) bool {
 }
 
 func toProviderError(err error) *llm.ProviderError {
-	// An error the HTTP client already classified, such as a failed token
-	// acquisition, keeps its status so retries still apply.
 	if providerErr, ok := errors.AsType[*llm.ProviderError](err); ok {
 		classified := *providerErr
 		if classified.Provider == "" {

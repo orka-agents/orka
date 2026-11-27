@@ -40,7 +40,6 @@ func TestSessionTranscriptPreservesToolArguments(t *testing.T) {
 				}},
 			}}))
 
-			// Continuation must reload the same arguments sent by the provider.
 			chat := &ChatHandler{sessionStore: ss}
 			messages, err := chat.loadChatSession(ctx, "default", "precise-tools")
 			require.NoError(t, err)
@@ -79,7 +78,6 @@ func TestSessionTranscriptPreservesToolArguments(t *testing.T) {
 			}
 			require.Equal(t, expectedText, call.ArgumentsText)
 
-			// Display text belongs only to the public projection.
 			stored, err := ss.LoadTranscript(ctx, "default", "precise-tools", 0)
 			require.NoError(t, err)
 			encoded, err := json.Marshal(stored)

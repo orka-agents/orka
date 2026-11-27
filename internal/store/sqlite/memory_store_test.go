@@ -248,9 +248,6 @@ func TestApplyMemoryProposal(t *testing.T) {
 	}
 }
 
-// TestProposalNamingAMemoryCountsAsApplied covers retained rows that name an
-// applied memory without the applied status. A new proposal cannot carry an
-// apply outcome, so the rows are seeded directly.
 func TestProposalNamingAMemoryCountsAsApplied(t *testing.T) {
 	for _, status := range []string{proposalStatusPending, proposalStatusAccepted} {
 		t.Run(status, func(t *testing.T) {
@@ -318,7 +315,6 @@ func sqliteConstraintError(t *testing.T) error {
 	return err
 }
 
-// signalAfterResolve closes resolved once its first resolve has returned.
 type signalAfterResolve struct {
 	*Store
 	resolved chan struct{}
@@ -333,11 +329,6 @@ func (s *signalAfterResolve) ResolveMemoryProposalApplication(
 	return target, err
 }
 
-// Concurrent applies of one proposal create one memory. A commit under a
-// write envelope holds the write lock for its whole operation, so the second
-// apply, which resolved the accepted proposal while the first held its
-// commit, waits for that commit, finds the target it resolved changed,
-// resolves again and returns the memory the first created.
 func TestApplyMemoryProposalConcurrentIdempotent(t *testing.T) {
 	s1, s2 := setupDiskStorePair(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -393,8 +384,6 @@ func TestApplyMemoryProposalConcurrentIdempotent(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for the first apply to read the accepted proposal")
 	}
-	// The second apply resolves the accepted proposal while the first holds
-	// its commit, then waits for that commit.
 	second := &signalAfterResolve{Store: s2, resolved: make(chan struct{})}
 	apply("second", orkaClient(t, second))
 	select {
@@ -437,12 +426,6 @@ func TestApplyMemoryProposalConcurrentIdempotent(t *testing.T) {
 	}
 }
 
-// withoutEnvelopes sends a client's memory proposal commits to the store
-// without the client's write envelope, as a store that does not require
-// envelopes accepts them. Such a commit runs in its own deferred
-// transaction, so another connection can change the proposal between the
-// commit's read and its write; an enveloped commit reserves the writer
-// before it reads.
 type withoutEnvelopes struct{ *Store }
 
 func (s withoutEnvelopes) CommitMemoryProposalApplication(
@@ -451,8 +434,6 @@ func (s withoutEnvelopes) CommitMemoryProposalApplication(
 	return s.Store.CommitMemoryProposalApplication(context.Background(), application)
 }
 
-// Without envelopes, two commits that both read the accepted proposal before
-// either writes still create one memory.
 func TestApplyMemoryProposalConcurrentIdempotentWithoutEnvelopes(t *testing.T) {
 	s1, s2 := setupDiskStorePair(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -466,8 +447,6 @@ func TestApplyMemoryProposalConcurrentIdempotentWithoutEnvelopes(t *testing.T) {
 	if err := s1.CreateMemoryProposal(ctx, proposal); err != nil {
 		t.Fatalf("CreateMemoryProposal: %v", err)
 	}
-	// The dataset holds its controller epoch before the applies start, so
-	// neither client's fence lookup writes while the other holds its read.
 	if err := s1.SyncControllerEpochMirror(ctx, storageclienttest.InitialEpoch()); err != nil {
 		t.Fatalf("SyncControllerEpochMirror: %v", err)
 	}
@@ -545,9 +524,6 @@ func TestApplyMemoryProposalConcurrentIdempotentWithoutEnvelopes(t *testing.T) {
 	}
 }
 
-// Without envelopes, a commit that read the proposal as accepted does not
-// overwrite a status another connection changed before its write, and no
-// raw SQLite concurrency error reaches the caller.
 func TestApplyMemoryProposalDoesNotOverwriteConcurrentStatusChangeWithoutEnvelopes(t *testing.T) {
 	s1, s2 := setupDiskStorePair(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -631,9 +607,6 @@ func TestApplyMemoryProposalDoesNotOverwriteConcurrentStatusChangeWithoutEnvelop
 	}
 }
 
-// archiveBeforeCommit archives the proposal once, right before the client's
-// first commit of its application, as another replica would between the
-// client's resolve and its commit.
 type archiveBeforeCommit struct {
 	*Store
 	archive func() error
@@ -651,10 +624,6 @@ func (s *archiveBeforeCommit) CommitMemoryProposalApplication(
 	return s.Store.CommitMemoryProposalApplication(ctx, application)
 }
 
-// A proposal archived after the client resolved it for application is not
-// applied, and its archived status is kept. A commit under a write envelope
-// holds the write lock for its whole operation, so the status changes
-// between the client's resolve and its commit.
 func TestApplyMemoryProposalDoesNotOverwriteConcurrentStatusChange(t *testing.T) {
 	s1, s2 := setupDiskStorePair(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -893,7 +862,7 @@ func TestTranscriptSearch(t *testing.T) {
 	if !strings.Contains(results[0].Snippet, "needle") {
 		t.Fatalf("snippet missing search term: %q", results[0].Snippet)
 	}
-	if len([]rune(results[0].Snippet)) > 92 { // allow ellipsis on both sides
+	if len([]rune(results[0].Snippet)) > 92 {
 		t.Fatalf("snippet too long: %d %q", len([]rune(results[0].Snippet)), results[0].Snippet)
 	}
 

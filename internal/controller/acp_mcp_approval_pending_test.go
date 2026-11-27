@@ -24,8 +24,6 @@ func seedMCPApprovalPending(t *testing.T, f *mcpApprovalRecoveryFixture, request
 	return seedMCPApprovalPendingInSession(t, f, requested, "")
 }
 
-// seedMCPApprovalPendingInSession seeds the call as made from session when it
-// is not empty, so its approval events carry that Session association.
 func seedMCPApprovalPendingInSession(t *testing.T, f *mcpApprovalRecoveryFixture, requested bool, session string) (*acpMCPApprovalCall, *store.ExternalEffect) {
 	t.Helper()
 	descriptor, err := f.request.ValidateAt(time.Now().UTC())
@@ -124,7 +122,6 @@ func TestMCPApprovalPendingRecoveryBeforeRequestedEventRepairsLateProjection(t *
 	require.NoError(t, err)
 	require.Empty(t, listed, "recovery must not fabricate a requested review")
 
-	// The old writer can append after recovery has already sealed the effect.
 	require.NoError(t, f.broker.requestToolApproval(f.ctx, call))
 	require.NoError(t, f.reconcile(t))
 	approval, before := f.approval(t)
@@ -206,8 +203,6 @@ func TestMCPApprovalPendingRecoveryWithoutEventRechecksTerminalTask(t *testing.T
 		t.Run(name, func(t *testing.T) {
 			f := newMCPApprovalRecoveryFixture(t)
 			call, effect := seedMCPApprovalPending(t, f, false)
-			// Prime a live scan before only the Task's state changes. There is
-			// no approval event or effect mutation to invalidate a history cache.
 			require.NoError(t, f.reconcile(t))
 			currentTask := &corev1alpha1.Task{}
 			require.NoError(t, f.kube.Get(f.ctx, client.ObjectKeyFromObject(f.task), currentTask))
@@ -276,8 +271,6 @@ func TestMCPApprovalPendingRecoveryRechecksExpiryWithoutNewEvents(t *testing.T) 
 	require.Equal(t, effect, current)
 	require.True(t, time.Now().UTC().Before(call.ExpiresAt), "prime recovery while the original review is still live")
 
-	// Only the immutable deadline passes; effect versions and event sequence
-	// stay unchanged, so a cached live scan must not suppress this settlement.
 	time.Sleep(time.Until(call.ExpiresAt))
 	require.NoError(t, f.reconcile(t))
 	requireMCPApprovalPendingDenied(t, f, call, effect, acpApprovalCodeExpired)
@@ -480,8 +473,6 @@ func TestMCPApprovalAbandonedPendingReceiptValidatesExactEffectBinding(t *testin
 			default:
 				receipt["code"] = name
 			}
-			// Keep the response digest valid so rejection exercises the
-			// receipt's identity and denial checks, not merely its checksum.
 			effect.Response, err = harnessv2.CanonicalValue(receipt)
 			require.NoError(t, err)
 			effect.ResponseDigest = store.CanonicalBytesDigest(effect.Response)

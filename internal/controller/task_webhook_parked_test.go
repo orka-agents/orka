@@ -22,8 +22,6 @@ import (
 	"github.com/orka-agents/orka/internal/taskwebhook"
 )
 
-// parkedWebhookHarness drives a parked Task's wait with the real wait
-// reconciler and its webhook with the real notifier, over one fake API.
 type parkedWebhookHarness struct {
 	*taskWaitHarness
 	receiver *webhookReceiver
@@ -37,8 +35,6 @@ func newParkedWebhookHarness(t *testing.T, task *corev1alpha1.Task) *parkedWebho
 	return &parkedWebhookHarness{taskWaitHarness: newTaskWaitHarness(t, task), receiver: receiver, keys: newWebhookTestKeys(t)}
 }
 
-// deliver runs one webhook reconcile for name with a fresh notifier, as a
-// restarted controller would: all delivery state comes from Task status.
 func (h *parkedWebhookHarness) deliver(name string) {
 	h.t.Helper()
 	notifier := newTestWebhookNotifier(h.t, h.keys, nil)
@@ -48,8 +44,6 @@ func (h *parkedWebhookHarness) deliver(name string) {
 	}
 }
 
-// assertOneNotice checks that exactly one signed notice was received for
-// task, with the expected event, and returns its payload.
 func (h *parkedWebhookHarness) assertOneNotice(task *corev1alpha1.Task, eventType string) WebhookPayload {
 	h.t.Helper()
 	receipts := h.receiver.all()
@@ -76,8 +70,6 @@ func (h *parkedWebhookHarness) assertOneNotice(task *corev1alpha1.Task, eventTyp
 	return payload
 }
 
-// assertParkedNothingSent checks that the parked Task neither sent nor
-// recorded a notice.
 func (h *parkedWebhookHarness) assertParkedNothingSent() {
 	h.t.Helper()
 	if got := len(h.receiver.all()); got != 0 {
@@ -91,7 +83,6 @@ func (h *parkedWebhookHarness) assertParkedNothingSent() {
 func TestParkedTurnSendsNoSucceededNoticeWhileItsWaitIsArmed(t *testing.T) {
 	h := newParkedWebhookHarness(t, parkedTestTask(corev1alpha1.TaskWaitKindApproval, corev1alpha1.TaskPhaseSucceeded))
 
-	// The turn settled Succeeded while its wait is still Requested.
 	h.deliver("parked")
 	h.assertParkedNothingSent()
 
@@ -117,7 +108,6 @@ func TestParkedTurnContinuationReportsTheChainOutcome(t *testing.T) {
 	if parked.Status.Wait.State != corev1alpha1.TaskWaitStateResumed {
 		t.Fatalf("wait state = %s, want Resumed", parked.Status.Wait.State)
 	}
-	// The resumed parked Task owes no notice of its own, across restarts.
 	h.deliver("parked")
 	h.deliver("parked")
 	h.assertParkedNothingSent()
@@ -151,7 +141,6 @@ func TestParkedTurnWhoseWaitExpiresDeliversOneFailedNoticeAcrossRestarts(t *test
 	h.deliver("parked")
 	h.assertParkedNothingSent()
 
-	// A restarted wait reconciler expires the wait; a restarted notifier sends.
 	h.r = &TaskWaitReconciler{
 		Client: h.client, APIReader: h.client, ExecutionEvents: h.events, TaskProvenanceProtected: true,
 		Now: func() time.Time { return taskWaitTestNow.Add(time.Minute) },

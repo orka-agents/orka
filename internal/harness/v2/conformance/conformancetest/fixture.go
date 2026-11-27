@@ -9,8 +9,6 @@ import (
 
 const DeterministicPromptResult = "deterministic external runtime result"
 
-// DeterministicProfile returns the shared profile used by the in-cluster v2
-// fixture and the E2E AgentRuntime registrations that point at it.
 func DeterministicProfile(adapterName string) (harnessv2.RuntimeProfile, error) {
 	zeroDigest := "sha256:" + strings.Repeat("0", 64)
 	toolPolicyDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest([]string{}, []string{}, false)

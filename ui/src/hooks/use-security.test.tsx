@@ -98,7 +98,6 @@ describe('security mutations', () => {
     const queryClient = createQueryClient()
     const { result } = renderHook(() => useUpdateThreatModel('repo'), { wrapper: createWrapper(queryClient) })
 
-    // Offline, the save waits before sending; the user switches namespace meanwhile.
     onlineManager.setOnline(false)
     try {
       let save: Promise<unknown> = Promise.resolve()
@@ -403,13 +402,11 @@ describe('security detail reads on 404', () => {
       return notFound()
     }))
 
-    // The app's default of one retry, which the hook must override for a 404.
     const appClient = new QueryClient({ defaultOptions: { queries: { retry: 1, gcTime: 0 } } })
     renderHook(() => useRepositoryScan('new-repo'), { wrapper: createWrapper(appClient) })
 
     await advance(9_000)
     expect(calls).toBe(1)
-    // A just-created RepositoryScan can 404 until the API cache catches up.
     await advance(1_500)
     expect(calls).toBe(2)
   })

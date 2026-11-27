@@ -29,13 +29,11 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-// CreateAgentTool implements dynamic Agent CRD creation
 type CreateAgentTool struct {
 	k8sClient     client.Client
 	executionMode executionmode.Mode
 }
 
-// CreateAgentArgs are the arguments for the create_agent tool
 type CreateAgentArgs struct {
 	Role         string                   `json:"role"`
 	SystemPrompt string                   `json:"systemPrompt"`
@@ -48,7 +46,6 @@ type CreateAgentArgs struct {
 	Runtime      *RuntimeArgs             `json:"runtime,omitempty"`
 }
 
-// ModelArgs specifies LLM model configuration
 type ModelArgs struct {
 	Provider      string `json:"provider,omitempty"`
 	Name          string `json:"name,omitempty"`
@@ -56,7 +53,6 @@ type ModelArgs struct {
 	MaxTokens     *int32 `json:"maxTokens,omitempty"`
 }
 
-// RuntimeArgs specifies agent CLI runtime configuration
 type RuntimeArgs struct {
 	Type                string                                    `json:"type"`
 	ContractVersion     *corev1alpha1.AgentRuntimeContractVersion `json:"contractVersion,omitempty"`
@@ -64,8 +60,6 @@ type RuntimeArgs struct {
 	DefaultAllowBash    *bool                                     `json:"defaultAllowBash,omitempty"`
 }
 
-// UnmarshalJSON rejects removed runtime credentials before argument decoding
-// can discard them and preserves explicit contract requests for validation.
 func (in *RuntimeArgs) UnmarshalJSON(data []byte) error {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
@@ -98,7 +92,6 @@ func applyOpencodeRuntimeDefaults(runtime *corev1alpha1.AgentCLIRuntime, allowed
 	}
 }
 
-// CoordinationArgs specifies coordination configuration
 type CoordinationArgs struct {
 	Enabled               bool              `json:"enabled"`
 	MaxDepth              int32             `json:"maxDepth,omitempty"`
@@ -106,20 +99,17 @@ type CoordinationArgs struct {
 	AllowedAgents         []AllowedAgentArg `json:"allowedAgents,omitempty"`
 }
 
-// AllowedAgentArg specifies an allowed agent for coordination
 type AllowedAgentArg struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace,omitempty"`
 }
 
-// CreateAgentResult is the result of creating an agent
 type CreateAgentResult struct {
 	AgentName string `json:"agentName"`
 	Namespace string `json:"namespace"`
 	Status    string `json:"status"`
 }
 
-// NewCreateAgentTool creates a new create_agent tool
 func NewCreateAgentTool(k8sClient client.Client, mode executionmode.Mode) *CreateAgentTool {
 	return &CreateAgentTool{
 		k8sClient:     k8sClient,
@@ -127,17 +117,14 @@ func NewCreateAgentTool(k8sClient client.Client, mode executionmode.Mode) *Creat
 	}
 }
 
-// Name returns the tool name
 func (t *CreateAgentTool) Name() string {
 	return createAgentToolName
 }
 
-// Description returns the tool description
 func (t *CreateAgentTool) Description() string {
 	return "Dynamically create an Agent CRD. The agent is owned by the parent task and will be cleaned up automatically when the task is deleted."
 }
 
-// Parameters returns the JSON Schema for parameters
 func (t *CreateAgentTool) Parameters() json.RawMessage {
 	return withSoulParameter(json.RawMessage(`{
 		"type": "object",
@@ -274,10 +261,6 @@ func normalizedCreateAgentModel(runtime *RuntimeArgs, model *ModelArgs) (string,
 		}
 	}
 	if runtimeType != corev1alpha1.AgentRuntimeOpencode {
-		// Admission rejects a harness-v2 built-in runtime Agent without
-		// spec.model.name (the ACP session has no default model); failing
-		// here keeps the tool's contract aligned with what the cluster
-		// will actually accept.
 		if isBuiltInACPRuntime(runtimeType) && requested == "" {
 			return "", fmt.Errorf("model.name is required for %s runtime Agents: the ACP runtime session has no default model", runtimeType)
 		}
@@ -323,8 +306,6 @@ func configureCreatedAgentRuntime(agent *corev1alpha1.Agent, runtimeArgs *Runtim
 	agent.Spec.SecretRef = nil
 }
 
-// Execute creates an Agent CRD dynamically
-//
 //nolint:gocyclo // Keep Agent construction and coordination-policy validation in one flow.
 func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a CreateAgentArgs
@@ -384,18 +365,15 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		ns = defaultNamespace
 	}
 
-	// Generate agent name: {parentTaskName}-{role}-{shortHash}
 	hash := sha256.Sum256([]byte(parentName + a.Role + time.Now().UTC().String()))
 	shortHash := fmt.Sprintf("%x", hash[:3])
 	agentName := fmt.Sprintf("%s-%s-%s", parentName, a.Role, shortHash)
 
-	// Fetch parent task for owner reference
 	parentTask := &corev1alpha1.Task{}
 	if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: parentName, Namespace: ns}, parentTask); err != nil {
 		return "", fmt.Errorf("failed to get parent task: %w", err)
 	}
 
-	// Build model config — clear provider to avoid mismatch with providerRef
 	model := &corev1alpha1.ModelConfig{}
 	if effectiveModel != nil {
 		model.Name = requestedModel
@@ -406,8 +384,6 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		model.Name = os.Getenv(workerenv.AIModel)
 	}
 
-	// Build provider ref — inherit from parent agent's providerRef for reliability,
-	// since the LLM often guesses wrong provider names (e.g., "anthropic" instead of "default")
 	providerRefName := ""
 	if parentTask.Spec.AgentRef != nil {
 		parentAgent := &corev1alpha1.Agent{}
@@ -431,13 +407,11 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		providerRefName = defaultNamespace
 	}
 
-	// Build tools
 	toolRefs := make([]corev1alpha1.ToolReference, 0, len(a.Tools))
 	for _, name := range a.Tools {
 		toolRefs = append(toolRefs, corev1alpha1.ToolReference{Name: name})
 	}
 
-	// Build skills
 	skillRefs := make([]corev1alpha1.SkillReference, 0, len(a.Skills))
 	for _, name := range a.Skills {
 		skillRefs = append(skillRefs, corev1alpha1.SkillReference{
@@ -470,7 +444,6 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: a.SystemPrompt}
 	}
 
-	// Set coordination config if provided
 	if a.Coordination != nil {
 		coord := &corev1alpha1.CoordinationConfig{
 			Enabled:               a.Coordination.Enabled,
@@ -489,7 +462,6 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		agent.Spec.Coordination = coord
 	}
 
-	// Set the normalized built-in runtime when provided.
 	configureCreatedAgentRuntime(agent, a.Runtime)
 	if err := executionmode.DefaultBuiltInAgentContract(agent, t.executionMode); err != nil {
 		return "", err
@@ -501,8 +473,6 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return "", err
 	}
 
-	// Set a non-blocking owner reference for auto-cleanup. Worker RBAC allows
-	// creating child resources but not updating the parent Task's finalizers.
 	isController := true
 	agent.OwnerReferences = []metav1.OwnerReference{
 		{
@@ -530,5 +500,4 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	return string(output), nil
 }
 
-// Ensure CreateAgentTool implements Tool
 var _ Tool = (*CreateAgentTool)(nil)

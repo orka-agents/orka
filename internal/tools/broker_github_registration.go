@@ -15,18 +15,8 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// brokeredResultBudget keeps a tool result that can grow with the size of
-// a pull request or issue discussion under the broker's result limit, with
-// room for the result envelope.
 const brokeredResultBudget = harnessv2.MaxMCPResultBytes - 16*1024
 
-// RegisterBrokeredGitHubTools registers the GitHub built-ins that can run
-// under a person's linked account into the controller MCP broker registry.
-// ACP runtimes reach them only through the requester's Connection: the
-// broker binds the link frozen at dispatch, hides the tools when there is
-// none, and never resolves a Task credential Secret for them. The set is
-// exactly the connector built-in catalog, so a provider can declare every
-// tool registered here and nothing else. Registration is idempotent.
 func RegisterBrokeredGitHubTools(r *Registry, k8sClient client.Client) error {
 	if r == nil {
 		return fmt.Errorf("brokered GitHub tool registry is required")

@@ -27,7 +27,6 @@ describe('TaskYaml', () => {
     expect(tokenOf(region, 'kind')).toBe('text-primary')
     expect(tokenOf(region, 'Task')).toBe('text-status-succeeded')
     expect(tokenOf(region, '500')).toBe('text-status-pending')
-    // The prompt is a block scalar: its lines are text, and the key after it is a key again.
     expect(tokenOf(region, '      Then look for duplicates.')).toBe('text-status-succeeded')
     expect(tokenOf(region, 'env')).toBe('text-primary')
   })

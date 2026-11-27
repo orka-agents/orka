@@ -21,8 +21,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb"
 )
 
-// artifactList returns n artifact metadata entries in filename order, each
-// padded to encode to about 1 KiB.
 func artifactList(n int) []storagev1.ArtifactMetadata {
 	pad := strings.Repeat("x", 960)
 	list := make([]storagev1.ArtifactMetadata, n)
@@ -37,9 +35,6 @@ func artifactList(n int) []storagev1.ArtifactMetadata {
 	return list
 }
 
-// A Task's artifacts are not bounded in number, so ListArtifacts streams its
-// list in parts of at most MaxListPartBytes. A list larger than the unary
-// message limit crosses whole and in order.
 func TestListsStreamPastOneMessage(t *testing.T) {
 	provider := newRecordingProvider()
 	server, err := wire.NewServer(serveBoth(provider))
@@ -62,7 +57,6 @@ func TestListsStreamPastOneMessage(t *testing.T) {
 	require.Empty(t, got, "an empty list crosses as one message")
 }
 
-// rawArtifacts serves ListArtifacts with a test's own framing.
 type rawArtifacts struct {
 	storagepb.UnimplementedArtifactsServer
 	serve func(grpc.ServerStreamingServer[storagepb.ListArtifactsResponse]) error
@@ -81,9 +75,6 @@ func wireArtifacts(names ...string) []*storagepb.ArtifactMetadata {
 	return items
 }
 
-// A list stream that fails, ends short, carries more than it declared or
-// breaks the framing fails the call; the client never returns a partial
-// list.
 func TestListStreamsFailClosed(t *testing.T) {
 	part := func(names ...string) *storagepb.ListArtifactsResponse {
 		return &storagepb.ListArtifactsResponse{Artifacts: wireArtifacts(names...)}
@@ -144,8 +135,6 @@ func TestListStreamsFailClosed(t *testing.T) {
 	require.Equal(t, []string{"a", "b", "c"}, names, "parts are joined in order")
 }
 
-// The client stops reading a list stream as soon as it carries more items
-// than it declared, rather than buffering whatever else the server sends.
 func TestListStreamsStopAtTheDeclaredCount(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
@@ -171,8 +160,6 @@ func TestListStreamsStopAtTheDeclaredCount(t *testing.T) {
 	require.NoError(t, ctx.Err())
 }
 
-// listHeader names the contract and test dataset, and declares count unless
-// it is empty.
 func listHeader(count string) metadata.MD {
 	header := metadata.Pairs(wire.HeaderContract, storagev1.ContractVersion, wire.HeaderRevision,
 		strconv.Itoa(wire.ProtocolRevision), wire.HeaderDataset, testDataset)
@@ -182,7 +169,6 @@ func listHeader(count string) metadata.MD {
 	return header
 }
 
-// rawListClient returns a client of a server whose ListArtifacts runs serve.
 func rawListClient(t *testing.T, serve func(grpc.ServerStreamingServer[storagepb.ListArtifactsResponse]) error) *wire.Client {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

@@ -2,10 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 
-// The inline script in index.html applies the theme before React loads, so a
-// dark page never flashes light. It repeats the store's migration; this runs it.
 const html = readFileSync(path.resolve(__dirname, '../index.html'), 'utf8')
-// The first script without a src is the pre-paint one; the second loads the app.
 const prePaint = new DOMParser().parseFromString(html, 'text/html').querySelector('script:not([src])')!.textContent!
 
 function paintsDark(stored: string | null, systemDark: boolean): boolean {
@@ -29,7 +26,6 @@ describe('index.html pre-paint theme', () => {
 
   it('treats a stored light from before version 1 as the old default, as the store does', () => {
     expect(paintsDark(saved('light', 0), true)).toBe(true)
-    // zustand always writes a version and skips migrating an entry without one.
     expect(paintsDark(saved('light'), true)).toBe(false)
   })
 

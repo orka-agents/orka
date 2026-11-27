@@ -15,53 +15,40 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// CreatePullRequestTool creates a GitHub pull request from a pushed branch.
 type CreatePullRequestTool struct {
 	k8sClient  client.Client
-	apiBaseURL string // override for testing; empty uses https://api.github.com
+	apiBaseURL string
 }
 
-// CreatePullRequestArgs are the arguments for the create_pull_request tool.
 type CreatePullRequestArgs struct {
-	// TaskName is the name of the completed child task whose branch to use.
-	// The tool reads the task's workspace config to determine repo and git secret.
-	TaskName string `json:"task_name"`
-	// HeadBranch is the remote branch that contains the changes.
+	TaskName   string `json:"task_name"`
 	HeadBranch string `json:"head_branch"`
-	// BaseBranch is the target branch to merge into (e.g. "main").
 	BaseBranch string `json:"base_branch"`
-	// Title is the pull request title.
-	Title string `json:"title"`
-	// Body is the pull request body (Markdown).
-	Body string `json:"body"`
+	Title      string `json:"title"`
+	Body       string `json:"body"`
 }
 
-// CreatePullRequestResult is the result of creating a pull request.
 type CreatePullRequestResult struct {
 	PRURL    string `json:"pr_url"`
 	PRNumber int    `json:"pr_number"`
 	Status   string `json:"status"`
 }
 
-// NewCreatePullRequestTool creates a new create_pull_request tool.
 func NewCreatePullRequestTool(k8sClient client.Client) *CreatePullRequestTool {
 	return &CreatePullRequestTool{
 		k8sClient: k8sClient,
 	}
 }
 
-// Name returns the tool name.
 func (t *CreatePullRequestTool) Name() string {
 	return createPullRequestToolName
 }
 
-// Description returns the tool description.
 func (t *CreatePullRequestTool) Description() string {
 	return "Create a GitHub pull request from a branch that was pushed by a completed agent task. " +
 		"Use this after a coder task with pushBranch has succeeded and been reviewed."
 }
 
-// Parameters returns the JSON schema for tool parameters.
 func (t *CreatePullRequestTool) Parameters() json.RawMessage {
 	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Name of the completed child task whose workspace config has the repo and git credentials"}, "head_branch": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "The branch containing the changes (the pushBranch used by the coder)"},
 		"base_branch": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "The target branch to merge into (e.g. 'main')"}, titleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Pull request title"}, githubBodyField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Pull request body in Markdown format"},
@@ -71,7 +58,6 @@ func (t *CreatePullRequestTool) Parameters() json.RawMessage {
 	return data
 }
 
-// Execute creates a pull request on GitHub.
 func (t *CreatePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMessage) (string, error) {
 	var args CreatePullRequestArgs
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
@@ -87,7 +73,6 @@ func (t *CreatePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 		return "", notSent(err)
 	}
 
-	// Create the pull request via GitHub API
 	prURL, prNumber, status, err := createGitHubPR(ctx, token, owner, repo, args.HeadBranch, args.BaseBranch, args.Title, args.Body, baseURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to create pull request: %w", err)
@@ -102,20 +87,14 @@ func (t *CreatePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 	return string(resultJSON), nil
 }
 
-// parseGitHubRepo extracts owner and repo name from a GitHub URL.
-// Supports https://github.com/owner/repo.git and similar formats.
-// ParseGitHubRepository returns the owner and repository named by a GitHub
-// repository URL in any of the spellings the built-in tools accept.
 func ParseGitHubRepository(repoURL string) (owner, repo string, err error) {
 	return parseGitHubRepo(repoURL)
 }
 
 func parseGitHubRepo(repoURL string) (string, string, error) {
-	// Normalize
 	repoURL = strings.TrimSuffix(repoURL, ".git")
 	repoURL = strings.TrimSuffix(repoURL, "/")
 
-	// Try HTTPS format: https://github.com/owner/repo
 	for _, prefix := range []string{"https://github.com/", "http://github.com/"} {
 		if after, ok := strings.CutPrefix(repoURL, prefix); ok {
 			path := after
@@ -126,7 +105,6 @@ func parseGitHubRepo(repoURL string) (string, string, error) {
 		}
 	}
 
-	// Try SSH format: git@github.com:owner/repo
 	if after, ok := strings.CutPrefix(repoURL, "git@github.com:"); ok {
 		path := after
 		parts := strings.SplitN(path, "/", 3)
@@ -138,8 +116,6 @@ func parseGitHubRepo(repoURL string) (string, string, error) {
 	return "", "", fmt.Errorf("unsupported GitHub URL format: %s", repoURL)
 }
 
-// createGitHubPR creates a pull request via the GitHub REST API.
-// If the pull request already exists, it resolves and returns the existing PR.
 func createGitHubPR(ctx context.Context, token, owner, repo, head, base, title, body, apiBaseURL string) (string, int, string, error) {
 	pr, err := CreateOrGetGitHubPullRequest(ctx, token, owner, repo, head, base, title, body, apiBaseURL)
 	if err != nil {

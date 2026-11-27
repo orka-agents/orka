@@ -11,22 +11,6 @@ import (
 	"unicode/utf8"
 )
 
-// The receipt codec stores a write's result exactly as the write returned
-// it, so a replay returns an equal value. It walks Go values rather than
-// their JSON form, so fields Orka's API leaves out are kept, and it keeps
-// what gob and JSON lose: a non-nil pointer to a zero value, a nil slice or
-// map apart from an empty one, and the bytes of a string that is not valid
-// UTF-8. Decoding is directed by the result type.
-//
-// A value encodes as JSON: a nil pointer, slice or map as null; a non-nil
-// pointer as {"*": value}; a struct as an object of every exported field
-// under its Go name; a time.Time as {"t": its MarshalBinary bytes}; a []byte
-// as {"b": base64}; a string that is not valid UTF-8 as {"x": base64}; a map
-// with string keys as an array of [key, value] pairs; integers as JSON
-// numbers; and floats as strings, so NaN and infinities survive. A type the
-// codec cannot represent exactly, such as an interface or an unexported
-// field, fails the write rather than storing a result that replays wrongly.
-
 var timeType = reflect.TypeFor[time.Time]()
 
 func marshalReceiptValue(value any) ([]byte, error) {
@@ -99,8 +83,6 @@ func receiptNode(v reflect.Value) (any, error) {
 		if v.Type().Key().Kind() != reflect.String {
 			return nil, fmt.Errorf("map key type %s is not a string", v.Type().Key())
 		}
-		// Entries are [key, value] pairs, so a key that is not valid UTF-8
-		// keeps its bytes as a value would.
 		entries := make([]any, 0, v.Len())
 		iter := v.MapRange()
 		for iter.Next() {
@@ -254,9 +236,6 @@ func setReceiptMap(node any, v reflect.Value) error {
 	return nil
 }
 
-// receiptStringNode encodes a string as itself when it is valid UTF-8, which
-// JSON keeps exactly, and otherwise as {"x": base64 of its bytes}, which JSON
-// would otherwise replace with U+FFFD.
 func receiptStringNode(s string) any {
 	if utf8.ValidString(s) {
 		return s

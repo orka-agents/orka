@@ -139,7 +139,6 @@ func (r *RuntimePoolReconciler) recoverExternalCredential(ctx context.Context, p
 		return nil, err
 	}
 	if !intent.CreateIssued {
-		// A never-issued intent grants no authority over an existing object.
 		return nil, nil
 	}
 	if !secret.DeletionTimestamp.IsZero() || !externalCredentialSecretMatches(pool, cfg, intent, secret) {
@@ -195,8 +194,6 @@ func (r *RuntimePoolReconciler) createExternalCredential(ctx context.Context, po
 	}
 	if err := r.Create(ctx, secret); err != nil {
 		if externalCredentialCreateRejected(err) {
-			// The API affirmatively rejected this call without creating our
-			// object. Persist that no-effect receipt before any retry/reselection.
 			intents[index].CreateIssued = false
 			if fenceErr := r.saveExternalCredentialIntents(ctx, pool, intents); fenceErr != nil {
 				return nil, fenceErr
@@ -233,8 +230,6 @@ func (r *RuntimePoolReconciler) recordKnownExternalAuthCredential(ctx context.Co
 	return r.saveExternalCredentialIntents(ctx, pool, append(intents, intent))
 }
 
-// A legacy bootstrap binding may outlive the epoch's name binding during cold
-// resume. Its saved Secret UID, rather than any public label, is the authority.
 func (r *RuntimePoolReconciler) recordLegacyBootstrapCredential(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {
 	bootstrap, err := runtimePoolBootstrapInstanceBindingFromAnnotation(pool)
 	if err != nil || bootstrap == nil {
@@ -380,15 +375,11 @@ func (r *RuntimePoolReconciler) deleteExternalCredentialIntent(ctx context.Conte
 			return pending, err
 		}
 	}
-	// A rejected/never-issued call or exact recorded UID absence revokes only
-	// this receipt, never ownership of a same-name foreign replacement.
 	intents = append(intents[:index:index], intents[index+1:]...)
 	return false, r.saveExternalCredentialIntents(ctx, pool, intents)
 }
 
 func (r *RuntimePoolReconciler) deleteExternalPrivateCredentials(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) (bool, error) {
-	// Legacy auth bindings are exact Core UID authority. Legacy provider and
-	// unbound auth inventory has no such authority and is left untouched.
 	for annotation, binding := range pool.Annotations {
 		if !strings.HasPrefix(annotation, runtimePoolPrivateAuthBindingPrefix) || binding == "" {
 			continue

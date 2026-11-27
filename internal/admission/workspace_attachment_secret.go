@@ -27,11 +27,6 @@ const (
 	kubeControllerManagerUsername   = "system:kube-controller-manager"
 )
 
-// WorkspaceAttachmentSecretValidator reserves attachment credential writes
-// for exact controller identities. Namespace workers may read and manage other
-// Secrets, but cannot forge or mutate the bearer authority recovered by core.
-// Kubernetes cleanup controllers may delete it during garbage collection or
-// namespace teardown.
 type WorkspaceAttachmentSecretValidator struct {
 	decoder admission.Decoder
 	config  ExecutionModeConfig

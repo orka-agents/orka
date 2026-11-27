@@ -12,15 +12,11 @@ import (
 
 var _ store.BranchClaimStore = (*Store)(nil)
 
-// CreateBranchClaim creates a canonical repository+full-ref ownership record.
-// The same immutable identity and digest is idempotent; any mismatch conflicts.
 func (s *Store) CreateBranchClaim(ctx context.Context, claim *store.BranchClaim, fence store.ControllerEpochFence) (*store.BranchClaim, error) {
 	created, _, err := s.CreateBranchClaimWithResult(ctx, claim, fence)
 	return created, err
 }
 
-// CreateBranchClaimWithResult creates or idempotently returns a claim and
-// reports true only when this transaction inserted the row.
 func (s *Store) CreateBranchClaimWithResult(ctx context.Context, claim *store.BranchClaim, fence store.ControllerEpochFence) (*store.BranchClaim, bool, error) {
 	normalized, fence, err := store.NormalizeBranchClaimForCreate(claim, fence)
 	if err != nil {
@@ -76,7 +72,6 @@ func (s *Store) CreateBranchClaimWithResult(ctx context.Context, claim *store.Br
 	return &normalized, true, nil
 }
 
-// GetBranchClaim returns one branch claim.
 func (s *Store) GetBranchClaim(ctx context.Context, id string) (*store.BranchClaim, error) {
 	id = strings.TrimSpace(id)
 	if err := store.ValidateControlIdentifier("branch claim ID", id); err != nil {
@@ -89,10 +84,6 @@ func (s *Store) GetBranchClaim(ctx context.Context, id string) (*store.BranchCla
 	return &claim, nil
 }
 
-// ReclaimBranchClaim deletes only the exact available Task-owned claim. A
-// missing claim or one whose immutable owner/request identity was replaced is
-// already reclaimed from the caller's perspective; every other mismatch is a
-// conflict so stale recovery cannot delete a live claim.
 func (s *Store) ReclaimBranchClaim(ctx context.Context, request store.ReclaimBranchClaimRequest) error {
 	normalized, err := store.NormalizeBranchClaimReclamationRequest(request)
 	if err != nil {
@@ -153,9 +144,6 @@ func (s *Store) ReclaimBranchClaim(ctx context.Context, request store.ReclaimBra
 	return tx.Commit()
 }
 
-// CompareAndSwapBranchClaim atomically updates the exact generation, baseline,
-// and availability observed by the caller.
-//
 //nolint:gocyclo // The explicit baseline/generation/version CAS validation is intentionally centralized.
 func (s *Store) CompareAndSwapBranchClaim(ctx context.Context, change store.BranchClaimCAS) (*store.BranchClaim, error) {
 	change.ID = strings.TrimSpace(change.ID)

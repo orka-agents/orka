@@ -19,19 +19,12 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// forwardResultEnvelopeBytes leaves room in the broker's result bound for the
-// status, headers, and JSON escaping around a forwarded body.
 const forwardResultEnvelopeBytes = 64 << 10
 
-// isForwardingTool reports whether a Tool forwards a client's requests.
 func isForwardingTool(tool *corev1alpha1.Tool) bool {
 	return tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.Forward != nil
 }
 
-// AllowForwarding lets this executor run forwarding Tools. Only the ACP broker
-// sets it: there the runtime built the call from a client request and the
-// broker checked it against the prompt's frozen tool policy. A native worker,
-// or the internal connector endpoint, refuses forwarding Tools.
 func (e *ToolExecutor) AllowForwarding() { e.forwarding = true }
 
 func toolForwardProtocol(tool *corev1alpha1.Tool) corev1alpha1.HTTPForwardProtocol {
@@ -41,10 +34,6 @@ func toolForwardProtocol(tool *corev1alpha1.Tool) corev1alpha1.HTTPForwardProtoc
 	return tool.Spec.HTTP.Forward.Protocol
 }
 
-// prepareForwardRequest builds the request a forwarding Tool call names on the
-// Tool's own origin: a read, or, through the Tool's write tool, a write with
-// its JSON body. No headers come from the call. The outbound access policy
-// then adds the credential as for any Tool.
 func (e *ToolExecutor) prepareForwardRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
 	if !e.forwarding {
 		return preparedToolRequest{}, fmt.Errorf("tool %q forwards a command-line client's requests and runs only through an ACP runtime", tool.Name)
@@ -61,8 +50,6 @@ func (e *ToolExecutor) prepareForwardRequest(ctx context.Context, tool *corev1al
 	if err != nil {
 		return preparedToolRequest{}, err
 	}
-	// A write runs only as the write tool of a Tool that allows writes: the
-	// broker hands the write tool its Tool with the write class.
 	write := harnessv2.ForwardWriteMethod(request.Method)
 	if write != (tool.Spec.BrokeredToolClass == corev1alpha1.AgentRuntimeBrokeredToolClassWrite) ||
 		(write && tool.Spec.HTTP.Forward.Writes == nil) {
@@ -84,7 +71,6 @@ func (e *ToolExecutor) prepareForwardRequest(ctx context.Context, tool *corev1al
 	if len(request.Body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	// A guarded write keeps its precondition, or it would run unguarded.
 	if request.IfMatch != "" {
 		req.Header.Set("If-Match", request.IfMatch)
 	}
@@ -101,10 +87,6 @@ func (e *ToolExecutor) prepareForwardRequest(ctx context.Context, tool *corev1al
 	return prepared, nil
 }
 
-// executeForwardRequest returns the upstream answer as it is, whatever its
-// status, so the client sees the service's own errors. Redirects are never
-// followed: the credential stays on the Tool's origin, and the client gets the
-// redirect to handle.
 func executeForwardRequest(httpClient *http.Client, prepared preparedToolRequest) (string, error) {
 	client := *httpClient
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -151,34 +133,19 @@ func executeForwardRequest(httpClient *http.Client, prepared preparedToolRequest
 	if err != nil {
 		return "", err
 	}
-	// JSON escaping can grow the body past the broker's result bound even
-	// when the raw body fits; that is a controlled tool failure, not a
-	// broker error.
 	if len(encoded) > harnessv2.MaxMCPResultBytes {
 		return "", ToolExecutionError{Err: fmt.Errorf("forwarded response exceeds %d bytes once encoded", harnessv2.MaxMCPResultBytes)}
 	}
 	return string(encoded), nil
 }
 
-// forwardContinuationRe matches an Azure Resource Manager continuation
-// parameter, `$skiptoken` (or its escaped `%24skiptoken`), in a nextLink or a
-// URL-valued header. A JSON body may escape the separator as `\u0026` and the
-// dollar as `\u0024`; the value stops at a backslash, so a following escaped
-// separator ends it.
 var forwardContinuationRe = regexp.MustCompile(`(?i)([?&]|\\u0026)((?:\$|%24|\\u0024)skiptoken=[^&#\s"'<>\\]+)`)
 
-// redactForwardedText redacts a forwarded response as other tool results are,
-// but keeps continuation parameters: the generic `token=` rule would replace a
-// `$skiptoken` value, and the gateway would then refuse the next page's
-// request. The credentials Orka injected are still removed everywhere first,
-// continuation parameters included.
 func redactForwardedText(text string, secrets ...string) string {
 	text = redactForwardedSecrets(text, secrets)
 	var kept []string
 	masked := forwardContinuationRe.ReplaceAllStringFunc(text, func(match string) string {
 		parts := forwardContinuationRe.FindStringSubmatch(match)
-		// A continuation token is kept as is only when it carries no
-		// injected credential in any encoding the client would undo.
 		if name, value, ok := strings.Cut(parts[2], "="); ok && forwardValueHoldsSecret(value, secrets) {
 			return parts[1] + name + "=[REDACTED]"
 		}
@@ -189,8 +156,6 @@ func redactForwardedText(text string, secrets ...string) string {
 	if len(kept) == 0 {
 		return redacted
 	}
-	// One pass restores every kept parameter, however many links the
-	// response holds.
 	return forwardContinuationMarkerRe.ReplaceAllStringFunc(redacted, func(marker string) string {
 		index, err := strconv.Atoi(marker[len("\x00orka-forward-continuation-") : len(marker)-1])
 		if err != nil || index >= len(kept) {
@@ -200,12 +165,8 @@ func redactForwardedText(text string, secrets ...string) string {
 	})
 }
 
-// forwardContinuationMarkerRe matches the placeholder redactForwardedText
-// holds a kept continuation parameter under.
 var forwardContinuationMarkerRe = regexp.MustCompile("\x00orka-forward-continuation-[0-9]+\x00")
 
-// redactForwardedSecrets removes the credentials Orka injected from text,
-// as they are and in any percent encoding a client would undo.
 func redactForwardedSecrets(text string, secrets []string) string {
 	for _, secret := range secrets {
 		if secret = strings.TrimSpace(secret); secret != "" {
@@ -217,17 +178,11 @@ func redactForwardedSecrets(text string, secrets []string) string {
 	return redactPercentEncodedSecrets(text, secrets)
 }
 
-// redactPercentEncodedSecrets finds a credential the upstream percent-encoded
-// in a non-standard way, such as `%2D` for "-", anywhere in text. The text is
-// decoded with each decoded byte mapped back to its source bytes, and only
-// the source of each match is replaced, so the rest of a URL is unchanged.
 func redactPercentEncodedSecrets(text string, secrets []string) string {
 	if !strings.Contains(text, "%") {
 		return text
 	}
 	decoded := make([]byte, 0, len(text))
-	// source[i] is where decoded byte i starts in text; a final entry marks
-	// the end.
 	source := make([]int, 0, len(text)+1)
 	for i := 0; i < len(text); {
 		source = append(source, i)
@@ -281,9 +236,6 @@ func isHexDigit(c byte) bool {
 	return ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F')
 }
 
-// forwardValueHoldsSecret reports whether a query value, once URL decoded
-// (any percent escape, not only the standard ones), contains an injected
-// credential.
 func forwardValueHoldsSecret(value string, secrets []string) bool {
 	decoded, err := url.QueryUnescape(value)
 	if err != nil {
@@ -297,23 +249,11 @@ func forwardValueHoldsSecret(value string, secrets []string) bool {
 	return false
 }
 
-// forwardSensitiveKeyRe matches a JSON key whose string value is a
-// credential, as the text redactor's assignment rule does for prose.
 var forwardSensitiveKeyRe = regexp.MustCompile(`(?i)^[a-z0-9_.$-]*(?:api[-_]?key|token|secret|password|passwd|pwd|credential|private[-_]?key|client[-_]?secret)[a-z0-9_.-]*$`)
 
-// forwardContinuationKeyRe matches the JSON keys that carry paging state,
-// whose values are kept so the next page can be requested.
 var forwardContinuationKeyRe = regexp.MustCompile(`(?i)^(?:\$?skiptoken|continuationtoken|nextlink)$`)
 
-// redactForwardedBody redacts a forwarded response body. The credentials Orka
-// injected are removed from the raw bytes first. A JSON body is then redacted
-// value by value: a string under a credential-named key becomes
-// "[REDACTED]" and every other string goes through the text rules, while
-// arrays, objects, numbers, and nulls are never rewritten, so a valid
-// response stays valid JSON. Other bodies are redacted as text.
 func redactForwardedBody(body string, secrets ...string) string {
-	// A JSON body is judged token by token, so redaction can never leave it
-	// malformed; a raw replacement could split a number or a literal.
 	if json.Valid([]byte(body)) {
 		if redacted, ok := redactForwardedJSON(body, secrets); ok {
 			return redacted
@@ -322,10 +262,6 @@ func redactForwardedBody(body string, secrets ...string) string {
 	return redactForwardedText(body, secrets...)
 }
 
-// redactForwardedJSON rewrites only the string literals whose redacted
-// value differs, copying every other byte of body unchanged. Strings are
-// judged decoded, so a credential the upstream escaped (`\u002d` for "-") is
-// still found, in keys as in values.
 func redactForwardedJSON(body string, secrets []string) (string, bool) {
 	type container struct {
 		object    bool
@@ -343,8 +279,6 @@ func redactForwardedJSON(body string, secrets []string) (string, bool) {
 		}
 	}
 	var previous, end int
-	// rewrite replaces the string literal the decoder just read.
-	// rewrite replaces the token the decoder just read with a JSON string.
 	rewrite := func(replacement string) bool {
 		between := body[previous:end]
 		start := len(between) - len(strings.TrimLeft(between, " \t\r\n:,"))
@@ -400,8 +334,6 @@ func redactForwardedJSON(body string, secrets []string) (string, bool) {
 			}
 			valueDone()
 		default:
-			// A number holding an injected credential becomes a string; the
-			// literals true, false, and null cannot hold one.
 			if number, ok := value.(json.Number); ok && redactForwardedSecrets(number.String(), secrets) != number.String() {
 				if !rewrite("[REDACTED]") {
 					return "", false

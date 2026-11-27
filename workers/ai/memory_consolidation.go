@@ -28,25 +28,16 @@ const (
 	roleAssistant = "assistant"
 	roleTool      = "tool"
 
-	memoryConsolidationResponseLimit = 8 << 20
-	memoryConsolidationHTTPTimeout   = 2 * time.Minute
-	// memoryConsolidationModelAttempts bounds how often a run asks the model
-	// for its structured result.
-	memoryConsolidationModelAttempts = 2
-	// memoryConsolidationUnavailableAttempts bounds how often a call is
-	// retried while the controller answers 503, as it does until it has
-	// published the worker's Job.
+	memoryConsolidationResponseLimit       = 8 << 20
+	memoryConsolidationHTTPTimeout         = 2 * time.Minute
+	memoryConsolidationModelAttempts       = 2
 	memoryConsolidationUnavailableAttempts = 12
 )
 
-// memoryConsolidationRetryDelay spaces retries of a 503; tests shorten it.
 var memoryConsolidationRetryDelay = 5 * time.Second
 
-// errControllerUnavailable marks a 503 from the controller.
 var errControllerUnavailable = errors.New("controller unavailable")
 
-// memoryConsolidationClient calls the controller's internal run routes as
-// this worker's Task.
 type memoryConsolidationClient struct {
 	baseURL string
 	token   string
@@ -67,7 +58,6 @@ func newMemoryConsolidationClient() (*memoryConsolidationClient, error) {
 	}, nil
 }
 
-// post calls a run route, retrying while the controller answers 503.
 func (c *memoryConsolidationClient) post(ctx context.Context, path string, body, out any) error {
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -115,11 +105,6 @@ func (c *memoryConsolidationClient) postOnce(ctx context.Context, path string, e
 	return json.Unmarshal(data, out)
 }
 
-// runMemoryConsolidation runs this Task as a memory consolidation run: the
-// controller supplies the inputs, the model submits one structured result
-// through the only tool it is offered, and the controller validates it and
-// records the report, which becomes the Task result. No other tool runs and
-// no memory is injected.
 func runMemoryConsolidation(
 	ctx context.Context, provider llm.Provider, model string, settings modelSettings, focus string,
 ) (string, error) {
@@ -132,7 +117,6 @@ func runMemoryConsolidation(
 		return "", fmt.Errorf("begin memory consolidation: %w", err)
 	}
 	if begin.Status != memoryconsolidation.StatusRunning || begin.Input == nil {
-		// A skipped run, or a retried Pod of a finished one.
 		return marshalConsolidationReport(begin.Report)
 	}
 	fmt.Printf("Memory consolidation run reads %d memories and %d of %d changed sessions\n",
@@ -149,8 +133,6 @@ func runMemoryConsolidation(
 	return marshalConsolidationReport(&report)
 }
 
-// requestConsolidation asks the model for its structured result, once more
-// with a reminder when it answers without calling the tool.
 func requestConsolidation(
 	ctx context.Context, provider llm.Provider, model string, settings modelSettings,
 	input memoryconsolidation.Input, focus string, runSettings memoryconsolidation.Settings,
@@ -172,9 +154,6 @@ func requestConsolidation(
 		if err := completionCallError(resp, err); err != nil {
 			return memoryconsolidation.Submission{}, fmt.Errorf("memory consolidation model call: %w", err)
 		}
-		// An unfinished, refused or failed response may still carry a tool
-		// call with valid arguments; submitting it would propose from a
-		// result the model never finished.
 		switch outcome := llm.NormalizeCompletionOutcome(resp); outcome {
 		case llm.CompletionOutcomeCompleted, llm.CompletionOutcomeToolCalls:
 		default:
@@ -190,8 +169,6 @@ func requestConsolidation(
 				return memoryconsolidation.Submission{}, fmt.Errorf("decode memory consolidation result: %w", err)
 			}
 			if submission.Operations == nil {
-				// Not a result: an empty list says nothing changes, a missing
-				// one says nothing. Ask again rather than finish the run.
 				break
 			}
 			return submission, nil
@@ -207,10 +184,6 @@ const consolidationReminderText = "Call " + memoryconsolidation.SubmitToolName +
 	" exactly once with your result, including its operations list." +
 	" Submit an empty operations list if memory needs no change."
 
-// consolidationReminder replays the model's turn and asks again. A turn that
-// called tools is answered with a result for each call, which carries the
-// reminder: providers reject an assistant turn with no text and no calls,
-// and every call needs its result.
 func consolidationReminder(resp *llm.CompletionResponse) []llm.Message {
 	if len(resp.ToolCalls) > 0 {
 		messages := make([]llm.Message, 0, 1+len(resp.ToolCalls))

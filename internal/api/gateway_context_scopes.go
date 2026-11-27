@@ -7,8 +7,6 @@ MIT License - see LICENSE file for details.
 package api
 
 const (
-	// ContextScopeGatewaysRead authorizes gateway resource and ledger reads.
-	ContextScopeGatewaysRead = "orka:gateways:read"
-	// ContextScopeGatewaysOperate authorizes dead-lettered delivery retries.
+	ContextScopeGatewaysRead    = "orka:gateways:read"
 	ContextScopeGatewaysOperate = "orka:gateways:operate"
 )

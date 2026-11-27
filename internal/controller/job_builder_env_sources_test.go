@@ -65,7 +65,6 @@ func TestBuildRejectsContainerTaskEnvObjectSourcesWithoutDirectSecretMounts(t *t
 	for _, tt := range tests {
 		for worker, image := range map[string]string{"managed": "", "custom": testBusyboxImage} {
 			t.Run(tt.name+"/"+worker, func(t *testing.T) {
-				// The builder reads the opt-in from the process environment.
 				t.Setenv(directSecretMountsEnvVar, "false")
 				builder := setupJobBuilder()
 				literal := corev1.EnvVar{Name: "MODE", Value: "smoke"}
@@ -135,9 +134,6 @@ func TestBuildLeavesAITaskEnvSourcesToTheTrustedWorkerPolicy(t *testing.T) {
 	}
 }
 
-// The workspace preparation init container holds the clone credential; Git
-// would run a caller-chosen command from GIT_CONFIG_PARAMETERS with it, so
-// Task env stays out of it apart from the proxy variables.
 func TestBuildKeepsTaskEnvOutOfTheWorkspaceInitContainer(t *testing.T) {
 	t.Setenv(directSecretMountsEnvVar, "false")
 	task := envSourceTestTask(corev1alpha1.TaskTypeContainer, testBusyboxImage,
@@ -172,7 +168,6 @@ func TestBuildKeepsTaskEnvOutOfTheWorkspaceInitContainer(t *testing.T) {
 	if got, ok := findEnvVar(initEnv, "https_proxy"); !ok || got.Value != "http://proxy:3128" {
 		t.Fatalf("init container https_proxy = %#v, found=%v; the proxy variables pass through", got, ok)
 	}
-	// A repository mutation Task pins the approved patch for preparation to verify.
 	if got, ok := findEnvVar(initEnv, workerenv.PriorTaskDiffSHA256); !ok || got.Value != "abc123" {
 		t.Fatalf("init container %s = %#v, found=%v; the patch digest must pass through", workerenv.PriorTaskDiffSHA256, got, ok)
 	}

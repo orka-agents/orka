@@ -24,7 +24,6 @@ const (
 	githubAPIResponseLimit          = 1 << 20
 )
 
-// GitHubPullRequest captures the canonical URL, number, and resolution status.
 type GitHubPullRequest struct {
 	HTMLURL string
 	Number  int
@@ -45,9 +44,6 @@ type gitHubAPIErrorResponse struct {
 	} `json:"errors"`
 }
 
-// CreateOrGetGitHubPullRequest creates a pull request via the GitHub REST API.
-// If GitHub reports that the pull request already exists, it resolves and returns
-// the existing open pull request instead.
 func CreateOrGetGitHubPullRequest(ctx context.Context, token, owner, repo, head, base, title, body, apiBaseURL string) (GitHubPullRequest, error) {
 	baseURL := githubAPIBaseURL
 	if apiBaseURL != "" {
@@ -94,7 +90,6 @@ func CreateOrGetGitHubPullRequest(ctx context.Context, token, owner, repo, head,
 			if followedRedirect(resp) {
 				return GitHubPullRequest{}, err
 			}
-			// GitHub refused the create; only the confirming lookup failed.
 			return GitHubPullRequest{}, &NoEffectError{
 				Summary: "GitHub refused the request because the pull request already exists, and looking it up failed", Err: err,
 			}

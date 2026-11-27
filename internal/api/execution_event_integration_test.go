@@ -743,8 +743,6 @@ func setupAuthenticatedExecutionEventApp(
 	return app
 }
 
-// newExecutionEventClientForTest serves a fresh SQLite store through the
-// storage client, which runs fenced task data access.
 func newExecutionEventClientForTest(t *testing.T) *storageclient.Client {
 	t.Helper()
 	return testStorageClient(newSQLiteExecutionEventStoreForTest(t))

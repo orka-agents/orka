@@ -147,8 +147,6 @@ rollout_timeout="$(deployment_rollout_timeout kubectl -n "${namespace}" "${deplo
 kubectl -n "${namespace}" rollout status deployment/"${deployment}" --timeout="${rollout_timeout}"
 start_api_port_forward
 wait_for_api
-# GitHub Actions OIDC tokens are short-lived; fetch immediately before use so
-# cluster setup and image builds cannot consume the token lifetime.
 fetch_token
 
 payload="${workdir}/task.json"

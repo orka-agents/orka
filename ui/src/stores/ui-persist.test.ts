@@ -1,7 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-// Loads the store through the real persist middleware, so hydration runs the
-// same migration rule as the pre-paint script in index.html (index-html.test.ts).
 function memoryStorage(entries: Record<string, string>) {
   const items = new Map(Object.entries(entries))
   return {

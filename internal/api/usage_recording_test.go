@@ -25,7 +25,6 @@ func TestUsageRequestContextFreezesNamespaceBeforeFirstObservation(t *testing.T)
 			detached := detachedSpanContext(ctx)
 			cancel()
 			require.NoError(t, detached.Err())
-			// Recreate after detachment, before the provider's first observation.
 			require.NoError(t, kube.Delete(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}))
 			require.NoError(t, kube.Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "replacement-uid"}}))
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +64,6 @@ func TestUsageRequestContextRetainsNamespaceLookupFailure(t *testing.T) {
 			backend := newInternalExecutionEventStore(t)
 			kube := testInternalExecutionEventClient(t)
 			ctx := detachedSpanContext(usageRequestContext(t.Context(), backend, kube, "missing", "session"))
-			// A namespace that appears later must not acquire the failed request.
 			require.NoError(t, kube.Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "missing", UID: "replacement-uid"}}))
 			var calls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

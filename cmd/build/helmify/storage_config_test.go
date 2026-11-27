@@ -92,8 +92,6 @@ func renderStorage(t *testing.T, values string) renderedStorage {
 	return rendered
 }
 
-// loadRenderedStorage feeds the rendered file and flags to the controller's
-// own loader, so the chart and the controller agree on the format.
 func loadRenderedStorage(t *testing.T, rendered renderedStorage) (*storageconfig.Config, error) {
 	t.Helper()
 	controller := rendered.controller(t)

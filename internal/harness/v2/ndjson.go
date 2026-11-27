@@ -15,10 +15,7 @@ const (
 	DefaultMaxTerminalResultBytes   = 256 << 10
 	DefaultMaxBufferedEvents        = 256
 	DefaultMaxUpdateEventsPerSecond = 100
-	// DefaultMaxUpdateBytesPerSecond is a fixed orka.harness.v2 protocol
-	// invariant applied to each event stream; it is not a negotiated
-	// ProtocolLimits value. The exported name is retained for compatibility.
-	DefaultMaxUpdateBytesPerSecond = 32 << 20
+	DefaultMaxUpdateBytesPerSecond  = 32 << 20
 
 	absoluteMaxEventLineBytes   = MaxCanonicalJSONBytes
 	absoluteMaxBufferedEvents   = 16_384
@@ -97,10 +94,6 @@ func (v *EventStreamValidator) ValidateNext(event Event, arrival time.Time) erro
 	return v.validateNext(event, arrival, -1)
 }
 
-// validateNext validates an event and, when encodedUpdateBytes is non-negative,
-// charges that exact encoded line size for update-byte accounting. Direct
-// ValidateNext callers retain the previous behavior of charging the event's
-// compact JSON encoding.
 func (v *EventStreamValidator) validateNext(event Event, arrival time.Time, encodedUpdateBytes int) error {
 	if v == nil {
 		return fmt.Errorf("event stream validator is required")
@@ -230,9 +223,6 @@ func (d *EventDecoder) Decode() (Event, error) {
 	return event, nil
 }
 
-// DecodeAll reads a complete finite event stream. Because this helper buffers,
-// it enforces MaxBufferedEvents. Streaming callers should use Decode and persist
-// or process each event before reading the next one.
 func (d *EventDecoder) DecodeAll() ([]Event, error) {
 	if d == nil {
 		return nil, fmt.Errorf("event decoder is required")
@@ -342,9 +332,6 @@ func writeAll(writer io.Writer, data []byte) error {
 	return nil
 }
 
-// IsPoisoningStreamError reports protocol/limit violations that require the
-// RuntimeSession to be poisoned rather than reused. Ordinary EOF is not a
-// poisoning error; a missing terminal discovered by Finish is.
 func IsPoisoningStreamError(err error) bool {
 	if err == nil || errors.Is(err, io.EOF) {
 		return false

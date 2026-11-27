@@ -37,7 +37,6 @@ describe('TaskList', () => {
   })
 
   it('loading state shows skeleton rows', () => {
-    // Default handler returns empty list, but first render is loading
     server.use(
       http.get('/api/v1/tasks', async () => {
         await new Promise((r) => setTimeout(r, 5000))
@@ -125,7 +124,6 @@ describe('TaskList', () => {
     )
     render(<TaskList />)
     await user.click(await screen.findByRole('button', { name: 'Delete task del-task' }))
-    // The trash icon only arms the delete; nothing is sent yet.
     expect(screen.getByRole('dialog')).toHaveTextContent('del-task')
     expect(deletes).toEqual([])
 
@@ -209,7 +207,6 @@ describe('TaskList', () => {
     expect(screen.getByText('Deleting')).toBeInTheDocument()
     expect(screen.getByText('Suspended')).toBeInTheDocument()
     expect(requests).toEqual([])
-    // A task already being deleted cannot be deleted again.
     expect(screen.getByRole('button', { name: 'Delete task going' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Delete task gated' })).toBeEnabled()
   })
@@ -305,7 +302,6 @@ describe('TaskList paging and access', () => {
     render(<TaskList />)
     await screen.findByText('task-29')
     expect(screen.getAllByRole('row')).toHaveLength(1 + 25)
-    // The oldest task is loaded but not revealed yet; the filter still finds it.
     expect(screen.queryByText('task-00')).not.toBeInTheDocument()
     await user.type(screen.getByLabelText('Filter tasks'), 'task-00')
     expect(screen.getByText('task-00')).toBeInTheDocument()
@@ -350,8 +346,6 @@ describe('TaskList paging and access', () => {
     const link = await screen.findByRole('link', { name })
     expect(link).toHaveAttribute('title', name)
     expect(link).toHaveClass('block', 'truncate')
-    // No breakpoint lifts the cap: at 1024 and 1280 every column is shown
-    // and a long name must still give way to them.
     const cell = link.closest('td')!
     expect(cell).toHaveClass('w-full', 'max-w-0')
     expect(cell.className).not.toMatch(/\b(sm|md|lg|xl):(w-auto|max-w-none)\b/)
@@ -380,7 +374,6 @@ describe('TaskList paging and access', () => {
     expect(names).toEqual(['zzz-newest', 'mmm-middle', 'aaa-oldest'])
     expect(screen.getByRole('columnheader', { name: 'Namespace' })).toHaveClass('hidden', 'md:table-cell')
     expect(screen.getByRole('columnheader', { name: 'Type' })).toHaveClass('hidden', 'sm:table-cell')
-    // The delete column is named for screen readers.
     expect(screen.getByRole('columnheader', { name: 'Actions' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'Phase' })).not.toHaveClass('hidden')
   })

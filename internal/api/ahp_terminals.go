@@ -28,46 +28,33 @@ import (
 )
 
 const (
-	ahpTerminalScheme     = "ahp-terminal:"
-	ahpTerminalFlushEvery = 20 * time.Millisecond
-	// ahpTerminalCloseFlushTries bounds the tries of a terminal's last output:
-	// together a little over ten seconds.
+	ahpTerminalScheme          = "ahp-terminal:"
+	ahpTerminalFlushEvery      = 20 * time.Millisecond
 	ahpTerminalCloseFlushTries = 16
 	ahpTerminalChunkMax        = 32 << 10
-	// ahpTerminalHoldMax bounds the output kept while the journal cannot
-	// take it; past it the shell's output waits.
-	ahpTerminalHoldMax  = 8 * ahpTerminalChunkMax
-	ahpTerminalInputMax = 64 << 10
-	ahpTerminalsPerUser = 32
+	ahpTerminalHoldMax         = 8 * ahpTerminalChunkMax
+	ahpTerminalInputMax        = 64 << 10
+	ahpTerminalsPerUser        = 32
 )
 
-// ahpTerminal is one shell in a user's workspace.
 type ahpTerminal struct {
-	ctx     context.Context
-	channel string
-	title   string
-	claim   ahptypes.TerminalClaim
-	input   chan []byte
-	sizes   chan remotecommand.TerminalSize
-	cancel  context.CancelFunc
-	// pending counts input admitted and not yet written, and pendingBytes
-	// its size, so admission can refuse input instead of a full queue
-	// dropping it, and a shell that does not read cannot hold much memory.
+	ctx          context.Context
+	channel      string
+	title        string
+	claim        ahptypes.TerminalClaim
+	input        chan []byte
+	sizes        chan remotecommand.TerminalSize
+	cancel       context.CancelFunc
 	pending      atomic.Int64
 	pendingBytes atomic.Int64
-	// pidFile records the shell's session in the workspace, so ending the
-	// terminal can stop every process it started.
-	pidFile string
+	pidFile      string
 }
 
 const (
-	ahpTerminalInputQueue = 512
-	// ahpTerminalInputQueueBytes bounds the input a terminal holds unwritten.
+	ahpTerminalInputQueue      = 512
 	ahpTerminalInputQueueBytes = 1 << 20
 )
 
-// Next implements remotecommand.TerminalSizeQueue. It returns nil once the
-// terminal ends, which releases the resize worker.
 func (t *ahpTerminal) Next() *remotecommand.TerminalSize {
 	select {
 	case size := <-t.sizes:
@@ -79,7 +66,6 @@ func (t *ahpTerminal) Next() *remotecommand.TerminalSize {
 
 func ahpTerminalKey(userKey, channel string) string { return userKey + "\x00" + channel }
 
-// hasTerminals reports whether the user has a terminal running.
 func (b *ahpBackend) hasTerminals(userKey string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -97,7 +83,6 @@ func (b *ahpBackend) terminal(userKey, channel string) *ahpTerminal {
 	return b.shells[ahpTerminalKey(userKey, channel)]
 }
 
-// CreateTerminal starts a shell in the user's workspace.
 func (b *ahpBackend) CreateTerminal(ctx context.Context, principal ahphost.Principal, params ahptypes.CreateTerminalParams, emit ahphost.Emitter) (ahptypes.TerminalState, error) {
 	if !b.workspaces.enabled() {
 		return ahptypes.TerminalState{}, &ahphost.Rejection{Reason: "terminals are not enabled on this host"}
@@ -105,7 +90,6 @@ func (b *ahpBackend) CreateTerminal(ctx context.Context, principal ahphost.Princ
 	if !strings.HasPrefix(params.Channel, ahpTerminalScheme) {
 		return ahptypes.TerminalState{}, &ahphost.Rejection{Reason: "terminal URIs use the ahp-terminal scheme"}
 	}
-	// A name is the terminal's first title, so it is bounded as titles are.
 	if params.Name != nil && len(*params.Name) > ahpTerminalTitleMax {
 		return ahptypes.TerminalState{}, &ahphost.Rejection{Reason: "the name is too long"}
 	}
@@ -128,10 +112,6 @@ func (b *ahpBackend) CreateTerminal(ctx context.Context, principal ahphost.Princ
 	if params.Cols != nil && params.Rows != nil && *params.Cols > 0 && *params.Rows > 0 {
 		term.sizes <- remotecommand.TerminalSize{Width: uint16(min(*params.Cols, 1000)), Height: uint16(min(*params.Rows, 1000))} //nolint:gosec // bounded above
 	}
-	// Claim the terminal's slot before anything starts, so concurrent creates
-	// can neither replace a running shell nor pass the limit together, and
-	// hold the user's lifecycle lock until the shell runs, so disposing the
-	// last session cannot remove the workspace under it.
 	unlock := b.lockUser(principal.UserKey)
 	defer unlock()
 	key := ahpTerminalKey(principal.UserKey, params.Channel)
@@ -181,7 +161,6 @@ func (b *ahpBackend) CreateTerminal(ctx context.Context, principal ahphost.Princ
 	}
 
 	stdin, stdinWriter := io.Pipe()
-	// Ending the terminal unblocks a write the exec stream will never read.
 	context.AfterFunc(termCtx, func() {
 		_ = stdinWriter.CloseWithError(io.EOF)
 		_ = stdin.Close()
@@ -204,8 +183,6 @@ func (b *ahpBackend) CreateTerminal(ctx context.Context, principal ahphost.Princ
 	}()
 	output := newAHPTerminalOutput(termCtx, emit, params.Channel, func() []string { return b.workspaces.tokensFor(principal.UserKey) })
 	go func() {
-		// The shell leads its own session; its PID names that session, so
-		// ending the terminal can stop everything started in it.
 		err := b.workspaces.stream(termCtx, pod,
 			[]string{ahpShell, "-c", `dir=$1 pidfile=$2; ` + ahpTerminalRecordSession + `; cd "$dir" 2>/dev/null || cd /workspace; exec /bin/sh -i`,
 				"sh", cwd, term.pidFile},
@@ -252,17 +229,10 @@ func (b *ahpBackend) endTerminal(ctx context.Context, principal ahphost.Principa
 	b.removeWorkspaceAfterLastTerminal(ctx, principal)
 }
 
-// removeWorkspaceAfterLastTerminal removes the user's workspace, unless it
-// holds work, once their last terminal has ended and no session remains,
-// when no idle timeout is set. Disposing of the last session leaves the
-// workspace while a shell runs, and with no idle timeout nothing else would
-// remove it, or the credentials in it, after that shell ends.
 func (b *ahpBackend) removeWorkspaceAfterLastTerminal(ctx context.Context, principal ahphost.Principal) {
 	if !b.workspaces.enabled() || b.cfg.WorkspaceIdleTimeout > 0 {
 		return
 	}
-	// The lifecycle lock keeps a session or terminal from starting to use the
-	// workspace while this decides.
 	unlock := b.lockUser(principal.UserKey)
 	defer unlock()
 	if b.hasTerminals(principal.UserKey) {
@@ -275,10 +245,6 @@ func (b *ahpBackend) removeWorkspaceAfterLastTerminal(ctx context.Context, princ
 	b.workspaces.removeUnlessHoldsWork(ctx, principal)
 }
 
-// DisposeTerminal stops a shell and every process it started, then frees its slot.
-// A stop that fails is returned, and the terminal kept, so disposing of it
-// again finishes: its stream may be gone by then, but the record of its
-// session in the workspace stays until the session is stopped.
 func (b *ahpBackend) DisposeTerminal(ctx context.Context, principal ahphost.Principal, channel string) error {
 	term := b.terminal(principal.UserKey, channel)
 	pidFile := ahpTerminalPIDFile(principal.UserKey, channel)
@@ -311,11 +277,6 @@ const (
 	ahpRetiredTerminalTTL  = 24 * time.Hour
 )
 
-// retireLocked remembers a used terminal URI. Clients name terminals with
-// fresh random URIs, so refusing reuse costs them nothing. The set keeps at
-// most ahpRetiredTerminalsMax URIs: past it, those older than
-// ahpRetiredTerminalTTL go, and then the oldest, however many terminals a
-// client churns through. b.mu must be held.
 func (b *ahpBackend) retireLocked(key string) {
 	if b.retired == nil {
 		b.retired = map[string]time.Time{}
@@ -340,15 +301,11 @@ func (b *ahpBackend) retireLocked(key string) {
 	b.retired[key] = now
 }
 
-// stopShell ends a terminal's exec stream and kills its session in the
-// workspace: closing the stream alone can leave the shell running there.
 func (b *ahpBackend) stopShell(ctx context.Context, principal ahphost.Principal, term *ahpTerminal) error {
 	term.cancel()
 	return b.stopSession(ctx, principal, term.pidFile)
 }
 
-// stopSession kills the session a terminal's record names in the workspace,
-// if it still runs. A workspace that is not running runs nothing.
 func (b *ahpBackend) stopSession(ctx context.Context, principal ahphost.Principal, pidFile string) error {
 	pod, ok := b.workspaces.running(ctx, principal)
 	if !ok {
@@ -359,22 +316,12 @@ func (b *ahpBackend) stopSession(ctx context.Context, principal ahphost.Principa
 	return b.workspaces.run(killCtx, pod, ahpShell, "-c", ahpStopSessionScript, "sh", pidFile, "stop")
 }
 
-// ahpTerminalPIDFile is where a terminal's shell records its session in the
-// workspace, so the terminal can be stopped, also by a later process.
 func ahpTerminalPIDFile(userKey, channel string) string {
 	return "/tmp/orka-terminal-" + ahpHash(userKey, channel)[:16] + ".pid"
 }
 
-// The host stops the shells of terminals an earlier process left behind
-// through this backend.
 var _ ahphost.TerminalReaper = (*ahpBackend)(nil)
 
-// ReapTerminals stops the shells of terminals an earlier process left running
-// in the user's workspace, which outlives the process. A session ID one of
-// this process's terminals now holds was reused, and is left alone. A failure
-// is returned, so the host keeps the terminals' channels and tries again.
-// Once they are stopped, the workspace is considered for removal as after the
-// last terminal is disposed of.
 func (b *ahpBackend) ReapTerminals(ctx context.Context, principal ahphost.Principal, channels []string) error {
 	pod, err := b.workspaces.runningForCleanup(ctx, principal)
 	if err != nil || pod == nil {
@@ -396,35 +343,13 @@ func (b *ahpBackend) ReapTerminals(ctx context.Context, principal ahphost.Princi
 		cancel()
 	}
 	if failed == nil {
-		// Without an idle timeout nothing else removes a workspace whose last
-		// terminal an earlier process left behind, as disposing of one does.
 		b.removeWorkspaceAfterLastTerminal(context.WithoutCancel(ctx), principal)
 	}
 	return failed
 }
 
-// ahpTerminalRecordSession records, in the file $pidfile names, the shell's
-// PID, which names the session it leads, and the shell's start time, which
-// tells that session from a later one that reuses the ID. It replaces the
-// positional parameters.
 const ahpTerminalRecordSession = `read -r stat < /proc/$$/stat; set -- ${stat##*) }; echo "$$ ${20}" > "$pidfile"`
 
-// ahpStopSessionScript kills every process in the session the file $1
-// records, then removes the file. $2 is stop for a terminal of this process,
-// or reap for one an earlier process left behind; further arguments are the
-// files of terminals still running, whose session IDs are never killed.
-//
-// The leader's start time proves the session is the recorded one. A leftover
-// record whose leader is gone has no owner to prove, so it is not reaped. A
-// running terminal's shell can exit before what it started; those processes
-// still hold the session ID, which Linux then cannot reuse, so stop kills
-// them. It reads /proc with shell builtins, so a workspace image needs no
-// more than sh: pkill is not one of its requirements.
-//
-// Disposing of a terminal ends its stream, whose end stops the session too,
-// so two runs can race on the file; rm -f still fails when the file goes
-// between its check and its unlink. drop succeeds once the file is gone,
-// whichever run removed it.
 const ahpStopSessionScript = `file=$1 mode=$2
 shift 2
 drop() { rm -f "$file" 2>/dev/null || [ ! -e "$file" ]; }
@@ -453,7 +378,6 @@ for stat in /proc/[0-9]*/stat; do
 done
 drop`
 
-// Terminals lists the user's running shells.
 func (b *ahpBackend) Terminals(_ context.Context, principal ahphost.Principal) ([]ahptypes.TerminalInfo, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -471,7 +395,6 @@ func (b *ahpBackend) Terminals(_ context.Context, principal ahphost.Principal) (
 	return terminals, nil
 }
 
-// authorizeTerminalAction admits input and resizes for the user's own shells.
 func (b *ahpBackend) authorizeTerminalAction(principal ahphost.Principal, channel string, action ahptypes.StateAction) error {
 	term := b.terminal(principal.UserKey, channel)
 	if term == nil {
@@ -482,8 +405,6 @@ func (b *ahpBackend) authorizeTerminalAction(principal ahphost.Principal, channe
 		if len(a.Data) > ahpTerminalInputMax {
 			return &ahphost.Rejection{Reason: "the input is too large"}
 		}
-		// Reserve room for the input now, on the terminal just checked: once
-		// admitted it is always delivered.
 		size := int64(len(a.Data))
 		if term.pending.Add(1) > ahpTerminalInputQueue {
 			term.pending.Add(-1)
@@ -510,9 +431,6 @@ func (b *ahpBackend) authorizeTerminalAction(principal ahphost.Principal, channe
 	}
 }
 
-// ReleaseClientAction gives back the input room an admitted terminal input
-// reserved when the host could not apply it, so a storage outage cannot fill
-// the queue with input that will never be written.
 func (b *ahpBackend) ReleaseClientAction(_ context.Context, principal ahphost.Principal, channel string, action ahptypes.StateAction) {
 	input, ok := action.Value.(*ahptypes.TerminalInputAction)
 	if !ok {
@@ -524,7 +442,6 @@ func (b *ahpBackend) ReleaseClientAction(_ context.Context, principal ahphost.Pr
 	}
 }
 
-// handleTerminalAction delivers input and resizes in the order they came.
 func (b *ahpBackend) handleTerminalAction(principal ahphost.Principal, channel string, action ahptypes.StateAction) {
 	term := b.terminal(principal.UserKey, channel)
 	if term == nil {
@@ -532,7 +449,6 @@ func (b *ahpBackend) handleTerminalAction(principal ahphost.Principal, channel s
 	}
 	switch a := action.Value.(type) {
 	case *ahptypes.TerminalInputAction:
-		// Admission reserved room, so this never blocks.
 		select {
 		case term.input <- []byte(a.Data):
 		case <-term.ctx.Done():
@@ -544,8 +460,6 @@ func (b *ahpBackend) handleTerminalAction(principal ahphost.Principal, channel s
 		default:
 		}
 	case *ahptypes.TerminalTitleChangedAction:
-		// The terminal list is built from the backend's terminals, so a
-		// renamed terminal keeps its name there too.
 		b.mu.Lock()
 		term.title = a.Title
 		b.mu.Unlock()
@@ -555,51 +469,33 @@ func (b *ahpBackend) handleTerminalAction(principal ahphost.Principal, channel s
 	}
 }
 
-// ahpTerminalOutput turns a shell's output into terminal/data actions,
-// coalesced and cut on UTF-8 boundaries. Terminal data is journaled, so it
-// never carries one of the workspace's git tokens, nor
-// ahpMinRedactedToken or more leading bytes of a token's secret, however the
-// output is split, delayed, or cut short.
 type ahpTerminalOutput struct {
-	ctx     context.Context
-	emit    ahphost.Emitter
-	channel string
-	// credentials returns the tokens the workspace holds.
+	ctx         context.Context
+	emit        ahphost.Emitter
+	channel     string
 	credentials func() []string
 
 	mu      sync.Mutex
 	pending []byte
-	// recent ends what was emitted, so a token that began there is still
-	// recognized as the rest of it arrives.
-	recent []byte
-	timer  *time.Timer
-	closed bool
+	recent  []byte
+	timer   *time.Timer
+	closed  bool
 }
 
 func newAHPTerminalOutput(ctx context.Context, emit ahphost.Emitter, channel string, credentials func() []string) *ahpTerminalOutput {
 	return &ahpTerminalOutput{ctx: ctx, emit: emit, channel: channel, credentials: credentials}
 }
 
-// ahpTerminalTitleMax bounds a terminal's title.
 const ahpTerminalTitleMax = 256
 
-// ahpMinRedactedToken is the shortest run of a token's secret that output
-// never carries. Shorter values are not treated as tokens: replacing them
-// would mangle ordinary output.
 const ahpMinRedactedToken = 8
 
-// ahpTokenHoldMin is the shortest start of a token's secret that output waits
-// on for more: shorter ones are too common in ordinary output to delay it.
 const ahpTokenHoldMin = 4
 
-// ahpTokenPublicStart is the length of a token's type prefix through its
-// first underscore, such as "ghu_", which reveals nothing about the token.
 func ahpTokenPublicStart(token string) int {
 	return strings.IndexByte(token, '_') + 1
 }
 
-// ahpTokenSecret is the part of a token after its public start, or "" for a
-// token too short to redact.
 func ahpTokenSecret(token string) string {
 	if secret := token[ahpTokenPublicStart(token):]; len(secret) >= ahpMinRedactedToken {
 		return secret
@@ -607,11 +503,6 @@ func ahpTokenSecret(token string) string {
 	return ""
 }
 
-// ahpRedactTokens replaces what pending carries of a token, reading pending
-// after recent, the end of what was already emitted. Each run that begins
-// with ahpMinRedactedToken or more bytes of a token's secret is replaced,
-// with the token's public start before it, however the run ends; a run that
-// reaches pending's end and could go on is left for ahpTokenHeld.
 func ahpRedactTokens(recent, pending []byte, tokens []string) []byte {
 	data := append(slices.Clip(recent), pending...)
 	var spans [][2]int
@@ -648,8 +539,6 @@ func ahpRedactTokens(recent, pending []byte, tokens []string) []byte {
 	}
 	slices.SortFunc(spans, func(a, b [2]int) int { return a[0] - b[0] })
 	out := make([]byte, 0, len(pending))
-	// at is the next byte of data to copy; replaced is where the last
-	// replacement ended, so overlapping runs are replaced once.
 	at, replaced := len(recent), -1
 	for _, span := range spans {
 		from, end := span[0], span[1]
@@ -666,9 +555,6 @@ func ahpRedactTokens(recent, pending []byte, tokens []string) []byte {
 	return append(out, data[at:]...)
 }
 
-// ahpTokenHeld says how much of pending's end, read after recent, is the
-// start of a token's secret, at least ahpTokenHoldMin bytes of it: that much
-// waits for more output, however long.
 func ahpTokenHeld(recent, pending []byte, tokens []string) int {
 	data := append(slices.Clip(recent), pending...)
 	held := 0
@@ -696,9 +582,6 @@ func (o *ahpTerminalOutput) Write(p []byte) (int, error) {
 	} else {
 		o.scheduleLocked()
 	}
-	// Output the journal could not take yet stays pending. Past the hold
-	// bound the shell waits for it, rather than output being dropped or held
-	// without end.
 	for len(o.pending) > ahpTerminalHoldMax {
 		o.mu.Unlock()
 		select {
@@ -716,7 +599,6 @@ func (o *ahpTerminalOutput) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// scheduleLocked flushes the pending output soon, once. o.mu must be held.
 func (o *ahpTerminalOutput) scheduleLocked() {
 	if o.timer != nil || o.closed {
 		return
@@ -739,8 +621,6 @@ func (o *ahpTerminalOutput) flushLocked() {
 		o.pending = ahpRedactTokens(o.recent, o.pending, tokens)
 		ready = len(o.pending)
 		if held := ahpTokenHeld(o.recent, o.pending, tokens); held > 0 && o.closed {
-			// The output ended inside a token: what arrived of it is
-			// still secret.
 			o.pending = append(o.pending[:ready-held], executionevents.ExecutionEventRedactedValue...)
 			ready = len(o.pending)
 		} else {
@@ -750,8 +630,6 @@ func (o *ahpTerminalOutput) flushLocked() {
 	for ready > 0 {
 		cut := min(ready, ahpTerminalChunkMax)
 		if cut < ready {
-			// Move the cut back to the start of a character, but never past
-			// what one character spans: malformed bytes are passed on.
 			at := cut
 			for back := 0; back < utf8.UTFMax-1 && at > 0 && !utf8.RuneStart(o.pending[at]); back++ {
 				at--
@@ -760,8 +638,6 @@ func (o *ahpTerminalOutput) flushLocked() {
 				cut = at
 			}
 		} else if !o.closed {
-			// Hold back a final character whose bytes have not all arrived:
-			// at most UTFMax-1 bytes stay pending.
 			for back := 1; back < utf8.UTFMax && back <= cut; back++ {
 				if i := cut - back; utf8.RuneStart(o.pending[i]) {
 					if !utf8.FullRune(o.pending[i:cut]) {
@@ -776,8 +652,6 @@ func (o *ahpTerminalOutput) flushLocked() {
 		}
 		data := strings.ToValidUTF8(string(o.pending[:cut]), "\uFFFD")
 		if o.emit.Emit(o.ctx, o.channel, ahptypes.StateAction{Value: &ahptypes.TerminalDataAction{Type: ahptypes.ActionTypeTerminalData, Data: data}}) != nil {
-			// The journal did not take it: it stays pending, already
-			// redacted, and nothing after it goes first.
 			o.scheduleLocked()
 			return
 		}
@@ -787,8 +661,6 @@ func (o *ahpTerminalOutput) flushLocked() {
 	}
 }
 
-// keepRecent keeps as much of the end of emitted output as a token could
-// have begun in.
 func (o *ahpTerminalOutput) keepRecent(data string, tokens []string) {
 	keep := 0
 	for _, token := range tokens {
@@ -800,9 +672,6 @@ func (o *ahpTerminalOutput) keepRecent(data string, tokens []string) {
 	}
 }
 
-// close sends what is pending before the terminal is reported exited. A final
-// flush the journal refuses is tried again for a while, since nothing would
-// schedule it once the output is closed; a terminal being ended stops trying.
 func (o *ahpTerminalOutput) close() {
 	o.mu.Lock()
 	defer o.mu.Unlock()

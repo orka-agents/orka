@@ -45,8 +45,6 @@ func updateVersion(root, tag string) error {
 			count:   1,
 		})
 	}
-	// Check every expected field before writing any file. Preserve surrounding
-	// bytes instead of reserializing YAML and changing comments or formatting.
 	updates := make(map[string]string, len(edits))
 	paths := make([]string, 0, len(edits))
 	for name, replacements := range edits {

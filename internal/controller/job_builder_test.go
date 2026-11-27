@@ -125,7 +125,6 @@ func setupJobBuilder() *JobBuilder {
 	return b
 }
 
-// buildEnvVars builds the environment variables for the container
 func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) []corev1.EnvVar {
 	envVars, err := b.buildEnvVarsWithOptions(ctx, task, agent, provider, JobBuildOptions{})
 	if err != nil {
@@ -292,7 +291,6 @@ func TestJobBuilder_Build_ContainerTask(t *testing.T) {
 	assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, ContainerWorkerServiceAccount)
 	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, false)
 
-	// Verify container settings
 	container := job.Spec.Template.Spec.Containers[0]
 	if container.Image != testBusyboxImage {
 		t.Errorf("Image = %s, want %s", container.Image, testBusyboxImage)
@@ -620,8 +618,6 @@ func TestJobBuilder_Build_AITaskWorkspaceDirectory(t *testing.T) {
 		wantEmptyDir  bool
 		wantArtifacts string
 	}{
-		// File tools default to /workspace, so a repository-less AI task needs a
-		// writable one, and files written there are uploaded as artifacts.
 		{name: "AI task without repository", taskType: corev1alpha1.TaskTypeAI, wantMount: true, wantEmptyDir: true, wantArtifacts: workspaceRootPath},
 		{
 			name: "AI task with repository keeps the default artifact directory", taskType: corev1alpha1.TaskTypeAI,
@@ -722,7 +718,6 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 
 	assertAutomountServiceAccountToken(t, job.Spec.Template.Spec.AutomountServiceAccountToken, true)
 
-	// Verify session-data emptyDir volume
 	hasSessionVolume := false
 	for _, vol := range job.Spec.Template.Spec.Volumes {
 		if vol.Name == "session-data" {
@@ -737,7 +732,6 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 		t.Error("Job should have session-data volume")
 	}
 
-	// Verify init container exists
 	if len(job.Spec.Template.Spec.InitContainers) == 0 {
 		t.Fatal("Job should have init container for session fetch")
 	}
@@ -1126,7 +1120,7 @@ func TestJobBuilder_buildResources_TaskResources(t *testing.T) {
 func TestJobBuilder_buildResources_AgentResources(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
-		Spec: corev1alpha1.TaskSpec{}, // No resources
+		Spec: corev1alpha1.TaskSpec{},
 	}
 	agent := &corev1alpha1.Agent{
 		Spec: corev1alpha1.AgentSpec{
@@ -1148,7 +1142,7 @@ func TestJobBuilder_buildResources_AgentResources(t *testing.T) {
 func TestJobBuilder_buildResources_Defaults(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
-		Spec: corev1alpha1.TaskSpec{}, // No resources
+		Spec: corev1alpha1.TaskSpec{},
 	}
 
 	resources := builder.buildResources(task, nil)
@@ -1206,7 +1200,6 @@ func TestJobBuilder_buildEnvVars(t *testing.T) {
 
 	envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
 
-	// Check required env vars
 	hasTaskName := false
 	hasTaskNamespace := false
 	hasResultEndpoint := false
@@ -1275,7 +1268,6 @@ func TestJobBuilder_buildEnvVars_AITask(t *testing.T) {
 
 	envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
 
-	// Check AI-specific env vars
 	hasProvider := false
 	hasModel := false
 	hasPrompt := false
@@ -1340,7 +1332,6 @@ func TestJobBuilder_buildEnvVars_WithAgent(t *testing.T) {
 
 	envVars := builder.buildEnvVars(context.Background(), task, agent, nil)
 
-	// Agent values should be used when task doesn't specify them
 	hasProvider := false
 	hasModel := false
 
@@ -1450,7 +1441,7 @@ func TestJobBuilder_buildContainer_ContainerWithoutImage(t *testing.T) {
 	task := &corev1alpha1.Task{
 		Spec: corev1alpha1.TaskSpec{
 			Type:  corev1alpha1.TaskTypeContainer,
-			Image: "", // No image specified
+			Image: "",
 		},
 	}
 
@@ -1672,9 +1663,6 @@ func TestJobBuilder_buildEnvVars_NoCoordination(t *testing.T) {
 	}
 }
 
-// --- Agent task path tests ---
-
-// helper to find env var by name
 func findEnvVar(envVars []corev1.EnvVar, name string) (corev1.EnvVar, bool) {
 	for _, e := range envVars {
 		if e.Name == name {
@@ -1694,7 +1682,6 @@ func countEnvVars(envVars []corev1.EnvVar, name string) int {
 	return count
 }
 
-// helper to check volume exists by name
 func hasVolume(volumes []corev1.Volume, name string) bool {
 	for _, v := range volumes {
 		if v.Name == name {
@@ -1734,7 +1721,6 @@ func requireWorkspaceCredentialProjection(
 	t.Fatalf("missing workspace credential volume %q", volumeName)
 }
 
-// helper to find a volume mount by name
 func findVolumeMount(mounts []corev1.VolumeMount, name string) (corev1.VolumeMount, bool) {
 	for _, m := range mounts {
 		if m.Name == name {
@@ -1744,13 +1730,11 @@ func findVolumeMount(mounts []corev1.VolumeMount, name string) (corev1.VolumeMou
 	return corev1.VolumeMount{}, false
 }
 
-// helper to check volume mount exists by name
 func hasVolumeMount(mounts []corev1.VolumeMount, name string) bool {
 	_, ok := findVolumeMount(mounts, name)
 	return ok
 }
 
-// helper to check EnvFrom includes the standard agent secret.
 func hasAgentEnvFromSecret(envFrom []corev1.EnvFromSource) bool {
 	for _, ef := range envFrom {
 		if ef.SecretRef != nil && ef.SecretRef.Name == testAgentSecretName {
@@ -2120,10 +2104,6 @@ func TestJobBuilder_Build_ContainerTask_RejectsUnsupportedPublicationGuarantees(
 	}
 }
 
-// ---------------------------------------------------------------------------
-// addSecretVolumes
-// ---------------------------------------------------------------------------
-
 func TestAddSecretVolumes_ProviderOpenAI(t *testing.T) {
 	jb := setupJobBuilder()
 	provider := &corev1alpha1.Provider{
@@ -2397,10 +2377,6 @@ func TestAddSecretVolumes_ProviderAzureOpenAI(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// addAIEnvVars — fallback providers
-// ---------------------------------------------------------------------------
-
 func TestAddAIEnvVars_FallbackProviders(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
@@ -2453,10 +2429,6 @@ func TestAddAIEnvVars_FallbackProviders(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// addWorkspaceEnvVars
-// ---------------------------------------------------------------------------
-
 func TestAddWorkspaceEnvVars_AllFields(t *testing.T) {
 	jb := setupJobBuilder()
 	task := &corev1alpha1.Task{
@@ -2494,10 +2466,6 @@ func TestAddWorkspaceEnvVars_AllFields(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// addAIEnvVars — fallback providers and child task coordination
-// ---------------------------------------------------------------------------
-
 func TestAddAIEnvVars_ChildTaskMessaging(t *testing.T) {
 	jb := setupJobBuilder()
 	task := &corev1alpha1.Task{
@@ -2516,12 +2484,10 @@ func TestAddAIEnvVars_ChildTaskMessaging(t *testing.T) {
 	for _, e := range envVars {
 		envMap[e.Name] = e.Value
 	}
-	// Child task should get messaging tools auto-injected
 	tools := envMap["ORKA_AI_TOOLS"]
 	if !strings.Contains(tools, "send_message") || !strings.Contains(tools, "check_messages") {
 		t.Errorf("expected messaging tools for child task, got %s", tools)
 	}
-	// Also ORKA_COORDINATION_ENABLED should be set
 	if envMap["ORKA_COORDINATION_ENABLED"] != scheduledRunLabelValue {
 		t.Error("expected ORKA_COORDINATION_ENABLED=true for child task without coordination agent")
 	}
@@ -2557,9 +2523,6 @@ func TestAddAIEnvVars_ChildTaskMessagingDisabled(t *testing.T) {
 			t.Fatalf("%s = %#v, want no implicitly injected coordination tool %q", workerenv.AITools, tools, tool)
 		}
 	}
-	// Disabling coordination tool injection should not change the existing child-task
-	// coordination mode marker; it only prevents implicit messaging tools from being
-	// exposed to the LLM.
 	if enabled := envMap[workerenv.CoordinationEnabled]; enabled != scheduledRunLabelValue {
 		t.Fatalf("%s = %q, want %q", workerenv.CoordinationEnabled, enabled, scheduledRunLabelValue)
 	}
@@ -2857,7 +2820,6 @@ func TestJobBuilderBuildDeduplicatesSkills(t *testing.T) {
 	jb := NewJobBuilder(fc)
 	jb.ControllerURL = testControllerURL
 
-	// Same skill referenced by both agent and task
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "dedup-agent", Namespace: defaultNS},
 		Spec: corev1alpha1.AgentSpec{
@@ -2882,7 +2844,6 @@ func TestJobBuilderBuildDeduplicatesSkills(t *testing.T) {
 		t.Fatalf("Build() error = %v", err)
 	}
 
-	// Find the skills ConfigMap and verify content appears only once
 	var skillsVolume *corev1.Volume
 	for i := range job.Spec.Template.Spec.Volumes {
 		if job.Spec.Template.Spec.Volumes[i].Name == "skills" {
@@ -2902,7 +2863,6 @@ func TestJobBuilderBuildDeduplicatesSkills(t *testing.T) {
 		t.Fatalf("expected skill ConfigMap to exist: %v", err)
 	}
 
-	// Should have exactly 1 inline entry (skill-0-inline), not 2
 	inlineCount := 0
 	for key := range cm.Data {
 		if strings.HasPrefix(key, "skill-") && strings.HasSuffix(key, "-inline") {
@@ -3064,9 +3024,6 @@ func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnRead
 		}}
 		return builder.buildEnvVars(context.Background(), task, agent, nil)
 	}
-	// A read failure while resolving connector tools must fail the build
-	// (the Task controller requeues) rather than start a worker with a write
-	// tool advertised but absent from the approval set.
 	toolReadFailure.Store(true)
 	func() {
 		defer func() {
@@ -3089,8 +3046,6 @@ func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnRead
 	if approval.Value != "dispatch_work_order,gh_write" {
 		t.Fatalf("%s = %q, want the connector write tool added", workerenv.ApprovalRequiredTools, approval.Value)
 	}
-	// The controller executes each connector tool only as defined at
-	// dispatch: the Job carries the spec digest of every dispatched one.
 	digests := map[string]string{}
 	digestsEnv, _ := findEnvVar(envVars, workerenv.ConnectorToolDigests)
 	if err := json.Unmarshal([]byte(digestsEnv.Value), &digests); err != nil {
@@ -3127,11 +3082,6 @@ func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnRead
 	}
 }
 
-// The tests below pin the approval contract for native AI Jobs described in
-// docs/development/policy-contract.md (statement 7): a Job's approval set is
-// fixed when the Job is built, from the Agent's approval list plus the
-// connector write tools it is offered, and recovering that Job keeps it.
-
 func TestJobBuilder_BuildWithOptions_NativeApprovalSet(t *testing.T) {
 	f := newConnectorToolFixture(t)
 	f.policy.UID = "policy-uid"
@@ -3140,12 +3090,10 @@ func TestJobBuilder_BuildWithOptions_NativeApprovalSet(t *testing.T) {
 	f.plainTool.UID = "plain-tool-uid"
 
 	tests := []struct {
-		name          string
-		mode          string
-		autonomous    bool
-		agentRequires []string
-		// dropAgentRequirement rebuilds the Job after removing the Agent's
-		// approval list, keeping the connector write available.
+		name                 string
+		mode                 string
+		autonomous           bool
+		agentRequires        []string
 		dropAgentRequirement bool
 		wantWriteOffered     bool
 		wantWriteRequired    bool
@@ -3285,8 +3233,6 @@ func TestPrepareAISoul_AgentEditAfterBindingFailsPreparation(t *testing.T) {
 	_, err := r.prepareAISoul(t.Context(), task, agent)
 	require.NoError(t, err)
 
-	// Editing only the approval list advances the Agent's generation, which
-	// the soul binding records, so the next iteration cannot be prepared.
 	agent = agent.DeepCopy()
 	agent.Generation++
 	agent.Spec.Coordination.ApprovalRequiredTools = []string{"dispatch_work_order"}
@@ -3322,8 +3268,6 @@ func TestCreateTaskJob_AdoptsRecordedJobWithItsIssuedApprovalSet(t *testing.T) {
 	task.Status.JobName, task.Status.JobUID = issued.Name, string(issued.UID)
 	require.NoError(t, r.Status().Update(ctx, task))
 
-	// The Agent's approval list changes after the Job was issued, so a fresh
-	// candidate would carry an empty approval set.
 	agent.Spec.Coordination.ApprovalRequiredTools = nil
 	agent.Generation++
 	require.NoError(t, r.Update(ctx, agent))
@@ -3370,7 +3314,6 @@ func TestJobBuilder_buildEnvVars_FreezesConnectionBindingsOnTheJob(t *testing.T)
 	if strings.Contains(env.Value, "token") {
 		t.Fatalf("frozen bindings must carry no token material: %q", env.Value)
 	}
-	// A Task-supplied value never survives: the controller owns the name.
 	task.Spec.Env = []corev1.EnvVar{{Name: workerenv.ConnectionBindings, Value: `[{"policyName":"github-conn","uid":"forged"}]`}}
 	envVars, err = builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{})
 	if err != nil {
@@ -3682,8 +3625,6 @@ func TestJobBuilder_buildEnvVars_IgnoresTaskSuppliedAITelemetryEnv(t *testing.T)
 	}
 }
 
-// code_exec reads its sandbox settings from the AI worker's environment, so
-// an AI Task's spec.env cannot set any of them, including names added later.
 func TestJobBuilder_buildEnvVars_IgnoresTaskSuppliedCodeExecEnv(t *testing.T) {
 	reserved := []string{
 		workerenv.CodeExecBackend,
@@ -3750,9 +3691,6 @@ func TestJobBuilder_buildEnvVars_PreservesContainerCodeExecEnv(t *testing.T) {
 	}
 }
 
-// The AI worker and the provider SDKs read provider endpoint settings from the
-// environment when the Provider and Agent leave them unset, so an AI Task's
-// spec.env cannot set any of them.
 func TestJobBuilder_buildEnvVars_IgnoresTaskSuppliedProviderConnectionEnv(t *testing.T) {
 	reserved := []string{
 		workerenv.AIBaseURL,
@@ -3989,8 +3927,6 @@ func TestValidateReadOnlyBuiltInAgentRuntimeAllowsCodexReadOnlyAgentMode(t *test
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 		labels.AnnotationAgentReadOnly: scheduledRunLabelValue,
 	}}}
-	// Codex read-only tasks run in the native read-only agent mode with a
-	// kernel-enforced read-only sandbox, so validation accepts them.
 	if err := validateReadOnlyBuiltInAgentRuntime(task, corev1alpha1.AgentRuntimeCodex); err != nil {
 		t.Fatalf("validateReadOnlyBuiltInAgentRuntime() error = %v, want codex accepted", err)
 	}
@@ -4019,8 +3955,6 @@ func TestValidateContainerDeliveredPromptSize(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "MAX_ARG_STRLEN") {
 		t.Fatalf("oversized prompt error = %v, want actionable env-limit message", err)
 	}
-	// spec.ai.prompt wins over spec.prompt (resolveAIConfig precedence): a
-	// short spec.prompt must not mask an oversized exported spec.ai.prompt.
 	masked := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "short", AI: &corev1alpha1.AISpec{Prompt: oversized}}}
 	if err := builder().validateContainerDeliveredPromptSize(ctx, masked, nil); err == nil {
 		t.Fatal("oversized spec.ai.prompt was masked by a short spec.prompt")
@@ -4029,8 +3963,6 @@ func TestValidateContainerDeliveredPromptSize(t *testing.T) {
 	if err := builder().validateContainerDeliveredPromptSize(ctx, bigSystem, nil); err == nil {
 		t.Fatal("oversized system prompt was accepted")
 	}
-	// A ConfigMap-backed Agent system prompt is resolved before export and
-	// must be measured after resolution.
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "sys", Namespace: "default"}, Data: map[string]string{"prompt": oversized}}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
@@ -4042,20 +3974,12 @@ func TestValidateContainerDeliveredPromptSize(t *testing.T) {
 	if err := builder(cm).validateContainerDeliveredPromptSize(ctx, fromConfigMap, agent); err == nil {
 		t.Fatal("oversized ConfigMap-backed system prompt was accepted")
 	}
-	// Container Tasks never export these fields; unused optional prompts
-	// must not fail an otherwise runnable container.
 	containerTask := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer, Image: "alpine", Prompt: oversized}}
 	if err := builder().validateContainerDeliveredPromptSize(ctx, containerTask, nil); err != nil {
 		t.Fatalf("container task rejected on unused prompt field: %v", err)
 	}
 }
 
-// TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
-// covers one native dispatch: link modes come from the bindings the dispatch
-// froze (not a second Connection read), a policy that changed since the
-// freeze fails the build so the dispatch retries, and a Tool resource
-// shadowed by a coordination built-in the worker registers is never
-// classified as connector-backed.
 func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -4076,7 +4000,6 @@ func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
 	builder.Client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy,
 		connectorTool("gh_read", corev1alpha1.AgentRuntimeBrokeredToolClassRead),
 		connectorTool("gh_write", corev1alpha1.AgentRuntimeBrokeredToolClassWrite),
-		// Same name as a coordination built-in the worker registers.
 		connectorTool("delegate_task", corev1alpha1.AgentRuntimeBrokeredToolClassWrite),
 	).Build()
 	task := &corev1alpha1.Task{
@@ -4092,7 +4015,6 @@ func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
 		PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 1, GrantSequence: 1,
 		Mode: corev1alpha1.ConnectionModeReadOnly, PolicyUID: "policy-uid", PolicyGeneration: 3,
 	}
-	// The freeze's own per-tool classification, as createTaskJob hands it on.
 	freezeInfos, err := classifyConnectorTools(context.Background(), builder.Client, NativeWorkerToolRegistry(task, agent), defaultNS,
 		[]string{"gh_read", "gh_write", "delegate_task"}, connectorScope{strictPolicies: true})
 	if err != nil {
@@ -4121,7 +4043,6 @@ func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
 		t.Fatalf("approval set = %q, a shadowed Tool resource must not gate the built-in", approval.Value)
 	}
 
-	// A readWrite binding exposes and gates the write tool.
 	readWrite := binding
 	readWrite.Mode = corev1alpha1.ConnectionModeReadWrite
 	envVars, err = build(readWrite)
@@ -4133,8 +4054,6 @@ func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
 		t.Fatalf("tools = %q, want the readWrite link to expose gh_write", toolsEnv.Value)
 	}
 
-	// The policy object changed since the freeze: the build fails so the
-	// dispatch retries rather than mixing revisions.
 	stale := binding
 	stale.PolicyGeneration = 2
 	if _, err := build(stale); !errors.Is(err, ErrConnectorToolResolution) {
@@ -4144,10 +4063,6 @@ func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
 		t.Fatalf("missing binding err = %v, want ErrConnectorToolResolution", err)
 	}
 
-	// One of two Tools sharing the frozen policy was retargeted to a plain
-	// policy since the freeze: the policy is still classified through the
-	// other Tool, but the retargeted one would run locally with no
-	// connector route or approval default, so the build fails.
 	plainPolicy := &corev1alpha1.OutboundAccessPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: defaultNS, UID: "plain-uid"},
 		Spec:       corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{}},
@@ -4175,9 +4090,6 @@ func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
 		t.Fatalf("tool restored: err = %v", err)
 	}
 
-	// The frozen policy left connection mode since the freeze: its tools
-	// would otherwise run as plain local tools with no connector route or
-	// approval default, so the build fails and the dispatch re-freezes.
 	direct := policy.DeepCopy()
 	direct.Spec.Connection = nil
 	if err := builder.Update(context.Background(), direct); err != nil {
@@ -4204,7 +4116,6 @@ func TestJobBuilder_buildEnvVars_MemoryConsolidationTask(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
 			Spec: corev1alpha1.TaskSpec{
 				Type: corev1alpha1.TaskTypeAI,
-				// Task env cannot start, stop or widen a run.
 				Env: []corev1.EnvVar{
 					{Name: workerenv.MemoryConsolidationMode, Value: "Propose"},
 					{Name: workerenv.MemoryContextEnabled, Value: "true"},

@@ -26,7 +26,9 @@ identity is converted into a TokenReview identity for these checks. Existing
 route-specific restrictions still apply. See [Security](../concepts/security.md)
 and [Transaction Token integration](../concepts/transaction-tokens.md).
 
-Health probes, static UI files, Gateway adapter ingress, GitHub webhooks, and
+Health probes, static UI files, the MCP endpoint's OAuth protected-resource
+metadata (`GET /.well-known/oauth-protected-resource/mcp`, served only with
+`--mcp-resource-url`), Gateway adapter ingress, GitHub webhooks, and
 internal worker/ACP routes are outside this inventory. Their existing probe,
 Gateway-bound Secret, HMAC, or internal credential policies are unchanged.
 

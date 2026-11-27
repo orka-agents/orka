@@ -55,9 +55,6 @@ const (
 
 const queryTrue = "true"
 
-// Handlers contains all API handlers
-//
-// builtinToolsList defines the built-in tools returned by list/get endpoints.
 var builtinToolsList = []fiber.Map{
 	builtinToolResponse(tools.NewWebSearchTool()),
 	builtinToolResponse(tools.NewCodeExecTool()),
@@ -68,7 +65,6 @@ var builtinToolsList = []fiber.Map{
 	builtinToolResponse(tools.NewReplyInConversationTool()),
 }
 
-// builtinToolsMap indexes built-in tools by name for single-tool lookup.
 var builtinToolsMap = func() map[string]fiber.Map {
 	m := make(map[string]fiber.Map, len(builtinToolsList))
 	for _, t := range builtinToolsList {
@@ -135,22 +131,18 @@ type Handlers struct {
 	githubSignIn              GitHubSignInConfig
 	signInLimiter             *gatewayIngressLimiter
 	invites                   *githubInvites
-	// oidcEnabled says whether OIDC sign-in is configured, for clients
-	// choosing how to sign in.
-	oidcEnabled        bool
-	oidcIssuer         string
-	oidcAudience       string
-	ahp                *ahphost.Host
-	completionLocks    *completionLocks
-	substrateMCPRouter *workerexecutor.SubstrateMCPRouter
-	// chatTurns stops a chat Session's in-flight request on session cancel.
-	chatTurns chatTurnStopper
-	// attentionBounds overrides the attention scan bounds; zero uses defaults.
-	attentionBounds    attentionBounds
-	agentIdentityAudit outboundaccess.AgentIdentityAuditReader
+	oidcEnabled               bool
+	oidcIssuer                string
+	oidcAudience              string
+	oidcScopes                []string
+	ahp                       *ahphost.Host
+	completionLocks           *completionLocks
+	substrateMCPRouter        *workerexecutor.SubstrateMCPRouter
+	chatTurns                 chatTurnStopper
+	attentionBounds           attentionBounds
+	agentIdentityAudit        outboundaccess.AgentIdentityAuditReader
 }
 
-// HandlersConfig holds configuration for creating Handlers.
 type HandlersConfig struct {
 	Client                    client.Client
 	APIReader                 client.Reader
@@ -168,27 +160,25 @@ type HandlersConfig struct {
 	ArtifactStore             store.ArtifactStore
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
-	// MemoryConsolidationStore serves memory consolidation run reports.
-	MemoryConsolidationStore store.MemoryConsolidationStore
-	SecurityStore            store.SecurityStore
-	RepositoryMonitorStore   store.RepositoryMonitorStore
-	ExecutionEventStore      store.ExecutionEventStore
-	LiveEvents               *liveevents.Broker
-	GatewayEventStore        store.GatewayEventStore
-	GatewayDeliveryStore     store.GatewayDeliveryStore
-	GatewayService           *gatewayruntime.Service
-	Connectors               ConnectorConfig
-	GitHubSignIn             GitHubSignInConfig
-	OIDCEnabled              bool
-	OIDCIssuer               string
-	OIDCAudience             string
-	// AHP serves the Agent Host Protocol and its connection tokens; nil disables it.
-	AHP                *ahphost.Host
-	SubstrateMCPProxy  SubstrateMCPProxyConfig
-	AgentIdentityAudit outboundaccess.AgentIdentityAuditReader
+	MemoryConsolidationStore  store.MemoryConsolidationStore
+	SecurityStore             store.SecurityStore
+	RepositoryMonitorStore    store.RepositoryMonitorStore
+	ExecutionEventStore       store.ExecutionEventStore
+	LiveEvents                *liveevents.Broker
+	GatewayEventStore         store.GatewayEventStore
+	GatewayDeliveryStore      store.GatewayDeliveryStore
+	GatewayService            *gatewayruntime.Service
+	Connectors                ConnectorConfig
+	GitHubSignIn              GitHubSignInConfig
+	OIDCEnabled               bool
+	OIDCIssuer                string
+	OIDCAudience              string
+	OIDCScopes                []string
+	AHP                       *ahphost.Host
+	SubstrateMCPProxy         SubstrateMCPProxyConfig
+	AgentIdentityAudit        outboundaccess.AgentIdentityAuditReader
 }
 
-// NewHandlers creates a new Handlers instance
 func NewHandlers(cfg HandlersConfig) *Handlers {
 	nativeSessions, _ := cfg.SessionStore.(store.NativeSessionImportStore)
 	nativeSessionMaxBytes, nativeSessionConfigErr := harnessv2.NormalizeNativeSessionMaxBytes(cfg.NativeSessionMaxBytes)
@@ -229,6 +219,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		oidcEnabled:               cfg.OIDCEnabled,
 		oidcIssuer:                cfg.OIDCIssuer,
 		oidcAudience:              cfg.OIDCAudience,
+		oidcScopes:                cfg.OIDCScopes,
 		ahp:                       cfg.AHP,
 		substrateMCPRouter:        cfg.SubstrateMCPProxy.Router,
 		completionLocks:           newCompletionLocks(),
@@ -236,7 +227,6 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 	}
 }
 
-// MetadataRequest holds Kubernetes-style metadata fields
 type MetadataRequest struct {
 	Name        string            `json:"name"`
 	Namespace   string            `json:"namespace"`
@@ -253,9 +243,6 @@ func objectMetaFromRequest(name, namespace string, metadata MetadataRequest) met
 	}
 }
 
-// resolveNamespace resolves the effective namespace for a request and enforces isolation if enabled.
-// When watchNamespace is set: it's the only allowed namespace (explicit mismatches are rejected).
-// Otherwise: explicit param > SA namespace from token > "default"
 func (h *Handlers) resolveNamespace(c fiber.Ctx, explicit string) (string, error) {
 	var ns string
 	if h.watchNamespace != "" {
@@ -274,8 +261,6 @@ func (h *Handlers) resolveNamespace(c fiber.Ctx, explicit string) (string, error
 		ns = GetEffectiveNamespace(c, "")
 	}
 
-	// Enforce namespace isolation: authenticated callers must carry a namespace
-	// and can only access that namespace.
 	if h.enforceNamespaceIsolation {
 		ui := GetUserInfo(c)
 		if ui != nil && ui.Namespace == "" {
@@ -303,7 +288,6 @@ func (h *Handlers) resolveNamespace(c fiber.Ctx, explicit string) (string, error
 	return ns, nil
 }
 
-// CreateAgentRequest is the request body for creating an agent
 type CreateAgentRequest struct {
 	Name      string                 `json:"name"`
 	Namespace string                 `json:"namespace"`
@@ -311,12 +295,10 @@ type CreateAgentRequest struct {
 	Spec      corev1alpha1.AgentSpec `json:"spec"`
 }
 
-// UpdateAgentRequest is the request body for updating an agent
 type UpdateAgentRequest struct {
 	Spec corev1alpha1.AgentSpec `json:"spec"`
 }
 
-// CreateTaskRequest is the request body for creating a task
 type CreateTaskRequest struct {
 	Name              string                           `json:"name"`
 	Namespace         string                           `json:"namespace"`
@@ -348,8 +330,6 @@ type CreateTaskRequest struct {
 	Suspend           *bool                            `json:"suspend,omitempty"`
 }
 
-// UnmarshalJSON validates status in Kubernetes-style manifests even though
-// creation never copies controller-owned status into the new Task.
 func (in *CreateTaskRequest) UnmarshalJSON(data []byte) error {
 	var status struct {
 		Status corev1alpha1.TaskStatus `json:"status"`
@@ -435,31 +415,26 @@ func applyFlatTaskRequest(spec *corev1alpha1.TaskSpec, req CreateTaskRequest) {
 	}
 }
 
-// ListResponse is a generic list response with pagination
 type ListResponse struct {
 	Items    any      `json:"items"`
 	Metadata ListMeta `json:"metadata"`
 }
 
-// ListMeta contains pagination metadata
 type ListMeta struct {
 	Continue           string `json:"continue,omitempty"`
 	RemainingItemCount *int64 `json:"remainingItemCount,omitempty"`
 }
 
-// Healthz handles health check requests
 func (h *Handlers) Healthz(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{apiFieldStatus: "ok"})
 }
 
-// Readyz handles readiness check requests
 func (h *Handlers) Readyz(c fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(c.Context(), 2*time.Second)
 	defer cancel()
 
 	checks := fiber.Map{}
 
-	// Verify database connectivity
 	if h.healthChecker != nil {
 		if err := h.healthChecker.HealthCheck(ctx); err != nil {
 			checks["store"] = "unhealthy"
@@ -471,9 +446,6 @@ func (h *Handlers) Readyz(c fiber.Ctx) error {
 		checks["store"] = "ok"
 	}
 
-	// Verify Kubernetes API connectivity without starting a cache informer. In
-	// namespace-isolated mode, use the exact read covered by the controller's
-	// narrow Namespace RBAC grant.
 	reader := h.apiReader
 	if reader == nil {
 		reader = h.client
@@ -501,11 +473,6 @@ func (h *Handlers) Readyz(c fiber.Ctx) error {
 	})
 }
 
-// jsonObjectHasField reports whether object has a member that encoding/json
-// decodes into a struct field named field. encoding/json matches field names
-// under strings.EqualFold, which also folds non-ASCII spellings such as U+017F
-// (ſ) to "s", so "RequestedBy" and "requeſtedBy" both fill a field tagged
-// "requestedBy". strings.ToLower or an exact lookup misses some of them.
 func jsonObjectHasField(object map[string]json.RawMessage, field string) bool {
 	for key := range object {
 		if strings.EqualFold(key, field) {
@@ -550,11 +517,6 @@ func rejectRequestedByTampering(body []byte) error {
 	return nil
 }
 
-// reservedTaskMetadataPrefixes are controller-owned metadata namespaces:
-// "orka.ai/" carries provenance and runtime bookkeeping, and
-// "acp.workspace.orka.ai/" carries workspace settlement state (the link label
-// and the settled marker) whose forgery would skip controller-owned
-// revocation and detach actions.
 var reservedTaskMetadataPrefixes = []string{"orka.ai/", "acp.workspace.orka.ai/"}
 
 func rejectReservedTaskAnnotations(annotations map[string]string) error {
@@ -579,7 +541,6 @@ func rejectReservedTaskLabels(taskLabels map[string]string) error {
 	return nil
 }
 
-// CreateTask creates a new task
 func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	if err := rejectRequestedByTampering(c.Body()); err != nil {
 		return err
@@ -623,15 +584,11 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		spec = *req.Spec.DeepCopy()
 	}
 	applyFlatTaskRequest(&spec, req)
-	// Server-owned audit fields are always stamped after authorization.
 	spec.RequestedBy = nil
 	spec.Transaction = nil
 	if spec.Type == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "type is required")
 	}
-	// An AHP conversation cannot be read through a Task that continues it:
-	// another person's is not found, and the owner's own is refused, since
-	// such a Task is not private.
 	if spec.SessionRef != nil {
 		hidden, err := ahpSessionHiddenIn(c.Context(), h.client, GetUserInfo(c), namespace, spec.SessionRef.Name)
 		if err != nil {
@@ -661,7 +618,6 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	stampTaskRequesterFromUserInfo(task, GetUserInfo(c))
 	tracing.StampTaskTraceContext(c.Context(), task)
 
-	// Parse timeout if provided
 	if req.Timeout != "" {
 		duration, err := parseDuration(req.Timeout)
 		if err != nil {
@@ -669,9 +625,6 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		}
 		task.Spec.Timeout = duration
 	}
-	// A zero or negative timeout has always elapsed: the Task would fail as
-	// timed out the moment it started. Checked after both request forms (the
-	// flat field and spec.timeout) have been applied.
 	if task.Spec.Timeout != nil && task.Spec.Timeout.Duration <= 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid timeout: must be greater than zero")
 	}
@@ -702,7 +655,6 @@ func (h *Handlers) authorizeTaskCreate(ctx context.Context, c fiber.Ctx, task *c
 	return authorizeKubernetesTaskCreate(ctx, h.uncachedReader(), h.clientset, GetUserInfo(c), task)
 }
 
-// ListTasks lists tasks
 func (h *Handlers) ListTasks(c fiber.Ctx) error {
 	explicitNS := c.Query(toolNamespaceArg, "")
 	limit := c.Query("limit", "100")
@@ -710,7 +662,6 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 
 	opts := &client.ListOptions{}
 
-	// Apply namespace filter with smart defaults
 	namespace, err := h.resolveNamespace(c, explicitNS)
 	if err != nil {
 		return err
@@ -719,10 +670,6 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "listTasks", h.contextTokenAuthorization.TaskListScopes); err != nil {
 		return err
 	}
-	// A label selector narrows the Kubernetes list itself (kubectl -l
-	// syntax). The per-Task authorization below still runs on every result,
-	// so the selector cannot show a caller anything they could not list
-	// without it.
 	if rawSelector := strings.TrimSpace(c.Query("labelSelector", "")); rawSelector != "" {
 		selector, err := k8slabels.Parse(rawSelector)
 		if err != nil {
@@ -731,8 +678,6 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 		opts.LabelSelector = selector
 	}
 
-	// Apply pagination. A limit of 0 is an explicit unpaginated list request for
-	// cache-backed client-side filtered scans; omitted limits keep the default page size.
 	if limit == "0" {
 		if continueToken != "" {
 			return fiber.NewError(fiber.StatusBadRequest, "continue cannot be used with limit=0")
@@ -777,8 +722,6 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 			}
 			allowed = allowed && !ahpTaskHidden(GetUserInfo(c), task)
 			if allowed {
-				// Server-side apply bookkeeping is about a third of each
-				// serialized Task and no API client reads it.
 				task.ManagedFields = nil
 				filtered = append(filtered, *task)
 			}
@@ -806,7 +749,6 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 	return c.JSON(response)
 }
 
-// GetTask gets a task by ID
 func (h *Handlers) GetTask(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -819,7 +761,6 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 		return err
 	}
 
-	// Build consistent response shape with optional plan data
 	type planResponse struct {
 		Summary      string `json:"summary"`
 		ProgressPct  int    `json:"progressPct"`
@@ -833,7 +774,7 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 	}
 
 	resp := taskResponse{Task: *task}
-	resp.ManagedFields = nil // server-side apply bookkeeping; no API client reads it
+	resp.ManagedFields = nil
 	if h.planStore != nil {
 		if plan, planErr := h.planStore.GetPlan(ctx, task.Namespace, task.Name); planErr == nil {
 			resp.Plan = &planResponse{
@@ -849,19 +790,13 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 	return c.JSON(resp)
 }
 
-// taskUIDQueryParam optionally fences a Task route to one Task UID, so a
-// client that resolved a Task earlier never reaches a later Task that reuses
-// its name.
 const taskUIDQueryParam = "uid"
 
-// taskMatchesExpectedUID reports whether the request names no UID or the
-// loaded Task's UID.
 func taskMatchesExpectedUID(c fiber.Ctx, task *corev1alpha1.Task) bool {
 	expected := c.Query(taskUIDQueryParam)
 	return expected == "" || string(task.UID) == expected
 }
 
-// DeleteTask deletes a task
 func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -890,8 +825,6 @@ func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "task not found")
 	}
 
-	// Delete exactly the Task that was authorized, never a later Task that
-	// reused its name in the meantime.
 	uid := task.UID
 	if err := h.client.Delete(ctx, task, client.Preconditions{UID: &uid}); err != nil {
 		if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
@@ -903,7 +836,6 @@ func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// GetTaskLogs gets logs for a task
 func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -916,7 +848,6 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		return err
 	}
 
-	// For completed tasks with results available, serve from ResultStore
 	if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
 		data, err := h.resultStore.GetResult(ctx, namespace, id)
 		if err != nil {
@@ -930,16 +861,13 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		})
 	}
 
-	// A scheduled parent never runs itself; each run is a child Task.
 	if task.Spec.Schedule != "" {
 		return fiber.NewError(fiber.StatusNotFound, "task runs on a schedule and has no logs of its own; each scheduled run is a child task with its own logs")
 	}
-	// For pending tasks with no job yet
 	if task.Status.JobName == "" {
 		return fiber.NewError(fiber.StatusNotFound, "task is pending, no logs available yet")
 	}
 
-	// For running tasks, stream logs from the pod if clientset is available
 	if h.clientset == nil {
 		return c.JSON(fiber.Map{
 			apiFieldMessage: "live log streaming not available",
@@ -947,7 +875,6 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		})
 	}
 
-	// Find the pod for this job
 	pods, err := h.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("job-name=%s", task.Status.JobName),
 	})
@@ -986,7 +913,6 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		})
 	}
 
-	// Non-follow mode: return the last N lines
 	tailLines, err := parseTaskLogTailLines(c.Query("tailLines"))
 	if err != nil {
 		return err
@@ -1013,16 +939,10 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 }
 
 const (
-	// defaultTaskLogTailLines is how many trailing pod log lines a non-follow
-	// task log request returns when it does not pass tailLines.
 	defaultTaskLogTailLines int64 = 100
-	// maxTaskLogTailLines caps tailLines: the lines are buffered in memory and
-	// returned in one JSON body, so a larger request is clamped to this bound.
-	maxTaskLogTailLines int64 = 10000
+	maxTaskLogTailLines     int64 = 10000
 )
 
-// parseTaskLogTailLines reads the tailLines query parameter of a non-follow
-// task log request: the default when absent, clamped to maxTaskLogTailLines.
 func parseTaskLogTailLines(raw string) (int64, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -1030,7 +950,6 @@ func parseTaskLogTailLines(raw string) (int64, error) {
 	}
 	tailLines, err := strconv.ParseInt(raw, 10, 64)
 	if errors.Is(err, strconv.ErrRange) && tailLines > 0 {
-		// A positive value past int64 is still a request for "everything".
 		err = nil
 	}
 	if err != nil || tailLines < 1 {
@@ -1039,7 +958,6 @@ func parseTaskLogTailLines(raw string) (int64, error) {
 	return min(tailLines, maxTaskLogTailLines), nil
 }
 
-// GetTaskResult gets the result of a task
 func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -1066,10 +984,6 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get result: %v", err))
 	}
-	// Results are stored by name. A UID-fenced read confirms the same Task
-	// still holds the name after the read, so the output is that Task's. The
-	// check reads live: the cache could still hold the original Task after a
-	// same-name replacement has published its result.
 	if c.Query(taskUIDQueryParam) != "" {
 		current, err := h.taskAccess().loadLive(c, namespace, id)
 		if err != nil {
@@ -1085,7 +999,6 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	})
 }
 
-// GetTaskPlan gets the autonomous plan state for a task
 func (h *Handlers) GetTaskPlan(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -1113,8 +1026,6 @@ func (h *Handlers) GetTaskPlan(c fiber.Ctx) error {
 	return c.JSON(plan)
 }
 
-// sessionListCursor is the opaque continue token of the newest-first sessions
-// list: the creation time and name of the last session on the page.
 type sessionListCursor struct {
 	CreatedAt time.Time `json:"createdAt"`
 	Name      string    `json:"name"`
@@ -1138,7 +1049,6 @@ func decodeSessionListCursor(raw string) (*store.SessionPageCursor, error) {
 	return &position, nil
 }
 
-// ListSessions lists sessions newest first.
 func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
@@ -1157,25 +1067,15 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
-	// The session cursor is the store position of the last listed session,
-	// not a Kubernetes cache token, so the cache sentinel normalization must
-	// not apply.
 	sessionCursor, err := decodeSessionListCursor(strings.TrimSpace(c.Query("continue", "")))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
-	// The store applies the cursor, gateway exclusion, newest-first ordering,
-	// and limit itself, so each page reads only its own rows.
-	// ParsePagination already caps Limit at MaxLimit; the explicit guard
-	// makes the narrowing conversion provably bounded.
 	limit := pagination.Limit
 	pageLimit := int(MaxLimit)
 	if limit <= MaxLimit {
 		pageLimit = int(limit)
 	}
-	// Sessions hidden from the caller are left out, and pages read on until
-	// one is full. The continue token names the last session listed, never
-	// a hidden one: the next page reads the rows after it again.
 	ui := GetUserInfo(c)
 	items := make([]fiber.Map, 0, pageLimit)
 	continueToken := ""
@@ -1233,7 +1133,6 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	return c.JSON(response)
 }
 
-// GetSession gets a session
 func (h *Handlers) GetSession(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -1274,7 +1173,6 @@ func (h *Handlers) GetSession(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session execution control: %v", err))
 	}
 
-	// Build JSONL transcript from messages for backward compatibility
 	var transcript string
 	if len(session.Messages) > 0 {
 		lines := make([]string, 0, len(session.Messages))
@@ -1306,9 +1204,6 @@ func (h *Handlers) GetSession(c fiber.Ctx) error {
 	return c.JSON(response)
 }
 
-// getSessionExecutionControl projects Kubernetes-authoritative Session state
-// into the public read API. The projection intentionally excludes mutation
-// Lease contents, controller epoch tokens, and other internal fencing data.
 func (h *Handlers) getSessionExecutionControl(
 	ctx context.Context,
 	namespace, sessionName string,
@@ -1364,7 +1259,6 @@ func (h *Handlers) getSessionExecutionControl(
 	return projection, nil
 }
 
-// DeleteSession deletes a session
 func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -1398,7 +1292,6 @@ func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// ListTools lists available tools
 func (h *Handlers) ListTools(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
@@ -1412,7 +1305,6 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 
 	opts := &client.ListOptions{Namespace: namespace}
 
-	// Apply pagination
 	pagination, err := ParsePagination(limit, continueToken)
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
@@ -1422,9 +1314,6 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 
 	ctx := c.Context()
 
-	// Add built-in tools to the response. They are not part of the paginated
-	// Tool CRD collection, so they are emitted once, on the first page only;
-	// a client following metadata.continue must not receive them again.
 	toolItems := make([]fiber.Map, 0)
 	if pagination.Continue == "" {
 		for _, tool := range builtinToolsList {
@@ -1439,8 +1328,6 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 		}
 	}
 
-	// A scoped context token can hide CRD tools; the Kubernetes remaining
-	// count then describes the unfiltered collection and must not be exposed.
 	toolsFiltered := false
 	var toolRemaining *int64
 	crdTools, continueToken, err := collectAuthorizedPages(pagination.Limit, pagination.Continue, func(continueToken string, pageLimit int64) ([]fiber.Map, string, error) {
@@ -1491,7 +1378,6 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 	return c.JSON(response)
 }
 
-// GetTool gets a tool by name
 func (h *Handlers) GetTool(c fiber.Ctx) error {
 	name := c.Params(apiFieldName)
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -1502,7 +1388,6 @@ func (h *Handlers) GetTool(c fiber.Ctx) error {
 		return err
 	}
 
-	// Check if it's a built-in tool
 	if builtin, ok := builtinToolsMap[name]; ok {
 		if err := authorizeContextTokenToolMetadata(c, h.contextTokenAuthorization, "getTool", name); err != nil {
 			return err
@@ -1510,7 +1395,6 @@ func (h *Handlers) GetTool(c fiber.Ctx) error {
 		return c.JSON(builtin)
 	}
 
-	// Look up Tool CRD
 	tool := &corev1alpha1.Tool{}
 	ctx := c.Context()
 	if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, tool); err != nil {
@@ -1526,7 +1410,6 @@ func (h *Handlers) GetTool(c fiber.Ctx) error {
 	return c.JSON(tool)
 }
 
-// ListAgents lists available agents
 func (h *Handlers) ListAgents(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
@@ -1540,7 +1423,6 @@ func (h *Handlers) ListAgents(c fiber.Ctx) error {
 
 	opts := &client.ListOptions{Namespace: namespace}
 
-	// Apply pagination
 	pagination, err := ParsePagination(limit, continueToken)
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
@@ -1583,7 +1465,6 @@ func (h *Handlers) ListAgents(c fiber.Ctx) error {
 		return err
 	}
 	if agentsFiltered {
-		// The raw count describes Agents the caller is not allowed to see.
 		remainingItemCount = nil
 	}
 
@@ -1598,7 +1479,6 @@ func (h *Handlers) ListAgents(c fiber.Ctx) error {
 	return c.JSON(response)
 }
 
-// GetAgent gets an agent by name
 func (h *Handlers) GetAgent(c fiber.Ctx) error {
 	name := c.Params(apiFieldName)
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -1624,15 +1504,11 @@ func (h *Handlers) GetAgent(c fiber.Ctx) error {
 	return c.JSON(agent)
 }
 
-// AgentSystemPromptResponse is the system prompt an Agent reads from a ConfigMap.
 type AgentSystemPromptResponse struct {
 	ConfigMapRef corev1alpha1.ConfigMapKeySelector `json:"configMapRef"`
 	Content      string                            `json:"content"`
 }
 
-// GetAgentSystemPrompt returns the key of the ConfigMap that an Agent's
-// spec.systemPrompt.configMapRef selects. It reads only that key, and only for
-// callers who may also read the ConfigMap itself.
 func (h *Handlers) GetAgentSystemPrompt(c fiber.Ctx) error {
 	name := c.Params(apiFieldName)
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -1680,14 +1556,12 @@ func (h *Handlers) GetAgentSystemPrompt(c fiber.Ctx) error {
 	return c.JSON(AgentSystemPromptResponse{ConfigMapRef: ref, Content: content})
 }
 
-// CreateAgent creates a new agent
 func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	var req CreateAgentRequest
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 	}
 
-	// Support both flat format {"name":"x"} and Kubernetes-style {"metadata":{"name":"x"}}
 	name := req.Name
 	if name == "" {
 		name = req.Metadata.Name
@@ -1696,7 +1570,6 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "name is required")
 	}
 
-	// Resolve namespace from request or token
 	explicitNS := req.Namespace
 	if explicitNS == "" {
 		explicitNS = req.Metadata.Namespace
@@ -1749,7 +1622,6 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(agent)
 }
 
-// UpdateAgent updates an existing agent
 func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
@@ -1759,8 +1631,6 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 		return err
 	}
 
-	// Namespace isolation is resolved before parsing the body so unauthorized
-	// namespace probes cannot learn whether the payload is syntactically valid.
 	var req UpdateAgentRequest
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
@@ -1772,9 +1642,6 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 	return h.updateAgentSpec(c, namespace, req.Spec, nil)
 }
 
-// updateAgentSpec keeps both routes on the same validation and authorization
-// path. Only the conditional route supplies expectations; they never advance
-// when a patch retries after a resourceVersion conflict.
 func (h *Handlers) updateAgentSpec(c fiber.Ctx, namespace string, spec corev1alpha1.AgentSpec, expected *UpdateAgentSpecRequest) error {
 	name := c.Params(apiFieldName)
 	ctx := c.Context()
@@ -1839,7 +1706,6 @@ func (h *Handlers) updateAgentSpec(c fiber.Ctx, namespace string, spec corev1alp
 	return c.JSON(agent)
 }
 
-// DeleteAgent deletes an agent
 func (h *Handlers) DeleteAgent(c fiber.Ctx) error {
 	name := c.Params(apiFieldName)
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -1869,7 +1735,6 @@ func (h *Handlers) DeleteAgent(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// CreateSkillRequest is the request body for creating a skill
 type CreateSkillRequest struct {
 	Name      string                 `json:"name"`
 	Namespace string                 `json:"namespace"`
@@ -1877,12 +1742,10 @@ type CreateSkillRequest struct {
 	Spec      corev1alpha1.SkillSpec `json:"spec"`
 }
 
-// UpdateSkillRequest is the request body for updating a skill
 type UpdateSkillRequest struct {
 	Spec corev1alpha1.SkillSpec `json:"spec"`
 }
 
-// ListSkills lists available skills
 func (h *Handlers) ListSkills(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
@@ -1934,7 +1797,6 @@ func (h *Handlers) ListSkills(c fiber.Ctx) error {
 	return c.JSON(response)
 }
 
-// GetSkill gets a skill by name
 func (h *Handlers) GetSkill(c fiber.Ctx) error {
 	name := c.Params(apiFieldName)
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -1957,7 +1819,6 @@ func (h *Handlers) GetSkill(c fiber.Ctx) error {
 	return c.JSON(skill)
 }
 
-// GetSkillContent gets the raw content of a skill
 func (h *Handlers) GetSkillContent(c fiber.Ctx) error {
 	name := c.Params(apiFieldName)
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -1981,7 +1842,6 @@ func (h *Handlers) GetSkillContent(c fiber.Ctx) error {
 	return c.SendString(skill.Spec.Content.Inline)
 }
 
-// CreateSkill creates a new skill
 func (h *Handlers) CreateSkill(c fiber.Ctx) error {
 	var req CreateSkillRequest
 	if err := c.Bind().JSON(&req); err != nil {
@@ -2027,7 +1887,6 @@ func (h *Handlers) CreateSkill(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(skill)
 }
 
-// UpdateSkill updates an existing skill
 func (h *Handlers) UpdateSkill(c fiber.Ctx) error {
 	name := c.Params(apiFieldName)
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -2063,7 +1922,6 @@ func (h *Handlers) UpdateSkill(c fiber.Ctx) error {
 	return c.JSON(skill)
 }
 
-// DeleteSkill deletes a skill
 func (h *Handlers) DeleteSkill(c fiber.Ctx) error {
 	name := c.Params(apiFieldName)
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -2090,14 +1948,12 @@ func (h *Handlers) DeleteSkill(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// SecretNameResponse is a minimal representation of a Secret for dropdown lists
 type SecretNameResponse struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
 	Type      string `json:"type"`
 }
 
-// ListSecretNames lists secret names in a namespace (metadata only, no data)
 func (h *Handlers) ListSecretNames(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
@@ -2114,7 +1970,6 @@ func (h *Handlers) ListSecretNames(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list secrets: %v", err))
 	}
 
-	// Return only names and types, never secret data
 	names := make([]SecretNameResponse, 0, len(secretList.Items))
 	for _, s := range secretList.Items {
 		if s.Type == corev1.SecretTypeServiceAccountToken || s.Type == "kubernetes.io/service-account-token" {
@@ -2130,7 +1985,6 @@ func (h *Handlers) ListSecretNames(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{apiFieldItems: names})
 }
 
-// StreamPodLogs streams logs from a pod
 func StreamPodLogs(ctx context.Context, clientset kubernetes.Interface, namespace, podName, containerName string) (io.ReadCloser, error) {
 	opts := &corev1.PodLogOptions{
 		Container: containerName,
@@ -2141,9 +1995,7 @@ func StreamPodLogs(ctx context.Context, clientset kubernetes.Interface, namespac
 	return req.Stream(ctx)
 }
 
-// parseDuration parses a duration string
 func parseDuration(s string) (*metav1.Duration, error) {
-	// Handle common formats like "300s", "5m", "1h"
 	duration, err := time.ParseDuration(s)
 	if err != nil {
 		return nil, err
@@ -2151,7 +2003,6 @@ func parseDuration(s string) (*metav1.Duration, error) {
 	return &metav1.Duration{Duration: duration}, nil
 }
 
-// GetTaskChildren returns child tasks for a given parent task
 func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 	taskName := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -2203,7 +2054,6 @@ func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 	})
 }
 
-// ListTaskArtifacts lists artifacts for a task
 func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -2232,7 +2082,6 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"artifacts": artifacts})
 }
 
-// DownloadTaskArtifact downloads a specific artifact file
 func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 	id := c.Params("id")
 	filename := c.Params("filename")
@@ -2258,7 +2107,6 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get artifact: %v", err))
 	}
 
-	// Sanitize filename for Content-Disposition header
 	safeFilename := strings.Map(func(r rune) rune {
 		if r == '"' || r == '\\' || r == '\r' || r == '\n' {
 			return '_'
@@ -2270,13 +2118,10 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 	return c.Send(data)
 }
 
-// handleAuthValidate returns success if the request passes auth middleware
 func (s *Server) handleAuthValidate(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"authenticated": true})
 }
 
-// validateAgentSpec rejects Agent fields the CRD schema cannot express. A
-// negative ttlAfterLastTask would otherwise be stored and read as expired.
 func validateAgentSpec(spec corev1alpha1.AgentSpec) error {
 	if spec.TTLAfterLastTask != nil && spec.TTLAfterLastTask.Duration < 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.ttlAfterLastTask must not be negative")

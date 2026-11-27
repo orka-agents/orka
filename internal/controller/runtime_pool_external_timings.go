@@ -24,26 +24,14 @@ import (
 )
 
 const (
-	// externalWorkloadPublishedAnnotation records when Core published the
-	// workload request of a sequence, as "<sequence> <RFC3339Nano>". It only
-	// measures how long the runtime took to start.
-	externalWorkloadPublishedAnnotation = "acp.workspace.orka.ai/workload-published-at"
-	// externalRetirementAuthorizedAnnotation records when Core authorized the
-	// provider to retire a sequence, in the same form. It only measures how
-	// long the runtime took to stop.
+	externalWorkloadPublishedAnnotation    = "acp.workspace.orka.ai/workload-published-at"
 	externalRetirementAuthorizedAnnotation = "acp.workspace.orka.ai/retirement-authorized-at"
-	// externalRuntimeStopRequestedAnnotation records, in the same form and in
-	// the retirement authorization patch, when this controller process first
-	// saw the RuntimePool retire that sequence. It only measures how long the
-	// runtime took to stop, and is absent when the process did not see the
-	// retirement begin, for example after a restart.
 	externalRuntimeStopRequestedAnnotation = "acp.workspace.orka.ai/stop-requested-at"
 
 	externalRuntimeStartedLogMessage = "ACP workspace runtime started"
 	externalRuntimeStoppedLogMessage = "ACP workspace runtime stopped"
 )
 
-// Start paths of an execution-workspace runtime.
 const (
 	externalRuntimePathCold        = "cold"
 	externalRuntimePathRestore     = "restore"
@@ -51,7 +39,6 @@ const (
 	externalRuntimePathReplacement = "replacement"
 )
 
-// Phases of an execution-workspace runtime start and stop.
 const (
 	externalRuntimePhaseProvision               = "provision"
 	externalRuntimePhaseProviderMaterialization = "provider_materialization"
@@ -66,8 +53,6 @@ func formatExternalRuntimeMilestone(sequence int64, at time.Time) string {
 	return strconv.FormatInt(sequence, 10) + " " + at.UTC().Format(time.RFC3339Nano)
 }
 
-// parseExternalRuntimeMilestone returns the recorded time only when it belongs
-// to the given sequence.
 func parseExternalRuntimeMilestone(raw string, sequence int64) (time.Time, bool) {
 	rawSequence, rawTime, ok := strings.Cut(strings.TrimSpace(raw), " ")
 	if !ok {
@@ -84,8 +69,6 @@ func parseExternalRuntimeMilestone(raw string, sequence int64) (time.Time, bool)
 	return at, true
 }
 
-// setExternalRuntimeMilestone stamps an annotation on a workspace about to be
-// patched, so the milestone costs no extra write.
 func setExternalRuntimeMilestone(w *workspacev1alpha1.ExecutionWorkspace, annotation string, sequence int64, at time.Time) {
 	if w.Annotations == nil {
 		w.Annotations = map[string]string{}
@@ -111,10 +94,6 @@ type externalRuntimePhase struct {
 	duration time.Duration
 }
 
-// externalRuntimeStartPhases breaks a runtime start into the time Core took to
-// provision and publish it (first sequence only, from RuntimePool creation),
-// the provider's materialization up to its DataPlaneReady report, and Core's
-// credential bootstrap and authenticated probe up to admission.
 func externalRuntimeStartPhases(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace, accepted time.Time) []externalRuntimePhase {
 	request := w.Spec.Workload
 	published, ok := parseExternalRuntimeMilestone(w.Annotations[externalWorkloadPublishedAnnotation], request.Sequence)
@@ -137,12 +116,6 @@ func externalRuntimeStartPhases(pool *corev1alpha1.RuntimePool, w *workspacev1al
 	return phases
 }
 
-// externalRuntimeReadyAt returns when the provider reported DataPlaneReady
-// for the published sequence. A condition time keeps whole seconds only, so a
-// report in the publication's own second can read as slightly before it; that
-// report counts as ready at publication. Readiness from an earlier second, or
-// observed for an earlier generation, can predate this sequence and is
-// ignored.
 func externalRuntimeReadyAt(w *workspacev1alpha1.ExecutionWorkspace, published time.Time) (time.Time, bool) {
 	ready := meta.FindStatusCondition(w.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceDataPlaneReady))
 	if ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration != w.Generation {
@@ -158,11 +131,6 @@ func externalRuntimeReadyAt(w *workspacev1alpha1.ExecutionWorkspace, published t
 	return at, true
 }
 
-// externalRuntimeStopPhases breaks a runtime stop into Core's drain, from the
-// first observed retirement of the sequence to retirement authorization, and
-// the provider's retirement up to Core's independent proof that the instance
-// stopped. Detach and settlement times are not used: settlement can suspend
-// the workspace after the pool already began, or even finished, its drain.
 func externalRuntimeStopPhases(w *workspacev1alpha1.ExecutionWorkspace, stopped time.Time) []externalRuntimePhase {
 	retirement := w.Spec.Retirement
 	authorized, ok := parseExternalRuntimeMilestone(w.Annotations[externalRetirementAuthorizedAnnotation], retirement.Sequence)
@@ -179,12 +147,6 @@ func externalRuntimeStopPhases(w *workspacev1alpha1.ExecutionWorkspace, stopped 
 	return append(phases, externalRuntimePhase{externalRuntimePhaseProviderRetirement, stopped.Sub(authorized)})
 }
 
-// stampExternalRuntimeStopRequested adds the observed start of the stop to the
-// patch that first authorizes the sequence's retirement. A later
-// authorization of the same sequence, such as deletion superseding a Suspend,
-// keeps that start until Core proved the earlier retirement's stop, by a
-// persisted Stopped status or a proof this process saw, and then drops it:
-// that stop was already reported and its drain had ended.
 func (r *RuntimePoolReconciler) stampExternalRuntimeStopRequested(w *workspacev1alpha1.ExecutionWorkspace, previous *workspacev1alpha1.WorkloadRetirement, pool *corev1alpha1.RuntimePool, authorized time.Time) {
 	sequence := w.Spec.Retirement.Sequence
 	if previous != nil && previous.Sequence == sequence {
@@ -199,9 +161,6 @@ func (r *RuntimePoolReconciler) stampExternalRuntimeStopRequested(w *workspacev1
 	}
 }
 
-// noteExternalRuntimeStopProven keeps when Core first proved the authorized
-// retirement's termination, so a Stopped write that fails and is retried
-// does not count Core's retry delay as the provider's retirement.
 func (r *RuntimePoolReconciler) noteExternalRuntimeStopProven(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) {
 	if w.Spec.Retirement != nil {
 		r.externalTimings.noteStopProven(pool.UID, externalRuntimeStopKey(w.Spec.Retirement), r.now())
@@ -216,7 +175,6 @@ func externalRuntimePhaseKeysAndValues(phases []externalRuntimePhase) []any {
 	return values
 }
 
-// phaseLogKey turns provider_materialization into providerMaterializationMs.
 func phaseLogKey(phase string) string {
 	parts := strings.Split(phase, "_")
 	for i := 1; i < len(parts); i++ {
@@ -227,14 +185,6 @@ func phaseLogKey(phase string) string {
 	return strings.Join(parts, "") + "Ms"
 }
 
-// externalRuntimeTimingReports remembers, per RuntimePool, the runtime
-// instance whose start and the retirement whose stop this controller process
-// already reported, when it first saw the pool retire its current sequence,
-// and when it first proved that retirement's termination. A readmission or a
-// repeated Stopped write after a transient failure is then not reported
-// again. It lives in memory only, so it costs no write: after a controller
-// restart one already-reported transition can be reported again, and a
-// retirement already under way is not given a start.
 type externalRuntimeTimingReports struct {
 	mu    sync.Mutex
 	pools map[types.UID]*externalRuntimeTimingReport
@@ -246,10 +196,6 @@ type externalRuntimeTimingReport struct {
 	provenKey       string
 	provenAt        time.Time
 
-	// retiringSequence is the sequence the pool is retiring, or zero.
-	// retirementRequestedAt is when this process first saw that retirement,
-	// or zero when the retirement was already under way at the process's
-	// first look at the pool.
 	retiringSequence      int64
 	retirementRequestedAt time.Time
 }
@@ -266,9 +212,6 @@ func (t *externalRuntimeTimingReports) poolLocked(uid types.UID) *externalRuntim
 	return report
 }
 
-// observeRetirement records whether the pool is retiring the sequence, and
-// when this process first saw it begin. A pool that leaves retirement before
-// it was authorized starts a later retirement afresh.
 func (t *externalRuntimeTimingReports) observeRetirement(uid types.UID, sequence int64, retiring bool, at time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -279,15 +222,12 @@ func (t *externalRuntimeTimingReports) observeRetirement(uid types.UID, sequence
 		report.retiringSequence, report.retirementRequestedAt = 0, time.Time{}
 	case report.retiringSequence == sequence:
 	case !seen:
-		// The retirement may have begun before this process started.
 		report.retiringSequence, report.retirementRequestedAt = sequence, time.Time{}
 	default:
 		report.retiringSequence, report.retirementRequestedAt = sequence, at
 	}
 }
 
-// retirementRequested returns when this process first saw the pool retire the
-// sequence, if it saw the retirement begin.
 func (t *externalRuntimeTimingReports) retirementRequested(uid types.UID, sequence int64) (time.Time, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -298,8 +238,6 @@ func (t *externalRuntimeTimingReports) retirementRequested(uid types.UID, sequen
 	return report.retirementRequestedAt, true
 }
 
-// claimStart reports whether the instance's start is not yet reported, and
-// marks it reported.
 func (t *externalRuntimeTimingReports) claimStart(uid types.UID, instance string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -311,8 +249,6 @@ func (t *externalRuntimeTimingReports) claimStart(uid types.UID, instance string
 	return true
 }
 
-// claimStop reports whether the retirement's stop is not yet reported, marks
-// it reported, and returns when its termination was first proven, if known.
 func (t *externalRuntimeTimingReports) claimStop(uid types.UID, key string) (time.Time, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -327,9 +263,6 @@ func (t *externalRuntimeTimingReports) claimStop(uid types.UID, key string) (tim
 	return time.Time{}, true
 }
 
-// noteStopProven keeps the first time Core proved the retirement's
-// termination, so cleanup that follows the proof is not counted as the
-// provider's retirement.
 func (t *externalRuntimeTimingReports) noteStopProven(uid types.UID, key string, at time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -339,8 +272,6 @@ func (t *externalRuntimeTimingReports) noteStopProven(uid types.UID, key string,
 	}
 }
 
-// stopProven reports whether this process proved the retirement's
-// termination.
 func (t *externalRuntimeTimingReports) stopProven(uid types.UID, key string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -360,9 +291,6 @@ func externalRuntimeStopKey(retirement *workspacev1alpha1.WorkloadRetirement) st
 
 type externalRuntimeTimingWorkspaceKey struct{}
 
-// withExternalRuntimeTimingWorkspace carries the workspace this reconcile
-// already read and patches in place, so a persisted transition is reported
-// from it rather than lost to a failed second read.
 func withExternalRuntimeTimingWorkspace(ctx context.Context, w *workspacev1alpha1.ExecutionWorkspace) context.Context {
 	return context.WithValue(ctx, externalRuntimeTimingWorkspaceKey{}, w)
 }
@@ -378,12 +306,6 @@ func (r *RuntimePoolReconciler) externalRuntimeTimingWorkspace(ctx context.Conte
 	return w
 }
 
-// observeExternalRuntimeTransition logs and records how long an
-// execution-workspace runtime took to start or stop. It runs only after a
-// status write persisted the transition. A start is reported the first time
-// an instance admits work, even when an earlier probe already recorded it
-// while it booted; a stop when the pool first records Stopped for a
-// retirement.
 func (r *RuntimePoolReconciler) observeExternalRuntimeTransition(ctx context.Context, pool *corev1alpha1.RuntimePool, previous, current corev1alpha1.RuntimePoolStatus) {
 	if current.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting && current.ActiveInstance != nil &&
 		(previous.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting || previous.ActiveInstance == nil ||
@@ -411,9 +333,6 @@ func (r *RuntimePoolReconciler) observeExternalRuntimeStart(ctx context.Context,
 	}, externalRuntimePhaseKeysAndValues(phases)...)...)
 }
 
-// observeExternalRuntimeStop reports a stop whose termination Core proved,
-// either through a Stopped status write or, for a deleted RuntimePool,
-// through the release of its finalizer.
 func (r *RuntimePoolReconciler) observeExternalRuntimeStop(ctx context.Context, pool *corev1alpha1.RuntimePool) {
 	w := r.externalRuntimeTimingWorkspace(ctx, pool)
 	if w == nil || w.Spec.Retirement == nil {

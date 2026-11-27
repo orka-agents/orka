@@ -35,8 +35,6 @@ func TestNewProvider_RelayIsAzureOnlyAndCarriesNoCredential(t *testing.T) {
 	}
 }
 
-// The relay admits only the paths the Azure SDK builds for the AI worker;
-// this pins that list to what the SDK actually sends.
 func TestRelayedAzureRequestsUseOnlyTheRelayedPaths(t *testing.T) {
 	const prefix = "/internal/v1/tasks/default/task-1/providers/primary"
 	allowed := regexp.MustCompile(`^` + prefix + `(/openai/deployments/[A-Za-z0-9_.-]+/chat/completions|/openai/responses)$`)

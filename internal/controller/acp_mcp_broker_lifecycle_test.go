@@ -84,9 +84,6 @@ func TestACPMCPBrokerCancelsInFlightToolWhenPromptAuthorityEnds(t *testing.T) {
 				}),
 				Effects: effects,
 			}
-			// Exercise the production HTTP adapter. Its incoming request context
-			// does not cancel on client disconnect, so durable prompt authority
-			// must cancel the downstream request independently.
 			app := fiber.New()
 			app.Post(harnessv2.MCPBrokerCallPath, adaptor.HTTPHandler(broker))
 			body, err := json.Marshal(request)

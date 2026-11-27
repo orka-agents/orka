@@ -19,10 +19,6 @@ type taskTranscriptSearcher struct {
 	gatewayEvents store.GatewayEventStore
 }
 
-// NewTaskTranscriptSearcher binds brokered search to an authenticated Task.
-// The identity must come from the controller MCP broker, never tool arguments.
-// Live Task and session authorization is repeated for each search and cleanup retry.
-// guard must come from the authenticated MCP prompt context.
 func NewTaskTranscriptSearcher(reader client.Reader, sessions store.SessionStore, gatewayEvents store.GatewayEventStore, taskKey client.ObjectKey, taskUID string, taskProvenanceProtected bool, guard func(context.Context, func(context.Context) error) error) tools.TranscriptSearcher {
 	return &taskTranscriptSearcher{
 		access: brokeredTaskDataAccess{
@@ -39,7 +35,6 @@ func (s *taskTranscriptSearcher) SearchTranscript(ctx context.Context, filter st
 	}
 	filter.SessionName = strings.TrimSpace(filter.SessionName)
 	filter.ExcludeSessionName = strings.TrimSpace(filter.ExcludeSessionName)
-	// Only controller-resolved references may set these authorization filters.
 	filter.SessionNames, filter.HistoryBounds = nil, nil
 	var results []store.TranscriptSearchResult
 	var task *corev1alpha1.Task
@@ -68,8 +63,6 @@ func authorizeTaskTranscriptSearch(ctx context.Context, sessions store.SessionSt
 		_, err := gatewayEvents.GetGatewayEventForTask(ctx, task.Namespace, task.Name, string(task.UID))
 		switch {
 		case err == nil:
-			// Gateway turns require an event-specific cutoff rather than the
-			// Task session references used for ordinary transcript search.
 			return fiber.NewError(fiber.StatusForbidden, "gateway session transcript search is unavailable")
 		case errors.Is(err, store.ErrNotFound):
 		default:

@@ -15,12 +15,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// failExternalNativeInstance models the provider's terminal report for a lost
-// native process: startup is withdrawn and the exact fence is preserved.
 func failExternalNativeInstance(t *testing.T, f *externalRuntimePoolFixture, mutate func(*workspacev1alpha1.ExecutionWorkspace)) {
 	t.Helper()
 	w := f.currentWorkspace(t)
-	// Settlement already asked to keep the data; a failed instance has none.
 	w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	if err := f.r.Update(t.Context(), w); err != nil {
 		t.Fatal(err)
@@ -125,7 +122,6 @@ func TestSettleACPClassWorkspaceKeepsFailedIncarnationWithRetainedData(t *testin
 			if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, task); err != nil {
 				t.Fatal(err)
 			}
-			// The Task executed on the workspace's pool before the instance failed.
 			task.Status.Execution = &corev1alpha1.TaskExecutionStatus{RuntimePoolName: acpTestSandboxPoolName}
 			if err := r.Status().Update(ctx, task); err != nil {
 				t.Fatal(err)
@@ -133,8 +129,6 @@ func TestSettleACPClassWorkspaceKeepsFailedIncarnationWithRetainedData(t *testin
 			if err := r.Get(ctx, key, workspace); err != nil {
 				t.Fatal(err)
 			}
-			// The Session Task froze Suspend; its incarnation resumed from a
-			// verified checkpoint unless it is a fresh first boot.
 			workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
 			workspace.Spec.Workload = &workspacev1alpha1.WorkloadRequest{Sequence: 2}
 			if retained {
@@ -149,8 +143,6 @@ func TestSettleACPClassWorkspaceKeepsFailedIncarnationWithRetainedData(t *testin
 			if err := r.Status().Update(ctx, workspace); err != nil {
 				t.Fatal(err)
 			}
-			// The first pass revokes the attachment; the adapter then releases
-			// the enforced epoch.
 			if done, err := r.settleACPClassWorkspace(ctx, task); err != nil || done {
 				t.Fatalf("revocation pass = (%v, %v)", done, err)
 			}
@@ -209,8 +201,6 @@ func TestSettleACPClassWorkspaceLeavesDeletedDesiredStateAlone(t *testing.T) {
 	if err := r.Get(ctx, key, workspace); err != nil {
 		t.Fatal(err)
 	}
-	// Deleting the linked RuntimePool retires the workspace this way; the API
-	// server rejects any later desired state.
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
 	workspace.Spec.Attachment = nil

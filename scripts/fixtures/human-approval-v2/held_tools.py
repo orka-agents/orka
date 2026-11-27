@@ -111,8 +111,6 @@ def make_server(address, state_path, max_hold_seconds=360):
             if not holds.started(run_id, ordinal):
                 holds.finish(run_id, ordinal, "responded")
                 return self.plain(status, value)
-            # No release/reset API exists. A genuine client disconnect ends a
-            # held execution; the safety timeout prevents an abandoned thread.
             deadline = time.monotonic() + max_hold_seconds
             while time.monotonic() < deadline:
                 try:

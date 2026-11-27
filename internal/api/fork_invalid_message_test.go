@@ -46,7 +46,6 @@ func TestInvalidObjectErrorMapsAdmissionDenialsOnly(t *testing.T) {
 	require.Equal(t, fiber.StatusBadRequest, fiberErr.Code)
 	require.Contains(t, fiberErr.Message, "require spec.model.name")
 
-	// The API server's own RBAC denial is not the caller's mistake.
 	rbac := apierrors.NewForbidden(gr, "coder", errors.New(`User "system:serviceaccount:orka-system:orka-controller-manager" cannot create resource "agents"`))
 	require.NoError(t, invalidObjectError("agent", rbac))
 	require.NoError(t, invalidObjectError("agent", errors.New("boom")))

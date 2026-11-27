@@ -61,8 +61,6 @@ func TestInternalReadRejectsCleanupDuringAuthorization(t *testing.T) {
 			if taskReads != 2 {
 				return nil
 			}
-			// The final API response already contains the old active Task, but
-			// its finalizer completes before database access can start.
 			if err := dataStore.DeletePlan(t.Context(), task.Namespace, task.Name); err != nil {
 				return err
 			}
@@ -113,11 +111,6 @@ func (s *taskReadRaceStore) GetPlan(ctx context.Context, namespace, taskName str
 	return s.Client.GetPlan(ctx, namespace, taskName)
 }
 
-// TestInternalReadsFenceAuthorizationAgainstTaskReuse races finalizer cleanup
-// and Task name reuse with a worker read that is already authorized. Cleanup
-// does not wait for the read: it moves the cleanup fence, so the read is
-// refused rather than served from the replacement Task, and the fresh
-// authorization that follows rejects the stale worker.
 func TestInternalReadsFenceAuthorizationAgainstTaskReuse(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -192,8 +185,6 @@ func TestInternalReadsFenceAuthorizationAgainstTaskReuse(t *testing.T) {
 					return nil
 				}
 				attemptedCleanup = true
-				// Finalizer cleanup must finish before the Task name can be reused.
-				// Race it after authorization and before reading the protected data.
 				cleanupErr = cleanup.DeletePlan(ctx, "default", "my-task")
 				if cleanupErr == nil {
 					return recreateTask(ctx)

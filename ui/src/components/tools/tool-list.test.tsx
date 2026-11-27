@@ -93,8 +93,6 @@ describe('ToolList', () => {
     await waitFor(() => {
       expect(screen.getByText('Not authorized to view tools')).toBeInTheDocument()
     })
-    // The error replaces the table entirely, so no horizontally scrolling
-    // table container can clip the message.
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
     expect(document.querySelector('[data-slot="table-container"]')).toBeNull()
   })
@@ -175,7 +173,6 @@ describe('ToolList', () => {
       expect(screen.getByText(description)).toBeInTheDocument()
     })
     expect(screen.getByText(description)).toHaveAttribute('title', description)
-    // The cap only widens from xl, so every column fits beside the sidebar at 1024px.
     expect(screen.getByText(description)).toHaveClass('truncate', 'max-w-48', 'xl:max-w-xs')
     expect(screen.getByText(description)).not.toHaveClass('max-w-xs')
   })

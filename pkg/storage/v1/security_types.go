@@ -5,7 +5,6 @@ import (
 	"time"
 )
 
-// ScanTaskIdentity binds ingestion to one Kubernetes Task incarnation and run.
 type ScanTaskIdentity struct {
 	Namespace      string
 	RepositoryScan string
@@ -16,8 +15,6 @@ type ScanTaskIdentity struct {
 	SliceID        string
 }
 
-// ScanTaskIngestion is committed with the Task's results and run counters.
-// Follow-up work uses this receipt instead of parsing and counting results again.
 type ScanTaskIngestion struct {
 	ScanTaskIdentity
 	FindingIDs          []string
@@ -26,7 +23,6 @@ type ScanTaskIngestion struct {
 	IngestedAt          time.Time
 }
 
-// ScanRun represents a single repository security scan execution.
 type ScanRun struct {
 	ID                   string     `json:"id"`
 	Namespace            string     `json:"namespace"`
@@ -50,18 +46,13 @@ type ScanRun struct {
 	Summary              string     `json:"summary,omitempty"`
 	ErrorMessage         string     `json:"errorMessage,omitempty"`
 
-	// RepositoryScanUID and RepositoryScanGeneration bind the run to the
-	// configuration that admitted it. Empty values identify legacy history.
 	RepositoryScanUID        string `json:"repositoryScanUID,omitempty"`
 	RepositoryScanGeneration int64  `json:"repositoryScanGeneration,omitempty"`
 
-	// CancellationVersion fences cleanup attempts. Once cancellation is
-	// requested, ordinary progress updates must never resume the run.
 	CancellationVersion int64 `json:"-"`
 	CancellationPending bool  `json:"-"`
 }
 
-// ThreatModel stores the latest generated or user-edited threat model.
 type ThreatModel struct {
 	Namespace       string    `json:"namespace"`
 	RepositoryScan  string    `json:"repositoryScan"`
@@ -73,7 +64,6 @@ type ThreatModel struct {
 	UpdatedAt       time.Time `json:"updatedAt"`
 }
 
-// FindingEvidenceRef points to supporting evidence for a finding.
 type FindingEvidenceRef struct {
 	Kind      string `json:"kind"`
 	TaskName  string `json:"taskName,omitempty"`
@@ -84,11 +74,9 @@ type FindingEvidenceRef struct {
 	EndLine   int    `json:"endLine,omitempty"`
 	Symbol    string `json:"symbol,omitempty"`
 	Quote     string `json:"quote,omitempty"`
-	// Role places a file location on the attack path, such as source or sink.
-	Role string `json:"role,omitempty"`
+	Role      string `json:"role,omitempty"`
 }
 
-// Finding represents a security finding associated with a repository scan.
 type Finding struct {
 	ID                            string               `json:"id"`
 	Namespace                     string               `json:"namespace"`
@@ -127,19 +115,16 @@ type Finding struct {
 	UpdatedAt                     time.Time            `json:"updatedAt"`
 }
 
-// PatchProposal represents a patch generation attempt for a finding.
 type PatchProposal struct {
-	ID              string `json:"id"`
-	Namespace       string `json:"namespace"`
-	RepositoryScan  string `json:"repositoryScan"`
-	FindingID       string `json:"findingID"`
-	TaskName        string `json:"taskName"`
-	Branch          string `json:"branch"`
-	DiffArtifact    string `json:"diffArtifact,omitempty"`
-	SummaryArtifact string `json:"summaryArtifact,omitempty"`
-	Status          string `json:"status"`
-	// Reason explains a failed proposal in operator-facing terms (no
-	// credential or agent-controlled text); empty while pending or succeeded.
+	ID                  string                    `json:"id"`
+	Namespace           string                    `json:"namespace"`
+	RepositoryScan      string                    `json:"repositoryScan"`
+	FindingID           string                    `json:"findingID"`
+	TaskName            string                    `json:"taskName"`
+	Branch              string                    `json:"branch"`
+	DiffArtifact        string                    `json:"diffArtifact,omitempty"`
+	SummaryArtifact     string                    `json:"summaryArtifact,omitempty"`
+	Status              string                    `json:"status"`
 	Reason              string                    `json:"reason,omitempty"`
 	PRNumber            *int                      `json:"prNumber,omitempty"`
 	PRURL               string                    `json:"prURL,omitempty"`
@@ -148,8 +133,6 @@ type PatchProposal struct {
 	UpdatedAt           time.Time                 `json:"updatedAt"`
 }
 
-// PatchPublicationEvidence is the immutable governed-publication tuple bound
-// atomically when a patch proposal reaches pr_opened.
 type PatchPublicationEvidence struct {
 	PublicationID      string                   `json:"publicationId"`
 	ArtifactDigest     string                   `json:"artifactDigest"`
@@ -164,8 +147,6 @@ type PatchPublicationEvidence struct {
 	PRReceipt          PatchPullRequestEvidence `json:"prReceipt"`
 }
 
-// PatchPullRequestEvidence is the exact non-secret forge receipt bound to a
-// PatchPublicationEvidence record.
 type PatchPullRequestEvidence struct {
 	IntentKey string `json:"intentKey"`
 	ForgeID   string `json:"forgeId"`
@@ -175,7 +156,6 @@ type PatchPullRequestEvidence struct {
 	HeadSHA   string `json:"headSha"`
 }
 
-// FindingCounts summarizes finding counts by severity.
 type FindingCounts struct {
 	Total    int32 `json:"total"`
 	Critical int32 `json:"critical"`
@@ -184,7 +164,6 @@ type FindingCounts struct {
 	Low      int32 `json:"low"`
 }
 
-// FindingFilter constrains finding queries.
 type FindingFilter struct {
 	Namespace         string
 	RepositoryScan    string
@@ -201,14 +180,12 @@ type FindingFilter struct {
 	Cursor            string
 }
 
-// ChangedLineRange identifies lines introduced or modified between two scan commits.
 type ChangedLineRange struct {
 	Path      string `json:"path"`
 	StartLine int    `json:"startLine"`
 	EndLine   int    `json:"endLine"`
 }
 
-// ReviewSliceFile references a repository file included in review slice metadata.
 type ReviewSliceFile struct {
 	Path    string `json:"path"`
 	Reason  string `json:"reason,omitempty"`
@@ -217,13 +194,11 @@ type ReviewSliceFile struct {
 	Command string `json:"command,omitempty"`
 }
 
-// ReviewSliceTest references a test file and optional command associated with a slice.
 type ReviewSliceTest struct {
 	Path    string `json:"path"`
 	Command string `json:"command,omitempty"`
 }
 
-// ReviewSlice describes a deterministic, bounded repository review unit.
 type ReviewSlice struct {
 	SchemaVersion     int                `json:"schemaVersion"`
 	ID                string             `json:"id"`
@@ -251,7 +226,6 @@ type ReviewSlice struct {
 	UpdatedAt         time.Time          `json:"updatedAt,omitempty"`
 }
 
-// ReviewSliceFilter constrains review slice queries.
 type ReviewSliceFilter struct {
 	Namespace      string
 	RepositoryScan string
@@ -261,7 +235,6 @@ type ReviewSliceFilter struct {
 	Cursor         string
 }
 
-// DroppedFinding records model output rejected before finding ingestion.
 type DroppedFinding struct {
 	ID             string    `json:"id"`
 	Namespace      string    `json:"namespace"`
@@ -275,7 +248,6 @@ type DroppedFinding struct {
 	CreatedAt      time.Time `json:"createdAt"`
 }
 
-// DroppedFindingFilter constrains dropped finding diagnostic queries.
 type DroppedFindingFilter struct {
 	Namespace      string
 	RepositoryScan string
@@ -288,9 +260,6 @@ type DroppedFindingFilter struct {
 	Cursor         string
 }
 
-// SecurityStore handles repository security scanning persistence. Scan Task
-// ingestion is a conditional command (see ScanIngestionStore); its
-// validation and application logic stays in Orka.
 type SecurityStore interface {
 	ScanIngestionStore
 
@@ -303,8 +272,6 @@ type SecurityStore interface {
 	ListScanRuns(ctx context.Context, namespace, repositoryScan string, limit int, cursor string) ([]ScanRun, string, error)
 	ListActiveScanRuns(ctx context.Context, namespace, repositoryScan string) ([]ScanRun, error)
 	ListScanRunsPendingCancellation(ctx context.Context, namespace, repositoryScan string) ([]ScanRun, error)
-	// RequestScanRunCancellation persists intent before external cleanup and
-	// updates run.CancellationVersion. Completion must match that version.
 	RequestScanRunCancellation(ctx context.Context, run *ScanRun, reason string) error
 	CompleteScanRunCancellation(ctx context.Context, run *ScanRun) error
 
@@ -315,8 +282,6 @@ type SecurityStore interface {
 
 	GetLatestThreatModel(ctx context.Context, namespace, repositoryScan string) (*ThreatModel, error)
 	SaveThreatModel(ctx context.Context, model *ThreatModel) error
-	// SaveThreatModelIfVersion saves model only while the latest stored
-	// version equals expectedVersion, and returns ErrConflict otherwise.
 	SaveThreatModelIfVersion(ctx context.Context, model *ThreatModel, expectedVersion int64) error
 
 	UpsertFinding(ctx context.Context, finding *Finding) error

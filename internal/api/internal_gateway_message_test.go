@@ -321,8 +321,6 @@ func TestInternalGatewayMessageChecksRevocationInsideWriter(t *testing.T) {
 	before, err := f.db.GetGatewayDelivery(t.Context(), f.task.Namespace, seed.DeliveryID)
 	require.NoError(t, err)
 	withdrawGatewayMessageCapability(t, f)
-	// Register the Task's cleanup fence first so the test revokes only during the
-	// admission authorization, after the worker has been authenticated.
 	require.NoError(t, f.db.WithAuthorizedTaskDataAccess(t.Context(), "default", f.task.Name, func(context.Context) ([]store.TaskJobIdentity, error) {
 		return nil, nil
 	}, func(context.Context) error { return nil }))
@@ -330,7 +328,6 @@ func TestInternalGatewayMessageChecksRevocationInsideWriter(t *testing.T) {
 	fresh := interceptor.NewClient(f.h.k8sClient.(client.WithWatch), interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 		err := c.Get(ctx, key, obj, opts...)
 		if _, ok := obj.(*gatewayv1alpha1.Gateway); ok && !revoked {
-			// This real write would deadlock if a Kubernetes read ran inside the writer.
 			require.NoError(t, f.db.RevokeTaskJob(ctx, store.TaskJobIdentity{Namespace: "default", TaskUID: string(f.task.UID), JobUID: f.task.Status.JobUID}))
 			revoked = true
 		}

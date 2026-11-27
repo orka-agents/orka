@@ -71,8 +71,6 @@ func TestControllerRelaySendsTheSDKRequestToTheRelay(t *testing.T) {
 	}
 }
 
-// The Azure SDK places a baseURL path after /openai, so a relay is built
-// only for a Provider whose baseURL is its resource's origin.
 func TestControllerRelayNeedsAnOriginBaseURL(t *testing.T) {
 	relay := &ControllerRelay{URL: "http://controller:8080/relay", Token: func(context.Context) (string, error) { return "t", nil }}
 	for _, baseURL := range []string{"https://example.openai.azure.com", "https://example.openai.azure.com/"} {

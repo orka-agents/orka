@@ -15,11 +15,8 @@ import (
 type ProviderType string
 
 const (
-	// ProviderTypeAnthropic is the Anthropic Claude provider
-	ProviderTypeAnthropic ProviderType = "anthropic"
-	// ProviderTypeOpenAI is the OpenAI provider
-	ProviderTypeOpenAI ProviderType = "openai"
-	// ProviderTypeAzureOpenAI is the Azure OpenAI provider
+	ProviderTypeAnthropic   ProviderType = "anthropic"
+	ProviderTypeOpenAI      ProviderType = "openai"
 	ProviderTypeAzureOpenAI ProviderType = "azure-openai"
 )
 
@@ -90,8 +87,6 @@ type ProviderEntraAuth struct {
 	Identity string `json:"identity"`
 }
 
-// EntraIdentity returns the configured Entra identity name, or "" when the
-// Provider does not use Entra authentication.
 func (p *Provider) EntraIdentity() string {
 	if p == nil || p.Spec.Auth == nil || p.Spec.Auth.Entra == nil {
 		return ""
@@ -99,8 +94,6 @@ func (p *Provider) EntraIdentity() string {
 	return p.Spec.Auth.Entra.Identity
 }
 
-// UsesKeylessAuth reports whether the Provider authenticates without an API
-// key Secret.
 func (p *Provider) UsesKeylessAuth() bool {
 	return p != nil && p.Spec.Auth != nil
 }

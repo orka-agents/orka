@@ -66,8 +66,6 @@ type cancelTaskRequest struct {
 	method, path, auth, reason string
 }
 
-// startCancelTaskController serves the controller's cancel endpoint and
-// records every request it receives.
 func startCancelTaskController(t *testing.T, status int, body string) *[]cancelTaskRequest {
 	t.Helper()
 	var requests []cancelTaskRequest

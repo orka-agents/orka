@@ -70,9 +70,6 @@ func TestCustomACPMCPToolDescriptorRefusesUnsafeForwardingTools(t *testing.T) {
 	}
 }
 
-// The Tool CRD refuses forwarding Tools named like a runtime's built-in tool,
-// which the descriptor builder would treat as provider-native and never
-// forward. Its name list must cover every built-in name a Tool can take.
 func TestForwardingToolCRDCoversEveryBuiltInToolName(t *testing.T) {
 	raw, err := os.ReadFile("../../config/crd/bases/core.orka.ai_tools.yaml")
 	if err != nil {
@@ -103,10 +100,6 @@ func TestForwardingToolCRDCoversEveryBuiltInToolName(t *testing.T) {
 	}
 }
 
-// TestForwardingToolsNeedACredentialInjectingPolicy covers a forwarding Tool
-// backed by a Gateway policy, which the executor never forwards: it is
-// refused before the agent starts, while Direct, Connection, and
-// AgentIdentity policies are accepted.
 func TestForwardingToolsNeedACredentialInjectingPolicy(t *testing.T) {
 	tool := forwardingDescriptorTool()
 	for name, spec := range map[string]corev1alpha1.OutboundAccessPolicySpec{
@@ -133,9 +126,6 @@ func TestForwardingToolsNeedACredentialInjectingPolicy(t *testing.T) {
 	}
 }
 
-// TestForwardingToolsNeedTheBearerOutput covers a policy that would send the
-// credential in another header or without "Bearer ": Azure Resource Manager
-// would refuse every request, so the Tool is refused before the agent starts.
 func TestForwardingToolsNeedTheBearerOutput(t *testing.T) {
 	tool := forwardingDescriptorTool()
 	none, raw, bearer := "", "Token ", "Bearer "

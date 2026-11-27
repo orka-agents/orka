@@ -20,9 +20,6 @@ func mcpApprovalPendingFromOlderEpoch(effect *store.ExternalEffect, fence store.
 		effect.ControllerEpochName == fence.Name && effect.ControllerEpoch > 0 && effect.ControllerEpoch < fence.Epoch
 }
 
-// acpMCPAbandonedPendingReceipt binds a pre-execution denial to its reservation
-// when a crash prevented the approval request event from being saved. Recovery
-// must first prove an older epoch or a terminal/deleting Task with the same run.
 func acpMCPAbandonedPendingReceipt(effect *store.ExternalEffect) json.RawMessage {
 	result, _ := harnessv2.CanonicalValue(struct {
 		IsError          bool   `json:"isError"`
@@ -42,8 +39,6 @@ func (d *ACPDispatcher) failMCPApprovalPending(ctx context.Context, fence store.
 	if err != nil || effect.ID != id || effect.Identity.Kind != acpMCPToolEffectKind || effect.State != store.ExternalEffectPending {
 		return nil, store.ErrConflict
 	}
-	// The Pending/version/digest CAS is the proof that execution never began.
-	// A concurrent claim wins rather than being overwritten as an unstarted call.
 	return d.Store.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
 		ID: effect.ID, Fence: fence, ExpectedVersion: effect.Version,
 		ExpectedState: store.ExternalEffectPending, NewState: store.ExternalEffectFailed,
@@ -64,10 +59,6 @@ func (d *ACPDispatcher) mcpApprovalUnboundPendingAbandoned(ctx context.Context, 
 	if err != nil || current == nil {
 		return false, err
 	}
-	// The discovery hint alone cannot revoke a call. A fresh Task read must
-	// bind this reservation's runtime session and epoch to a run that the broker
-	// also refuses. This covers a lost request event followed by Task cleanup
-	// without requiring a controller restart or executable Secret access.
 	execution := current.Status.Execution
 	if execution == nil || execution.RuntimeSessionUID == "" || execution.RuntimeSessionUID != effect.Identity.AggregateID ||
 		execution.ControllerEpoch != effect.ControllerEpoch {
@@ -135,13 +126,9 @@ func (d *ACPDispatcher) acpMCPApprovalPendingDenial(
 	if store.IsTerminalPromptExecutionState(attempt.ExecutionState) {
 		return acpApprovalCodeStale, nil
 	}
-	// A transport disconnect, missing local lease, or temporary read failure
-	// does not by itself revoke a same-epoch review that can still reconnect.
 	return "", nil
 }
 
-// mcpApprovalCurrentTask re-reads the Task and returns nil when it is gone or
-// its UID changed, so callers never act on a recreated Task's name.
 func (d *ACPDispatcher) mcpApprovalCurrentTask(ctx context.Context, task *corev1alpha1.Task) (*corev1alpha1.Task, error) {
 	reader := d.APIReader
 	if reader == nil {

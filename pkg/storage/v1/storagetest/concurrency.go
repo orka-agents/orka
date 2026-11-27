@@ -14,14 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// concurrentCallers is how many callers race in each concurrency case. A
-// provider that is not linearizable per dataset, such as one that reads and
-// then writes without a lock or a serializable transaction, admits more than
-// one winner.
 const concurrentCallers = 8
 
-// runConcurrently releases concurrentCallers callers together and returns
-// their errors in caller order.
 func runConcurrently(call func(caller int) error) []error {
 	errs := make([]error, concurrentCallers)
 	start := make(chan struct{})
@@ -37,8 +31,6 @@ func runConcurrently(call func(caller int) error) []error {
 	return errs
 }
 
-// requireOneWinner checks that exactly one caller succeeded and every other
-// caller was refused with want.
 func requireOneWinner(t *testing.T, errs []error, want error) int {
 	t.Helper()
 	winner := -1
@@ -54,10 +46,6 @@ func requireOneWinner(t *testing.T, errs []error, want error) int {
 	return winner
 }
 
-// readDuringWrites calls write writes times while concurrentCallers-1 readers
-// call read in a loop, and fails on the first error either returns. Each write
-// waits for a read to start after the previous one, so reads overlap the whole
-// workload even when a provider could finish every write before a reader runs.
 func readDuringWrites(t *testing.T, writes int, write func(i int) error, read func() error) {
 	t.Helper()
 	var started, readers atomic.Int64
@@ -156,8 +144,6 @@ func runConcurrency(t *testing.T, newProvider StateFactory) {
 
 	t.Run("stream heads are read from one snapshot during appends", func(t *testing.T) {
 		provider := newProvider(t)
-		// Enough streams that a provider reading heads in bounded batches reads
-		// the first and last streams in different queries.
 		streams := make([]string, 1024)
 		for i := range streams {
 			streams[i] = fmt.Sprintf("task-%d", i)
@@ -176,7 +162,6 @@ func runConcurrency(t *testing.T, newProvider StateFactory) {
 			if err != nil {
 				return err
 			}
-			// Each write appends to first before last, so no snapshot has last ahead.
 			if heads[last] > heads[first] {
 				return fmt.Errorf("stream %s is at %d but %s, appended first, is at %d", last, heads[last], first, heads[first])
 			}
@@ -275,8 +260,6 @@ func runConcurrency(t *testing.T, newProvider StateFactory) {
 				TargetKind: "pull_request", TargetNumber: int64(round + 1), DesiredAction: "review",
 				Status: storagev1.WorkActionStatusRunning}
 			require.NoError(t, provider.CreateWorkAction(t.Context(), action))
-			// One caller completes the action; the others park it. A park that
-			// reads before the completion and writes after it would reopen it.
 			errs := runConcurrently(func(caller int) error {
 				if caller == 0 {
 					completed := *action
@@ -327,15 +310,9 @@ func runConcurrency(t *testing.T, newProvider StateFactory) {
 	})
 }
 
-// sessionEventPagesSnapshot checks that a Session events page and its latest
-// sequence come from one snapshot while streams are appended to and deleted.
 func sessionEventPagesSnapshot(t *testing.T, provider storagev1.StateProvider) {
 	const session = "snapshot-session"
 	filter := storagev1.SessionExecutionEventFilter{Namespace: eventsTenant, SessionName: session, Limit: 50}
-	// firstEventSeqs holds the Session sequence of each round's first event.
-	// A round appends two events to a new stream and then deletes the stream,
-	// so in any snapshot with an empty page the latest sequence is zero or a
-	// round's second event, never a first event that was still stored.
 	var firstEventSeqs sync.Map
 	appendToSession := func(stream, eventType string) error {
 		event := taskEvent(eventsTenant, stream, eventType)
@@ -369,12 +346,7 @@ func sessionEventPagesSnapshot(t *testing.T, provider storagev1.StateProvider) {
 	})
 }
 
-// cleanupFenceSnapshot checks that a Session UID stays fenced while its
-// cleanup intent is replaced by a completion.
 func cleanupFenceSnapshot(t *testing.T, provider storagev1.StateProvider) {
-	// prepared holds one more than the last round whose cleanup intent was
-	// stored. From then on its Session UID is fenced, first by the intent and
-	// then by the completion that replaces it.
 	var prepared atomic.Int64
 	readDuringWrites(t, 25, func(i int) error {
 		name, uid := fmt.Sprintf("fenced-%d", i), fmt.Sprintf("fenced-uid-%d", i)
@@ -414,15 +386,9 @@ func cleanupFenceSnapshot(t *testing.T, provider storagev1.StateProvider) {
 	})
 }
 
-// gatewayClaimRenewalSnapshot checks that a successful claim renewal returns
-// the event still dispatching under its owner while claims are retried.
 func gatewayClaimRenewalSnapshot(t *testing.T, provider storagev1.StateProvider) {
 	base := time.Date(2026, time.May, 6, 7, 8, 9, 0, time.UTC)
 	const owner = "dispatcher"
-	// claimed holds one more than the last round whose event this owner holds.
-	// Each round claims a new event and then retries it past base, so a
-	// renewal at base either fails or returns the event still dispatching
-	// under this owner.
 	var claimed atomic.Int64
 	readDuringWrites(t, 25, func(i int) error {
 		event := gatewayEvent(base, eventsTenant, fmt.Sprintf("renew-%d", i))
@@ -460,13 +426,7 @@ func gatewayClaimRenewalSnapshot(t *testing.T, provider storagev1.StateProvider)
 	})
 }
 
-// cleanupIdentityBinding checks that binding a cleanup identity to a Session
-// created during the call succeeds or reports the Session missing. A conflict
-// matches no serial order, because nothing else binds or fences these
-// Sessions.
 func cleanupIdentityBinding(t *testing.T, provider storagev1.StateProvider) {
-	// created holds the number of Sessions stored so far. Readers bind the next
-	// one, which the writer may create while the binding runs.
 	var created atomic.Int64
 	readDuringWrites(t, 50, func(i int) error {
 		if err := provider.CreateSession(t.Context(), &storagev1.SessionRecord{
@@ -488,14 +448,8 @@ func cleanupIdentityBinding(t *testing.T, provider storagev1.StateProvider) {
 	})
 }
 
-// lockDuringDelete races lock acquisition against deletion of the same
-// Session. Readers lock the newest Session, all as the same owner, while the
-// writer creates a Session and then deletes it. Acquisition must succeed or
-// report the Session missing, and a deletion must not succeed once a lock on
-// the Session was granted. Any other result matches no serial order.
 func lockDuringDelete(t *testing.T, provider storagev1.StateProvider) {
 	const rounds = 50
-	// current holds one more than the newest round whose Session was created.
 	var current atomic.Int64
 	var granted [rounds]atomic.Int64
 	var deleted [rounds]bool
@@ -512,7 +466,6 @@ func lockDuringDelete(t *testing.T, provider storagev1.StateProvider) {
 		case err == nil:
 			deleted[i] = true
 		case errors.Is(err, storagev1.ErrConflict):
-			// A reader locked the Session first.
 		default:
 			return err
 		}
@@ -541,11 +494,6 @@ func lockDuringDelete(t *testing.T, provider storagev1.StateProvider) {
 	}
 }
 
-// usageReplayDuringRetention replays usage observations while retention
-// removes them. The writer records an observation that is already past the
-// retention cutoff and then prunes; readers replay the newest one unchanged.
-// Before or after the prune, an identical replay is recorded, so any error
-// matches no serial order.
 func usageReplayDuringRetention(t *testing.T, provider storagev1.StateProvider) {
 	input := int64(5)
 	observation := func(round int64) storagev1.UsageObservation {
@@ -553,7 +501,6 @@ func usageReplayDuringRetention(t *testing.T, provider storagev1.StateProvider) 
 			CounterID: fmt.Sprintf("counter-%d", round), Scope: "call", Source: "agent", Model: "model",
 			InputTokens: &input, Status: "running", ObservedAt: controlBaseTime}
 	}
-	// current holds one more than the newest round whose observation was recorded.
 	var current atomic.Int64
 	readDuringWrites(t, 50, func(i int) error {
 		if err := provider.RecordUsage(t.Context(), observation(int64(i))); err != nil {

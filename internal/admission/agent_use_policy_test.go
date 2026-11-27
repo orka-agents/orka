@@ -27,9 +27,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// agentUseGrants allows `use` only on the listed namespace/name Agents, or
-// objects of resource when it is set, and records every check the policy
-// makes.
 type agentUseGrants struct {
 	allowed  map[string]bool
 	checked  []string
@@ -55,8 +52,6 @@ func loadAgentUsePolicies(t *testing.T) map[string]*admissionregistrationv1.Vali
 	return loadUsePolicies(t, filepath.Join("..", "..", "config", "agent-use-policy", "agent_use_policy.yaml"))
 }
 
-// loadUsePolicies loads a shipped policy file, keyed by the resource each
-// policy matches, and requires every policy to fail closed with a Deny binding.
 func loadUsePolicies(t *testing.T, path string) map[string]*admissionregistrationv1.ValidatingAdmissionPolicy {
 	t.Helper()
 	documents, err := splitYAMLDocuments(path)
@@ -85,7 +80,6 @@ func loadUsePolicies(t *testing.T, path string) map[string]*admissionregistratio
 	return policies
 }
 
-// admitsAgentUse evaluates a shipped policy as kube-apiserver does.
 func admitsAgentUse(
 	t *testing.T,
 	policy *admissionregistrationv1.ValidatingAdmissionPolicy,

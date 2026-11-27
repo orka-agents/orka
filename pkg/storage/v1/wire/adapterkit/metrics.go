@@ -11,13 +11,8 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire"
 )
 
-// durationBuckets are the upper bounds, in seconds, of the call duration
-// histogram.
 var durationBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300}
 
-// metrics holds the adapter's metrics and writes them in the Prometheus text
-// exposition format. Labels take only bounded values: method names from the
-// protocol, gRPC codes, ErrorInfo reasons and credential names.
 type metrics struct {
 	mu        sync.Mutex
 	requests  map[[3]string]uint64
@@ -40,7 +35,6 @@ func newMetrics() *metrics {
 	}
 }
 
-// ObserveCall implements wire.CallObserver.
 func (m *metrics) ObserveCall(call wire.CallInfo) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -76,8 +70,6 @@ func (m *metrics) setReady(ready bool) {
 	m.ready = ready
 }
 
-// exposition renders the metrics in the text format. It holds the lock only
-// while rendering, so a slow scrape never delays the calls that record metrics.
 func (m *metrics) exposition() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -139,7 +131,6 @@ func (m *metrics) exposition() string {
 	return out.String()
 }
 
-// quote renders a label value with the escapes the text format requires.
 func quote(value string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(value) + `"`
 }

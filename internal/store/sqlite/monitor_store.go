@@ -22,8 +22,6 @@ func defaultMonitorLimit(limit int) int {
 	return limit
 }
 
-// monitorQuery accumulates one namespace-scoped monitor SELECT and its bound
-// arguments so every paged list shares the same cursor, limit, and row loop.
 type monitorQuery struct {
 	sql  strings.Builder
 	args []any
@@ -36,7 +34,6 @@ func newMonitorQuery(selectSQL, namespace string) *monitorQuery {
 	return q
 }
 
-// monitorFilter appends an equality predicate unless value is its zero value.
 func monitorFilter[T comparable](q *monitorQuery, column string, value T) {
 	var zero T
 	if value == zero {
@@ -46,7 +43,6 @@ func monitorFilter[T comparable](q *monitorQuery, column string, value T) {
 	q.args = append(q.args, value)
 }
 
-// queryOne scans exactly one row and maps sql.ErrNoRows to store.ErrNotFound.
 func queryOne[T any](ctx context.Context, db *sql.DB, scan func(rowScanner) (T, error), query string, args ...any) (*T, error) {
 	value, err := scan(db.QueryRowContext(ctx, query, args...))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -58,7 +54,6 @@ func queryOne[T any](ctx context.Context, db *sql.DB, scan func(rowScanner) (T, 
 	return &value, nil
 }
 
-// queryPage runs one offset-paged monitor query and returns the next cursor.
 func queryPage[T any](ctx context.Context, db *sql.DB, q *monitorQuery, orderBy, cursor string, limit int, scan func(rowScanner) (T, error)) ([]T, string, error) {
 	offset, err := parseOffsetCursor(cursor)
 	if err != nil {
@@ -86,7 +81,6 @@ func queryPage[T any](ctx context.Context, db *sql.DB, q *monitorQuery, orderBy,
 	return results, nextOffsetCursor(offset, len(results), limit), nil
 }
 
-// UpsertRepositoryMonitor inserts or updates normalized monitor metadata.
 func (s *Store) UpsertRepositoryMonitor(ctx context.Context, monitor *store.RepositoryMonitorRecord) error {
 	_, err := writeOperationInto(ctx, s, "UpsertRepositoryMonitor", nil, monitor, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.upsertRepositoryMonitorWrite(ctx, monitor)
@@ -168,7 +162,6 @@ func repositoryMonitorIdentityChanged(existing, next store.RepositoryMonitorReco
 		existing.Branch != next.Branch
 }
 
-// GetRepositoryMonitor fetches normalized monitor metadata.
 func (s *Store) GetRepositoryMonitor(ctx context.Context, namespace, name string) (*store.RepositoryMonitorRecord, error) {
 	var monitor store.RepositoryMonitorRecord
 	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
@@ -189,7 +182,6 @@ func (s *Store) GetRepositoryMonitor(ctx context.Context, namespace, name string
 	return &monitor, nil
 }
 
-// DeleteRepositoryMonitor deletes normalized monitor metadata.
 func (s *Store) DeleteRepositoryMonitor(ctx context.Context, namespace, name string) error {
 	return writeOperationErr(ctx, s, "DeleteRepositoryMonitor", func(ctx context.Context) error {
 		return s.deleteRepositoryMonitorWrite(ctx, namespace, name)
@@ -237,8 +229,6 @@ func deleteRepositoryMonitorDependentState(ctx context.Context, tx *sql.Tx, name
 		`DELETE FROM review_publish_records WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM command_events WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM implementation_jobs WHERE monitor_namespace = ? AND monitor_name = ?`,
-		// GitHub commit statuses outlive monitors. Retain recorded readiness IDs
-		// so peer monitors still recognize and exclude them from repository CI.
 		`DELETE FROM github_mutation_records WHERE monitor_namespace = ? AND monitor_name = ? AND (operation != 'readiness_status' OR external_id = '')`,
 		`DELETE FROM repair_jobs WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM monitor_events WHERE monitor_namespace = ? AND monitor_name = ?`,
@@ -254,7 +244,6 @@ func deleteRepositoryMonitorDependentState(ctx context.Context, tx *sql.Tx, name
 	return deletedRows, nil
 }
 
-// CreateMonitorRun inserts a new monitor run.
 func (s *Store) CreateMonitorRun(ctx context.Context, run *store.MonitorRun) error {
 	_, err := writeOperationInto(ctx, s, "CreateMonitorRun", nil, run, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.createMonitorRunWrite(ctx, run)
@@ -291,7 +280,6 @@ func (s *Store) createMonitorRunWrite(ctx context.Context, run *store.MonitorRun
 	return err
 }
 
-// UpdateMonitorRun updates a monitor run.
 func (s *Store) UpdateMonitorRun(ctx context.Context, run *store.MonitorRun) error {
 	_, err := writeOperationInto(ctx, s, "UpdateMonitorRun", nil, run, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.updateMonitorRunWrite(ctx, run)
@@ -317,7 +305,6 @@ func (s *Store) updateMonitorRunWrite(ctx context.Context, run *store.MonitorRun
 	return err
 }
 
-// GetMonitorRun fetches a monitor run by ID.
 func (s *Store) GetMonitorRun(ctx context.Context, namespace, id string) (*store.MonitorRun, error) {
 	return queryOne(ctx, s.db, scanMonitorRun, monitorRunSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id)
 }
@@ -344,7 +331,6 @@ func scanMonitorRun(r rowScanner) (store.MonitorRun, error) {
 	return run, nil
 }
 
-// ListMonitorRuns lists monitor runs ordered newest first unless OldestFirst is set.
 func (s *Store) ListMonitorRuns(ctx context.Context, filter store.MonitorRunFilter) ([]store.MonitorRun, string, error) {
 	q := newMonitorQuery(monitorRunSelectSQL(), filter.Namespace)
 	monitorFilter(q, "monitor_name", filter.MonitorName)
@@ -373,7 +359,6 @@ func monitorItemKey(item *store.MonitorItem) string {
 	return item.SHA
 }
 
-// UpsertMonitorItem inserts or updates the latest state for one monitor item.
 func (s *Store) UpsertMonitorItem(ctx context.Context, item *store.MonitorItem) error {
 	_, err := writeOperationInto(ctx, s, "UpsertMonitorItem", nil, item, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.upsertMonitorItemWrite(ctx, item)
@@ -459,7 +444,6 @@ func (s *Store) upsertMonitorItemWrite(ctx context.Context, item *store.MonitorI
 	return err
 }
 
-// GetMonitorItem fetches one monitor item by its durable key.
 func (s *Store) GetMonitorItem(ctx context.Context, namespace, monitorName, kind, itemKey string) (*store.MonitorItem, error) {
 	return queryOne(ctx, s.db, scanMonitorItem, monitorItemSelectSQL()+`
 		 WHERE monitor_namespace = ? AND monitor_name = ? AND kind = ? AND item_key = ?`,
@@ -490,7 +474,6 @@ func scanMonitorItem(r rowScanner) (store.MonitorItem, error) {
 	return item, err
 }
 
-// ListMonitorItems lists current monitor items.
 func (s *Store) ListMonitorItems(ctx context.Context, filter store.MonitorItemFilter) ([]store.MonitorItem, string, error) {
 	q := newMonitorQuery(monitorItemSelectSQL(), filter.Namespace)
 	monitorFilter(q, "monitor_name", filter.MonitorName)
@@ -503,7 +486,6 @@ func (s *Store) ListMonitorItems(ctx context.Context, filter store.MonitorItemFi
 	return queryPage(ctx, s.db, q, "updated_at DESC, item_key ASC", filter.Cursor, filter.Limit, scanMonitorItem)
 }
 
-// CreateActionRecord inserts a durable action record.
 func (s *Store) CreateActionRecord(ctx context.Context, record *store.ActionRecord) error {
 	_, err := writeOperationInto(ctx, s, "CreateActionRecord", nil, record, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.createActionRecordWrite(ctx, record)
@@ -538,7 +520,6 @@ func (s *Store) createActionRecordWrite(ctx context.Context, record *store.Actio
 	return uniqueConflict(err)
 }
 
-// UpdateActionRecord replaces result fields when sensitive content must be redacted.
 func (s *Store) UpdateActionRecord(ctx context.Context, record *store.ActionRecord) error {
 	_, err := writeOperationInto(ctx, s, "UpdateActionRecord", nil, record, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.updateActionRecordWrite(ctx, record)
@@ -572,7 +553,6 @@ func (s *Store) updateActionRecordWrite(ctx context.Context, record *store.Actio
 	return nil
 }
 
-// GetActionRecord fetches an action record by ID.
 func (s *Store) GetActionRecord(ctx context.Context, namespace, id string) (*store.ActionRecord, error) {
 	return queryOne(ctx, s.db, scanActionRecord, actionRecordSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id)
 }
@@ -594,7 +574,6 @@ func scanActionRecord(r rowScanner) (store.ActionRecord, error) {
 	return record, err
 }
 
-// ListActionRecords lists action records ordered newest first.
 func (s *Store) ListActionRecords(ctx context.Context, filter store.ActionRecordFilter) ([]store.ActionRecord, string, error) {
 	q := newMonitorQuery(actionRecordSelectSQL(), filter.Namespace)
 	monitorFilter(q, "monitor_name", filter.MonitorName)
@@ -605,7 +584,6 @@ func (s *Store) ListActionRecords(ctx context.Context, filter store.ActionRecord
 	return queryPage(ctx, s.db, q, "created_at DESC, id DESC", filter.Cursor, filter.Limit, scanActionRecord)
 }
 
-// CreateReviewRecord inserts an immutable review record.
 func (s *Store) CreateReviewRecord(ctx context.Context, record *store.ReviewRecord) error {
 	_, err := writeOperationInto(ctx, s, "CreateReviewRecord", nil, record, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.createReviewRecordWrite(ctx, record)
@@ -635,7 +613,6 @@ func (s *Store) createReviewRecordWrite(ctx context.Context, record *store.Revie
 	return uniqueConflict(err)
 }
 
-// GetReviewRecord fetches a review record by ID.
 func (s *Store) GetReviewRecord(ctx context.Context, namespace, id string) (*store.ReviewRecord, error) {
 	return queryOne(ctx, s.db, scanReviewRecord, reviewRecordSelectSQL()+" WHERE monitor_namespace = ? AND id = ?", namespace, id)
 }
@@ -662,7 +639,6 @@ func scanReviewRecord(r rowScanner) (store.ReviewRecord, error) {
 	return record, err
 }
 
-// ListReviewRecords lists review records ordered newest first.
 func (s *Store) ListReviewRecords(ctx context.Context, filter store.ReviewRecordFilter) ([]store.ReviewRecord, string, error) {
 	q := newMonitorQuery(reviewRecordSelectSQL(), filter.Namespace)
 	monitorFilter(q, "monitor_name", filter.MonitorName)
@@ -673,7 +649,6 @@ func (s *Store) ListReviewRecords(ctx context.Context, filter store.ReviewRecord
 	return queryPage(ctx, s.db, q, "created_at DESC, id DESC", filter.Cursor, filter.Limit, scanReviewRecord)
 }
 
-// CreateReviewPublishRecord inserts a review publish attempt/outcome record.
 func (s *Store) CreateReviewPublishRecord(ctx context.Context, record *store.ReviewPublishRecord) error {
 	_, err := writeOperationInto(ctx, s, "CreateReviewPublishRecord", nil, record, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.createReviewPublishRecordWrite(ctx, record)
@@ -709,7 +684,6 @@ func (s *Store) createReviewPublishRecordWrite(ctx context.Context, record *stor
 	return uniqueConflict(err)
 }
 
-// UpdateReviewPublishRecord updates a review publish attempt/outcome record.
 func (s *Store) UpdateReviewPublishRecord(ctx context.Context, record *store.ReviewPublishRecord) error {
 	_, err := writeOperationInto(ctx, s, "UpdateReviewPublishRecord", nil, record, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.updateReviewPublishRecordWrite(ctx, record)
@@ -749,7 +723,6 @@ func (s *Store) updateReviewPublishRecordWrite(ctx context.Context, record *stor
 	return nil
 }
 
-// GetReviewPublishRecord fetches a review publish record by ID.
 func (s *Store) GetReviewPublishRecord(ctx context.Context, namespace, id string) (*store.ReviewPublishRecord, error) {
 	return queryOne(ctx, s.db, scanReviewPublishRecord, reviewPublishRecordSelectSQL()+" WHERE monitor_namespace = ? AND id = ?", namespace, id)
 }
@@ -772,7 +745,6 @@ func scanReviewPublishRecord(r rowScanner) (store.ReviewPublishRecord, error) {
 	return record, err
 }
 
-// ListReviewPublishRecords lists review publish records ordered newest first.
 func (s *Store) ListReviewPublishRecords(ctx context.Context, filter store.ReviewPublishRecordFilter) ([]store.ReviewPublishRecord, string, error) {
 	q := newMonitorQuery(reviewPublishRecordSelectSQL(), filter.Namespace)
 	monitorFilter(q, "monitor_name", filter.MonitorName)
@@ -784,7 +756,6 @@ func (s *Store) ListReviewPublishRecords(ctx context.Context, filter store.Revie
 	return queryPage(ctx, s.db, q, "updated_at DESC, id DESC", filter.Cursor, filter.Limit, scanReviewPublishRecord)
 }
 
-// CreateCommandEvent inserts a maintainer command event.
 func (s *Store) CreateCommandEvent(ctx context.Context, event *store.CommandEvent) error {
 	_, err := writeOperationInto(ctx, s, "CreateCommandEvent", nil, event, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.createCommandEventWrite(ctx, event)
@@ -812,7 +783,6 @@ func (s *Store) createCommandEventWrite(ctx context.Context, event *store.Comman
 	return uniqueConflict(err)
 }
 
-// UpdateCommandEvent updates command processing state.
 func (s *Store) UpdateCommandEvent(ctx context.Context, event *store.CommandEvent) error {
 	_, err := writeOperationInto(ctx, s, "UpdateCommandEvent", nil, event, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.updateCommandEventWrite(ctx, event)
@@ -837,7 +807,6 @@ func (s *Store) updateCommandEventWrite(ctx context.Context, event *store.Comman
 	return err
 }
 
-// GetCommandEvent fetches a command event by ID.
 func (s *Store) GetCommandEvent(ctx context.Context, namespace, id string) (*store.CommandEvent, error) {
 	return queryOne(ctx, s.db, scanCommandEvent, commandEventSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id)
 }
@@ -867,7 +836,6 @@ func scanCommandEvent(r rowScanner) (store.CommandEvent, error) {
 	return event, nil
 }
 
-// ListCommandEvents lists command intake events.
 func (s *Store) ListCommandEvents(ctx context.Context, filter store.CommandEventFilter) ([]store.CommandEvent, string, error) {
 	q := newMonitorQuery(commandEventSelectSQL(), filter.Namespace)
 	monitorFilter(q, "monitor_name", filter.MonitorName)
@@ -878,7 +846,6 @@ func (s *Store) ListCommandEvents(ctx context.Context, filter store.CommandEvent
 	return queryPage(ctx, s.db, q, "created_at DESC, id DESC", filter.Cursor, filter.Limit, scanCommandEvent)
 }
 
-// CreateRepairJob inserts a repair job.
 func (s *Store) CreateRepairJob(ctx context.Context, job *store.RepairJob) error {
 	_, err := writeOperationInto(ctx, s, "CreateRepairJob", nil, job, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.createRepairJobWrite(ctx, job)
@@ -906,7 +873,6 @@ func (s *Store) createRepairJobWrite(ctx context.Context, job *store.RepairJob) 
 	return uniqueConflict(err)
 }
 
-// UpdateRepairJob updates repair job state.
 func (s *Store) UpdateRepairJob(ctx context.Context, job *store.RepairJob) error {
 	_, err := writeOperationInto(ctx, s, "UpdateRepairJob", nil, job, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.updateRepairJobWrite(ctx, job)
@@ -930,7 +896,6 @@ func (s *Store) updateRepairJobWrite(ctx context.Context, job *store.RepairJob) 
 	return err
 }
 
-// GetRepairJob fetches a repair job by ID.
 func (s *Store) GetRepairJob(ctx context.Context, namespace, id string) (*store.RepairJob, error) {
 	return queryOne(ctx, s.db, scanRepairJob, repairJobSelectSQL()+" WHERE monitor_namespace = ? AND id = ?", namespace, id)
 }
@@ -958,7 +923,6 @@ func scanRepairJob(r rowScanner) (store.RepairJob, error) {
 	return job, nil
 }
 
-// ListRepairJobs lists repair jobs ordered by update time.
 func (s *Store) ListRepairJobs(ctx context.Context, filter store.RepairJobFilter) ([]store.RepairJob, string, error) {
 	q := newMonitorQuery(repairJobSelectSQL(), filter.Namespace)
 	monitorFilter(q, "monitor_name", filter.MonitorName)
@@ -969,7 +933,6 @@ func (s *Store) ListRepairJobs(ctx context.Context, filter store.RepairJobFilter
 	return queryPage(ctx, s.db, q, "updated_at DESC, id DESC", filter.Cursor, filter.Limit, scanRepairJob)
 }
 
-// CreateMonitorEvent inserts an audit event.
 func (s *Store) CreateMonitorEvent(ctx context.Context, event *store.MonitorEvent) error {
 	_, err := writeOperationInto(ctx, s, "CreateMonitorEvent", nil, event, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.createMonitorEventWrite(ctx, event)
@@ -996,7 +959,6 @@ func (s *Store) createMonitorEventWrite(ctx context.Context, event *store.Monito
 	return uniqueConflict(err)
 }
 
-// ListMonitorEvents lists audit events ordered newest first.
 func (s *Store) ListMonitorEvents(ctx context.Context, filter store.MonitorEventFilter) ([]store.MonitorEvent, string, error) {
 	q := newMonitorQuery(monitorEventSelectSQL(), filter.Namespace)
 	monitorFilter(q, "id", filter.ID)
@@ -1023,7 +985,6 @@ func scanMonitorEvent(r rowScanner) (store.MonitorEvent, error) {
 	return event, err
 }
 
-// CreateWorkAction inserts a durable workflow action.
 func (s *Store) CreateWorkAction(ctx context.Context, action *store.WorkAction) error {
 	_, err := writeOperationInto(ctx, s, "CreateWorkAction", nil, action, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.createWorkActionWrite(ctx, action)
@@ -1065,7 +1026,6 @@ func (s *Store) createWorkActionWrite(ctx context.Context, action *store.WorkAct
 	return uniqueConflict(err)
 }
 
-// UpdateWorkAction updates durable workflow action state.
 func (s *Store) UpdateWorkAction(ctx context.Context, action *store.WorkAction) error {
 	_, err := writeOperationInto(ctx, s, "UpdateWorkAction", nil, action, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.updateWorkActionWrite(ctx, action)
@@ -1135,12 +1095,10 @@ func scanWorkAction(r rowScanner) (store.WorkAction, error) {
 	return action, nil
 }
 
-// GetWorkAction fetches one workflow action by ID.
 func (s *Store) GetWorkAction(ctx context.Context, namespace, id string) (*store.WorkAction, error) {
 	return queryOne(ctx, s.db, scanWorkAction, workActionSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id)
 }
 
-// ListWorkActions lists workflow actions ordered by update time.
 func (s *Store) ListWorkActions(ctx context.Context, filter store.WorkActionFilter) ([]store.WorkAction, string, error) {
 	q := newMonitorQuery(workActionSelectSQL(), filter.Namespace)
 	monitorFilter(q, "monitor_name", filter.MonitorName)
@@ -1157,7 +1115,6 @@ func (s *Store) ListWorkActions(ctx context.Context, filter store.WorkActionFilt
 	return queryPage(ctx, s.db, q, "updated_at DESC, id DESC", filter.Cursor, filter.Limit, scanWorkAction)
 }
 
-// CancelWorkActions cancels non-terminal target actions except the executing control action.
 func (s *Store) CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason, exceptActionID string) (int, error) {
 	return writeOperation(ctx, s, "CancelWorkActions", nil, func(ctx context.Context) (int, error) {
 		return s.cancelWorkActionsWrite(ctx, namespace, monitorName, targetKind, targetNumber, reason, exceptActionID)
@@ -1177,8 +1134,6 @@ func (s *Store) cancelWorkActionsWrite(ctx context.Context, namespace, monitorNa
 	return int(rows), nil
 }
 
-// MarkWorkActionRetryPending parks an active work action for a retry and
-// leaves a finished one unchanged.
 func (s *Store) MarkWorkActionRetryPending(ctx context.Context, request store.MarkWorkActionRetryPendingRequest) (bool, error) {
 	return writeOperation(ctx, s, "MarkWorkActionRetryPending", nil, func(ctx context.Context) (bool, error) {
 		return s.markWorkActionRetryPendingWrite(ctx, request)
@@ -1187,7 +1142,6 @@ func (s *Store) MarkWorkActionRetryPending(ctx context.Context, request store.Ma
 
 func (s *Store) markWorkActionRetryPendingWrite(ctx context.Context, request store.MarkWorkActionRetryPendingRequest) (bool, error) {
 	exec := s.taskDataExecutor(ctx)
-	// The status list is storagev1.WorkActionActiveStatuses.
 	result, err := exec.ExecContext(ctx,
 		`UPDATE work_actions SET status = 'retry_pending', phase = 'retry_pending', run_id = ?, blocked_reason = ?,
 		 error = ?, completed_at = NULL, updated_at = ?
@@ -1209,7 +1163,6 @@ func (s *Store) markWorkActionRetryPendingWrite(ctx context.Context, request sto
 	return false, err
 }
 
-// CreateImplementationJob inserts an implementation job.
 func (s *Store) CreateImplementationJob(ctx context.Context, job *store.ImplementationJob) error {
 	_, err := writeOperationInto(ctx, s, "CreateImplementationJob", nil, job, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.createImplementationJobWrite(ctx, job)
@@ -1243,7 +1196,6 @@ func (s *Store) createImplementationJobWrite(ctx context.Context, job *store.Imp
 	return uniqueConflict(err)
 }
 
-// UpdateImplementationJob updates implementation job state.
 func (s *Store) UpdateImplementationJob(ctx context.Context, job *store.ImplementationJob) error {
 	_, err := writeOperationInto(ctx, s, "UpdateImplementationJob", nil, job, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.updateImplementationJobWrite(ctx, job)
@@ -1298,12 +1250,10 @@ func scanImplementationJob(r rowScanner) (store.ImplementationJob, error) {
 	return job, nil
 }
 
-// GetImplementationJob fetches one implementation job.
 func (s *Store) GetImplementationJob(ctx context.Context, namespace, id string) (*store.ImplementationJob, error) {
 	return queryOne(ctx, s.db, scanImplementationJob, implementationJobSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id)
 }
 
-// ListImplementationJobs lists implementation jobs ordered by update time.
 func (s *Store) ListImplementationJobs(ctx context.Context, filter store.ImplementationJobFilter) ([]store.ImplementationJob, string, error) {
 	q := newMonitorQuery(implementationJobSelectSQL(), filter.Namespace)
 	monitorFilter(q, "monitor_name", filter.MonitorName)
@@ -1314,10 +1264,6 @@ func (s *Store) ListImplementationJobs(ctx context.Context, filter store.Impleme
 	return queryPage(ctx, s.db, q, "updated_at DESC, id DESC", filter.Cursor, filter.Limit, scanImplementationJob)
 }
 
-// CountImplementationJobs counts jobs matching durable workflow filters without
-// materializing historical rows. When ExcludeWorkActionStatuses is set, jobs
-// with a linked work action in one of those statuses are excluded; jobs without
-// a linked/found action remain counted, matching controller capacity semantics.
 func (s *Store) CountImplementationJobs(ctx context.Context, filter store.ImplementationJobFilter) (int, error) {
 	query := strings.Builder{}
 	query.WriteString("SELECT COUNT(*) FROM implementation_jobs j")
@@ -1369,7 +1315,6 @@ func (s *Store) CountImplementationJobs(ctx context.Context, filter store.Implem
 	return count, nil
 }
 
-// CreateGitHubMutationRecord inserts an immutable GitHub mutation audit record.
 func (s *Store) CreateGitHubMutationRecord(ctx context.Context, record *store.GitHubMutationRecord) error {
 	_, err := writeOperationInto(ctx, s, "CreateGitHubMutationRecord", nil, record, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.createGitHubMutationRecordWrite(ctx, record)
@@ -1402,7 +1347,6 @@ func (s *Store) createGitHubMutationRecordWrite(ctx context.Context, record *sto
 	return uniqueConflict(err)
 }
 
-// UpdateGitHubMutationRecord updates the durable outcome of one mutation attempt.
 func (s *Store) UpdateGitHubMutationRecord(ctx context.Context, record *store.GitHubMutationRecord) error {
 	_, err := writeOperationInto(ctx, s, "UpdateGitHubMutationRecord", nil, record, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.updateGitHubMutationRecordWrite(ctx, record)
@@ -1464,12 +1408,10 @@ func scanGitHubMutationRecord(r rowScanner) (store.GitHubMutationRecord, error) 
 	return record, nil
 }
 
-// GetGitHubMutationRecord fetches one mutation record.
 func (s *Store) GetGitHubMutationRecord(ctx context.Context, namespace, id string) (*store.GitHubMutationRecord, error) {
 	return queryOne(ctx, s.db, scanGitHubMutationRecord, githubMutationRecordSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id)
 }
 
-// ListGitHubMutationRecords lists mutation records ordered newest first.
 func (s *Store) ListGitHubMutationRecords(ctx context.Context, filter store.GitHubMutationRecordFilter) ([]store.GitHubMutationRecord, string, error) {
 	q := newMonitorQuery(githubMutationRecordSelectSQL(), filter.Namespace)
 	if filter.AllNamespaces {

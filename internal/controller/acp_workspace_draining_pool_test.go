@@ -83,7 +83,7 @@ func transitionPoolProviderToDraining(t *testing.T, r *TaskReconciler, plan ACPR
 		t.Fatal(err)
 	}
 	provider.Spec.LifecycleState = workspacev1alpha1.ExecutionWorkspaceProviderDraining
-	provider.Generation++ // The fake client does not advance spec generations.
+	provider.Generation++
 	if err := r.Update(t.Context(), provider); err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,6 @@ func TestACPDrainingProviderCreatesPoolForFrozenSession(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Recreate the pool after the exact logical Session binding is resolved.
 			if err := r.Delete(t.Context(), pool); err != nil {
 				t.Fatal(err)
 			}

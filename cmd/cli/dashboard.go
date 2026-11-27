@@ -12,20 +12,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// dashboardAbsentFunc reports whether a server definitively serves no
-// dashboard. Tests replace it to stay off the network.
 var dashboardAbsentFunc = dashboardAbsent
 
-// dashboardProbeClient answers with the first response, so an SSO gateway
-// that redirects /login is judged by that redirect, not by wherever it leads.
 var dashboardProbeClient = &http.Client{
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
-// dashboardAbsent asks server for the dashboard's login page. Only a 404 is
-// an answer: the controller serves that page whenever its dashboard is
-// enabled, while an unreachable server or a proxy that wants its own sign-in
-// first says nothing either way and keeps the URL flow as it was.
 func dashboardAbsent(server string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -56,8 +48,6 @@ func newDashboardCmd() *cobra.Command {
 			"namespace, else \"" + defaultNamespace + "\". The controller serves the dashboard only when it runs with " +
 			"--dashboard-enabled; every other orka command works without it.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Only a token given for this command signs the browser in; the
-			// ORKA_TOKEN and config tokens are API credentials.
 			token, err := flagToken(cmd)
 			if err != nil {
 				return err
@@ -68,14 +58,11 @@ func newDashboardCmd() *cobra.Command {
 			if server == "" {
 				server = defaultServer
 			}
-			// The namespace of the ServiceAccount the created token is for.
 			ns := configuredNamespace(cmd, cfg)
 			if ns == "" {
 				ns = defaultNamespace
 			}
 
-			// Checked before a token is minted, so a server without the
-			// dashboard never gets a credential that has nowhere to go.
 			if dashboardAbsentFunc(server) {
 				return fmt.Errorf("%s does not serve the dashboard: start the controller with --dashboard-enabled "+
 					"(Helm: controller.dashboard.enabled=true), or use the orka CLI, which works without it", server)
@@ -127,8 +114,6 @@ func newDashboardCmd() *cobra.Command {
 		},
 	}
 
-	// Shadows the global --token, whose help recommends ORKA_TOKEN, which this
-	// command does not read.
 	cmd.Flags().StringP("token", "t", "",
 		"Token to sign the dashboard in with (prefer --token-file, which keeps it out of process arguments; "+
 			envToken+" is not used)")

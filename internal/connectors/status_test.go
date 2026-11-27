@@ -10,9 +10,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// The status mirrors the grant custody assigned to the committed material,
-// so a snapshot or approval bound to one grant can tell a re-link of the
-// same object apart.
 func TestApplyLinkedStatusRaisesGrantSequenceOnEveryCommit(t *testing.T) {
 	provider := &corev1alpha1.ConnectorProvider{
 		ObjectMeta: metav1.ObjectMeta{Name: "github", Namespace: "orka-system", UID: "provider-uid"},

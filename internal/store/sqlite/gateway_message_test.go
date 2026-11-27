@@ -172,7 +172,6 @@ func TestGatewayMessageReplayOnlyIsAtomicReceiptLookup(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Receipt lookup precedes lifecycle and quota, but never event identity.
 			if err := s.ReleaseLock(ctx, event.Namespace, event.SessionName, event.TaskName, event.TaskUID); err != nil {
 				t.Fatal(err)
 			}
@@ -434,7 +433,6 @@ func TestGatewayMessageManualRetryRejectsAnyLaterStartedDelivery(t *testing.T) {
 			if err := s.MarkGatewayDeliveryTerminal(ctx, event.Namespace, first.ID, "sender", store.GatewayDeliveryFailed, "failed", now); err != nil {
 				t.Fatal(err)
 			}
-			// A pending, never-started successor does not prohibit manual retry.
 			if _, err := s.RetryGatewayDelivery(ctx, event.Namespace, first.ID, now, now.Add(time.Hour)); err != nil {
 				t.Fatal(err)
 			}
@@ -486,7 +484,6 @@ func TestGatewayMessageExpiredPredecessorIsAbandoned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Claim processing must not depend on a separate maintenance tick to abandon expired messages.
 	claimMessageDelivery(t, s, now.Add(2*time.Second), terminal.ID)
 	stored, err := s.GetGatewayDelivery(ctx, event.Namespace, first.ID)
 	if err != nil || stored.State != store.GatewayDeliveryExpired {
@@ -654,7 +651,6 @@ func TestGatewayMessageBoundsDoNotChangeGenericTerminalAdmission(t *testing.T) {
 		wantError bool
 	}{
 		{"message", 16 << 10, false}, {"message", (16 << 10) + 1, true},
-		// Terminal size validation remains at the service/protocol boundary.
 		{"final", 64 << 10, false}, {"final", (64 << 10) + 1, false},
 		{"error", 64 << 10, false}, {"error", (64 << 10) + 1, false},
 	} {

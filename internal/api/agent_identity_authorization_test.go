@@ -124,6 +124,6 @@ func TestAgentIdentityBindReviewsTheSameSubjectAsAgentUse(t *testing.T) {
 	}
 	clientset, seen := identityBindClientset(true)
 	requireForbidden(t, authorizeAgentIdentityBind(context.Background(), clientset,
-		&UserInfo{Username: "Alice", AuthType: AuthTypeOIDC}, agent, nil)) // no issuer and subject: no reviewable identity
+		&UserInfo{Username: "Alice", AuthType: AuthTypeOIDC}, agent, nil))
 	require.Empty(t, *seen)
 }

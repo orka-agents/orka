@@ -14,8 +14,6 @@ import (
 
 const runtimeIdentityLimit = 256
 
-// RuntimeSessionMessageContent carries bounded external sender provenance into model history
-// without changing the canonical message content stored for operators and delivery.
 func RuntimeSessionMessageContent(message SessionMessage) string {
 	if !strings.EqualFold(strings.TrimSpace(message.Role), "user") ||
 		strings.TrimSpace(message.SourceType) != "gateway-event" {

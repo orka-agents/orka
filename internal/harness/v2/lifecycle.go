@@ -34,16 +34,14 @@ var runtimeSessionTransitions = map[RuntimeSessionState]map[RuntimeSessionState]
 	RuntimeSessionStatePromptRunning: {
 		RuntimeSessionStateValidating: {},
 		RuntimeSessionStateCancelling: {},
-		// A prompt that settles without completing leaves an unproven workspace.
-		RuntimeSessionStatePoisoned: {},
+		RuntimeSessionStatePoisoned:   {},
 	},
 	RuntimeSessionStateValidating: {
 		RuntimeSessionStateIdle:                 {},
 		RuntimeSessionStatePreparingPublication: {},
-		// A runtime may freeze and persist the delta within validation.
-		RuntimeSessionStatePublicationPrepared: {},
-		RuntimeSessionStateCancelling:          {},
-		RuntimeSessionStatePoisoned:            {},
+		RuntimeSessionStatePublicationPrepared:  {},
+		RuntimeSessionStateCancelling:           {},
+		RuntimeSessionStatePoisoned:             {},
 	},
 	RuntimeSessionStatePreparingPublication: {
 		RuntimeSessionStatePublicationPrepared: {},
@@ -68,8 +66,6 @@ var runtimeSessionTransitions = map[RuntimeSessionState]map[RuntimeSessionState]
 		RuntimeSessionStateDeleting: {},
 	},
 	RuntimeSessionStateCancelling: {
-		// The prompt can complete before the cancellation reaches the adapter;
-		// its workspace is then validated like any completed prompt.
 		RuntimeSessionStateValidating: {},
 		RuntimeSessionStatePoisoned:   {},
 	},
@@ -77,8 +73,7 @@ var runtimeSessionTransitions = map[RuntimeSessionState]map[RuntimeSessionState]
 		RuntimeSessionStateDeleting: {},
 	},
 	RuntimeSessionStateDeleting: {
-		RuntimeSessionStateDeleted: {},
-		// Cleanup that cannot be proven keeps the session, poisoned, for retry.
+		RuntimeSessionStateDeleted:  {},
 		RuntimeSessionStatePoisoned: {},
 	},
 	RuntimeSessionStateDeleted: {},
@@ -139,9 +134,6 @@ func (s RuntimeSessionState) PublicationReconciliationInProgress() bool {
 	}
 }
 
-// DeletionTransition returns the first safe state transition for a deletion
-// request. Publication reconciliation and finalization are never interrupted;
-// callers must finish them before asking again.
 func DeletionTransition(state RuntimeSessionState) (RuntimeSessionState, error) {
 	if !IsKnownRuntimeSessionState(state) {
 		return "", fmt.Errorf("unsupported runtime session state %q", state)

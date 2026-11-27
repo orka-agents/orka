@@ -12,8 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// On Windows the forward is recognised by the creation time recorded when the
-// CLI started it, and only while that process runs.
 func TestPortForwardProcessRunningOnWindows(t *testing.T) {
 	cmd := exec.Command("ping", "-n", "30", "127.0.0.1")
 	require.NoError(t, cmd.Start())

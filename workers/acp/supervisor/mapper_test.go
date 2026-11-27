@@ -131,8 +131,6 @@ func TestACPAssistantMessageIDReadsOnlyAgentMessageChunks(t *testing.T) {
 	}
 }
 
-// The runtime advertises ACP session notices, so the pinned codex-acp sends
-// Codex warnings in this shape; they never reach the agent's reply.
 func TestMapACPUpdateDropsSessionNotices(t *testing.T) {
 	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
 		"sessionUpdate":"notice",

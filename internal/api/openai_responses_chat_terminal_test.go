@@ -16,8 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Exercise the mounted, authenticated Responses route with the real OpenAI
-// provider, including its unsupported-Responses probe and Chat SSE fallback.
 func TestResponsesProductionChatTerminalToolCalls(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		for _, outcome := range []string{"length", "missing_finish", "transport_error", "refusal", "malformed_arguments", "tool_calls", "stop"} {
@@ -36,7 +34,6 @@ func TestResponsesProductionChatTerminalToolCalls(t *testing.T) {
 					chatRequests.Add(1)
 					w.Header().Set("Content-Type", "text/event-stream")
 					if outcome == "transport_error" {
-						// Force a real unexpected EOF after the call deltas.
 						w.Header().Set("Content-Length", "1000000")
 					}
 					emit := func(delta map[string]any, finish string) {
@@ -58,8 +55,6 @@ func TestResponsesProductionChatTerminalToolCalls(t *testing.T) {
 							emit(map[string]any{"tool_calls": []any{map[string]any{"index": i, "id": fmt.Sprintf("call-%d", i), "type": "function", "function": map[string]any{"name": "client_tool", "arguments": args}}}}, "")
 						}
 					}
-					// The SDK marks the final modern call finished here, before
-					// the upstream has supplied any terminal outcome.
 					emit(map[string]any{}, "")
 					finish := "tool_calls"
 					if legacy {

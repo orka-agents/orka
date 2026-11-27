@@ -171,7 +171,6 @@ func TestSendMessageTool_Execute(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Clear env vars first
 			for _, k := range []string{envOrkaTaskName, envOrkaTaskNamespace, envOrkaParentTask, envOrkaControllerURL} {
 				t.Setenv(k, "")
 			}
@@ -293,7 +292,6 @@ func TestSendMessageToolRefusesContentOverTheMessageLimit(t *testing.T) {
 	ctx := WithToolContext(context.Background(), &ToolContext{
 		TaskID: testWorkerAName, Namespace: defaultNamespace, ParentTaskID: testCoordinatorTaskName, MessageStore: messages,
 	})
-	// A two-byte rune: the limit counts bytes, not characters.
 	content := strings.Repeat("é", store.MaxMessageContentBytes/2) + "x"
 	args, err := json.Marshal(SendMessageArgs{ToTask: testSiblingTaskName, Content: content})
 	if err != nil {

@@ -13,19 +13,12 @@ import (
 	"github.com/orka-agents/orka/internal/acp"
 )
 
-// By an idle adapter restart the session tree is the child's, and a
-// write-intent workspace is its private 0700 directory. The supervisor has no
-// DAC_OVERRIDE, so the restart's workspace check must run as the child or it
-// would refuse every clean session. Run as root, ideally with the runtime's
-// capabilities (CHOWN, KILL, SETGID, SETUID), to cover that.
 func TestRelaunchWorkspaceValidationActsAsTheSessionChild(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root, as the runtime's supervisor runs")
 	}
 	const child = 4243
 	base := t.TempDir()
-	// The child reaches its tree through supervisor-owned ancestors it can
-	// only search, as under the runtime's session base directory.
 	for _, dir := range []string{base, filepath.Dir(base)} {
 		if err := os.Chmod(dir, 0o711); err != nil {
 			t.Fatal(err)
@@ -42,7 +35,6 @@ func TestRelaunchWorkspaceValidationActsAsTheSessionChild(t *testing.T) {
 	if err := acp.FinalizeSessionOwnership(root, child, child); err != nil {
 		t.Fatal(err)
 	}
-	// Without DAC_OVERRIDE the test's cleanup must reclaim the tree.
 	t.Cleanup(func() { _ = acp.ReclaimSessionOwnership(root) })
 
 	validate := validateWorkspaceAsSessionChild(rejectOpenCodeProjectConfiguration, paths, child, child)
@@ -67,9 +59,6 @@ func TestRelaunchWorkspaceValidationActsAsTheSessionChild(t *testing.T) {
 	}
 }
 
-// Claude's skill plugin can carry hooks and MCP servers, so the session child
-// must be able to read it but never change, add to, or replace it. Run as
-// root, ideally with the runtime's capabilities, to cover that.
 func TestClaudeSkillPluginIsReadOnlyForTheSessionChild(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root, as the runtime's supervisor runs")
@@ -83,7 +72,6 @@ func TestClaudeSkillPluginIsReadOnlyForTheSessionChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Session roots sit under supervisor-owned folders children only search.
 	for _, dir := range []string{filepath.Dir(base), filepath.Dir(filepath.Dir(base))} {
 		if err := os.Chmod(dir, 0o711); err != nil {
 			t.Fatal(err)

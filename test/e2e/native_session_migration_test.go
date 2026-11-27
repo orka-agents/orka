@@ -31,8 +31,6 @@ import (
 )
 
 const (
-	// aimock synthesizes encrypted reasoning for reasoning models even at
-	// effort none. Native migration deliberately rejects that format.
 	nativeMigrationModel         = "gpt-4.1"
 	nativeMigrationThread        = "01a10020-1222-76e3-977d-d5165792ae72"
 	nativeMigrationNonce         = "SESSIONKIT_NONCE_7a8381a91bcf"
@@ -42,9 +40,6 @@ const (
 	nativeMigrationLocalReply    = "NATIVE_LOCAL_CONTINUATION"
 )
 
-// Unlike the fresh-session lifecycle smoke, this spec imports a supported
-// paginated rollout. It must preserve native tool history, not merely replay
-// the canonical Orka transcript, through the public CLI and deployed runtime.
 var _ = Describe("Native Codex Session migration", Label("agent-runtime"), func() {
 	It("imports with the CLI, continues through aimock, exports, and resumes the same native thread locally", func() {
 		if runtime.GOOS != "linux" {
@@ -92,8 +87,6 @@ var _ = Describe("Native Codex Session migration", Label("agent-runtime"), func(
 		version := nativeMigrationRun(codex, root, localEnv, "", "--version")
 		Expect(version).To(Equal("codex-cli " + acp.CodexCLIVersion + "\n"))
 
-		// The public stdin token command keeps the API credential out of argv,
-		// logs, the source home, and the returned Codex home.
 		nativeMigrationRun(orka, root, localEnv, token, "config", "set-token", "--file", "-")
 		session := fmt.Sprintf("native-migration-%d", time.Now().UnixNano())
 		agent, taskName := session+"-agent", session+"-task"
@@ -116,15 +109,10 @@ var _ = Describe("Native Codex Session migration", Label("agent-runtime"), func(
 		sourcePath := filepath.Join(sourceHome, "sessions/2026/10/02", fixture)
 		Expect(os.MkdirAll(filepath.Dir(sourcePath), 0o700)).To(Succeed())
 		Expect(os.WriteFile(sourcePath, sourceRollout, 0o600)).To(Succeed())
-		// Source authentication and policy are deliberately unusable. Neither
-		// may become authority in the cluster or the exported destination.
 		auth := []byte(`{"OPENAI_API_KEY":"revoked-native-source-test-key"}`)
 		Expect(os.WriteFile(filepath.Join(sourceHome, "auth.json"), auth, 0o600)).To(Succeed())
 		sourceConfig := []byte("model = \"invalid-source-model\"\napproval_policy = \"untrusted\"\n")
 		Expect(os.WriteFile(filepath.Join(sourceHome, "config.toml"), sourceConfig, 0o600)).To(Succeed())
-		// A real stopped Codex home already has its native lock namespace.
-		// Capture retains these inodes; initialize them without weakening the
-		// exact source-file immutability assertion or holding an active writer.
 		lock, err := writerlock.Source(context.Background(), sourceHome, nativeMigrationThread)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(lock.Close()).To(Succeed())
@@ -135,7 +123,6 @@ var _ = Describe("Native Codex Session migration", Label("agent-runtime"), func(
 			"--codex-home", sourceHome, "--thread", nativeMigrationThread, "--journal-dir", importJournal, "--source-stopped"}
 		Expect(nativeMigrationRun(orka, root, localEnv, "", importArgs...)).To(
 			ContainSubstring("Staged thread " + nativeMigrationThread))
-		// Exact public retries must reuse the staged import, not duplicate it.
 		Expect(nativeMigrationRun(orka, root, localEnv, "", importArgs...)).To(
 			ContainSubstring("Staged thread " + nativeMigrationThread))
 
@@ -234,19 +221,14 @@ env_key = "NATIVE_MIGRATION_LOCAL_KEY"
 	})
 })
 
-// Run without utils.Run: it replaces Env/Dir and logs argv and failure output.
-// These subprocesses must never inherit the user's Codex home or credentials.
 func nativeMigrationRun(binary, cwd string, env []string, stdin string, args ...string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir, cmd.Env, cmd.Stdin = cwd, env, strings.NewReader(stdin)
 	cmd.WaitDelay = 5 * time.Second
-	// Codex can warn about PATH aliases on stderr in temporary homes. Keep
-	// machine-readable stdout separate and never retain credential-bearing diagnostics.
 	cmd.Stderr = io.Discard
 	output, err := cmd.Output()
-	// Native history and authentication are not safe failure diagnostics.
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "native migration subprocess failed (output omitted)")
 	return string(output)
 }
@@ -302,7 +284,6 @@ func nativeMigrationHomeFiles(home string) (map[string]nativeMigrationFileSnapsh
 		if err != nil {
 			return err
 		}
-		// Keep only digests and metadata, never credential-bearing file contents.
 		files[rel] = nativeMigrationFileSnapshot{Digest: codexstate.DataDigest(data), Info: info}
 		return nil
 	})
@@ -323,8 +304,6 @@ func nativeMigrationHomesEqual(before, after map[string]nativeMigrationFileSnaps
 	return true
 }
 
-// Remove the nonce from the historical command arguments so only a genuine
-// native function_call_output (not a prompt or assistant summary) proves replay.
 func nativeMigrationSourceRollout(original []byte) ([]byte, error) {
 	var out bytes.Buffer
 	for line := range bytes.SplitSeq(bytes.TrimSpace(original), []byte("\n")) {
@@ -353,8 +332,6 @@ func nativeMigrationSourceRollout(original []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// aimock does not require authentication. This gate makes the local return leg
-// fail unless real Codex uses the freshly supplied destination credential.
 func nativeMigrationLocalProvider(upstreamURL, key string) (*httptest.Server, error) {
 	upstream, err := url.Parse(upstreamURL)
 	if err != nil {

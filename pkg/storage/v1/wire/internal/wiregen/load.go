@@ -19,9 +19,6 @@ const (
 	wirePackage  = "orka.storage.v1"
 )
 
-// loadContract type-checks the Go contract package from its source. The
-// contract imports only the standard library, which the source importer
-// resolves, so no module loader is needed.
 func loadContract(dir string) (*types.Package, error) {
 	names, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
@@ -47,8 +44,6 @@ func loadContract(dir string) (*types.Package, error) {
 	return config.Check(contractPath, fset, files, nil)
 }
 
-// loadProtocolRevision reads the wire package's ProtocolRevision constant
-// from source, so the generator never compiles the package it writes.
 func loadProtocolRevision(path string) (int, error) {
 	file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
 	if err != nil {

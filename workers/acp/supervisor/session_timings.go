@@ -21,24 +21,17 @@ import (
 	"github.com/orka-agents/orka/internal/acp"
 )
 
-// cgroupCPUStatPaths are the runtime container's CPU statistics: cgroup v2
-// first, then the two common cgroup v1 mounts.
 var cgroupCPUStatPaths = []string{
 	"/sys/fs/cgroup/cpu.stat",
 	"/sys/fs/cgroup/cpu,cpuacct/cpu.stat",
 	"/sys/fs/cgroup/cpu/cpu.stat",
 }
 
-// cpuThrottleSample is one reading of the container's cumulative CPU
-// throttling counters.
 type cpuThrottleSample struct {
 	throttledPeriods uint64
 	throttled        time.Duration
 }
 
-// readCPUThrottle reads the first available cgroup cpu.stat. It reports false
-// when none is readable, as on a runtime that is not in a cgroup with a CPU
-// limit, so callers omit throttling rather than report zero.
 func readCPUThrottle(paths []string) (cpuThrottleSample, bool) {
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
@@ -52,8 +45,6 @@ func readCPUThrottle(paths []string) (cpuThrottleSample, bool) {
 	return cpuThrottleSample{}, false
 }
 
-// parseCPUStat reads nr_throttled and the throttled time from cpu.stat:
-// throttled_usec under cgroup v2, throttled_time in nanoseconds under v1.
 func parseCPUStat(data []byte) (cpuThrottleSample, bool) {
 	var sample cpuThrottleSample
 	periods, throttled := false, false
@@ -82,9 +73,6 @@ func parseCPUStat(data []byte) (cpuThrottleSample, bool) {
 	return sample, periods && throttled
 }
 
-// parseThrottledTime parses a cumulative throttled time counted in unit. It
-// parses as a signed 64-bit count so the value always fits a Duration, rejects
-// negative counts, and saturates a count whose Duration would overflow.
 func parseThrottledTime(value string, unit time.Duration) (time.Duration, bool) {
 	count, err := strconv.ParseInt(value, 10, 64)
 	if err != nil || count < 0 {
@@ -96,16 +84,11 @@ func parseThrottledTime(value string, unit time.Duration) (time.Duration, bool) 
 	return time.Duration(count) * unit, true
 }
 
-// sessionStartStage is one completed stage of a RuntimeSession creation.
 type sessionStartStage struct {
 	name     string
 	duration time.Duration
 }
 
-// sessionStartTimings records how long each stage of one RuntimeSession
-// creation takes, and the CPU throttling the runtime container saw over the
-// same window. It holds stage names, durations and throttling counters only:
-// never paths, credentials or content.
 type sessionStartTimings struct {
 	now          func() time.Time
 	readThrottle func() (cpuThrottleSample, bool)
@@ -137,8 +120,6 @@ func newSessionStartTimingsWith(now func() time.Time, readThrottle func() (cpuTh
 	return t
 }
 
-// mark records the stage that just finished as the time since the previous
-// mark. A nil receiver records nothing.
 func (t *sessionStartTimings) mark(stage string) {
 	if t == nil {
 		return
@@ -148,7 +129,6 @@ func (t *sessionStartTimings) mark(stage string) {
 	t.last = now
 }
 
-// recordAdapter keeps the adapter's own breakdown of its startup stage.
 func (t *sessionStartTimings) recordAdapter(timings acp.StartupTimings) {
 	if t == nil {
 		return
@@ -156,10 +136,6 @@ func (t *sessionStartTimings) recordAdapter(timings acp.StartupTimings) {
 	t.adapter, t.adapterKnown = timings, true
 }
 
-// finish ends the measured window: it records when the creation attempt
-// returned, so the total includes a stage that failed before its mark, and
-// reads the throttling counters once more, so the log line and the span report
-// the same window. A nil receiver records nothing.
 func (t *sessionStartTimings) finish() {
 	if t == nil {
 		return
@@ -170,8 +146,6 @@ func (t *sessionStartTimings) finish() {
 	}
 }
 
-// total returns the time from the start to finish, or to the last stage mark
-// when finish has not run.
 func (t *sessionStartTimings) total() time.Duration {
 	end := t.ended
 	if end.IsZero() {
@@ -182,9 +156,6 @@ func (t *sessionStartTimings) total() time.Duration {
 
 func milliseconds(duration time.Duration) int64 { return duration.Milliseconds() }
 
-// logAttrs returns the timings as slog attributes: the total, each stage in
-// order, the adapter's breakdown when known, and the throttling delta when the
-// container's cgroup was readable at both ends.
 func (t *sessionStartTimings) logAttrs() []any {
 	if t == nil {
 		return nil
@@ -209,7 +180,6 @@ func (t *sessionStartTimings) logAttrs() []any {
 	return attrs
 }
 
-// spanAttributes returns the same timings as span attributes.
 func (t *sessionStartTimings) spanAttributes() []attribute.KeyValue {
 	if t == nil {
 		return nil
@@ -235,9 +205,6 @@ func (t *sessionStartTimings) spanAttributes() []attribute.KeyValue {
 	return attrs
 }
 
-// throttleDelta returns the change in the throttling counters between the
-// start and finish. Unread or backwards counters (a different cgroup) are
-// reported as unknown.
 func (t *sessionStartTimings) throttleDelta() (uint64, time.Duration, bool) {
 	if !t.throttleStarted || !t.throttleEnded {
 		return 0, 0, false
@@ -249,7 +216,6 @@ func (t *sessionStartTimings) throttleDelta() (uint64, time.Duration, bool) {
 	return end.throttledPeriods - t.throttleStart.throttledPeriods, end.throttled - t.throttleStart.throttled, true
 }
 
-// snakeCase turns a lowerCamel stage name into snake_case.
 func snakeCase(name string) string {
 	var builder strings.Builder
 	for i, r := range name {

@@ -71,7 +71,6 @@ func TestDeleteAgentTool_Parameters(t *testing.T) {
 }
 
 func TestDeleteAgentTool_Execute_DefaultNamespace(t *testing.T) {
-	// Test that without env var and without explicit namespace, default namespace is used
 	t.Setenv(envOrkaTaskNamespace, "")
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{

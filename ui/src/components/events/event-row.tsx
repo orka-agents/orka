@@ -16,8 +16,6 @@ function formatTime(ts?: string): string {
   return d.toLocaleTimeString(undefined, { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0')
 }
 
-// Pretty-print the redacted API content payload. The backend already sanitizes
-// and truncates content before serving it, so this never exposes hidden raw data.
 function stringifyContent(event: ExecutionEvent): string | null {
   if (event.content === undefined || event.content === null) return null
   try {
@@ -43,13 +41,9 @@ function TruncationMarkers({ event }: { event: ExecutionEvent }) {
 
 export interface EventRowProps {
   event: ExecutionEvent
-  // Show the originating task name (used by the session timeline).
   showTask?: boolean
-  // Optional render slot for a task link (session timeline supplies this).
   taskLink?: (taskName: string) => React.ReactNode
-  // Optional "fork from here" action.
   onFork?: (event: ExecutionEvent) => void
-  // Optional copy handler for the redacted event payload.
   onCopy?: (event: ExecutionEvent) => void
 }
 
@@ -107,8 +101,6 @@ export function EventRow({ event, showTask, taskLink, onFork, onCopy }: EventRow
                   onClick={() => setExpanded((v) => !v)}
                   className="inline-flex items-center gap-1 rounded text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   aria-expanded={expanded}
-                  // Only advertise the relationship while the region is mounted, so
-                  // assistive tech never follows a dangling IDREF when collapsed.
                   aria-controls={expanded ? payloadId : undefined}
                 >
                   <ChevronRight className={`h-3 w-3 transition-transform ${expanded ? 'rotate-90' : ''}`} aria-hidden="true" />

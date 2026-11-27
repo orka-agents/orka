@@ -23,8 +23,6 @@ acp_report_update '.result = "not_qualified" | .stage = "publication_tests" | .p
 publication_test_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/release-publication-tests.XXXXXX")"
 trap 'rm -rf "${publication_test_dir}"' EXIT
 test_status=0
-# These packages use temporary Git repositories and local HTTP test servers.
-# Do not pass workflow, provider, or optional canary credentials to them.
 (
   unset GH_TOKEN GITHUB_TOKEN COPILOT_GITHUB_TOKEN
   unset ACP_E2E_WRITE_READ_CREDENTIAL_TOKEN ACP_E2E_WRITE_TARGET_READ_CREDENTIAL_TOKEN
@@ -57,8 +55,6 @@ fi
 acp_report_update '.publicationTests = $evidence' --argjson evidence "${evidence}"
 if ! acp_report_publication_tests_qualified "${ACP_E2E_REPORT_FILE}"; then
   acp_report_update '.publicationTests.status = "failed"'
-  # Keep diagnostics to test identities and redacted tool errors, never raw
-  # fixture responses or operation credential contents.
   jq -r 'select(.Action == "fail") | "FAIL " + .Package + " " + (.Test // "[package]")' \
     "${publication_test_dir}/events.jsonl" >&2
   redact <"${publication_test_dir}/stderr" >&2
