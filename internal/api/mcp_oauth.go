@@ -24,9 +24,6 @@ type mcpProtectedResourceMetadata struct {
 	BearerMethodsSupported []string `json:"bearer_methods_supported"`
 }
 
-// ParseMCPResourceURL returns the canonical form of the MCP endpoint's
-// external URL, which MCP clients name as the OAuth resource. Empty input
-// returns "".
 func ParseMCPResourceURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -49,10 +46,10 @@ func ParseMCPResourceURL(raw string) (string, error) {
 	}
 	scheme := strings.ToLower(parsed.Scheme)
 	hostname := strings.ToLower(parsed.Hostname())
-	if scheme != "https" && (scheme != "http" || !isLoopbackHostname(hostname)) {
+	if scheme != "https" && (scheme != connectorSchemeHTTP || !isLoopbackHostname(hostname)) {
 		return "", errors.New("MCP resource URL must use https, or http only for localhost")
 	}
-	if (scheme == "https" && portNum == 443) || (scheme == "http" && portNum == 80) {
+	if (scheme == "https" && portNum == 443) || (scheme == connectorSchemeHTTP && portNum == 80) {
 		return "", errors.New("MCP resource URL must omit the default port so clients and metadata match under RFC 9728")
 	}
 	if strings.Contains(hostname, ":") {
@@ -72,8 +69,6 @@ func ParseMCPResourceURL(raw string) (string, error) {
 	return scheme + "://" + strings.ToLower(parsed.Host) + mcpEndpointPath, nil
 }
 
-// ParseOIDCScopes splits a space- or comma-separated OAuth scope list and
-// checks each scope is an RFC 6749 scope token.
 func ParseOIDCScopes(raw string) ([]string, error) {
 	fields := strings.FieldsFunc(raw, func(r rune) bool { return r == ' ' || r == ',' })
 	scopes := make([]string, 0, len(fields))
@@ -88,8 +83,6 @@ func ParseOIDCScopes(raw string) ([]string, error) {
 	return scopes, nil
 }
 
-// ValidateOAuth checks that a configured MCP resource URL can be served:
-// clients sign in with the OIDC issuer, so OIDC must be configured too.
 func (c MCPServerConfig) ValidateOAuth(oidc OIDCConfig) error {
 	if c.ResourceURL == "" {
 		return nil
@@ -128,9 +121,6 @@ func serveMCPProtectedResourceMetadata(metadata mcpProtectedResourceMetadata) fi
 	}
 }
 
-// withMCPBearerChallenge adds the OAuth challenge to an authentication
-// refusal, so an MCP client can find where to sign in. When a Bearer token was
-// presented and rejected, it also sets RFC 6750 error="invalid_token".
 func withMCPBearerChallenge(auth fiber.Handler, challenge string) fiber.Handler {
 	if challenge == "" {
 		return auth

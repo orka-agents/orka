@@ -81,9 +81,7 @@ const mcpServerInstructions = "Orka runs Tasks on Kubernetes-hosted Agents. Use 
 type MCPServerConfig struct {
 	Enabled       bool
 	MaxConcurrent int
-	// ResourceURL is the endpoint's external URL from ParseMCPResourceURL.
-	// With OIDC configured, it enables OAuth protected-resource metadata.
-	ResourceURL string
+	ResourceURL   string
 }
 
 type mcpServer struct {
