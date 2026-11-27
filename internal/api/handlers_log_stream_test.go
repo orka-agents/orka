@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -38,14 +39,21 @@ func TestParseTaskLogStream(t *testing.T) {
 	}
 }
 
-func TestTailLogLines(t *testing.T) {
-	if got := tailLogLines("a\nb\nc\nd\n", 2); got != "c\nd\n" {
-		t.Fatalf("tailLogLines = %q, want %q", got, "c\nd\n")
+func TestReadBoundedTailLogLines(t *testing.T) {
+	got, err := readBoundedTailLogLines(strings.NewReader("a\nb\nc\nd\n"), 2, 1024)
+	if err != nil || got != "c\nd\n" {
+		t.Fatalf("readBoundedTailLogLines = (%q, %v), want (%q, nil)", got, err, "c\nd\n")
 	}
-	if got := tailLogLines("a\nb", 5); got != "a\nb" {
-		t.Fatalf("tailLogLines = %q, want %q", got, "a\nb")
+	got, err = readBoundedTailLogLines(strings.NewReader("a\nb"), 5, 1024)
+	if err != nil || got != "a\nb" {
+		t.Fatalf("readBoundedTailLogLines = (%q, %v), want (%q, nil)", got, err, "a\nb")
 	}
-	if got := tailLogLines("a\nb\nc", 1); got != "c" {
-		t.Fatalf("tailLogLines = %q, want %q", got, "c")
+	got, err = readBoundedTailLogLines(strings.NewReader("a\nb\nc"), 1, 1024)
+	if err != nil || got != "c" {
+		t.Fatalf("readBoundedTailLogLines = (%q, %v), want (%q, nil)", got, err, "c")
+	}
+	got, err = readBoundedTailLogLines(strings.NewReader("12345\n67890\nabcde\n"), 2, 12)
+	if err != nil || len(got) > 12 {
+		t.Fatalf("readBoundedTailLogLines bounded = (%q, %v), want <= 12 bytes", got, err)
 	}
 }

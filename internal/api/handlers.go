@@ -933,19 +933,25 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	}
 	defer func() { _ = logStream.Close() }()
 
-	logBytes, err := io.ReadAll(logStream)
-	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to read logs: %v", err))
-	}
-
-	logs := string(logBytes)
+	var logs string
 	if usedSplitStream {
-		logs = tailLogLines(logs, tailLines)
+		logs, err = readBoundedTailLogLines(logStream, tailLines, maxTaskLogReadBytes)
+		if err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to read logs: %v", err))
+		}
+	} else {
+		logBytes, readErr := io.ReadAll(io.LimitReader(logStream, maxTaskLogReadBytes))
+		if readErr != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to read logs: %v", readErr))
+		}
+		logs = string(logBytes)
 	}
 	return c.JSON(fiber.Map{
 		"logs": logs,
 	})
 }
+
+const maxTaskLogReadBytes int64 = 4 << 20
 
 func parseTaskLogStream(raw string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
@@ -1003,21 +1009,47 @@ func streamPodLogsWithStream(
 	return stream, err
 }
 
-func tailLogLines(logs string, tailLines int64) string {
-	if tailLines <= 0 || logs == "" {
-		return logs
+func readBoundedTailLogLines(r io.Reader, tailLines, maxBytes int64) (string, error) {
+	if maxBytes <= 0 {
+		maxBytes = maxTaskLogReadBytes
 	}
-	hasTrailingNewline := strings.HasSuffix(logs, "\n")
-	trimmed := strings.TrimSuffix(logs, "\n")
-	lines := strings.Split(trimmed, "\n")
-	if int64(len(lines)) <= tailLines {
-		return logs
+	if tailLines <= 0 {
+		tailLines = defaultTaskLogTailLines
 	}
-	sliced := strings.Join(lines[int64(len(lines))-tailLines:], "\n")
-	if hasTrailingNewline {
-		return sliced + "\n"
+	br := bufio.NewReader(io.LimitReader(r, maxBytes))
+	ring := make([]string, 0, min(tailLines, 1024))
+	var head int64
+	var retainedBytes int64
+	for {
+		line, err := br.ReadString('\n')
+		if len(line) > 0 {
+			if int64(len(ring)) < tailLines {
+				ring = append(ring, line)
+				retainedBytes += int64(len(line))
+			} else {
+				retainedBytes -= int64(len(ring[head]))
+				ring[head] = line
+				retainedBytes += int64(len(line))
+				head = (head + 1) % tailLines
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
 	}
-	return sliced
+	if len(ring) == 0 {
+		return "", nil
+	}
+	var out strings.Builder
+	out.Grow(int(retainedBytes))
+	ringLen := int64(len(ring))
+	for i := range ringLen {
+		out.WriteString(ring[(head+i)%ringLen])
+	}
+	return out.String(), nil
 }
 
 const (
