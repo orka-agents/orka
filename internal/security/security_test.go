@@ -793,6 +793,11 @@ func TestRemediationPullRequestBodyDistinguishesDiffAndTestVerification(t *testi
 	if !strings.Contains(withTestsBody, "**Agent-reported tests run:**") || !strings.Contains(withTestsBody, "`go test ./...` (exit 0)") {
 		t.Fatalf("PR body with tests missing test run list:\n%s", withTestsBody)
 	}
+
+	nilSummaryBody := RemediationPullRequestBody(finding, nil)
+	if !strings.Contains(nilSummaryBody, "**Verification status:**") || !strings.Contains(nilSummaryBody, "Patch summary artifact is unavailable; fix behavior is unverified") {
+		t.Fatalf("PR body with nil summary did not disclose unavailable test evidence:\n%s", nilSummaryBody)
+	}
 }
 
 func TestRemediationPullRequestBodyWithholdsLineWrappedCredential(t *testing.T) {
