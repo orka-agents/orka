@@ -869,7 +869,7 @@ func (r *AgentHostReconciler) reconcilePod(
 			agentHostReasonRestarting, "the host's Pod stopped; replacing it", "")
 		return ctrl.Result{RequeueAfter: agentHostCleanupRequeue}, nil
 	}
-	if message := staleAgentHostPod(pod, template, tokenSource); message != "" {
+	if message := staleAgentHostPod(pod, template, tokenSource, r.ClusterCapabilities); message != "" {
 		if err := r.deletePod(ctx, host, names); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -1068,12 +1068,18 @@ func newAgentHostObject(kind string) client.Object {
 	}
 }
 
-func staleAgentHostPod(pod *corev1.Pod, template *corev1alpha1.AgentHostTemplate, tokenSource string) string {
+func staleAgentHostPod(pod *corev1.Pod, template *corev1alpha1.AgentHostTemplate, tokenSource string, caps k8scaps.Capabilities) string {
 	switch {
 	case pod.Annotations[agenthost.AnnotationGitHubToken] != tokenSource:
 		return "replacing the host's Pod to change its credentials"
 	case pod.Annotations[agenthost.AnnotationTemplateUID] != string(template.UID):
 		return "replacing the host's Pod to run its recreated template"
+	case caps.PodUserNamespaces && (pod.Spec.HostUsers == nil || *pod.Spec.HostUsers):
+		return "replacing the host's Pod to enable user namespaces"
+	case caps.SupplementalGroupsStrict && (pod.Spec.SecurityContext == nil ||
+		pod.Spec.SecurityContext.SupplementalGroupsPolicy == nil ||
+		*pod.Spec.SecurityContext.SupplementalGroupsPolicy != corev1.SupplementalGroupsPolicyStrict):
+		return "replacing the host's Pod to enable strict supplemental groups"
 	}
 	return ""
 }

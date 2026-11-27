@@ -64,10 +64,10 @@ func TestDetectWithReaderVersions(t *testing.T) {
 			wantImageVolume: false,
 		},
 		{
-			name:            "k8s 1.34 omits 1.35+ features",
+			name:            "k8s 1.34 enables pod-level resources and omits 1.35+ features",
 			reader:          stubDiscoveryReader{raw: "v1.34.1", hasResize: true},
 			wantSuppStrict:  false,
-			wantPodLevel:    false,
+			wantPodLevel:    true,
 			wantSplitLogs:   false,
 			wantResize:      true,
 			wantImageVolume: false,

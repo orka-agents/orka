@@ -222,6 +222,13 @@ func (r *RuntimePoolReconciler) observeNativeRuntimePoolBoot(ctx context.Context
 	}, nil
 }
 
+func runtimePoolBootWitnessEqual(existing, observed runtimePoolBootWitness) bool {
+	if len(existing.ImageVolumes) == 0 && len(observed.ImageVolumes) > 0 {
+		observed.ImageVolumes = nil
+	}
+	return reflect.DeepEqual(existing, observed)
+}
+
 func observedImageVolumeDigests(container corev1.ContainerStatus) map[string]string {
 	if len(container.VolumeMounts) == 0 {
 		return nil
@@ -398,7 +405,7 @@ func (r *RuntimePoolReconciler) enrollRuntimePoolBoot(ctx context.Context, pool 
 	}
 	existing, loadErr := loadRuntimePoolBootWitness(ctx, r.ControlStore, w.identity(runtimePoolBootWitnessKind))
 	if loadErr == nil {
-		if !reflect.DeepEqual(existing, w) {
+		if !runtimePoolBootWitnessEqual(existing, w) {
 			return fmt.Errorf("%w: enrolled RuntimePool boot changed", store.ErrConflict)
 		}
 		retired, err := loadRuntimePoolBootRetirement(ctx, r.ControlStore, w)
@@ -411,7 +418,7 @@ func (r *RuntimePoolReconciler) enrollRuntimePoolBoot(ctx context.Context, pool 
 			}
 			return nil
 		}
-		return r.requireRuntimePoolBootRetention(ctx, w)
+		return r.requireRuntimePoolBootRetention(ctx, existing)
 	}
 	if !errors.Is(loadErr, store.ErrNotFound) && !errors.Is(loadErr, store.ErrNotReady) {
 		return loadErr

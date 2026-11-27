@@ -88,10 +88,13 @@ func DetectWithReader(reader DiscoveryReader) (Capabilities, error) {
 	caps := Capabilities{
 		ServerVersion: strings.TrimSpace(raw),
 	}
+	podLevelMin := version.MustParseGeneric(PodLevelResourcesServerVersion)
 	featureBaseline := version.MustParseGeneric(FeatureBaselineServerVersion)
 	imageVolumeMin := version.MustParseGeneric(ImageVolumeServerVersion)
-	if !parsed.LessThan(featureBaseline) {
+	if !parsed.LessThan(podLevelMin) {
 		caps.PodLevelResources = true
+	}
+	if !parsed.LessThan(featureBaseline) {
 		caps.PodLogsSplitStreams = true
 	}
 	if !parsed.LessThan(imageVolumeMin) {

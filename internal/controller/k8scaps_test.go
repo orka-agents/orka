@@ -141,6 +141,17 @@ func TestObservedImageVolumeDigests(t *testing.T) {
 	if empty := observedImageVolumeDigests(corev1.ContainerStatus{}); empty != nil {
 		t.Fatalf("observedImageVolumeDigests(empty) = %#v, want nil", empty)
 	}
+	prior := runtimePoolBootWitness{SchemaVersion: 1, PodName: "p1", ContainerID: "c1", ImageID: "img1"}
+	upgraded := prior
+	upgraded.ImageVolumes = got
+	if !runtimePoolBootWitnessEqual(prior, upgraded) {
+		t.Fatal("expected pre-upgrade witness without ImageVolumes to match observed witness with ImageVolumes")
+	}
+	changed := upgraded
+	changed.ImageVolumes = map[string]string{"toolbox-0": "ghcr.io/orka/tools@sha256:ccc"}
+	if runtimePoolBootWitnessEqual(upgraded, changed) {
+		t.Fatal("expected witness with different ImageVolumes to differ")
+	}
 }
 
 func TestRuntimePoolResizePolicy(t *testing.T) {
