@@ -528,7 +528,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 			Prompt:    security.BuildValidationResultPrompt(scan, finding, resultBinding, policy.PromptPolicy()),
 			Timeout:   &timeout,
 			Priority:  &priority,
-			Workspace: repositoryScanTaskWorkspaceAtCommit(scan, corev1alpha1.WorkspaceIntentRead, pinnedCommit),
+			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
 		},
 	}
 	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.uncachedReader(), task); err != nil {
@@ -546,6 +546,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 	if err := authorizeAndStampTaskContext(ctx, h.uncachedReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityValidationTask", ui, task); err != nil {
 		return err
 	}
+	task.Spec.Workspace = repositoryScanTaskWorkspaceAtCommit(scan, corev1alpha1.WorkspaceIntentRead, pinnedCommit)
 	createErr := h.client.Create(ctx, task)
 	if createErr == nil {
 		sealRequesterStamp(ctx, h.client, task)

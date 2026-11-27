@@ -21,7 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/redact"
-	"github.com/orka-agents/orka/internal/store"
 	toolspkg "github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -1860,8 +1859,7 @@ func contextTokenWorkspaceFailures(token *ContextToken, workspace *corev1alpha1.
 		if !refOnlyWorkspaceMatches && gotBranch != want {
 			failures = append(failures, fmt.Sprintf("workspace branch %q does not match token context %q", gotBranch, want))
 		}
-		pinnedCommitOnMatchingBranch := gotBranch == want && gotRef != "" && store.ValidateGitObjectID("workspace ref", gotRef) == nil
-		if !hasWantRef && gotRef != "" && !pinnedCommitOnMatchingBranch {
+		if !hasWantRef && gotRef != "" {
 			failures = append(failures, fmt.Sprintf("workspace ref %q overrides the branch constrained by token context", gotRef))
 		}
 	}
