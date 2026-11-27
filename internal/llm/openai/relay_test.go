@@ -7,6 +7,7 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -58,6 +59,15 @@ func TestRelayedAzureRequestsUseOnlyTheRelayedPaths(t *testing.T) {
 			_, _ = fmt.Fprint(w, `{"error":{"message":"Not Found","type":"invalid_request_error","code":"invalid_url"}}`)
 			return
 		}
+		var body struct {
+			Stream bool `json:"stream"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello stream!\"}}]}\n\ndata: [DONE]\n\n")
+			return
+		}
 		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-1","object":"chat.completion","model":"gpt-x","choices":[{"index":0,`+
 			`"message":{"role":"assistant","content":"Hello!"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
 	}))
@@ -81,17 +91,28 @@ func TestRelayedAzureRequestsUseOnlyTheRelayedPaths(t *testing.T) {
 		t.Fatalf("Complete() = %+v, %v", response, err)
 	}
 	provider.mode.Store(int32(apiModeChatCompletions))
+	mu.Lock()
+	beforeStream := len(paths)
+	mu.Unlock()
 	stream, err := provider.Stream(context.Background(), request)
 	if err != nil {
 		t.Fatalf("Stream() error = %v", err)
 	}
-	for range stream {
+	var streamed strings.Builder
+	for chunk := range stream {
+		if chunk.Error != nil {
+			t.Fatalf("Stream() chunk error = %v", chunk.Error)
+		}
+		streamed.WriteString(chunk.Content)
+	}
+	if streamed.String() != "Hello stream!" {
+		t.Fatalf("Stream() content = %q, want %q", streamed.String(), "Hello stream!")
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(paths) == 0 {
-		t.Fatal("no request reached the relay")
+	if len(paths) <= beforeStream {
+		t.Fatal("Stream() sent no request to the relay")
 	}
 	for _, path := range paths {
 		if !allowed.MatchString(path) {

@@ -178,7 +178,7 @@ func (h *InternalHandlers) newProviderRelayHTTPClient(c fiber.Ctx, reader client
 }
 
 func (h *InternalHandlers) revalidateProviderRelayBeforeSend(ctx context.Context, c fiber.Ctx, reader client.Reader, target providerRelayRequest, providerUID types.UID, providerGeneration int64, identity, baseURL string) error {
-	liveTask, err := h.internalCallerAuthorizer().verifyTaskCaller(c, target.namespace, target.taskName)
+	liveTask, err := h.internalCallerAuthorizer().verifyTaskCallerContext(ctx, GetUserInfo(c), target.namespace, target.taskName)
 	if err != nil {
 		return err
 	}
