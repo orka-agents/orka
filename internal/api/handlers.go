@@ -1016,22 +1016,57 @@ func readBoundedTailLogLines(r io.Reader, tailLines, maxBytes int64) (string, er
 	if tailLines <= 0 {
 		tailLines = defaultTaskLogTailLines
 	}
-	br := bufio.NewReader(io.LimitReader(r, maxBytes))
+	br := bufio.NewReaderSize(r, 32*1024)
 	ring := make([]string, 0, min(tailLines, 1024))
 	var head int64
+	var count int64
 	var retainedBytes int64
-	for {
-		line, err := br.ReadString('\n')
-		if len(line) > 0 {
-			if int64(len(ring)) < tailLines {
+
+	pushLine := func(line string) {
+		if int64(len(line)) > maxBytes {
+			line = line[int64(len(line))-maxBytes:]
+		}
+		if int64(len(ring)) < tailLines {
+			if count == int64(len(ring)) {
 				ring = append(ring, line)
-				retainedBytes += int64(len(line))
 			} else {
-				retainedBytes -= int64(len(ring[head]))
-				ring[head] = line
-				retainedBytes += int64(len(line))
-				head = (head + 1) % tailLines
+				idx := (head + count) % int64(len(ring))
+				ring[idx] = line
 			}
+			count++
+			retainedBytes += int64(len(line))
+		} else if count < tailLines {
+			idx := (head + count) % tailLines
+			ring[idx] = line
+			count++
+			retainedBytes += int64(len(line))
+		} else {
+			retainedBytes -= int64(len(ring[head]))
+			ring[head] = line
+			retainedBytes += int64(len(line))
+			head = (head + 1) % tailLines
+		}
+		ringLen := int64(len(ring))
+		for retainedBytes > maxBytes && count > 1 {
+			retainedBytes -= int64(len(ring[head]))
+			ring[head] = ""
+			head = (head + 1) % ringLen
+			count--
+		}
+	}
+
+	var cur []byte
+	for {
+		frag, err := br.ReadSlice('\n')
+		if len(frag) > 0 {
+			cur = appendBoundedTailBytes(cur, frag, maxBytes)
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if len(cur) > 0 {
+			pushLine(string(cur))
+			cur = cur[:0]
 		}
 		if errors.Is(err, io.EOF) {
 			break
@@ -1040,16 +1075,29 @@ func readBoundedTailLogLines(r io.Reader, tailLines, maxBytes int64) (string, er
 			return "", err
 		}
 	}
-	if len(ring) == 0 {
+	if count == 0 {
 		return "", nil
 	}
 	var out strings.Builder
 	out.Grow(int(retainedBytes))
 	ringLen := int64(len(ring))
-	for i := range ringLen {
+	for i := range count {
 		out.WriteString(ring[(head+i)%ringLen])
 	}
 	return out.String(), nil
+}
+
+func appendBoundedTailBytes(dst, src []byte, maxBytes int64) []byte {
+	if int64(len(src)) >= maxBytes {
+		return append(dst[:0], src[int64(len(src))-maxBytes:]...)
+	}
+	total := int64(len(dst)) + int64(len(src))
+	if total > maxBytes {
+		drop := total - maxBytes
+		copy(dst, dst[drop:])
+		dst = dst[:int64(len(dst))-drop]
+	}
+	return append(dst, src...)
 }
 
 const (

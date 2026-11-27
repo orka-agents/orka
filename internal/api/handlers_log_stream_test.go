@@ -53,7 +53,11 @@ func TestReadBoundedTailLogLines(t *testing.T) {
 		t.Fatalf("readBoundedTailLogLines = (%q, %v), want (%q, nil)", got, err, "c")
 	}
 	got, err = readBoundedTailLogLines(strings.NewReader("12345\n67890\nabcde\n"), 2, 12)
-	if err != nil || len(got) > 12 {
-		t.Fatalf("readBoundedTailLogLines bounded = (%q, %v), want <= 12 bytes", got, err)
+	if err != nil || got != "67890\nabcde\n" {
+		t.Fatalf("readBoundedTailLogLines past byte cap = (%q, %v), want (%q, nil)", got, err, "67890\nabcde\n")
+	}
+	got, err = readBoundedTailLogLines(strings.NewReader(strings.Repeat("x", 100)+"tail\n"), 2, 10)
+	if err != nil || got != "xxxxxtail\n" {
+		t.Fatalf("readBoundedTailLogLines long line = (%q, %v), want (%q, nil)", got, err, "xxxxxtail\n")
 	}
 }
