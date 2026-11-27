@@ -87,8 +87,6 @@ type ProviderEntraAuth struct {
 	Identity string `json:"identity"`
 }
 
-// EntraIdentity returns the configured Entra identity name, or "" when the
-// Provider does not use Entra authentication.
 func (p *Provider) EntraIdentity() string {
 	if p == nil || p.Spec.Auth == nil || p.Spec.Auth.Entra == nil {
 		return ""
@@ -96,8 +94,6 @@ func (p *Provider) EntraIdentity() string {
 	return p.Spec.Auth.Entra.Identity
 }
 
-// UsesKeylessAuth reports whether the Provider authenticates without an API
-// key Secret.
 func (p *Provider) UsesKeylessAuth() bool {
 	return p != nil && p.Spec.Auth != nil
 }

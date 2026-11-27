@@ -211,7 +211,6 @@ func TestTokenUsesTheWorkloadIdentityFlowAndCaches(t *testing.T) {
 	if fake.count() != 2 {
 		t.Fatalf("Entra saw %d requests, want a fresh token after five minutes", fake.count())
 	}
-	// Verify always asks Entra.
 	if err := source.Verify(context.Background(), "models", testEndpoint); err != nil {
 		t.Fatal(err)
 	}

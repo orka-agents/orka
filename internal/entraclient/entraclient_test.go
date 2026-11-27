@@ -47,7 +47,6 @@ func TestCacheNeverOutlivesTheTokenOrTheCap(t *testing.T) {
 			return fmt.Sprint("t", calls), lifetime, nil
 		}
 	}
-	// A two-minute token is kept one minute: its lifetime less the margin.
 	if _, err := cache.Get(context.Background(), "short", fetch(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +58,6 @@ func TestCacheNeverOutlivesTheTokenOrTheCap(t *testing.T) {
 	if token, _ := cache.Get(context.Background(), "short", fetch(2*time.Minute)); token != "t2" {
 		t.Fatalf("token = %q, want a fresh one after its lifetime less the margin", token)
 	}
-	// An hour-long token is kept at most MaxCachedTokenLifetime.
 	if _, err := cache.Get(context.Background(), "long", fetch(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +65,6 @@ func TestCacheNeverOutlivesTheTokenOrTheCap(t *testing.T) {
 	if token, _ := cache.Get(context.Background(), "long", fetch(time.Hour)); token != "t4" {
 		t.Fatalf("token = %q, want a fresh one after the cap", token)
 	}
-	// A token with no usable lifetime is never cached.
 	if _, err := cache.Get(context.Background(), "unknown", fetch(0)); err != nil {
 		t.Fatal(err)
 	}

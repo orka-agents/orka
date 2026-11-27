@@ -965,8 +965,6 @@ func main() {
 		envutil.String("ORKA_AGENT_HOST_CONTROLLER_POD_LABELS", "orka.ai/network-role=controller"),
 		"Comma-separated key=value labels of the controller Pods that may read agent-host status.")
 	flag.Parse()
-	// Configuration errors below exit before the controller starts, so the
-	// logger must be live for them to be seen.
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	nativeSessionMaxBytes, nativeSessionMaxBytesErr = effectiveNativeSessionMaxBytes(flag.CommandLine, nativeSessionMaxBytes, nativeSessionMaxBytesErr)
 	if nativeSessionMaxBytesErr != nil {
@@ -1005,8 +1003,6 @@ func main() {
 		setupLog.Error(err, "invalid Provider identity configuration")
 		os.Exit(1)
 	}
-	// The identities' federated credentials trust the controller
-	// ServiceAccount too, so no OutboundAccessPolicy may mint its tokens.
 	if controllerServiceAccountErr != nil && len(providerIdentityConfig.Identities) > 0 {
 		setupLog.Error(controllerServiceAccountErr, "Provider identities require the controller to know its own ServiceAccount")
 		os.Exit(1)
@@ -1016,7 +1012,6 @@ func main() {
 		setupLog.Error(err, "invalid Provider identity configuration")
 		os.Exit(1)
 	}
-	// A nil *Source must not become a non-nil interface value.
 	var providerIdentityVerifier controller.ProviderIdentityVerifier
 	var providerIdentityTokens api.ProviderIdentityTokenSource
 	if providerIdentitySource != nil {

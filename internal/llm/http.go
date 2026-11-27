@@ -29,19 +29,15 @@ var sharedHTTPClient = sync.OnceValue(func() *http.Client {
 	return &http.Client{Transport: transport}
 })
 
-// BearerTokenSource returns a short-lived bearer token for one request.
 type BearerTokenSource func(ctx context.Context) (string, error)
 
-// ErrBearerTokenUnsupported is returned by providers that cannot
-// authenticate with a BearerTokenSource.
 var ErrBearerTokenUnsupported = &ProviderError{Message: "this provider type does not support token authentication"}
 
-// NewBearerHTTPClient returns a client that authenticates every request with
-// a token from source and sends it only to baseURL's https origin. It drops
-// any API key header, and it never follows a redirect, so the token cannot be
-// forwarded to another endpoint. Connections are shared with
-// SharedHTTPClient.
 func NewBearerHTTPClient(baseURL string, source BearerTokenSource) (*http.Client, error) {
+	return NewBearerHTTPClientWithTransport(baseURL, source, nil)
+}
+
+func NewBearerHTTPClientWithTransport(baseURL string, source BearerTokenSource, base http.RoundTripper) (*http.Client, error) {
 	origin, err := httpsOrigin(baseURL)
 	if err != nil {
 		return nil, err
@@ -49,8 +45,11 @@ func NewBearerHTTPClient(baseURL string, source BearerTokenSource) (*http.Client
 	if source == nil {
 		return nil, errors.New("a bearer token source is required")
 	}
+	if base == nil {
+		base = SharedHTTPClient().Transport
+	}
 	return &http.Client{
-		Transport:     &bearerTransport{base: SharedHTTPClient().Transport, origin: origin, source: source},
+		Transport:     &bearerTransport{base: base, origin: origin, source: source},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}, nil
 }
@@ -78,18 +77,24 @@ func (t *bearerTransport) RoundTrip(request *http.Request) (*http.Response, erro
 	return t.base.RoundTrip(authenticated)
 }
 
-// closeRequestBody honours the RoundTripper contract on early returns.
 func closeRequestBody(request *http.Request) {
 	if request.Body != nil {
 		_ = request.Body.Close()
 	}
 }
 
-// httpsOrigin returns the lower-case https origin of rawURL, without the
-// default port.
+func isASCIIHost(host string) bool {
+	for i := 0; i < len(host); i++ {
+		if host[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
 func httpsOrigin(rawURL string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil {
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || !isASCIIHost(parsed.Hostname()) || parsed.User != nil {
 		return "", errors.New("token authentication requires an https endpoint without credentials")
 	}
 	host := strings.ToLower(parsed.Hostname())

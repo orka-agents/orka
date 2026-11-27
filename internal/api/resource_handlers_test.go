@@ -845,7 +845,6 @@ func TestHandlers_ProviderRESTMutationRejectsAndKeepsAuth(t *testing.T) {
 	})
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 
-	// An update that leaves auth out keeps it, as it keeps baseURL.
 	resp = testJSONRequest(t, app, http.MethodPut, "/providers/keyless", map[string]any{
 		"spec": map[string]any{
 			"type":         "azure-openai",

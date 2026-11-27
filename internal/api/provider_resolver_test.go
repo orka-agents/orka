@@ -743,7 +743,6 @@ func TestProviderResolverKeylessProviderUsesTheIdentityAndNoSecret(t *testing.T)
 	assert.Equal(t, "https://example.openai.azure.com", tokens.baseURL)
 	assert.Zero(t, tracked.secretReads, "a keyless Provider must not read a Secret")
 
-	// The client is built without obtaining a token; tokens are per request.
 	tokens.err = errors.New("issuer down")
 	provider, _, err := resolver.buildProvider(keylessProvider(), providerConfig, "gpt-example")
 	require.NoError(t, err)

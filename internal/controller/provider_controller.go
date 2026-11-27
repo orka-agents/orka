@@ -33,21 +33,14 @@ const (
 	reasonValidationSucceeded = "ValidationSucceeded"
 	reasonValidationFailed    = "ValidationFailed"
 
-	// ConditionProviderCredentialReady reports whether a keyless Provider's
-	// identity can obtain a token. Providers with an API key Secret do not
-	// carry it.
 	ConditionProviderCredentialReady = "CredentialReady"
 	reasonTokenIssued                = "TokenIssued"
 	reasonTokenRefused               = "TokenRefused"
 	reasonIssuerUnavailable          = "IssuerUnavailable"
 
-	// providerCredentialRecheck is how often a keyless Provider's identity
-	// is verified with its issuer while its generation is unchanged.
 	providerCredentialRecheck = time.Hour
-	// providerCredentialRetry is how soon a refused or unanswered
-	// verification is retried.
-	providerCredentialRetry = time.Minute
-	providerVerifyTimeout   = 30 * time.Second
+	providerCredentialRetry   = time.Minute
+	providerVerifyTimeout     = 30 * time.Second
 )
 
 type ProviderIdentityVerifier interface {

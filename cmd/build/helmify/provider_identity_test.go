@@ -69,8 +69,6 @@ func TestStaticChartRendersProviderIdentitiesTheControllerAccepts(t *testing.T) 
 	require.Contains(t, usGov, `audience: "api://AzureADTokenExchangeUSGov"`)
 }
 
-// The identities trust the controller ServiceAccount, so the chart installs
-// the same protection it installs for agent identities.
 func TestStaticChartProtectsTheControllerServiceAccountWithProviderIdentities(t *testing.T) {
 	const template = "templates/controller-serviceaccount-admission-policy.yaml"
 	rendered, err := helmTemplateStaticChartForRelease(t, "orka", "orka-system",
@@ -81,8 +79,6 @@ func TestStaticChartProtectsTheControllerServiceAccountWithProviderIdentities(t 
 	require.Contains(t, rendered, "kind: ValidatingAdmissionPolicyBinding\n")
 }
 
-// An empty or padded audience must not leave the projected token and the
-// controller with different audiences.
 func TestStaticChartDefaultsAnEmptyProviderTokenAudienceForTokenAndFlag(t *testing.T) {
 	for _, audience := range []string{"", "  "} {
 		rendered, err := helmTemplateStaticChart(t,

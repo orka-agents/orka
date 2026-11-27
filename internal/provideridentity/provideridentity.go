@@ -1,10 +1,5 @@
 // Copyright (c) 2026. MIT License - see LICENSE file for details.
 
-// Package provideridentity configures the Entra workload identities that
-// keyless model Providers name in spec.auth.entra.identity, and obtains their
-// tokens in the controller. The controller's projected ServiceAccount token is
-// the federated credential; tokens are cached briefly, attached only for the
-// exact origins the operator allowed, and never stored or logged.
 package provideridentity
 
 import (
@@ -27,36 +22,22 @@ import (
 )
 
 const (
-	// CloudAzurePublic is the Azure public cloud.
-	CloudAzurePublic = "AzurePublic"
-	// CloudAzureUSGovernment is Azure Government.
+	CloudAzurePublic       = "AzurePublic"
 	CloudAzureUSGovernment = "AzureUSGovernment"
-	// CloudAzureChina is Azure operated by 21Vianet.
-	CloudAzureChina = "AzureChina"
+	CloudAzureChina        = "AzureChina"
 
-	// DefaultTokenFile is where the controller's projected ServiceAccount
-	// token for Provider identities is mounted.
-	DefaultTokenFile = "/var/run/secrets/orka.ai/provider-identity/token"
-	// DefaultTokenAudience is the audience of that token in the public cloud.
+	DefaultTokenFile     = "/var/run/secrets/orka.ai/provider-identity/token"
 	DefaultTokenAudience = "api://AzureADTokenExchange"
 
-	// publicDataPlaneScope is the scope Azure OpenAI and Foundry endpoints
-	// accept for Entra tokens in the public cloud.
 	publicDataPlaneScope = "https://ai.azure.com/.default"
 	metricAdapter        = "providerIdentity"
 	schemeHTTPS          = "https"
 )
 
-// ErrNotConfigured marks a Provider that names an identity this controller
-// does not have.
 var ErrNotConfigured = errors.New("the Provider identity is not configured on this controller")
 
-// ErrEndpointNotAllowed marks a Provider whose endpoint is not in the
-// identity's allowedEndpoints.
 var ErrEndpointNotAllowed = errors.New("the Provider endpoint is not in the identity's allowedEndpoints")
 
-// ErrIssuerUnavailable marks an issuer that could not answer; callers may
-// retry later.
 var ErrIssuerUnavailable = entraclient.ErrIssuerUnavailable
 
 var guidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -67,53 +48,28 @@ type cloudDefaults struct {
 	scope     string
 }
 
-// clouds holds what Microsoft documents for each cloud. Azure China's
-// token-exchange audience and the sovereign data-plane scopes are not
-// documented, so those must be configured explicitly.
 var clouds = map[string]cloudDefaults{
 	CloudAzurePublic:       {authority: entraclient.DefaultAuthority, audience: "api://AzureADTokenExchange", scope: publicDataPlaneScope},
 	CloudAzureUSGovernment: {authority: "https://login.microsoftonline.us", audience: "api://AzureADTokenExchangeUSGov"},
 	CloudAzureChina:        {authority: "https://login.chinacloudapi.cn"},
 }
 
-// Config is the controller's Provider identity configuration, given as JSON
-// in --provider-identities.
 type Config struct {
-	// TokenAudience is the audience of the projected ServiceAccount token
-	// the controller presents. Every identity's exchange audience must match
-	// it. DefaultTokenAudience when empty.
-	TokenAudience string `json:"tokenAudience,omitempty"`
-	// Identities are the identities Providers may name.
-	Identities []Identity `json:"identities"`
+	TokenAudience string     `json:"tokenAudience,omitempty"`
+	Identities    []Identity `json:"identities"`
 }
 
-// Identity is one named Entra workload identity.
 type Identity struct {
-	// Name is what Provider.spec.auth.entra.identity refers to.
-	Name string `json:"name"`
-	// TenantID is the Entra tenant of the identity.
-	TenantID string `json:"tenantID"`
-	// ClientID is the app registration or user-assigned managed identity
-	// whose federated credential trusts the controller ServiceAccount.
-	ClientID string `json:"clientID"`
-	// Cloud selects the authority, exchange audience and scope defaults.
-	// AzurePublic when empty.
-	Cloud string `json:"cloud,omitempty"`
-	// Authority overrides the cloud's Entra authority.
-	Authority string `json:"authority,omitempty"`
-	// ExchangeAudience overrides the cloud's token-exchange audience. It
-	// must equal Config.TokenAudience.
-	ExchangeAudience string `json:"exchangeAudience,omitempty"`
-	// Scope overrides the cloud's data-plane scope, such as
-	// https://ai.azure.com/.default.
-	Scope string `json:"scope,omitempty"`
-	// AllowedEndpoints are the exact https origins this identity's tokens
-	// may be sent to, such as https://example.openai.azure.com.
+	Name             string   `json:"name"`
+	TenantID         string   `json:"tenantID"`
+	ClientID         string   `json:"clientID"`
+	Cloud            string   `json:"cloud,omitempty"`
+	Authority        string   `json:"authority,omitempty"`
+	ExchangeAudience string   `json:"exchangeAudience,omitempty"`
+	Scope            string   `json:"scope,omitempty"`
 	AllowedEndpoints []string `json:"allowedEndpoints"`
 }
 
-// Parse reads the JSON configuration. Unknown fields are refused, so a typo
-// cannot silently drop a restriction. An empty value means no identities.
 func Parse(raw string) (Config, error) {
 	var config Config
 	if strings.TrimSpace(raw) == "" {
@@ -124,15 +80,12 @@ func Parse(raw string) (Config, error) {
 	if err := decoder.Decode(&config); err != nil {
 		return Config{}, fmt.Errorf("parse the Provider identity configuration: %w", err)
 	}
-	// More reports elements inside an array or object, not the end of
-	// input, so an unmatched "}" or "]" would pass it.
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return Config{}, errors.New("parse the Provider identity configuration: trailing data after the JSON object")
 	}
 	return config, config.Validate()
 }
 
-// resolved is an identity with its effective settings.
 type resolved struct {
 	name      string
 	tenantID  string
@@ -149,7 +102,6 @@ func (c Config) tokenAudience() string {
 	return DefaultTokenAudience
 }
 
-// Validate rejects a partly or wrongly configured identity at startup.
 func (c Config) Validate() error {
 	_, err := c.resolve()
 	return err
@@ -174,7 +126,6 @@ func (i Identity) resolve(tokenAudience string) (resolved, error) {
 	if errs := k8svalidation.IsDNS1123Label(i.Name); len(errs) > 0 {
 		return resolved{}, errors.New("the name must be a DNS label")
 	}
-	// The values are sent as they are, so surrounding space would reach Entra.
 	if !guidPattern.MatchString(i.TenantID) || !guidPattern.MatchString(i.ClientID) {
 		return resolved{}, errors.New("tenantID and clientID must be GUIDs without surrounding space")
 	}
@@ -243,20 +194,25 @@ func validateScope(scope string) error {
 	return nil
 }
 
-// exactOrigin returns the canonical origin of an allowed endpoint, which must
-// be an https origin with no path, credentials, query, or fragment.
+func isASCIIHost(host string) bool {
+	for i := 0; i < len(host); i++ {
+		if host[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
 func exactOrigin(endpoint string) (string, error) {
 	parsed, err := url.Parse(endpoint)
 	if err != nil || strings.TrimSpace(endpoint) != endpoint || parsed.Scheme != schemeHTTPS || parsed.Hostname() == "" ||
-		parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" ||
+		!isASCIIHost(parsed.Hostname()) || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" ||
 		(parsed.Path != "" && parsed.Path != "/") || strings.Contains(parsed.Hostname(), "*") {
 		return "", fmt.Errorf("%q must be an exact https origin such as https://example.openai.azure.com", endpoint)
 	}
 	return canonicalOrigin(parsed), nil
 }
 
-// canonicalOrigin is the scheme and host in lower case, with the default
-// https port dropped.
 func canonicalOrigin(parsed *url.URL) string {
 	host := strings.ToLower(parsed.Hostname())
 	if port := parsed.Port(); port != "" && port != "443" {
@@ -267,30 +223,23 @@ func canonicalOrigin(parsed *url.URL) string {
 	return "https://" + host
 }
 
-// Origin returns the canonical origin of a Provider base URL. Only https is
-// accepted, so a token never travels in clear text.
 func Origin(baseURL string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil || parsed.Scheme != schemeHTTPS || parsed.Hostname() == "" || parsed.User != nil {
+	if err != nil || parsed.Scheme != schemeHTTPS || parsed.Hostname() == "" || !isASCIIHost(parsed.Hostname()) || parsed.User != nil {
 		return "", errors.New("the Provider baseURL must be an https URL without credentials")
 	}
 	return canonicalOrigin(parsed), nil
 }
 
-// Source obtains tokens for configured Provider identities.
 type Source struct {
-	// Credential returns the controller's federated credential.
 	Credential func() (string, error)
 	HTTPClient *http.Client
-	// Now returns the current time; time.Now when nil.
-	Now func() time.Time
+	Now        func() time.Time
 
 	identities map[string]resolved
 	cache      *entraclient.Cache
 }
 
-// NewSource returns a Source for a validated configuration, or nil when no
-// identity is configured.
 func NewSource(config Config, credential func() (string, error)) (*Source, error) {
 	identities, err := config.resolve()
 	if err != nil {
@@ -311,8 +260,6 @@ func (s *Source) now() time.Time {
 	return time.Now()
 }
 
-// Check reports whether the identity is configured and may be used for
-// baseURL, without asking Entra.
 func (s *Source) Check(identity, baseURL string) error {
 	_, err := s.lookup(identity, baseURL)
 	return err
@@ -336,9 +283,6 @@ func (s *Source) lookup(identity, baseURL string) (resolved, error) {
 	return entry, nil
 }
 
-// Token returns a token for the identity, to be sent only to baseURL's
-// origin. Tokens are cached under the identity's tenant, client, authority
-// and scope for at most entraclient.MaxCachedTokenLifetime.
 func (s *Source) Token(ctx context.Context, identity, baseURL string) (string, error) {
 	entry, err := s.lookup(identity, baseURL)
 	if err != nil {
@@ -350,8 +294,6 @@ func (s *Source) Token(ctx context.Context, identity, baseURL string) (string, e
 	})
 }
 
-// Verify asks Entra for a fresh token, past the cache, and discards it. It
-// proves that the identity, its federated credential and the scope work.
 func (s *Source) Verify(ctx context.Context, identity, baseURL string) error {
 	entry, err := s.lookup(identity, baseURL)
 	if err != nil {

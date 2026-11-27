@@ -70,7 +70,6 @@ func TestResolveProviderRefusesAKeylessFallbackProvider(t *testing.T) {
 		t.Fatalf("resolveProvider() = %v, want the keyless fallback refused", err)
 	}
 
-	// Agent Tasks use no Providers, so their fallbacks are not checked.
 	agentTask := task.DeepCopy()
 	agentTask.Spec.Type = corev1alpha1.TaskTypeAgent
 	if _, err := r.resolveProvider(context.Background(), agentTask, agent); err != nil {
