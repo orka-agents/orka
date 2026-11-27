@@ -1610,6 +1610,9 @@ func (h *Handlers) authorizeRepositoryScanValidationAgent(
 		},
 	}
 	ui := GetUserInfo(c)
+	if err := refuseWorkerRootTaskForIdentityAgent(c.Context(), h.uncachedReader(), ui, validationProbeTask); err != nil {
+		return err
+	}
 	if enforceTaskCreate {
 		if err := authorizeKubernetesTaskCreate(c.Context(), h.uncachedReader(), h.clientset, ui, validationProbeTask); err != nil {
 			return err
