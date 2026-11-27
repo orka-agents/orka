@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -78,8 +79,11 @@ func TestAuthTokenRefreshesExpiredOIDCToken(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(envToken, "")
 	t.Setenv(envServer, "")
-	refreshCalls := 0
-	var refreshed string
+	var (
+		mu           sync.Mutex
+		refreshCalls int
+		refreshed    string
+	)
 	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/token" {
 			w.WriteHeader(http.StatusNotFound)
@@ -89,11 +93,14 @@ func TestAuthTokenRefreshesExpiredOIDCToken(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		token := testCompactJWT(t, "https://idp.example", "orka-client-id", time.Now().Add(time.Hour).Unix())
+		mu.Lock()
 		refreshCalls++
-		refreshed = testCompactJWT(t, "https://idp.example", "orka-client-id", time.Now().Add(time.Hour).Unix())
+		refreshed = token
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]any{
-			"access_token":  refreshed,
+			"access_token":  token,
 			"refresh_token": "refresh-2",
 			"expires_in":    3600,
 		}); err != nil {
@@ -108,14 +115,18 @@ func TestAuthTokenRefreshesExpiredOIDCToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("auth token: %v\n%s", err, stderr)
 	}
-	if refreshCalls != 1 {
-		t.Fatalf("refreshCalls = %d, want 1", refreshCalls)
+	mu.Lock()
+	gotCalls := refreshCalls
+	gotRefreshed := refreshed
+	mu.Unlock()
+	if gotCalls != 1 {
+		t.Fatalf("refreshCalls = %d, want 1", gotCalls)
 	}
-	if stdout != refreshed+"\n" {
+	if stdout != gotRefreshed+"\n" {
 		t.Fatalf("stdout = %q, want the refreshed token", stdout)
 	}
-	if saved := loadConfig(); saved.Token != refreshed || saved.OIDCRefreshToken != "refresh-2" {
-		t.Fatalf("refreshed session was not saved: token match %v, refresh token %q", saved.Token == refreshed, saved.OIDCRefreshToken)
+	if saved := loadConfig(); saved.Token != gotRefreshed || saved.OIDCRefreshToken != "refresh-2" {
+		t.Fatalf("refreshed session was not saved: token match %v, refresh token %q", saved.Token == gotRefreshed, saved.OIDCRefreshToken)
 	}
 }
 

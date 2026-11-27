@@ -169,7 +169,7 @@ orka auth whoami
 `orka auth token` prints the token the CLI sends to the server, so another client, such as an [MCP client](../guides/mcp-server.md#use-your-orka-sign-in) or a script, can act as you. It refreshes a saved sign-in first:
 
 ```bash
-curl -H "Authorization: Bearer $(orka auth token --server https://orka.example.com)" https://orka.example.com/api/v1/auth/whoami
+token="$(env -u ORKA_TOKEN orka auth token --server https://orka.example.com)" && printf 'Authorization: Bearer %s\n' "$token" | curl --header @- https://orka.example.com/api/v1/auth/whoami
 orka auth token --server https://orka.example.com --format header-json   # {"Authorization":"Bearer <token>"}
 ```
 
