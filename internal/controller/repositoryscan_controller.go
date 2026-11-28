@@ -4831,7 +4831,7 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 			recordValidationError(finding, validationProblem)
 			validationMetricStatus = findingValidationStatusError
 		} else if artifact != nil {
-			if existing := preservedValidationPoCVerification(finding, artifact); existing != nil {
+			if existing := preservedValidationPoCVerification(scan, finding, artifact); existing != nil {
 				artifact.PoCVerification = existing
 			} else {
 				pendingPoC, pocVerification, pocErr := r.evaluateControllerPoCVerification(ctx, scan, task, finding, artifact)

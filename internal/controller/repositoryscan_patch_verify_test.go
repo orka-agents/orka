@@ -112,7 +112,7 @@ func TestIngestPatchTaskControllerVerificationFailBeforePass(t *testing.T) {
 		t.Fatalf("patched verification readCredentialRef = %#v, want %q", patchedTask.Spec.Workspace.ReadCredentialRef, fixture.scan.Spec.PublicationReadCredentialRef.Name)
 	}
 	patchedTask.Spec = taskSpecWithServerDefaults(patchedTask.Spec)
-	desiredPatched := buildDesiredPatchVerifyTask(fixture.scan, task, fixture.finding, patchVerifyPhasePatched, strings.Repeat("b", 40), fixture.scan.Spec.PatchVerification.Image, fixture.scan.Spec.PatchVerification.Command, true)
+	desiredPatched := buildDesiredPatchVerifyTask(fixture.scan, task, fixture.finding, patchVerifyPhasePatched, strings.Repeat("b", 40), fixture.scan.Spec.PatchVerification.Image, fixture.scan.Spec.PatchVerification.Command, patchVerifyTimeout, true)
 	if !patchVerifyTaskMatchesDesired(fixture.scan, patchedTask, desiredPatched) {
 		t.Fatal("expected patchVerifyTaskMatchesDesired to accept server-defaulted task spec")
 	}
@@ -306,7 +306,7 @@ func TestRepositoryScanPatchVerifyJobAndConfinementLifecycle(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "patch-task-1", Namespace: "default"},
 	}
 	finding := &store.Finding{ID: "fnd-1", ScanRunID: "scan-run-1"}
-	task := buildDesiredPatchVerifyTask(scan, patchTask, finding, patchVerifyPhasePatched, strings.Repeat("a", 40), scan.Spec.PatchVerification.Image, scan.Spec.PatchVerification.Command, true)
+	task := buildDesiredPatchVerifyTask(scan, patchTask, finding, patchVerifyPhasePatched, strings.Repeat("a", 40), scan.Spec.PatchVerification.Image, scan.Spec.PatchVerification.Command, patchVerifyTimeout, true)
 	task.UID = types.UID("patch-verify-task-uid")
 	task.Annotations[labels.AnnotationTransactionTokenSecret] = "injected-token-secret"
 

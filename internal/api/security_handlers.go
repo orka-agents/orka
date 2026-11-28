@@ -114,8 +114,8 @@ func validateRepositoryScanSpecValues(spec corev1alpha1.RepositoryScanSpec) erro
 				return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.pocExecution.allowedHarnesses contains unsupported harness %q", harness))
 			}
 		}
-		if spec.PoCExecution.Timeout != nil && spec.PoCExecution.Timeout.Duration <= 0 {
-			return fiber.NewError(fiber.StatusBadRequest, "spec.pocExecution.timeout must be positive")
+		if spec.PoCExecution.Timeout != nil && spec.PoCExecution.Timeout.Duration < time.Second {
+			return fiber.NewError(fiber.StatusBadRequest, "spec.pocExecution.timeout must be at least 1s")
 		}
 		if spec.PoCExecution.SandboxWorkspaceClassRef != nil && strings.TrimSpace(spec.PoCExecution.SandboxWorkspaceClassRef.Name) == "" {
 			return fiber.NewError(fiber.StatusBadRequest, "spec.pocExecution.sandboxWorkspaceClassRef.name is required")
