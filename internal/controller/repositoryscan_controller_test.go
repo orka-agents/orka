@@ -7049,6 +7049,130 @@ func TestMapperCrossComponentEnvAppliesOnlyToFullScans(t *testing.T) {
 	}
 }
 
+func TestMapperCrossComponentEnvVariantHuntsAndSlotReservation(t *testing.T) {
+	ctx := context.Background()
+	st := setupControllerSQLiteStore(t)
+	reconciler := &RepositoryScanReconciler{SecurityStore: st}
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "variant-scan", Namespace: defaultNS},
+		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/orka-agents/example", Branch: "main"},
+	}
+	run := &storepkg.ScanRun{ID: "scan_full"}
+	target := trustedFindingsRepository(scan, run)
+	targetKey := security.FindingV2TargetKey(target.RepoURL, target.Branch, target.SubPath)
+
+	for i := range 4 {
+		if err := st.UpsertFinding(ctx, &storepkg.Finding{
+			ID:               fmt.Sprintf("fnd_val_%d", i),
+			Namespace:        defaultNS,
+			RepositoryScan:   scan.Name,
+			ScanRunID:        "scan_prev",
+			TargetKey:        targetKey,
+			Fingerprint:      fmt.Sprintf("fp_val_%d", i),
+			Title:            fmt.Sprintf("Validated issue %d", i),
+			Category:         "authz",
+			RootCause:        "Missing ownership check",
+			FilePath:         fmt.Sprintf("internal/api/h%d.go", i),
+			Line:             10 + i,
+			Severity:         "high",
+			Confidence:       "high",
+			ValidationStatus: findingValidationStatusValidated,
+			State:            findingStateOpen,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.UpsertFinding(ctx, &storepkg.Finding{
+		ID:               "fnd_unvalidated",
+		Namespace:        defaultNS,
+		RepositoryScan:   scan.Name,
+		ScanRunID:        "scan_prev",
+		TargetKey:        targetKey,
+		Fingerprint:      "fp_unval",
+		Title:            "Unvalidated candidate",
+		FilePath:         "internal/api/unval.go",
+		ValidationStatus: findingValidationStatusPending,
+		State:            findingStateOpen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertFinding(ctx, &storepkg.Finding{
+		ID:               "fnd_dismissed",
+		Namespace:        defaultNS,
+		RepositoryScan:   scan.Name,
+		ScanRunID:        "scan_prev",
+		TargetKey:        targetKey,
+		Fingerprint:      "fp_dismissed",
+		Title:            "Dismissed finding",
+		FilePath:         "internal/api/dismissed.go",
+		ValidationStatus: findingValidationStatusValidated,
+		State:            "false_positive",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	extractInvestigations := func(env []corev1.EnvVar) []security.SecurityInvestigation {
+		for _, item := range env {
+			if item.Name == security.EnvInvestigations {
+				var out []security.SecurityInvestigation
+				if err := json.Unmarshal([]byte(strings.ReplaceAll(item.Value, "$$", "$")), &out); err != nil {
+					t.Fatalf("unmarshal investigations: %v", err)
+				}
+				return out
+			}
+		}
+		return nil
+	}
+
+	envNoTM, err := reconciler.mapperCrossComponentEnv(ctx, scan, run)
+	if err != nil {
+		t.Fatalf("mapperCrossComponentEnv(no threat model) error = %v", err)
+	}
+	invsNoTM := extractInvestigations(envNoTM)
+	if len(invsNoTM) != 4 {
+		t.Fatalf("variants without threat model = %d (%#v), want 4 validated open findings", len(invsNoTM), invsNoTM)
+	}
+	for _, inv := range invsNoTM {
+		if strings.Contains(inv.Title, "Unvalidated") || strings.Contains(inv.Title, "Dismissed") {
+			t.Fatalf("unexpected non-eligible finding in variant investigations: %#v", inv)
+		}
+	}
+
+	tmInvs := make([]security.SecurityInvestigation, 0, 8)
+	for i := range 8 {
+		tmInvs = append(tmInvs, security.SecurityInvestigation{
+			Title:    fmt.Sprintf("TM Investigation %d", i),
+			Question: fmt.Sprintf("Check threat model path %d", i),
+			Paths:    []string{fmt.Sprintf("pkg/tm%d", i)},
+		})
+	}
+	if err := st.SaveThreatModel(ctx, &storepkg.ThreatModel{
+		Namespace: defaultNS, RepositoryScan: scan.Name,
+		Content: security.RenderThreatModelInvestigations("# Threat model\n", tmInvs),
+		Source:  "generated",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	envFull, err := reconciler.mapperCrossComponentEnv(ctx, scan, run)
+	if err != nil {
+		t.Fatalf("mapperCrossComponentEnv(full threat model) error = %v", err)
+	}
+	invsFull := extractInvestigations(envFull)
+	if len(invsFull) != 8 {
+		t.Fatalf("combined investigations = %d, want 8", len(invsFull))
+	}
+	variantCount := 0
+	for _, inv := range invsFull {
+		if strings.HasPrefix(inv.Title, "Variant hunt:") {
+			variantCount++
+		}
+	}
+	if variantCount != 3 {
+		t.Fatalf("reserved variant count = %d, want 3 alongside 5 threat-model investigations", variantCount)
+	}
+}
+
 func TestIngestValidationTaskMarksUndecodableResultAsError(t *testing.T) {
 	ctx := context.Background()
 	store := setupControllerSQLiteStore(t)
