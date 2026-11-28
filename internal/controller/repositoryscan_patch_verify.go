@@ -121,6 +121,7 @@ type patchVerificationStep struct {
 	command               string
 	requireFailBeforePass bool
 	expectedBaseExitCode  int
+	timeout               time.Duration
 }
 
 func effectivePatchVerificationPlans(scan *corev1alpha1.RepositoryScan, finding *store.Finding) ([]patchVerificationStep, string) {
@@ -133,6 +134,7 @@ func effectivePatchVerificationPlans(scan *corev1alpha1.RepositoryScan, finding 
 			image:                 strings.TrimSpace(scan.Spec.PatchVerification.Image),
 			command:               strings.TrimSpace(scan.Spec.PatchVerification.Command),
 			requireFailBeforePass: scan.Spec.PatchVerification.RequireFailBeforePass,
+			timeout:               patchVerifyTimeout,
 		})
 	}
 	if pocCmd, expectedExitCode, ok := validatedFindingPoCCommand(finding); ok {
@@ -140,12 +142,17 @@ func effectivePatchVerificationPlans(scan *corev1alpha1.RepositoryScan, finding 
 		if img == "" && scan != nil && scan.Spec.PatchVerification != nil {
 			img = strings.TrimSpace(scan.Spec.PatchVerification.Image)
 		}
+		pocTimeout := effectivePoCVerificationTimeout(nil)
+		if scan != nil && scan.Spec.PoCExecution != nil {
+			pocTimeout = effectivePoCVerificationTimeout(scan.Spec.PoCExecution)
+		}
 		if tools.ValidRepositoryValidationImage(img) {
 			duplicate := false
 			for i := range plans {
 				if plans[i].image == img && plans[i].command == pocCmd {
 					plans[i].requireFailBeforePass = true
 					plans[i].expectedBaseExitCode = expectedExitCode
+					plans[i].timeout = pocTimeout
 					duplicate = true
 					break
 				}
@@ -156,6 +163,7 @@ func effectivePatchVerificationPlans(scan *corev1alpha1.RepositoryScan, finding 
 					command:               pocCmd,
 					requireFailBeforePass: true,
 					expectedBaseExitCode:  expectedExitCode,
+					timeout:               pocTimeout,
 				})
 			}
 		}
@@ -187,13 +195,62 @@ func (r *RepositoryScanReconciler) evaluateControllerPatchVerification(
 	if patchedCommit == "" || store.ValidateGitObjectID("patched commit", patchedCommit) != nil {
 		return false, "controller patch verification requires a valid published commit SHA", nil
 	}
+	var results []*security.PatchControllerVerification
 	for _, plan := range plans {
-		pending, stepProblem, err := r.evaluatePatchVerificationStep(ctx, scan, patchTask, finding, baseCommit, patchedCommit, verified.summaryArtifact, plan)
-		if err != nil || pending || stepProblem != "" {
-			return pending, stepProblem, err
+		pending, stepVerification, stepProblem, err := r.evaluatePatchVerificationStep(ctx, scan, patchTask, finding, baseCommit, patchedCommit, plan)
+		if err != nil {
+			return false, "", err
+		}
+		if pending {
+			return true, "", nil
+		}
+		if stepProblem != "" {
+			if stepVerification != nil {
+				if persistErr := r.persistControllerVerificationArtifact(ctx, patchTask, verified.summaryArtifact, stepVerification); persistErr != nil {
+					return false, "", persistErr
+				}
+			}
+			return false, stepProblem, nil
+		}
+		if stepVerification != nil {
+			results = append(results, stepVerification)
+		}
+	}
+	if len(results) > 0 {
+		aggregate := aggregatePatchControllerVerifications(results)
+		if err := r.persistControllerVerificationArtifact(ctx, patchTask, verified.summaryArtifact, aggregate); err != nil {
+			return false, "", err
 		}
 	}
 	return false, "", nil
+}
+
+func aggregatePatchControllerVerifications(results []*security.PatchControllerVerification) *security.PatchControllerVerification {
+	if len(results) == 1 {
+		return results[0]
+	}
+	last := results[len(results)-1]
+	commands := make([]string, 0, len(results))
+	requireFailBeforePass := false
+	for _, item := range results {
+		if cmd := strings.TrimSpace(item.Command); cmd != "" {
+			commands = append(commands, cmd)
+		}
+		if item.RequireFailBeforePass {
+			requireFailBeforePass = true
+		}
+	}
+	return &security.PatchControllerVerification{
+		Status:                patchVerifyStatusVerify,
+		Command:               strings.Join(commands, " && "),
+		RequireFailBeforePass: requireFailBeforePass,
+		BaseCommit:            last.BaseCommit,
+		PatchedCommit:         last.PatchedCommit,
+		BaseTaskName:          last.BaseTaskName,
+		PatchedTaskName:       last.PatchedTaskName,
+		BasePassed:            last.BasePassed,
+		PatchedPassed:         last.PatchedPassed,
+	}
 }
 
 func (r *RepositoryScanReconciler) evaluatePatchVerificationStep(
@@ -203,11 +260,10 @@ func (r *RepositoryScanReconciler) evaluatePatchVerificationStep(
 	finding *store.Finding,
 	baseCommit string,
 	patchedCommit string,
-	summaryArtifact string,
 	plan patchVerificationStep,
-) (bool, string, error) {
+) (bool, *security.PatchControllerVerification, string, error) {
 	if plan.requireFailBeforePass && (baseCommit == "" || store.ValidateGitObjectID("base commit", baseCommit) != nil) {
-		return false, "controller fail->pass verification requires a valid publication source baseline SHA", nil
+		return false, nil, "controller fail->pass verification requires a valid publication source baseline SHA", nil
 	}
 
 	var baseTask *corev1alpha1.Task
@@ -215,23 +271,23 @@ func (r *RepositoryScanReconciler) evaluatePatchVerificationStep(
 	if plan.requireFailBeforePass {
 		var problem string
 		var err error
-		baseTask, problem, err = r.ensurePatchVerifyTask(ctx, scan, patchTask, finding, patchVerifyPhaseBase, baseCommit, plan.image, plan.command, false)
+		baseTask, problem, err = r.ensurePatchVerifyTask(ctx, scan, patchTask, finding, patchVerifyPhaseBase, baseCommit, plan.image, plan.command, plan.timeout, false)
 		if err != nil {
-			return false, "", err
+			return false, nil, "", err
 		}
 		if problem != "" {
-			return false, problem, nil
+			return false, nil, problem, nil
 		}
 		if !baseTask.Status.Phase.IsTerminal() {
-			return true, "", nil
+			return true, nil, "", nil
 		}
 		if baseTask.Status.Phase == corev1alpha1.TaskPhaseCancelled {
-			return false, "controller base verification task was cancelled", nil
+			return false, nil, "controller base verification task was cancelled", nil
 		}
 		passed := baseTask.Status.Phase == corev1alpha1.TaskPhaseSucceeded
 		basePassed = &passed
 		if passed {
-			if err := r.persistControllerVerificationArtifact(ctx, patchTask, summaryArtifact, &security.PatchControllerVerification{
+			return false, &security.PatchControllerVerification{
 				Status:                patchVerifyStatusFailed,
 				Command:               plan.command,
 				RequireFailBeforePass: true,
@@ -239,45 +295,40 @@ func (r *RepositoryScanReconciler) evaluatePatchVerificationStep(
 				PatchedCommit:         patchedCommit,
 				BaseTaskName:          baseTask.Name,
 				BasePassed:            basePassed,
-			}); err != nil {
-				return false, "", err
-			}
-			return false, "controller fail->pass verification rejected: command already passed on unpatched base commit", nil
+			}, "controller fail->pass verification rejected: command already passed on unpatched base commit", nil
 		}
 		baseTriggered := patchVerifyBaseCommandExitedNonZero(baseTask)
 		if plan.expectedBaseExitCode > 0 {
 			baseTriggered = pocCommandTriggered(baseTask, plan.expectedBaseExitCode)
 		}
 		if !baseTriggered {
-			if err := r.persistControllerVerificationArtifact(ctx, patchTask, summaryArtifact, &security.PatchControllerVerification{
+			failedVerification := &security.PatchControllerVerification{
 				Status:                patchVerifyStatusFailed,
 				Command:               plan.command,
 				RequireFailBeforePass: true,
 				BaseCommit:            baseCommit,
 				PatchedCommit:         patchedCommit,
 				BaseTaskName:          baseTask.Name,
-			}); err != nil {
-				return false, "", err
 			}
 			if plan.expectedBaseExitCode > 0 {
-				return false, fmt.Sprintf("controller fail->pass verification rejected: base task did not exit with expected PoC exit code %d", plan.expectedBaseExitCode), nil
+				return false, failedVerification, fmt.Sprintf("controller fail->pass verification rejected: base task did not exit with expected PoC exit code %d", plan.expectedBaseExitCode), nil
 			}
-			return false, "controller fail->pass verification rejected: base task did not record a normal non-zero command exit code", nil
+			return false, failedVerification, "controller fail->pass verification rejected: base task did not record a normal non-zero command exit code", nil
 		}
 	}
 
-	patchedTask, problem, err := r.ensurePatchVerifyTask(ctx, scan, patchTask, finding, patchVerifyPhasePatched, patchedCommit, plan.image, plan.command, true)
+	patchedTask, problem, err := r.ensurePatchVerifyTask(ctx, scan, patchTask, finding, patchVerifyPhasePatched, patchedCommit, plan.image, plan.command, plan.timeout, true)
 	if err != nil {
-		return false, "", err
+		return false, nil, "", err
 	}
 	if problem != "" {
-		return false, problem, nil
+		return false, nil, problem, nil
 	}
 	if !patchedTask.Status.Phase.IsTerminal() {
-		return true, "", nil
+		return true, nil, "", nil
 	}
 	if patchedTask.Status.Phase == corev1alpha1.TaskPhaseCancelled {
-		return false, "controller patched verification task was cancelled", nil
+		return false, nil, "controller patched verification task was cancelled", nil
 	}
 	patchedPassed := patchedTask.Status.Phase == corev1alpha1.TaskPhaseSucceeded
 	verification := &security.PatchControllerVerification{
@@ -295,15 +346,9 @@ func (r *RepositoryScanReconciler) evaluatePatchVerificationStep(
 	}
 	if !patchedPassed {
 		verification.Status = patchVerifyStatusFailed
-		if err := r.persistControllerVerificationArtifact(ctx, patchTask, summaryArtifact, verification); err != nil {
-			return false, "", err
-		}
-		return false, "controller patch verification failed on patched commit", nil
+		return false, verification, "controller patch verification failed on patched commit", nil
 	}
-	if err := r.persistControllerVerificationArtifact(ctx, patchTask, summaryArtifact, verification); err != nil {
-		return false, "", err
-	}
-	return false, "", nil
+	return false, verification, "", nil
 }
 
 func buildDesiredPatchVerifyTask(
@@ -314,8 +359,12 @@ func buildDesiredPatchVerifyTask(
 	commitSHA string,
 	image string,
 	command string,
+	timeoutDuration time.Duration,
 	useTargetRepo bool,
 ) *corev1alpha1.Task {
+	if timeoutDuration <= 0 {
+		timeoutDuration = patchVerifyTimeout
+	}
 	taskName := patchVerifyTaskName(scan.Name, finding.ID, patchTask.Name, phase, commitSHA, image, command)
 	workspace := repositoryScanTaskWorkspaceAtCommit(scan, corev1alpha1.WorkspaceIntentRead, commitSHA)
 	if useTargetRepo {
@@ -327,7 +376,7 @@ func buildDesiredPatchVerifyTask(
 			workspace.ReadCredentialRef = workspaceCredentialReference(scan.Spec.PublicationReadCredentialRef)
 		}
 	}
-	timeout := metav1.Duration{Duration: patchVerifyTimeout}
+	timeout := metav1.Duration{Duration: timeoutDuration}
 	priority := int32(740)
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -385,9 +434,10 @@ func (r *RepositoryScanReconciler) ensurePatchVerifyTask(
 	commitSHA string,
 	image string,
 	command string,
+	timeoutDuration time.Duration,
 	useTargetRepo bool,
 ) (*corev1alpha1.Task, string, error) {
-	desired := buildDesiredPatchVerifyTask(scan, patchTask, finding, phase, commitSHA, image, command, useTargetRepo)
+	desired := buildDesiredPatchVerifyTask(scan, patchTask, finding, phase, commitSHA, image, command, timeoutDuration, useTargetRepo)
 	existing := &corev1alpha1.Task{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: scan.Namespace, Name: desired.Name}, existing)
 	if err == nil {

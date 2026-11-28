@@ -555,7 +555,7 @@ func (r *RepositoryScanReconciler) loadPatchSummaryForDecoration(
 			}
 		}
 	}
-	if summary != nil && scan != nil && scan.Spec.PatchVerification != nil {
+	if summary != nil && scan != nil && (scan.Spec.PatchVerification != nil || scan.Spec.PoCExecution != nil) {
 		if verification := r.loadControllerVerificationArtifact(ctx, task, summaryArtifact); verification != nil {
 			summary.ControllerVerification = verification
 		}
