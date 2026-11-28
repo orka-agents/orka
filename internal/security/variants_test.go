@@ -34,6 +34,16 @@ func TestBuildVariantInvestigation(t *testing.T) {
 	if len(inv.Paths) != 2 {
 		t.Fatalf("variant paths = %#v, want 2 deduplicated repo-relative paths", inv.Paths)
 	}
+
+	secretFinding := &store.Finding{
+		ID:        "fnd_secret",
+		Title:     "Leaked token",
+		RootCause: "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456",
+		FilePath:  "internal/api/auth.go",
+	}
+	if _, ok := BuildVariantInvestigation(secretFinding); ok {
+		t.Fatal("expected BuildVariantInvestigation to reject credential-shaped text")
+	}
 }
 
 func TestDistillFindingRule(t *testing.T) {
@@ -43,8 +53,9 @@ func TestDistillFindingRule(t *testing.T) {
 		Category:  "path-traversal",
 		Severity:  "high",
 		RootCause: "Untrusted tar entry path joined without containment check",
-		FilePath:  "internal/archive/extract.go",
+		FilePath:  "scripts/entry.py",
 		Evidence: []store.FindingEvidenceRef{
+			{Kind: "file", Path: "scripts/entry.py", StartLine: 10, EndLine: 20, Role: "source", Symbol: "parse_input"},
 			{Kind: "file", Path: "internal/archive/extract.go", StartLine: 42, EndLine: 50, Role: "sink", Symbol: "filepath.Join"},
 		},
 	}
@@ -53,32 +64,45 @@ func TestDistillFindingRule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DistillFindingRule() error = %v", err)
 	}
-	if rule.SinkSymbol != "filepath.Join" {
-		t.Fatalf("SinkSymbol = %q, want filepath.Join", rule.SinkSymbol)
+	if rule.SinkSymbol != "filepath.Join" || !rule.CandidateOnly {
+		t.Fatalf("SinkSymbol=%q CandidateOnly=%v, want filepath.Join + candidateOnly=true", rule.SinkSymbol, rule.CandidateOnly)
 	}
-	if !strings.Contains(rule.SemgrepYAML, "languages: [go]") || !strings.Contains(rule.SemgrepYAML, "severity: ERROR") || !strings.Contains(rule.SemgrepYAML, "filepath.Join(...)") {
+	if !strings.Contains(rule.SemgrepYAML, "languages: [go]") || !strings.Contains(rule.SemgrepYAML, "candidatePattern: true") || !strings.Contains(rule.SemgrepYAML, "filepath.Join(...)") {
 		t.Fatalf("unexpected Semgrep YAML:\n%s", rule.SemgrepYAML)
 	}
 	if !strings.Contains(rule.ScanPolicyHint, "Archive path traversal") {
 		t.Fatalf("unexpected ScanPolicyHint: %q", rule.ScanPolicyHint)
 	}
 
-	noSymbolFinding := &store.Finding{
-		ID:        "fnd_nosym",
+	sourceOnlyFinding := &store.Finding{
+		ID:        "fnd_sourceonly",
 		Title:     "Missing authz check",
 		Category:  "authz",
 		Severity:  "medium",
 		RootCause: "Handler does not verify tenant ownership",
 		FilePath:  "internal/api/handler.go",
+		Evidence: []store.FindingEvidenceRef{
+			{Kind: "file", Path: "internal/api/handler.go", StartLine: 10, EndLine: 20, Role: "source", Symbol: "handleRequest"},
+		},
 	}
-	noSymRule, err := DistillFindingRule(noSymbolFinding)
+	sourceOnlyRule, err := DistillFindingRule(sourceOnlyFinding)
 	if err != nil {
-		t.Fatalf("DistillFindingRule(noSymbol) error = %v", err)
+		t.Fatalf("DistillFindingRule(sourceOnly) error = %v", err)
 	}
-	if noSymRule.SemgrepYAML != "" {
-		t.Fatalf("expected empty SemgrepYAML when no concrete sink symbol exists, got:\n%s", noSymRule.SemgrepYAML)
+	if sourceOnlyRule.SemgrepYAML != "" || sourceOnlyRule.CandidateOnly {
+		t.Fatalf("expected empty SemgrepYAML when only non-sink symbols exist, got:\n%s", sourceOnlyRule.SemgrepYAML)
 	}
-	if !strings.Contains(noSymRule.ScanPolicyHint, "Missing authz check") {
-		t.Fatalf("unexpected ScanPolicyHint for symbol-less finding: %q", noSymRule.ScanPolicyHint)
+	if !strings.Contains(sourceOnlyRule.ScanPolicyHint, "Missing authz check") {
+		t.Fatalf("unexpected ScanPolicyHint for source-only finding: %q", sourceOnlyRule.ScanPolicyHint)
+	}
+
+	secretCatFinding := &store.Finding{
+		ID:       "fnd_secretcat",
+		Title:    "Auth bypass",
+		Category: "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+		Severity: "high",
+	}
+	if _, err := DistillFindingRule(secretCatFinding); err == nil {
+		t.Fatal("expected DistillFindingRule to reject credential-shaped category")
 	}
 }
