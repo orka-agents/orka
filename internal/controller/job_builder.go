@@ -483,7 +483,8 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 
 	validationTask := opts.RepositoryMonitorValidation || isRepositoryMonitorValidationTask(task)
 	patchVerifyTask := isRepositoryScanPatchVerifyTask(task)
-	readOnlyWorkspace := validationTask || patchVerifyTask
+	confinedTask := validationTask || patchVerifyTask
+	readOnlyWorkspace := confinedTask
 	jobName := buildTaskJobName(task)
 	execution := resolveExecution(task, agent)
 
@@ -540,11 +541,11 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 
 	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 		Name:         runtimePoolTempVolume,
-		VolumeSource: corev1.VolumeSource{EmptyDir: repositoryMonitorValidationEmptyDir(validationTask, repositoryValidationTmpSizeLimit)},
+		VolumeSource: corev1.VolumeSource{EmptyDir: repositoryMonitorValidationEmptyDir(confinedTask, repositoryValidationTmpSizeLimit)},
 	})
 
 	transactionTokenTask := task
-	if validationTask && task != nil && strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenSecret]) != "" {
+	if confinedTask && task != nil && strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenSecret]) != "" {
 		transactionTokenTask = task.DeepCopy()
 		delete(transactionTokenTask.Annotations, labels.AnnotationTransactionTokenSecret)
 	}
@@ -557,7 +558,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	}
 
 	if taskNeedsWorkspaceInitContainer(task) {
-		b.addWorkspaceInitContainer(job, task, validationTask)
+		b.addWorkspaceInitContainer(job, task, confinedTask)
 	}
 	if err := b.applyRepositoryValidationJobHardening(job, task, validationTask, patchVerifyTask); err != nil {
 		return nil, err
@@ -584,19 +585,14 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 }
 
 func (b *JobBuilder) applyRepositoryValidationJobHardening(job *batchv1.Job, task *corev1alpha1.Task, validationTask, patchVerifyTask bool) error {
-	if patchVerifyTask {
-		applyRepositoryMonitorValidationDefaultTolerations(&job.Spec.Template.Spec)
-		if err := applyRepositoryMonitorValidationProcessLimit(job, task); err != nil {
-			return err
-		}
-		applyRepositoryMonitorValidationStorageBounds(job)
-	}
-	if !validationTask {
+	if !validationTask && !patchVerifyTask {
 		return nil
 	}
 	applyRepositoryMonitorValidationDefaultTolerations(&job.Spec.Template.Spec)
-	if err := b.addRepositoryMonitorValidationCommand(job, task); err != nil {
-		return err
+	if validationTask {
+		if err := b.addRepositoryMonitorValidationCommand(job, task); err != nil {
+			return err
+		}
 	}
 	if err := b.addRepositoryMonitorValidationNetworkGate(job, task); err != nil {
 		return err
@@ -676,6 +672,15 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 					repositoryMonitorValidationShellWrapper,
 					path.Join(repositoryMonitorValidationCommandMount, repositoryMonitorValidationCommandFile),
 				}
+				container.TerminationMessagePath = corev1.TerminationMessagePathDefault
+				container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+			} else if isRepositoryScanPatchVerifyTask(task) {
+				wrapped := make([]string, 0, 1+len(container.Command)+len(container.Args))
+				wrapped = append(wrapped, repositoryMonitorValidationSandboxWorkerMode)
+				wrapped = append(wrapped, container.Command...)
+				wrapped = append(wrapped, container.Args...)
+				container.Command = []string{path.Join(repositoryMonitorValidationNetworkSandboxMount, repositoryMonitorValidationNetworkSandboxBinary)}
+				container.Args = wrapped
 				container.TerminationMessagePath = corev1.TerminationMessagePathDefault
 				container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
 			}

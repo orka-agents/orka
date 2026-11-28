@@ -81,7 +81,7 @@ func mayBeRepositoryMonitorValidationTask(task *corev1alpha1.Task) bool {
 }
 
 func (r *TaskReconciler) repositoryMonitorValidationSafetyTask(ctx context.Context, task *corev1alpha1.Task) bool {
-	if isRepositoryMonitorValidationTask(task) {
+	if isConfinedVerificationTask(task, isRepositoryMonitorValidationTask(task)) {
 		return true
 	}
 	if !mayBeRepositoryMonitorValidationTask(task) {
@@ -239,8 +239,12 @@ func (r *TaskReconciler) ensureRepositoryMonitorValidationNetworkGate(ctx contex
 	return r.ensureRepositoryMonitorValidationNetworkGateForTask(ctx, task, validationTask)
 }
 
+func isConfinedVerificationTask(task *corev1alpha1.Task, monitorValidation bool) bool {
+	return monitorValidation || isRepositoryScanPatchVerifyTask(task)
+}
+
 func (r *TaskReconciler) ensureRepositoryMonitorValidationNetworkGateForTask(ctx context.Context, task *corev1alpha1.Task, validationTask bool) (bool, error) {
-	if !validationTask {
+	if !isConfinedVerificationTask(task, validationTask) {
 		return true, nil
 	}
 	current := &corev1.ConfigMap{}
@@ -299,10 +303,10 @@ func (r *TaskReconciler) reconcileRepositoryMonitorValidationConfinement(ctx con
 	if err != nil {
 		return err
 	}
-	if !validationTask {
+	if !isConfinedVerificationTask(task, validationTask) {
 		return nil
 	}
-	if err := r.validateRepositoryMonitorValidationJob(ctx, task, job); err != nil {
+	if err := r.validateConfinedVerificationJob(ctx, task, job, validationTask); err != nil {
 		return err
 	}
 	gate := &corev1.ConfigMap{}
@@ -331,7 +335,7 @@ func (r *TaskReconciler) reconcileRepositoryMonitorValidationConfinement(ctx con
 		}
 		return nil
 	}
-	prepared, err := repositoryMonitorValidationPreconditionsCompleted(pod)
+	prepared, err := confinedVerificationPreconditionsCompleted(pod, validationTask)
 	if err != nil {
 		return err
 	}
@@ -370,7 +374,7 @@ func (r *TaskReconciler) reconcileRepositoryMonitorValidationConfinement(ctx con
 	return r.Patch(ctx, gate, patch)
 }
 
-func (r *TaskReconciler) validateRepositoryMonitorValidationJob(ctx context.Context, task *corev1alpha1.Task, actual *batchv1.Job) error {
+func (r *TaskReconciler) validateConfinedVerificationJob(ctx context.Context, task *corev1alpha1.Task, actual *batchv1.Job, monitorValidation bool) error {
 	if r.JobBuilder == nil || r.Scheme == nil {
 		return repositoryMonitorValidationConfinementErrorf("validation Job renderer is unavailable")
 	}
@@ -378,7 +382,7 @@ func (r *TaskReconciler) validateRepositoryMonitorValidationJob(ctx context.Cont
 	if renderTask.Status.Attempts > 0 {
 		renderTask.Status.Attempts--
 	}
-	expected, err := r.JobBuilder.BuildWithOptions(ctx, renderTask, nil, nil, JobBuildOptions{RepositoryMonitorValidation: true})
+	expected, err := r.JobBuilder.BuildWithOptions(ctx, renderTask, nil, nil, JobBuildOptions{RepositoryMonitorValidation: monitorValidation})
 	if err != nil {
 		return repositoryMonitorValidationConfinementErrorf("render expected validation Job: %v", err)
 	}
@@ -691,7 +695,7 @@ func repositoryMonitorValidationMetadataContains(actual, expected map[string]str
 	return true
 }
 
-func repositoryMonitorValidationPreconditionsCompleted(pod *corev1.Pod) (bool, error) {
+func confinedVerificationPreconditionsCompleted(pod *corev1.Pod, requireCommandMaterializer bool) (bool, error) {
 	if pod == nil {
 		return false, nil
 	}
@@ -711,7 +715,7 @@ func repositoryMonitorValidationPreconditionsCompleted(pod *corev1.Pod) (bool, e
 	if !foundWorkspace {
 		return false, repositoryMonitorValidationConfinementErrorf("validation Pod is missing the workspace preparation init container")
 	}
-	if !foundCommand {
+	if requireCommandMaterializer && !foundCommand {
 		return false, repositoryMonitorValidationConfinementErrorf("validation Pod is missing the command materializer init container")
 	}
 	if !foundProbe {
@@ -719,7 +723,7 @@ func repositoryMonitorValidationPreconditionsCompleted(pod *corev1.Pod) (bool, e
 	}
 
 	workspacePrepared := false
-	commandMaterialized := false
+	commandMaterialized := !requireCommandMaterializer
 	networkBaselineEstablished := false
 	for i := range pod.Status.InitContainerStatuses {
 		status := &pod.Status.InitContainerStatuses[i]
