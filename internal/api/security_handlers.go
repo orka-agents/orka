@@ -1243,8 +1243,15 @@ func (h *Handlers) ListSecurityFindings(c fiber.Ctx) error {
 	}
 
 	if strings.EqualFold(strings.TrimSpace(c.Query("format")), "sarif") {
-		c.Set("Content-Type", "application/sarif+json")
-		return c.JSON(security.BuildSARIFLog(findings))
+		sarifFindings := findings
+		if next != "" || filter.Cursor != "" {
+			allFindings, listErr := h.listAllMatchingSecurityFindings(c.Context(), filter)
+			if listErr != nil {
+				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to export SARIF findings: %v", listErr))
+			}
+			sarifFindings = allFindings
+		}
+		return c.JSON(security.BuildSARIFLog(sarifFindings), "application/sarif+json")
 	}
 	resp := fiber.Map{apiFieldItems: findings, apiFieldMetadata: fiber.Map{commandIntentContinue: next}}
 	if failOn := strings.TrimSpace(c.Query("failOn")); failOn != "" {

@@ -2,6 +2,7 @@ package security
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/orka-agents/orka/internal/store"
@@ -153,6 +154,14 @@ func sarifLevel(severity string) string {
 	}
 }
 
+func sarifRelativeURI(repoPath string) string {
+	parts := strings.Split(strings.TrimSpace(repoPath), "/")
+	for i := range parts {
+		parts[i] = url.PathEscape(parts[i])
+	}
+	return strings.Join(parts, "/")
+}
+
 func sarifLocations(finding store.Finding) []SARIFLocation {
 	locs := make([]SARIFLocation, 0, max(1, len(finding.Evidence)))
 	for _, ref := range finding.Evidence {
@@ -161,7 +170,7 @@ func sarifLocations(finding store.Finding) []SARIFLocation {
 		}
 		loc := SARIFLocation{
 			PhysicalLocation: SARIFPhysicalLocation{
-				ArtifactLocation: SARIFArtifactLocation{URI: ref.Path},
+				ArtifactLocation: SARIFArtifactLocation{URI: sarifRelativeURI(ref.Path)},
 			},
 		}
 		if ref.StartLine > 0 {
@@ -176,7 +185,7 @@ func sarifLocations(finding store.Finding) []SARIFLocation {
 	if len(locs) == 0 && strings.TrimSpace(finding.FilePath) != "" {
 		loc := SARIFLocation{
 			PhysicalLocation: SARIFPhysicalLocation{
-				ArtifactLocation: SARIFArtifactLocation{URI: finding.FilePath},
+				ArtifactLocation: SARIFArtifactLocation{URI: sarifRelativeURI(finding.FilePath)},
 			},
 		}
 		if finding.Line > 0 {

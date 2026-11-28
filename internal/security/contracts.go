@@ -63,6 +63,7 @@ type ReviewContextManifest struct {
 	IncludedFiles     []ReviewContextIncludedFile  `json:"includedFiles"`
 	OmittedFiles      []ReviewContextOmittedFile   `json:"omittedFiles,omitempty"`
 	ReferenceFiles    []ReviewContextReferenceFile `json:"referenceFiles,omitempty"`
+	DismissedFeedback string                       `json:"dismissedFeedback,omitempty"`
 	PromptBytes       int                          `json:"promptBytes"`
 	ApproximateTokens int                          `json:"approximateTokens"`
 	Prompt            string                       `json:"prompt,omitempty"`
