@@ -223,3 +223,47 @@ func TestRepositoryScanPoCVerifyJobUsesSharedConfinement(t *testing.T) {
 	}
 	_ = corev1.Pod{}
 }
+
+func TestPhase5cSandboxWorkspaceAndPoCHandoffToPatchVerify(t *testing.T) {
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "poc-handoff", Namespace: "default", UID: types.UID("poc-handoff-uid")},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL: "https://github.com/orka-agents/example",
+			Branch:  "main",
+			PoCExecution: &corev1alpha1.RepositoryScanPoCExecutionSpec{
+				Image: testPatchVerificationImage,
+				SandboxWorkspaceClassRef: &corev1alpha1.WorkspaceClassReference{
+					Name: "gvisor-sandbox",
+				},
+			},
+		},
+	}
+	execSpec := repositoryScanValidationExecution(scan)
+	if execSpec == nil || execSpec.Workspace == nil || execSpec.Workspace.ClassRef == nil || execSpec.Workspace.ClassRef.Name != "gvisor-sandbox" {
+		t.Fatalf("repositoryScanValidationExecution() = %#v, want gvisor-sandbox classRef", execSpec)
+	}
+
+	valJSON, err := json.Marshal(security.ValidationArtifact{
+		Version:   1,
+		FindingID: "fnd-1",
+		Status:    findingValidationStatusValidated,
+		Summary:   "Confirmed",
+		PoC: &security.ValidationPoC{
+			Harness: security.PoCHarnessGoTest,
+			Command: "go test ./pkg/auth -run TestPoC",
+		},
+		PoCVerification: &security.ValidationPoCVerification{
+			Status:    pocVerifyStatusVerified,
+			Harness:   security.PoCHarnessGoTest,
+			CommitSHA: strings.Repeat("a", 40),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding := &store.Finding{ID: "fnd-1", ValidationJSON: string(valJSON)}
+	img, cmd, failBeforePass, active, problem := effectivePatchVerificationPlan(scan, finding)
+	if !active || problem != "" || !failBeforePass || img != testPatchVerificationImage || cmd != "go test ./pkg/auth -run TestPoC" {
+		t.Fatalf("effectivePatchVerificationPlan() = (%q, %q, failBeforePass=%v, active=%v, problem=%q), want PoC handoff with fail->pass", img, cmd, failBeforePass, active, problem)
+	}
+}

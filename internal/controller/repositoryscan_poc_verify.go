@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -36,6 +37,42 @@ const (
 	pocVerifyStatusSkipped   = "poc_skipped"
 	pocVerifyMaxTaskNameSize = 63
 )
+
+func repositoryScanValidationExecution(scan *corev1alpha1.RepositoryScan) *corev1alpha1.ExecutionSpec {
+	if scan == nil || scan.Spec.PoCExecution == nil || scan.Spec.PoCExecution.SandboxWorkspaceClassRef == nil {
+		return nil
+	}
+	className := strings.TrimSpace(scan.Spec.PoCExecution.SandboxWorkspaceClassRef.Name)
+	if className == "" {
+		return nil
+	}
+	return &corev1alpha1.ExecutionSpec{
+		Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+			ClassRef: &corev1alpha1.WorkspaceClassReference{Name: className},
+		},
+	}
+}
+
+func validatedFindingPoCCommand(finding *store.Finding) (string, bool) {
+	if finding == nil || strings.TrimSpace(finding.ValidationJSON) == "" {
+		return "", false
+	}
+	var artifact security.ValidationArtifact
+	if err := json.Unmarshal([]byte(finding.ValidationJSON), &artifact); err != nil {
+		return "", false
+	}
+	if artifact.PoC == nil || artifact.PoCVerification == nil {
+		return "", false
+	}
+	if strings.TrimSpace(artifact.PoCVerification.Status) != pocVerifyStatusVerified {
+		return "", false
+	}
+	cmd := strings.TrimSpace(artifact.PoC.Command)
+	if cmd == "" {
+		return "", false
+	}
+	return cmd, true
+}
 
 func isRepositoryScanPoCVerifyTask(task *corev1alpha1.Task) bool {
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeContainer {

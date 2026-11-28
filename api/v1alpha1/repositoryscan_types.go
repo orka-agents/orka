@@ -59,6 +59,12 @@ type RepositoryScanPoCExecutionSpec struct {
 	// Timeout bounds each controller-replayed PoC execution. Defaults to 5m when omitted.
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
+
+	// SandboxWorkspaceClassRef optionally binds an isolated ExecutionWorkspaceClass
+	// (e.g. gVisor/agent-sandbox) to validation agent Tasks for iterative PoC authoring.
+	// Exported PoCs are still replayed by the controller in a clean confined container.
+	// +optional
+	SandboxWorkspaceClassRef *WorkspaceClassReference `json:"sandboxWorkspaceClassRef,omitempty"`
 }
 
 // RepositoryScanSpec defines the desired state of RepositoryScan.

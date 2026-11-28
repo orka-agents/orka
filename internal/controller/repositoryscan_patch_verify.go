@@ -115,6 +115,29 @@ func controllerVerificationArtifactName(summaryArtifact string) string {
 	return strings.TrimSuffix(summaryArtifact, ".json") + patchVerifyArtifactSuffix
 }
 
+func effectivePatchVerificationPlan(scan *corev1alpha1.RepositoryScan, finding *store.Finding) (image, command string, requireFailBeforePass bool, active bool, problem string) {
+	if pocCmd, ok := validatedFindingPoCCommand(finding); ok {
+		img := effectivePoCVerificationImage(scan)
+		if img == "" && scan != nil && scan.Spec.PatchVerification != nil {
+			img = strings.TrimSpace(scan.Spec.PatchVerification.Image)
+		}
+		if tools.ValidRepositoryValidationImage(img) {
+			return img, pocCmd, true, true, ""
+		}
+	}
+	if scan == nil || scan.Spec.PatchVerification == nil {
+		return "", "", false, false, ""
+	}
+	if errMsg := validateRepositoryScanPatchVerificationSpec(scan.Spec.PatchVerification); errMsg != "" {
+		return "", "", false, true, errMsg
+	}
+	return strings.TrimSpace(scan.Spec.PatchVerification.Image),
+		strings.TrimSpace(scan.Spec.PatchVerification.Command),
+		scan.Spec.PatchVerification.RequireFailBeforePass,
+		true,
+		""
+}
+
 func (r *RepositoryScanReconciler) evaluateControllerPatchVerification(
 	ctx context.Context,
 	scan *corev1alpha1.RepositoryScan,
@@ -123,13 +146,13 @@ func (r *RepositoryScanReconciler) evaluateControllerPatchVerification(
 	publication securityPatchPublicationReceipt,
 	verified patchVerificationResult,
 ) (bool, string, error) {
-	if scan == nil || scan.Spec.PatchVerification == nil {
+	verifyImage, verifyCommand, requireFailBeforePass, active, problem := effectivePatchVerificationPlan(scan, finding)
+	if !active {
 		return false, "", nil
 	}
-	if problem := validateRepositoryScanPatchVerificationSpec(scan.Spec.PatchVerification); problem != "" {
+	if problem != "" {
 		return false, problem, nil
 	}
-	spec := scan.Spec.PatchVerification
 	patchedCommit := ""
 	baseCommit := ""
 	if publication.publication != nil {
@@ -139,16 +162,16 @@ func (r *RepositoryScanReconciler) evaluateControllerPatchVerification(
 	if patchedCommit == "" || store.ValidateGitObjectID("patched commit", patchedCommit) != nil {
 		return false, "controller patch verification requires a valid published commit SHA", nil
 	}
-	if spec.RequireFailBeforePass && (baseCommit == "" || store.ValidateGitObjectID("base commit", baseCommit) != nil) {
+	if requireFailBeforePass && (baseCommit == "" || store.ValidateGitObjectID("base commit", baseCommit) != nil) {
 		return false, "controller fail->pass verification requires a valid publication source baseline SHA", nil
 	}
 
 	var baseTask *corev1alpha1.Task
 	var basePassed *bool
-	if spec.RequireFailBeforePass {
+	if requireFailBeforePass {
 		var problem string
 		var err error
-		baseTask, problem, err = r.ensurePatchVerifyTask(ctx, scan, patchTask, finding, patchVerifyPhaseBase, baseCommit, false)
+		baseTask, problem, err = r.ensurePatchVerifyTask(ctx, scan, patchTask, finding, patchVerifyPhaseBase, baseCommit, verifyImage, verifyCommand, false)
 		if err != nil {
 			return false, "", err
 		}
@@ -166,7 +189,7 @@ func (r *RepositoryScanReconciler) evaluateControllerPatchVerification(
 		if passed {
 			if err := r.persistControllerVerificationArtifact(ctx, patchTask, verified.summaryArtifact, &security.PatchControllerVerification{
 				Status:                patchVerifyStatusFailed,
-				Command:               strings.TrimSpace(spec.Command),
+				Command:               verifyCommand,
 				RequireFailBeforePass: true,
 				BaseCommit:            baseCommit,
 				PatchedCommit:         patchedCommit,
@@ -180,7 +203,7 @@ func (r *RepositoryScanReconciler) evaluateControllerPatchVerification(
 		if !patchVerifyBaseCommandExitedNonZero(baseTask) {
 			if err := r.persistControllerVerificationArtifact(ctx, patchTask, verified.summaryArtifact, &security.PatchControllerVerification{
 				Status:                patchVerifyStatusFailed,
-				Command:               strings.TrimSpace(spec.Command),
+				Command:               verifyCommand,
 				RequireFailBeforePass: true,
 				BaseCommit:            baseCommit,
 				PatchedCommit:         patchedCommit,
@@ -192,7 +215,7 @@ func (r *RepositoryScanReconciler) evaluateControllerPatchVerification(
 		}
 	}
 
-	patchedTask, problem, err := r.ensurePatchVerifyTask(ctx, scan, patchTask, finding, patchVerifyPhasePatched, patchedCommit, true)
+	patchedTask, problem, err := r.ensurePatchVerifyTask(ctx, scan, patchTask, finding, patchVerifyPhasePatched, patchedCommit, verifyImage, verifyCommand, true)
 	if err != nil {
 		return false, "", err
 	}
@@ -208,8 +231,8 @@ func (r *RepositoryScanReconciler) evaluateControllerPatchVerification(
 	patchedPassed := patchedTask.Status.Phase == corev1alpha1.TaskPhaseSucceeded
 	verification := &security.PatchControllerVerification{
 		Status:                patchVerifyStatusVerify,
-		Command:               strings.TrimSpace(spec.Command),
-		RequireFailBeforePass: spec.RequireFailBeforePass,
+		Command:               verifyCommand,
+		RequireFailBeforePass: requireFailBeforePass,
 		BaseCommit:            baseCommit,
 		PatchedCommit:         patchedCommit,
 		PatchedTaskName:       patchedTask.Name,
@@ -238,9 +261,11 @@ func buildDesiredPatchVerifyTask(
 	finding *store.Finding,
 	phase string,
 	commitSHA string,
+	image string,
+	command string,
 	useTargetRepo bool,
 ) *corev1alpha1.Task {
-	taskName := patchVerifyTaskName(scan.Name, finding.ID, patchTask.Name, phase, commitSHA, scan.Spec.PatchVerification.Image, scan.Spec.PatchVerification.Command)
+	taskName := patchVerifyTaskName(scan.Name, finding.ID, patchTask.Name, phase, commitSHA, image, command)
 	workspace := repositoryScanTaskWorkspaceAtCommit(scan, corev1alpha1.WorkspaceIntentRead, commitSHA)
 	if useTargetRepo {
 		if strings.TrimSpace(scan.Spec.ForkRepo) != "" {
@@ -269,13 +294,13 @@ func buildDesiredPatchVerifyTask(
 			Annotations: map[string]string{
 				labels.AnnotationWorkspaceInitContainer: scheduledRunLabelValue,
 			},
-			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(scan, corev1alpha1.GroupVersion.WithKind("RepositoryScan"))},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(scan, corev1alpha1.GroupVersion.WithKind(repositoryScanResourceKind))},
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:      corev1alpha1.TaskTypeContainer,
-			Image:     strings.TrimSpace(scan.Spec.PatchVerification.Image),
+			Image:     strings.TrimSpace(image),
 			Command:   []string{patchVerifyShell, "-c"},
-			Args:      []string{strings.TrimSpace(scan.Spec.PatchVerification.Command)},
+			Args:      []string{strings.TrimSpace(command)},
 			Timeout:   &timeout,
 			Priority:  &priority,
 			Workspace: workspace,
@@ -307,9 +332,11 @@ func (r *RepositoryScanReconciler) ensurePatchVerifyTask(
 	finding *store.Finding,
 	phase string,
 	commitSHA string,
+	image string,
+	command string,
 	useTargetRepo bool,
 ) (*corev1alpha1.Task, string, error) {
-	desired := buildDesiredPatchVerifyTask(scan, patchTask, finding, phase, commitSHA, useTargetRepo)
+	desired := buildDesiredPatchVerifyTask(scan, patchTask, finding, phase, commitSHA, image, command, useTargetRepo)
 	existing := &corev1alpha1.Task{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: scan.Namespace, Name: desired.Name}, existing)
 	if err == nil {

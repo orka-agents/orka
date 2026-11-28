@@ -159,6 +159,21 @@ func (h *Handlers) ensureSecurityStore() error {
 	return nil
 }
 
+func repositoryScanValidationExecution(scan *corev1alpha1.RepositoryScan) *corev1alpha1.ExecutionSpec {
+	if scan == nil || scan.Spec.PoCExecution == nil || scan.Spec.PoCExecution.SandboxWorkspaceClassRef == nil {
+		return nil
+	}
+	className := strings.TrimSpace(scan.Spec.PoCExecution.SandboxWorkspaceClassRef.Name)
+	if className == "" {
+		return nil
+	}
+	return &corev1alpha1.ExecutionSpec{
+		Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+			ClassRef: &corev1alpha1.WorkspaceClassReference{Name: className},
+		},
+	}
+}
+
 func (h *Handlers) fetchRepositoryScan(ctx context.Context, namespace, name string) (*corev1alpha1.RepositoryScan, error) {
 	scan := &corev1alpha1.RepositoryScan{}
 	if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, scan); err != nil {
@@ -565,6 +580,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 			Timeout:   &timeout,
 			Priority:  &priority,
 			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
+			Execution: repositoryScanValidationExecution(scan),
 		},
 	}
 	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.uncachedReader(), task); err != nil {
