@@ -799,14 +799,21 @@ func (r *RepositoryScanReconciler) mapperCrossComponentEnv(ctx context.Context, 
 	if r.SecurityStore == nil {
 		return env, nil
 	}
+	var threatModelInvestigations []security.SecurityInvestigation
 	model, err := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
-	if errors.Is(err, store.ErrNotFound) {
-		return env, nil
+	switch {
+	case err == nil:
+		threatModelInvestigations = security.ThreatModelInvestigations(model.Content)
+	case errors.Is(err, store.ErrNotFound):
+	default:
+		return nil, err
 	}
+	variantInvestigations, err := r.collectVariantInvestigationsForRun(ctx, scan, run)
 	if err != nil {
 		return nil, err
 	}
-	if investigations := security.ThreatModelInvestigations(model.Content); len(investigations) > 0 {
+	investigations := combineMapperInvestigations(threatModelInvestigations, variantInvestigations)
+	if len(investigations) > 0 {
 		data, err := json.Marshal(investigations)
 		if err != nil {
 			return nil, err
@@ -814,6 +821,87 @@ func (r *RepositoryScanReconciler) mapperCrossComponentEnv(ctx context.Context, 
 		env = append(env, corev1.EnvVar{Name: security.EnvInvestigations, Value: strings.ReplaceAll(string(data), "$", "$$")})
 	}
 	return env, nil
+}
+
+func (r *RepositoryScanReconciler) collectVariantInvestigationsForRun(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	run *store.ScanRun,
+) ([]security.SecurityInvestigation, error) {
+	if r.SecurityStore == nil || scan == nil || run == nil {
+		return nil, nil
+	}
+	targetScan, err := r.repositoryScanWithFrozenRunTarget(ctx, scan, run)
+	if err != nil {
+		targetScan = scan
+	}
+	target := trustedFindingsRepository(targetScan, run)
+	targetKey := security.FindingV2TargetKey(target.RepoURL, target.Branch, target.SubPath)
+	targetKeysByRun := make(map[string]findingRunTargetKey)
+	var variantInvestigations []security.SecurityInvestigation
+	cursor := ""
+	const maxVariantCandidates = 8
+	for len(variantInvestigations) < maxVariantCandidates {
+		page, next, listErr := r.SecurityStore.ListFindings(ctx, store.FindingFilter{
+			Namespace:        scan.Namespace,
+			RepositoryScan:   scan.Name,
+			ValidationStatus: findingValidationStatusValidated,
+			Limit:            50,
+			Cursor:           cursor,
+		})
+		if listErr != nil {
+			return nil, listErr
+		}
+		for i := range page {
+			candidate := page[i]
+			if findingUserFinalState(candidate.State) {
+				continue
+			}
+			matched, matchErr := r.findingTargetKeyMatches(ctx, targetScan, target, targetKey, &candidate, targetKeysByRun)
+			if matchErr != nil {
+				return nil, matchErr
+			}
+			if !matched {
+				continue
+			}
+			if inv, ok := security.BuildVariantInvestigation(&candidate); ok {
+				variantInvestigations = append(variantInvestigations, inv)
+				if len(variantInvestigations) >= maxVariantCandidates {
+					break
+				}
+			}
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	return variantInvestigations, nil
+}
+
+func combineMapperInvestigations(threatModel, variants []security.SecurityInvestigation) []security.SecurityInvestigation {
+	const (
+		maxTotalInvestigations = 8
+		reservedVariantSlots   = 3
+	)
+	tmClean := security.SanitizeInvestigations(threatModel)
+	varClean := security.SanitizeInvestigations(variants)
+	if len(varClean) == 0 {
+		return tmClean
+	}
+	if len(tmClean) == 0 {
+		return varClean
+	}
+	variantTake := min(len(varClean), reservedVariantSlots)
+	tmTake := min(len(tmClean), maxTotalInvestigations-variantTake)
+	remaining := maxTotalInvestigations - tmTake - variantTake
+	if remaining > 0 && len(varClean) > variantTake {
+		variantTake += min(remaining, len(varClean)-variantTake)
+	}
+	combined := make([]security.SecurityInvestigation, 0, tmTake+variantTake)
+	combined = append(combined, tmClean[:tmTake]...)
+	combined = append(combined, varClean[:variantTake]...)
+	return security.SanitizeInvestigations(combined)
 }
 
 type latestScanPipelineState struct {
