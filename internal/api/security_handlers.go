@@ -117,6 +117,9 @@ func validateRepositoryScanSpecValues(spec corev1alpha1.RepositoryScanSpec) erro
 		if spec.PoCExecution.Timeout != nil && spec.PoCExecution.Timeout.Duration < time.Second {
 			return fiber.NewError(fiber.StatusBadRequest, "spec.pocExecution.timeout must be at least 1s")
 		}
+		if spec.PoCExecution.SandboxWorkspaceClassRef != nil && strings.TrimSpace(spec.PoCExecution.SandboxWorkspaceClassRef.Name) == "" {
+			return fiber.NewError(fiber.StatusBadRequest, "spec.pocExecution.sandboxWorkspaceClassRef.name is required")
+		}
 	}
 	return nil
 }
@@ -157,6 +160,19 @@ func (h *Handlers) ensureSecurityStore() error {
 		return fiber.NewError(fiber.StatusNotImplemented, "security store not configured")
 	}
 	return nil
+}
+
+func repositoryScanValidationExecution(scan *corev1alpha1.RepositoryScan) *corev1alpha1.ExecutionSpec {
+	if scan == nil || scan.Spec.PoCExecution == nil || scan.Spec.PoCExecution.SandboxWorkspaceClassRef == nil {
+		return nil
+	}
+	return &corev1alpha1.ExecutionSpec{
+		Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+			ClassRef: &corev1alpha1.WorkspaceClassReference{
+				Name: strings.TrimSpace(scan.Spec.PoCExecution.SandboxWorkspaceClassRef.Name),
+			},
+		},
+	}
 }
 
 func (h *Handlers) fetchRepositoryScan(ctx context.Context, namespace, name string) (*corev1alpha1.RepositoryScan, error) {
@@ -565,6 +581,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 			Timeout:   &timeout,
 			Priority:  &priority,
 			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
+			Execution: repositoryScanValidationExecution(scan),
 		},
 	}
 	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.uncachedReader(), task); err != nil {
@@ -848,6 +865,9 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	if err := h.authorizeRepositoryScanValidationAgent(c, "createRepositoryScanValidation", scan, false); err != nil {
 		return err
 	}
+	if err := authorizeRepositoryScanSandboxWorkspaceClassUse(c.Context(), h.clientset, GetUserInfo(c), scan); err != nil {
+		return err
+	}
 	if err := h.client.Create(c.Context(), scan); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "repository scan already exists")
@@ -930,6 +950,9 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 		return err
 	}
 	if err := h.authorizeRepositoryScanValidationAgent(c, "updateRepositoryScanValidation", updated, false); err != nil {
+		return err
+	}
+	if err := authorizeRepositoryScanSandboxWorkspaceClassUse(c.Context(), h.clientset, GetUserInfo(c), updated); err != nil {
 		return err
 	}
 	if err := h.client.Update(c.Context(), updated); err != nil {

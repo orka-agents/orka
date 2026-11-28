@@ -43,6 +43,40 @@ const (
 	pocVerifyMaxTaskNameSize = 63
 )
 
+func repositoryScanValidationExecution(scan *corev1alpha1.RepositoryScan) *corev1alpha1.ExecutionSpec {
+	if scan == nil || scan.Spec.PoCExecution == nil || scan.Spec.PoCExecution.SandboxWorkspaceClassRef == nil {
+		return nil
+	}
+	return &corev1alpha1.ExecutionSpec{
+		Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+			ClassRef: &corev1alpha1.WorkspaceClassReference{
+				Name: strings.TrimSpace(scan.Spec.PoCExecution.SandboxWorkspaceClassRef.Name),
+			},
+		},
+	}
+}
+
+func validatedFindingPoCCommand(finding *store.Finding) (command, controlCommand string, expectedExitCode int, ok bool) {
+	if finding == nil || strings.TrimSpace(finding.ValidationJSON) == "" {
+		return "", "", 0, false
+	}
+	var artifact security.ValidationArtifact
+	if err := json.Unmarshal([]byte(finding.ValidationJSON), &artifact); err != nil {
+		return "", "", 0, false
+	}
+	if artifact.PoC == nil || artifact.PoCVerification == nil {
+		return "", "", 0, false
+	}
+	if strings.TrimSpace(artifact.PoCVerification.Status) != pocVerifyStatusVerified {
+		return "", "", 0, false
+	}
+	cmd := strings.TrimSpace(artifact.PoC.Command)
+	if cmd == "" {
+		return "", "", 0, false
+	}
+	return cmd, strings.TrimSpace(artifact.PoC.ControlCommand), artifact.PoC.ExpectedExitCode, true
+}
+
 func pocExecutionPolicyDigest(scan *corev1alpha1.RepositoryScan) string {
 	if scan == nil || scan.Spec.PoCExecution == nil {
 		return ""

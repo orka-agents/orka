@@ -65,6 +65,30 @@ func authorizeToolWorkspaceClassUse(
 	)
 }
 
+func authorizeRepositoryScanSandboxWorkspaceClassUse(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	userInfo *UserInfo,
+	scan *corev1alpha1.RepositoryScan,
+) error {
+	if scan == nil || scan.Spec.PoCExecution == nil || scan.Spec.PoCExecution.SandboxWorkspaceClassRef == nil {
+		return nil
+	}
+	className := strings.TrimSpace(scan.Spec.PoCExecution.SandboxWorkspaceClassRef.Name)
+	if className == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.pocExecution.sandboxWorkspaceClassRef.name is required")
+	}
+	return authorizeWorkspaceClassUse(
+		ctx,
+		clientset,
+		userInfo,
+		scan.Namespace,
+		className,
+		"repositoryscan",
+		scan.Name,
+	)
+}
+
 func authorizeWorkspaceClassUse(
 	ctx context.Context,
 	clientset kubernetes.Interface,

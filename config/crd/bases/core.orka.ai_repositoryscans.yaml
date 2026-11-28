@@ -215,6 +215,19 @@ spec:
                     maxLength: 2048
                     pattern: ^[^\s@]+@sha256:[a-f0-9]{64}$
                     type: string
+                  sandboxWorkspaceClassRef:
+                    description: |-
+                      SandboxWorkspaceClassRef optionally binds an isolated ExecutionWorkspaceClass
+                      (e.g. gVisor/agent-sandbox) to validation agent Tasks for iterative PoC authoring.
+                      Exported PoCs are still replayed by the controller in a clean confined container.
+                    properties:
+                      name:
+                        description: Name is the class name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                   timeout:
                     description: Timeout bounds each controller-replayed PoC execution.
                       Defaults to 5m when omitted.

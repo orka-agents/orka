@@ -2533,6 +2533,7 @@ func (r *RepositoryScanReconciler) ensureValidationTask(ctx context.Context, sca
 			Timeout:   &timeout,
 			Priority:  &priority,
 			Workspace: repositoryScanTaskWorkspaceAtCommit(scan, corev1alpha1.WorkspaceIntentRead, pinnedCommit),
+			Execution: repositoryScanValidationExecution(scan),
 		},
 	}
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {

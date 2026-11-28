@@ -252,3 +252,68 @@ func TestRepositoryScanPoCVerifyJobUsesSharedConfinement(t *testing.T) {
 	}
 	_ = corev1.Pod{}
 }
+
+func TestPhase5cSandboxWorkspaceAndPoCHandoffToPatchVerify(t *testing.T) {
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "poc-handoff", Namespace: "default", UID: types.UID("poc-handoff-uid")},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL: "https://github.com/orka-agents/example",
+			Branch:  "main",
+			PoCExecution: &corev1alpha1.RepositoryScanPoCExecutionSpec{
+				Image: testPatchVerificationImage,
+				SandboxWorkspaceClassRef: &corev1alpha1.WorkspaceClassReference{
+					Name: "gvisor-sandbox",
+				},
+			},
+		},
+	}
+	execSpec := repositoryScanValidationExecution(scan)
+	if execSpec == nil || execSpec.Workspace == nil || execSpec.Workspace.ClassRef == nil || execSpec.Workspace.ClassRef.Name != "gvisor-sandbox" {
+		t.Fatalf("repositoryScanValidationExecution() = %#v, want gvisor-sandbox classRef", execSpec)
+	}
+
+	valJSON, err := json.Marshal(security.ValidationArtifact{
+		Version:   1,
+		FindingID: "fnd-1",
+		Status:    findingValidationStatusValidated,
+		Summary:   "Confirmed",
+		PoC: &security.ValidationPoC{
+			Harness:          security.PoCHarnessGoTest,
+			Command:          "go test ./pkg/auth -run TestPoC",
+			ExpectedExitCode: 42,
+		},
+		PoCVerification: &security.ValidationPoCVerification{
+			Status:    pocVerifyStatusVerified,
+			Harness:   security.PoCHarnessGoTest,
+			CommitSHA: strings.Repeat("a", 40),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding := &store.Finding{ID: "fnd-1", ValidationJSON: string(valJSON)}
+	plans, problem := effectivePatchVerificationPlans(scan, finding)
+	if problem != "" || len(plans) != 1 || !plans[0].requireFailBeforePass || plans[0].image != testPatchVerificationImage || plans[0].command != "go test ./pkg/auth -run TestPoC" || plans[0].expectedBaseExitCode != 42 {
+		t.Fatalf("effectivePatchVerificationPlans() = (%#v, problem=%q), want single PoC plan with expected exit 42", plans, problem)
+	}
+
+	scan.Spec.PatchVerification = &corev1alpha1.RepositoryScanPatchVerificationSpec{
+		Image:                 testPatchVerificationImage,
+		Command:               "go test ./...",
+		RequireFailBeforePass: false,
+	}
+	plans, problem = effectivePatchVerificationPlans(scan, finding)
+	if problem != "" || len(plans) != 2 {
+		t.Fatalf("effectivePatchVerificationPlans(both) = (%#v, problem=%q), want both operator patchVerification and PoC plans", plans, problem)
+	}
+	if plans[0].command != "go test ./..." || plans[1].command != "go test ./pkg/auth -run TestPoC" || plans[1].expectedBaseExitCode != 42 {
+		t.Fatalf("unexpected combined plans: %#v", plans)
+	}
+
+	whitespaceScan := scan.DeepCopy()
+	whitespaceScan.Spec.PoCExecution.SandboxWorkspaceClassRef = &corev1alpha1.WorkspaceClassReference{Name: "   "}
+	wsExec := repositoryScanValidationExecution(whitespaceScan)
+	if wsExec == nil || wsExec.Workspace == nil || wsExec.Workspace.ClassRef == nil || wsExec.Workspace.ClassRef.Name != "" {
+		t.Fatalf("expected whitespace sandboxWorkspaceClassRef to remain explicit so admission rejects it, got %#v", wsExec)
+	}
+}
