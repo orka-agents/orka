@@ -1169,9 +1169,11 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 		ContextDigest:  digest,
 	}
 	metrics.RecordSecurityReviewContextBytes(manifest.PromptBytes)
+	promptPolicy := policy.PromptPolicy()
+	promptPolicy.DismissedFeedback = manifest.DismissedFeedback
 	prompt := security.BuildReviewResultPrompt(
 		scan, run.Mode, run.BaseCommit, run.HeadCommit, threatModel, reviewSlice,
-		resultBinding, *manifest, trustedFindingsRepository(scan, run), policy.PromptPolicy(),
+		resultBinding, *manifest, trustedFindingsRepository(scan, run), promptPolicy,
 	)
 	if attempt == securityReviewRetryAttempt {
 		prompt += securityReviewRetryPrompt
@@ -1888,10 +1890,66 @@ func (r *RepositoryScanReconciler) loadReviewSlicesArtifact(ctx context.Context,
 	}
 }
 
+func (r *RepositoryScanReconciler) collectDismissedFeedbackForRun(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	run *store.ScanRun,
+) (string, error) {
+	if r.SecurityStore == nil || scan == nil || run == nil {
+		return "", nil
+	}
+	targetScan, err := r.repositoryScanWithFrozenRunTarget(ctx, scan, run)
+	if err != nil {
+		targetScan = scan
+	}
+	target := trustedFindingsRepository(targetScan, run)
+	targetKey := security.FindingV2TargetKey(target.RepoURL, target.Branch, target.SubPath)
+	targetKeysByRun := make(map[string]findingRunTargetKey)
+	var dismissed []store.Finding
+	for _, state := range []string{"false_positive", "wont_fix", "dismissed"} {
+		cursor := ""
+		for len(dismissed) < 12 {
+			page, next, listErr := r.SecurityStore.ListFindings(ctx, store.FindingFilter{
+				Namespace:      scan.Namespace,
+				RepositoryScan: scan.Name,
+				State:          state,
+				Limit:          50,
+				Cursor:         cursor,
+			})
+			if listErr != nil {
+				return "", listErr
+			}
+			for i := range page {
+				candidate := page[i]
+				matched, matchErr := r.findingTargetKeyMatches(ctx, targetScan, target, targetKey, &candidate, targetKeysByRun)
+				if matchErr != nil {
+					return "", matchErr
+				}
+				if !matched {
+					continue
+				}
+				dismissed = append(dismissed, candidate)
+				if len(dismissed) >= 12 {
+					break
+				}
+			}
+			if next == "" {
+				break
+			}
+			cursor = next
+		}
+		if len(dismissed) >= 12 {
+			break
+		}
+	}
+	return security.BuildDismissedFindingsFeedback(dismissed), nil
+}
+
 func (r *RepositoryScanReconciler) loadMapperReviewContext(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	sliceID string,
+	dismissedFeedback string,
 ) (string, string, string, error) {
 	if r.ArtifactStore == nil {
 		return "", "", repositoryScanArtifactStoreNotConfigured, nil
@@ -1905,14 +1963,23 @@ func (r *RepositoryScanReconciler) loadMapperReviewContext(
 	default:
 		return "", "", "", err
 	}
-	manifest, digest, err := security.ParseTrustedReviewContextManifest(data)
+	manifest, _, err := security.ParseTrustedReviewContextManifest(data)
 	if err != nil {
 		return "", "", fmt.Sprintf("%s is invalid: %v", artifactName, err), nil
 	}
 	if strings.TrimSpace(manifest.SliceID) != strings.TrimSpace(sliceID) {
 		return "", "", fmt.Sprintf("%s sliceId does not match mapper slice", artifactName), nil
 	}
-	canonical, err := json.Marshal(manifest)
+	manifest.DismissedFeedback = dismissedFeedback
+	canonical, err := security.MarshalReviewContext(*manifest)
+	if err != nil {
+		return "", "", "", err
+	}
+	bounded, digest, err := security.ParseTrustedReviewContextManifest(canonical)
+	if err != nil {
+		return "", "", fmt.Sprintf("%s is invalid after feedback: %v", artifactName, err), nil
+	}
+	canonical, err = json.Marshal(bounded)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -4568,6 +4635,10 @@ func (r *RepositoryScanReconciler) ingestMapperTask(ctx context.Context, scan *c
 	annotateChangedMetadata := artifact.ChangedFilesComputed && (run.Mode == scanModeIncremental || run.Mode == scanModeManual)
 	skippedSlices := 0
 	preparedSlices := make([]store.ReviewSlice, 0, len(artifact.Slices))
+	dismissedFeedback, err := r.collectDismissedFeedbackForRun(ctx, scan, run)
+	if err != nil {
+		return err
+	}
 	for i := range artifact.Slices {
 		slice := artifact.Slices[i]
 		slice.Namespace = scan.Namespace
@@ -4584,7 +4655,7 @@ func (r *RepositoryScanReconciler) ingestMapperTask(ctx context.Context, scan *c
 				skippedSlices++
 			}
 		}
-		contextJSON, contextHash, contextProblem, err := r.loadMapperReviewContext(ctx, task, slice.ID)
+		contextJSON, contextHash, contextProblem, err := r.loadMapperReviewContext(ctx, task, slice.ID, dismissedFeedback)
 		if err != nil {
 			return err
 		}

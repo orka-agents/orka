@@ -1213,7 +1213,7 @@ func (h *Handlers) ListSecurityFindings(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid limit")
 	}
-	findings, next, err := h.securityStore.ListFindings(c.Context(), store.FindingFilter{
+	filter := store.FindingFilter{
 		Namespace:        namespace,
 		RepositoryScan:   c.Params("name"),
 		SliceID:          c.Query("sliceID"),
@@ -1224,7 +1224,8 @@ func (h *Handlers) ListSecurityFindings(c fiber.Ctx) error {
 		Recommended:      c.Query("recommended") == queryTrue,
 		Limit:            limit,
 		Cursor:           c.Query("cursor"),
-	})
+	}
+	findings, next, err := h.securityStore.ListFindings(c.Context(), filter)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list findings: %v", err))
 	}
@@ -1241,7 +1242,57 @@ func (h *Handlers) ListSecurityFindings(c fiber.Ctx) error {
 		}
 	}
 
-	return c.JSON(fiber.Map{apiFieldItems: findings, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
+	if failOn := strings.TrimSpace(c.Query("failOn")); failOn != "" {
+		switch strings.ToLower(failOn) {
+		case "critical", "high", "medium", "low":
+		default:
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid failOn severity %q: must be one of critical, high, medium, low", failOn))
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(c.Query("format")), "sarif") {
+		sarifFindings := findings
+		if next != "" || filter.Cursor != "" {
+			allFindings, listErr := h.listAllMatchingSecurityFindings(c.Context(), filter)
+			if listErr != nil {
+				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to export SARIF findings: %v", listErr))
+			}
+			sarifFindings = allFindings
+		}
+		return c.JSON(security.BuildSARIFLog(sarifFindings), "application/sarif+json")
+	}
+	resp := fiber.Map{apiFieldItems: findings, apiFieldMetadata: fiber.Map{commandIntentContinue: next}}
+	if failOn := strings.TrimSpace(c.Query("failOn")); failOn != "" {
+		gateFindings := findings
+		if next != "" || filter.Cursor != "" {
+			allFindings, listErr := h.listAllMatchingSecurityFindings(c.Context(), filter)
+			if listErr != nil {
+				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to evaluate findings gate: %v", listErr))
+			}
+			gateFindings = allFindings
+		}
+		resp["gate"] = security.EvaluateFindingsGate(gateFindings, failOn)
+	}
+	return c.JSON(resp)
+}
+
+func (h *Handlers) listAllMatchingSecurityFindings(ctx context.Context, base store.FindingFilter) ([]store.Finding, error) {
+	filter := base
+	filter.Cursor = ""
+	if filter.Limit <= 0 || filter.Limit < 200 {
+		filter.Limit = 200
+	}
+	var all []store.Finding
+	for {
+		page, next, err := h.securityStore.ListFindings(ctx, filter)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if next == "" {
+			return all, nil
+		}
+		filter.Cursor = next
+	}
 }
 
 func (h *Handlers) ListSecurityReviewSlices(c fiber.Ctx) error {
