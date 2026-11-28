@@ -1134,25 +1134,38 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 		return err
 	}
 	var existingTasks []corev1alpha1.Task
+	var budgetSnapshot *reviewTaskBudgetSnapshot
+	var singlePool types.NamespacedName
+	usePerAgentBudget := targetScan.Spec.ScoutAgentRef != nil && strings.TrimSpace(targetScan.Spec.ScoutAgentRef.Name) != ""
 	if r.Client != nil {
 		existing, err := r.listCurrentScanTasksFrom(ctx, uncachedReader(r.APIReader, r.Client), scan, "")
 		if err != nil {
 			return err
 		}
 		existingTasks = existing.Items
-	}
-	for _, reviewSlice := range reviewSlices {
-		agentRef := reviewSliceAgentRef(targetScan, reviewSlice)
-		var pool types.NamespacedName
-		if r.Client != nil {
-			available, err := r.reviewTaskBudgetForAgent(ctx, existingTasks, run.ID, scan.Namespace, agentRef)
+		if usePerAgentBudget {
+			budgetSnapshot, err = r.newReviewTaskBudgetSnapshot(ctx, existingTasks, run.ID)
 			if err != nil {
 				return err
 			}
+		} else {
+			available, err := r.reviewTaskBudget(ctx, existingTasks, run.ID)
+			if err != nil {
+				return err
+			}
+			reviewSlices = reviewSlices[:min(len(reviewSlices), available)]
+			singlePool, _ = r.reviewRuntimePool(ctx, existingTasks, run.ID)
+		}
+	}
+	for _, reviewSlice := range reviewSlices {
+		agentRef := reviewSliceAgentRef(targetScan, reviewSlice)
+		pool := singlePool
+		if budgetSnapshot != nil {
+			available, agentPool := budgetSnapshot.budgetForAgent(ctx, r, scan.Namespace, agentRef)
 			if available <= 0 {
 				continue
 			}
-			pool, _ = r.reviewRuntimePoolForAgent(ctx, existingTasks, run.ID, scan.Namespace, agentRef)
+			pool = agentPool
 		}
 		task, err := r.buildReviewTask(ctx, targetScan, run, threatModel, reviewSlice, policy, securityReviewInitialAttempt)
 		if err != nil {
@@ -1162,7 +1175,9 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 			return err
 		}
 		r.reviewTaskLedger().record(client.ObjectKeyFromObject(task), pool, time.Now())
-		existingTasks = append(existingTasks, *task)
+		if budgetSnapshot != nil {
+			budgetSnapshot.recordCreated(scan.Namespace, agentRef, pool)
+		}
 	}
 	return nil
 }
@@ -1406,8 +1421,10 @@ func (r *RepositoryScanReconciler) topUpReviewTasks(ctx context.Context, scan *c
 			return nil
 		}
 	}
-	if outstandingReviewTasks(tasks.Items, scanID) >= r.reviewTaskWindow(ctx, tasks.Items, scanID) {
-		return nil
+	if scan.Spec.ScoutAgentRef == nil || strings.TrimSpace(scan.Spec.ScoutAgentRef.Name) == "" {
+		if outstandingReviewTasks(tasks.Items, scanID) >= r.reviewTaskWindow(ctx, tasks.Items, scanID) {
+			return nil
+		}
 	}
 	run, err := r.SecurityStore.GetScanRun(ctx, scan.Namespace, scanID)
 	if err != nil {
@@ -1485,50 +1502,129 @@ func (r *RepositoryScanReconciler) reviewTaskWindowForPool(live int) int {
 	return maxOutstandingReviewTasks / DefaultACPDispatchWorkers * min(dispatch, prompts)
 }
 
-func (r *RepositoryScanReconciler) reviewTaskBudgetForAgent(
+type reviewPoolBudgetInfo struct {
+	pool    types.NamespacedName
+	prompts int
+}
+
+type reviewTaskBudgetSnapshot struct {
+	runID                 string
+	runTasks              []corev1alpha1.Task
+	dispatch              int
+	perPlace              int
+	sharedActive          int
+	settled               map[types.NamespacedName]bool
+	activeOnPool          map[types.NamespacedName]int
+	agentPools            map[types.NamespacedName]reviewPoolBudgetInfo
+	agentOutstandingInRun map[types.NamespacedName]int
+	poolCreated           map[types.NamespacedName]int
+	sharedCreated         int
+	now                   time.Time
+}
+
+func agentRefKey(defaultNamespace string, ref corev1alpha1.AgentReference) types.NamespacedName {
+	ns := strings.TrimSpace(ref.Namespace)
+	if ns == "" {
+		ns = defaultNamespace
+	}
+	return types.NamespacedName{Namespace: ns, Name: strings.TrimSpace(ref.Name)}
+}
+
+func (r *RepositoryScanReconciler) newReviewTaskBudgetSnapshot(
 	ctx context.Context,
 	runTasks []corev1alpha1.Task,
 	runID string,
-	defaultNamespace string,
-	agentRef corev1alpha1.AgentReference,
-) (int, error) {
-	pool, poolPrompts := r.reviewRuntimePoolForAgent(ctx, runTasks, runID, defaultNamespace, agentRef)
-	available := max(r.reviewTaskWindowForPool(poolPrompts)-outstandingReviewTasks(runTasks, runID), 0)
+) (*reviewTaskBudgetSnapshot, error) {
 	var all corev1alpha1.TaskList
 	if err := r.List(ctx, &all, client.MatchingLabels{labels.LabelSecurityStage: security.StageReview}); err != nil {
-		return 0, err
+		return nil, err
 	}
-	shared, onPool := 0, 0
+	now := time.Now()
 	settled := make(map[types.NamespacedName]bool, len(all.Items))
+	activeOnPool := make(map[types.NamespacedName]int)
+	shared := 0
 	for i := range all.Items {
 		task := &all.Items[i]
-		named := task.Status.Execution != nil && strings.TrimSpace(task.Status.Execution.RuntimePoolName) != ""
+		poolName := ""
+		if task.Status.Execution != nil {
+			poolName = strings.TrimSpace(task.Status.Execution.RuntimePoolName)
+		}
+		named := poolName != ""
 		active := task.Status.Phase == "" || isActiveTaskPhase(task.Status.Phase)
 		settled[client.ObjectKeyFromObject(task)] = named || !active
 		if !active {
 			continue
 		}
 		shared++
-		if poolPrompts > 0 && named && task.Namespace == pool.Namespace &&
-			strings.TrimSpace(task.Status.Execution.RuntimePoolName) == pool.Name {
-			onPool++
+		if named {
+			activeOnPool[types.NamespacedName{Namespace: task.Namespace, Name: poolName}]++
 		}
 	}
-	unlisted, unqueuedOnPool := r.reviewTaskLedger().pending(settled, pool, time.Now())
+	unlisted, _ := r.reviewTaskLedger().pending(settled, types.NamespacedName{}, now)
 	shared += unlisted
-	if poolPrompts > 0 {
-		onPool += unqueuedOnPool
-	}
 	dispatch := r.ACPDispatchMaxConcurrentTasks
 	if dispatch <= 0 {
 		dispatch = DefaultACPDispatchWorkers
 	}
-	perPlace := maxOutstandingReviewTasks / DefaultACPDispatchWorkers
-	available = min(available, max(perPlace*dispatch-shared, 0))
-	if poolPrompts > 0 {
-		available = min(available, max(perPlace*poolPrompts-onPool, 0))
+	agentOutstanding := make(map[types.NamespacedName]int)
+	for i := range runTasks {
+		task := &runTasks[i]
+		if scanTaskRunID(task) != runID || taskSecurityStage(task) != security.StageReview {
+			continue
+		}
+		if task.Status.Phase != "" && !isActiveTaskPhase(task.Status.Phase) {
+			continue
+		}
+		if task.Spec.AgentRef != nil {
+			agentOutstanding[agentRefKey(task.Namespace, *task.Spec.AgentRef)]++
+		}
 	}
-	return available, nil
+	return &reviewTaskBudgetSnapshot{
+		runID:                 runID,
+		runTasks:              runTasks,
+		dispatch:              dispatch,
+		perPlace:              maxOutstandingReviewTasks / DefaultACPDispatchWorkers,
+		sharedActive:          shared,
+		settled:               settled,
+		activeOnPool:          activeOnPool,
+		agentPools:            make(map[types.NamespacedName]reviewPoolBudgetInfo),
+		agentOutstandingInRun: agentOutstanding,
+		poolCreated:           make(map[types.NamespacedName]int),
+		now:                   now,
+	}, nil
+}
+
+func (s *reviewTaskBudgetSnapshot) budgetForAgent(
+	ctx context.Context,
+	r *RepositoryScanReconciler,
+	defaultNamespace string,
+	agentRef corev1alpha1.AgentReference,
+) (int, types.NamespacedName) {
+	key := agentRefKey(defaultNamespace, agentRef)
+	info, ok := s.agentPools[key]
+	if !ok {
+		pool, prompts := r.reviewRuntimePoolForAgent(ctx, s.runTasks, s.runID, defaultNamespace, agentRef)
+		info = reviewPoolBudgetInfo{pool: pool, prompts: prompts}
+		s.agentPools[key] = info
+	}
+	window := r.reviewTaskWindowForPool(info.prompts)
+	available := max(window-s.agentOutstandingInRun[key], 0)
+	available = min(available, max(s.perPlace*s.dispatch-(s.sharedActive+s.sharedCreated), 0))
+	if info.prompts > 0 {
+		_, unqueuedOnPool := r.reviewTaskLedger().pending(s.settled, info.pool, s.now)
+		onPool := s.activeOnPool[info.pool] + unqueuedOnPool + s.poolCreated[info.pool]
+		available = min(available, max(s.perPlace*info.prompts-onPool, 0))
+	}
+	return available, info.pool
+}
+
+func (s *reviewTaskBudgetSnapshot) recordCreated(defaultNamespace string, agentRef corev1alpha1.AgentReference, pool types.NamespacedName) {
+	key := agentRefKey(defaultNamespace, agentRef)
+	s.agentOutstandingInRun[key]++
+	s.sharedCreated++
+	if pool.Name != "" {
+		s.poolCreated[pool]++
+	}
 }
 
 func (r *RepositoryScanReconciler) reviewRuntimePool(ctx context.Context, tasks []corev1alpha1.Task, runID string) (types.NamespacedName, int) {
