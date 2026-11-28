@@ -245,6 +245,7 @@ func TestTracingProviderCompleteEmitsGenAISpan(t *testing.T) {
 			StopReason:   "stop",
 			InputTokens:  11,
 			OutputTokens: 7,
+			ToolCalls:    []ToolCall{{ID: "call-1", Name: "search"}},
 		},
 	})
 	resp, err := tp.Complete(parentCtx, &CompletionRequest{
@@ -285,10 +286,14 @@ func TestTracingProviderCompleteEmitsGenAISpan(t *testing.T) {
 	assertStringAttr(t, attrs, genai.AttrOutputType, "json_object")
 	assertIntAttr(t, attrs, genai.AttrUsageInputTokens, 11)
 	assertIntAttr(t, attrs, genai.AttrUsageOutputTokens, 7)
+	assertIntAttr(t, attrs, tracing.AttrLLMToolCalls, 1)
 	assertStringAttr(t, attrs, genai.AttrResponseID, "resp-1")
 	assertStringAttr(t, attrs, genai.AttrResponseModel, "gpt-4o")
-	assertStringAttr(t, attrs, "llm.provider", genai.ProviderAzureOpenAI)
-	assertIntAttr(t, attrs, "llm.input_tokens", 11)
+	for _, key := range []string{"llm.provider", "llm.model", "llm.input_tokens", "llm.output_tokens", "llm.tool_calls"} {
+		if _, ok := attrs[key]; ok {
+			t.Fatalf("legacy attr %q was emitted", key)
+		}
+	}
 
 	rm := mh.Collect(t)
 	if got := histogramPointCount(rm, genai.MetricClientOperationDuration); got != 1 {

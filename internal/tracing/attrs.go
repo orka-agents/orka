@@ -16,6 +16,7 @@ const (
 	AttrUserSub             = "orka.user.sub"
 	AttrParentTaskID        = "orka.parent_task.id"
 	AttrChildTaskID         = "orka.child_task.id"
+	AttrLLMToolCalls        = "orka.llm.tool_calls"
 	AttrToolName            = "orka.tool.name"
 	AttrToolKind            = "orka.tool.kind"
 	AttrToolResultSizeBytes = "orka.tool.result.size_bytes"
