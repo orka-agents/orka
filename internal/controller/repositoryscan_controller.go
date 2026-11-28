@@ -1169,9 +1169,19 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 		ContextDigest:  digest,
 	}
 	metrics.RecordSecurityReviewContextBytes(manifest.PromptBytes)
+	promptPolicy := policy.PromptPolicy()
+	if r.SecurityStore != nil {
+		if dismissed, _, listErr := r.SecurityStore.ListFindings(ctx, store.FindingFilter{
+			Namespace:      scan.Namespace,
+			RepositoryScan: scan.Name,
+			Limit:          50,
+		}); listErr == nil {
+			promptPolicy.DismissedFeedback = security.BuildDismissedFindingsFeedback(dismissed)
+		}
+	}
 	prompt := security.BuildReviewResultPrompt(
 		scan, run.Mode, run.BaseCommit, run.HeadCommit, threatModel, reviewSlice,
-		resultBinding, *manifest, trustedFindingsRepository(scan, run), policy.PromptPolicy(),
+		resultBinding, *manifest, trustedFindingsRepository(scan, run), promptPolicy,
 	)
 	if attempt == securityReviewRetryAttempt {
 		prompt += securityReviewRetryPrompt
