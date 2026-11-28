@@ -5278,6 +5278,17 @@ func (r *RepositoryScanReconciler) ingestPatchTask(ctx context.Context, scan *co
 		return nil
 	}
 
+	if proposal.Status == patchProposalStatusPROpened && proposal.PublicationEvidence != nil {
+		if proposal.PRNumber != nil {
+			r.decorateSecurityPatchPullRequest(ctx, scan, task, findingID, *proposal.PRNumber, proposal.PublicationEvidence.PRIntent.PublicationGeneration, proposal.SummaryArtifact)
+		}
+		finding.PatchProposalID = proposal.ID
+		finding.State = findingStatePROpen
+		finding.PRNumber = proposal.PRNumber
+		finding.PRURL = proposal.PRURL
+		return r.SecurityStore.UpsertFinding(ctx, finding)
+	}
+
 	proposal.Status = taskPhaseToSecurityPhase(task.Status.Phase)
 	requestedBranch := ""
 	if task.Spec.Workspace != nil {

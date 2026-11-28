@@ -763,6 +763,57 @@ func TestRemediationPullRequestBodyNeutralizesActiveText(t *testing.T) {
 	}
 }
 
+func TestRemediationPullRequestBodyDistinguishesDiffAndTestVerification(t *testing.T) {
+	t.Parallel()
+	finding := &store.Finding{ID: "fnd_verify", Title: "Fix auth bypass", Severity: "high", Confidence: "high"}
+
+	noTestsBody := RemediationPullRequestBody(finding, &PatchSummaryArtifact{
+		FindingID:    "fnd_verify",
+		Summary:      "Enforced role check.",
+		ChangedFiles: []string{"auth.go"},
+		Risk:         "low",
+	})
+	if !strings.Contains(noTestsBody, "**Verification status:**") || !strings.Contains(noTestsBody, "No regression tests were reported; fix behavior is unverified") {
+		t.Fatalf("PR body without tests did not disclose unverified fix status:\n%s", noTestsBody)
+	}
+	if strings.Contains(noTestsBody, "**Agent-reported tests run:**") {
+		t.Fatalf("PR body without tests unexpectedly included tests section:\n%s", noTestsBody)
+	}
+
+	withTestsBody := RemediationPullRequestBody(finding, &PatchSummaryArtifact{
+		FindingID:    "fnd_verify",
+		Summary:      "Enforced role check.",
+		ChangedFiles: []string{"auth.go"},
+		TestsRun:     []PatchTestRun{{Command: "go test ./...", ExitCode: 0}},
+		Risk:         "low",
+	})
+	if !strings.Contains(withTestsBody, "Agent-reported tests passed (not independently executed by Orka") {
+		t.Fatalf("PR body with tests did not qualify agent-reported test status:\n%s", withTestsBody)
+	}
+	if !strings.Contains(withTestsBody, "**Agent-reported tests run:**") || !strings.Contains(withTestsBody, "`go test ./...` (exit 0)") {
+		t.Fatalf("PR body with tests missing test run list:\n%s", withTestsBody)
+	}
+
+	nilSummaryBody := RemediationPullRequestBody(finding, nil)
+	if !strings.Contains(nilSummaryBody, "**Verification status:**") || !strings.Contains(nilSummaryBody, "Patch summary artifact is unavailable; fix behavior is unverified") {
+		t.Fatalf("PR body with nil summary did not disclose unavailable test evidence:\n%s", nilSummaryBody)
+	}
+
+	failingTestsBody := RemediationPullRequestBody(finding, &PatchSummaryArtifact{
+		FindingID:    "fnd_verify",
+		Summary:      "Enforced role check.",
+		ChangedFiles: []string{"auth.go"},
+		TestsRun:     []PatchTestRun{{Command: "go test ./...", ExitCode: 1}},
+		Risk:         "low",
+	})
+	if !strings.Contains(failingTestsBody, "One or more agent-reported tests failed; fix behavior is unverified") {
+		t.Fatalf("PR body with failing test did not disclose failure:\n%s", failingTestsBody)
+	}
+	if strings.Contains(failingTestsBody, "Agent-reported tests passed") {
+		t.Fatalf("PR body with failing test falsely claimed tests passed:\n%s", failingTestsBody)
+	}
+}
+
 func TestRemediationPullRequestBodyWithholdsLineWrappedCredential(t *testing.T) {
 	t.Parallel()
 	const key = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"

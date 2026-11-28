@@ -358,6 +358,9 @@ func TestParsePatchResultRejectsInvalidEnvelopes(t *testing.T) {
 		"wrong scan":                          `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"other","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"risk":"low"}`,
 		"unknown field":                       `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"risk":"low","diff":"x"}`,
 		"no changed files":                    `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":[],"risk":"low"}`,
+		"failing test run":                    `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"testsRun":[{"command":"go test ./...","exitCode":1}],"risk":"low"}`,
+		"missing test exit code":              `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"testsRun":[{"command":"go test ./..."}],"risk":"low"}`,
+		"null test exit code":                 `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"testsRun":[{"command":"go test ./...","exitCode":null}],"risk":"low"}`,
 		"unsafe path":                         `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["../etc/passwd"],"risk":"low"}`,
 		"bad risk":                            `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"risk":"critical"}`,
 		"tool transcript":                     `{"schemaVersion":1,"kind":"orka.security.patch.v1","repositoryScan":"kaset","findingId":"fnd_1","summary":"<tool_call>rm</tool_call>","changedFiles":["a.go"],"risk":"low"}`,
@@ -375,6 +378,23 @@ func TestParsePatchResultRejectsInvalidEnvelopes(t *testing.T) {
 			t.Parallel()
 			if _, err := ParsePatchResult([]byte(payload), expected); err == nil {
 				t.Fatalf("ParsePatchResult() accepted %s", name)
+			}
+		})
+	}
+}
+
+func TestPatchSummaryArtifactUnmarshalRejectsMissingOrNullExitCode(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"missing exitCode": `{"schemaVersion":1,"findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"testsRun":[{"command":"go test ./..."}],"risk":"low"}`,
+		"null exitCode":    `{"schemaVersion":1,"findingId":"fnd_1","summary":"s","changedFiles":["a.go"],"testsRun":[{"command":"go test ./...","exitCode":null}],"risk":"low"}`,
+	}
+	for name, payload := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var summary PatchSummaryArtifact
+			if err := json.Unmarshal([]byte(payload), &summary); err == nil {
+				t.Fatalf("json.Unmarshal(PatchSummaryArtifact) accepted %s", name)
 			}
 		})
 	}

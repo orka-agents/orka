@@ -794,6 +794,9 @@ func NormalizePatchSummaryArtifact(artifact PatchSummaryArtifact) (*PatchSummary
 		if LooksLikeSecret(command) {
 			return nil, fmt.Errorf("patch testsRun contains a credential-shaped command")
 		}
+		if run.ExitCode != 0 {
+			return nil, fmt.Errorf("patch testsRun command %q exited with code %d", command, run.ExitCode)
+		}
 		testsRun[i] = PatchTestRun{Command: command, ExitCode: run.ExitCode}
 	}
 	risk := strings.ToLower(strings.TrimSpace(artifact.Risk))
