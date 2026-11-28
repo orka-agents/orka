@@ -182,6 +182,12 @@ type RepositoryScanSpec struct {
 	// AnalysisAgentRef is the agent used for scan runs.
 	AnalysisAgentRef AgentReference `json:"analysisAgentRef"`
 
+	// ScoutAgentRef is the optional lightweight agent used for broad component-slice
+	// triage while cross-component investigations and baseline audits stay on AnalysisAgentRef.
+	// Defaults to AnalysisAgentRef when omitted.
+	// +optional
+	ScoutAgentRef *AgentReference `json:"scoutAgentRef,omitempty"`
+
 	// ValidationAgentRef is the optional agent used for finding validation runs.
 	// Defaults to AnalysisAgentRef when omitted.
 	// +optional

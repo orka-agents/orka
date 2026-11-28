@@ -127,6 +127,7 @@ func (h *Handlers) validateRepositoryScanAgentRuntimes(ctx context.Context, name
 		ref   *corev1alpha1.AgentReference
 	}{
 		{field: "spec.analysisAgentRef", ref: &spec.AnalysisAgentRef},
+		{field: "spec.scoutAgentRef", ref: spec.ScoutAgentRef},
 		{field: "spec.validationAgentRef", ref: spec.ValidationAgentRef},
 		{field: "spec.patchAgentRef", ref: spec.PatchAgentRef},
 	}
@@ -841,6 +842,11 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenSecurityScanTask(c, "createRepositoryScan", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
+	if scan.Spec.ScoutAgentRef != nil && strings.TrimSpace(scan.Spec.ScoutAgentRef.Name) != "" {
+		if err := h.authorizeContextTokenSecurityScanTask(c, "createRepositoryScan", scan, *scan.Spec.ScoutAgentRef); err != nil {
+			return err
+		}
+	}
 	if scan.Spec.ValidationAgentRef != nil && strings.TrimSpace(scan.Spec.ValidationAgentRef.Name) != "" {
 		if err := h.authorizeContextTokenSecurityScanTask(c, "createRepositoryScan", scan, *scan.Spec.ValidationAgentRef); err != nil {
 			return err
@@ -924,6 +930,11 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 	updated.Spec = req.Spec
 	if err := h.authorizeContextTokenSecurityScanTask(c, "updateRepositoryScan", updated, updated.Spec.AnalysisAgentRef); err != nil {
 		return err
+	}
+	if updated.Spec.ScoutAgentRef != nil && strings.TrimSpace(updated.Spec.ScoutAgentRef.Name) != "" {
+		if err := h.authorizeContextTokenSecurityScanTask(c, "updateRepositoryScan", updated, *updated.Spec.ScoutAgentRef); err != nil {
+			return err
+		}
 	}
 	if updated.Spec.ValidationAgentRef != nil && strings.TrimSpace(updated.Spec.ValidationAgentRef.Name) != "" {
 		if err := h.authorizeContextTokenSecurityScanTask(c, "updateRepositoryScan", updated, *updated.Spec.ValidationAgentRef); err != nil {

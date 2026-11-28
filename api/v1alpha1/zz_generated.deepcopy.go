@@ -4431,6 +4431,11 @@ func (in *RepositoryScanSpec) DeepCopyInto(out *RepositoryScanSpec) {
 		**out = **in
 	}
 	out.AnalysisAgentRef = in.AnalysisAgentRef
+	if in.ScoutAgentRef != nil {
+		in, out := &in.ScoutAgentRef, &out.ScoutAgentRef
+		*out = new(AgentReference)
+		**out = **in
+	}
 	if in.ValidationAgentRef != nil {
 		in, out := &in.ValidationAgentRef, &out.ValidationAgentRef
 		*out = new(AgentReference)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -277,6 +278,35 @@ func readGoModulePath(fullPath string) string {
 		}
 	}
 	return ""
+}
+
+func annotateGoSliceBlastRadius(root string, files []repoFile, reviewSlices []store.ReviewSlice) {
+	lines := referenceLineCounts(root, files)
+	graph := newGoImportGraph(root, files, lines)
+	for i := range reviewSlices {
+		slice := &reviewSlices[i]
+		if slice.Source != "deterministic-go-package" || len(slice.OwnedFiles) == 0 {
+			continue
+		}
+		dir := path.Dir(slice.OwnedFiles[0].Path)
+		importers := graph.importers(dir)
+		if len(importers) == 0 {
+			continue
+		}
+		tag := "importers:" + strconv.Itoa(len(importers))
+		if !containsString(slice.Tags, tag) {
+			slice.Tags = append(slice.Tags, tag)
+			sort.Strings(slice.Tags)
+		}
+		if len(importers) >= 5 && !containsString(slice.Tags, "high-fan-in") {
+			slice.Tags = append(slice.Tags, "high-fan-in")
+			sort.Strings(slice.Tags)
+		}
+	}
+}
+
+func containsString(items []string, target string) bool {
+	return slices.Contains(items, target)
 }
 
 func sortedKeys(set map[string]struct{}) []string {

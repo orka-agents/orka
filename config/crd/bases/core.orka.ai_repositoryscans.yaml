@@ -307,6 +307,22 @@ spec:
               schedule:
                 description: Schedule is the cron expression for incremental scans.
                 type: string
+              scoutAgentRef:
+                description: |-
+                  ScoutAgentRef is the optional lightweight agent used for broad component-slice
+                  triage while cross-component investigations and baseline audits stay on AnalysisAgentRef.
+                  Defaults to AnalysisAgentRef when omitted.
+                properties:
+                  name:
+                    description: Name is the name of the Agent
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace of the Agent (defaults
+                      to Task namespace)
+                    type: string
+                required:
+                - name
+                type: object
               subPath:
                 description: SubPath scopes scanning to a subdirectory in a monorepo.
                 type: string

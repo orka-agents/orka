@@ -1188,6 +1188,11 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 	}
 	timeout := metav1.Duration{Duration: 2 * time.Hour}
 	priority := int32(700)
+	reviewAgentRef := scan.Spec.AnalysisAgentRef
+	if scan.Spec.ScoutAgentRef != nil && strings.TrimSpace(scan.Spec.ScoutAgentRef.Name) != "" &&
+		reviewSlice.Kind != security.SliceKindInvestigation && reviewSlice.Kind != security.SliceKindBaseline {
+		reviewAgentRef = *scan.Spec.ScoutAgentRef
+	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,
@@ -1207,7 +1212,7 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:      corev1alpha1.TaskTypeAgent,
-			AgentRef:  &scan.Spec.AnalysisAgentRef,
+			AgentRef:  &reviewAgentRef,
 			Prompt:    prompt,
 			Timeout:   &timeout,
 			Priority:  &priority,
