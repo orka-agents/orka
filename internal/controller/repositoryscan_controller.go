@@ -1176,7 +1176,7 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 		}
 		r.reviewTaskLedger().record(client.ObjectKeyFromObject(task), pool, time.Now())
 		if budgetSnapshot != nil {
-			budgetSnapshot.recordCreated(scan.Namespace, agentRef, pool)
+			budgetSnapshot.recordCreated(client.ObjectKeyFromObject(task), scan.Namespace, agentRef, pool)
 		}
 	}
 	return nil
@@ -1618,10 +1618,11 @@ func (s *reviewTaskBudgetSnapshot) budgetForAgent(
 	return available, info.pool
 }
 
-func (s *reviewTaskBudgetSnapshot) recordCreated(defaultNamespace string, agentRef corev1alpha1.AgentReference, pool types.NamespacedName) {
+func (s *reviewTaskBudgetSnapshot) recordCreated(taskKey types.NamespacedName, defaultNamespace string, agentRef corev1alpha1.AgentReference, pool types.NamespacedName) {
 	key := agentRefKey(defaultNamespace, agentRef)
 	s.agentOutstandingInRun[key]++
 	s.sharedCreated++
+	s.settled[taskKey] = true
 	if pool.Name != "" {
 		s.poolCreated[pool]++
 	}
