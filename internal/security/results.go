@@ -628,7 +628,6 @@ const (
 	PoCHarnessShell  = "sh"
 
 	maxPoCCommandBytes = 4096
-	maxPoCSignalBytes  = 512
 )
 
 func ValidPoCHarness(harness string) bool {
@@ -670,12 +669,10 @@ func ValidateValidationPoC(poc *ValidationPoC) error {
 	}
 	poc.ExpectedSignal = strings.TrimSpace(poc.ExpectedSignal)
 	if poc.ExpectedSignal != "" {
-		if err := boundedString("validation.poc.expected_signal", poc.ExpectedSignal, maxPoCSignalBytes); err != nil {
-			return err
-		}
+		return fmt.Errorf("validation.poc.expected_signal is not supported yet")
 	}
-	if poc.ExpectedExitCode < 0 || poc.ExpectedExitCode > 125 {
-		return fmt.Errorf("validation.poc.expected_exit_code must be between 0 and 125")
+	if poc.ExpectedExitCode < 0 || poc.ExpectedExitCode > 124 {
+		return fmt.Errorf("validation.poc.expected_exit_code must be between 0 and 124")
 	}
 	return nil
 }
