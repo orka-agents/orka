@@ -403,3 +403,126 @@ func TestParsePatchResultRejectsGenericCredentialAssignments(t *testing.T) {
 		}
 	}
 }
+
+func TestParseSecurityResultsRejectPromptPlaceholders(t *testing.T) {
+	t.Parallel()
+	binding := AgentResultBinding{
+		RepositoryScan: "vekil",
+		ScanID:         "scan_123",
+		PolicyDigest:   "sha256:policy",
+		ContextDigest:  "sha256:context",
+	}
+	repo := FindingsV2Repository{
+		RepoURL: "https://github.com/sozercan/vekil",
+		Branch:  "main",
+		HeadSHA: strings.Repeat("a", 40),
+	}
+
+	threatPayload := ThreatModelResultEnvelope{
+		SchemaVersion:  AgentResultSchemaVersion,
+		Kind:           AgentResultKindThreatModel,
+		RepositoryScan: binding.RepositoryScan,
+		ScanID:         binding.ScanID,
+		PolicyDigest:   binding.PolicyDigest,
+		ThreatModel:    "# Threat Model\n\n...",
+	}
+	if _, err := ParseThreatModelResult(mustMarshalSecurityResult(t, threatPayload), AgentResultBinding{
+		RepositoryScan: binding.RepositoryScan, ScanID: binding.ScanID, PolicyDigest: binding.PolicyDigest,
+	}); err == nil || !strings.Contains(err.Error(), "placeholder") {
+		t.Fatalf("ParseThreatModelResult(placeholder) error = %v, want placeholder rejection", err)
+	}
+
+	threatPayload.ThreatModel = "# Threat Model\n\n…"
+	if _, err := ParseThreatModelResult(mustMarshalSecurityResult(t, threatPayload), AgentResultBinding{
+		RepositoryScan: binding.RepositoryScan, ScanID: binding.ScanID, PolicyDigest: binding.PolicyDigest,
+	}); err == nil || !strings.Contains(err.Error(), "placeholder") {
+		t.Fatalf("ParseThreatModelResult(unicode ellipsis placeholder) error = %v, want placeholder rejection", err)
+	}
+
+	findingsPayload := FindingsResultEnvelope{
+		SchemaVersion:  AgentResultSchemaVersion,
+		Kind:           AgentResultKindFindings,
+		RepositoryScan: binding.RepositoryScan,
+		ScanID:         binding.ScanID,
+		SliceID:        "slice_api",
+		PolicyDigest:   binding.PolicyDigest,
+		ContextDigest:  binding.ContextDigest,
+		Findings: FindingsV2Artifact{
+			SchemaVersion: SchemaVersionFindingsV2,
+			Repository:    repo,
+			Scan:          FindingsV2Scan{Mode: "initial", SliceID: "slice_api", Summary: "..."},
+			Findings:      []FindingsV2Finding{},
+		},
+	}
+	if _, err := ParseFindingsResult(mustMarshalSecurityResult(t, findingsPayload), FindingsResultExpectation{
+		Binding: binding, SliceID: "slice_api", Mode: "initial", Repository: repo,
+	}); err == nil || !strings.Contains(err.Error(), "placeholder") {
+		t.Fatalf("ParseFindingsResult(placeholder summary) error = %v, want placeholder rejection", err)
+	}
+
+	validationPayload := ValidationResultEnvelope{
+		SchemaVersion:  AgentResultSchemaVersion,
+		Kind:           AgentResultKindValidation,
+		RepositoryScan: binding.RepositoryScan,
+		ScanID:         binding.ScanID,
+		FindingID:      "fnd_1",
+		PolicyDigest:   binding.PolicyDigest,
+		Validation: ValidationArtifact{
+			Version:   1,
+			FindingID: "fnd_1",
+			Status:    "validated",
+			Summary:   "...",
+		},
+	}
+	if _, err := ParseValidationResult(mustMarshalSecurityResult(t, validationPayload), ValidationResultExpectation{
+		Binding: AgentResultBinding{
+			RepositoryScan: binding.RepositoryScan, ScanID: binding.ScanID, PolicyDigest: binding.PolicyDigest,
+		},
+		Finding: &store.Finding{ID: "fnd_1"},
+	}); err == nil || !strings.Contains(err.Error(), "placeholder") {
+		t.Fatalf("ParseValidationResult(placeholder summary) error = %v, want placeholder rejection", err)
+	}
+}
+
+func TestReviewResultIsInconclusive(t *testing.T) {
+	t.Parallel()
+	if !ReviewResultIsInconclusive(FindingsV2Artifact{Findings: []FindingsV2Finding{}}) {
+		t.Fatal("empty zero-finding review should be inconclusive")
+	}
+	if !ReviewResultIsInconclusive(FindingsV2Artifact{
+		Scan:     FindingsV2Scan{Summary: "..."},
+		Findings: []FindingsV2Finding{},
+	}) {
+		t.Fatal("placeholder-summary zero-finding review should be inconclusive")
+	}
+	if !ReviewResultIsInconclusive(FindingsV2Artifact{
+		Scan:     FindingsV2Scan{Summary: "...", ReviewedFiles: []string{"..."}},
+		Findings: []FindingsV2Finding{},
+	}) {
+		t.Fatal("placeholder-only reviewedFiles should be inconclusive")
+	}
+	if !ReviewResultIsInconclusive(FindingsV2Artifact{
+		Scan:     FindingsV2Scan{ResolvedQuestions: []FindingsV2ResolvedQuestion{{Question: "Is auth enforced?", Resolution: ""}}},
+		Findings: []FindingsV2Finding{},
+	}) {
+		t.Fatal("unanswered resolvedQuestions should be inconclusive")
+	}
+	if ReviewResultIsInconclusive(FindingsV2Artifact{
+		Scan:     FindingsV2Scan{ResolvedQuestions: []FindingsV2ResolvedQuestion{{Question: "Is auth enforced?", Resolution: "Yes, middleware checks token on line 42."}}},
+		Findings: []FindingsV2Finding{},
+	}) {
+		t.Fatal("substantively answered resolvedQuestions should not be inconclusive")
+	}
+	if ReviewResultIsInconclusive(FindingsV2Artifact{
+		Scan:     FindingsV2Scan{Summary: "Checked auth middleware; no bypass found.", ReviewedFiles: []string{"internal/api/auth.go"}},
+		Findings: []FindingsV2Finding{},
+	}) {
+		t.Fatal("substantive zero-finding review with reviewedFiles should not be inconclusive")
+	}
+	if ReviewResultIsInconclusive(FindingsV2Artifact{
+		Scan:     FindingsV2Scan{Summary: "No vulnerabilities found in slice."},
+		Findings: []FindingsV2Finding{},
+	}) {
+		t.Fatal("substantive zero-finding review with real summary should not be inconclusive")
+	}
+}

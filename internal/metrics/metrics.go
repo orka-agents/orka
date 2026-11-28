@@ -260,6 +260,69 @@ var (
 		},
 	)
 
+	SecurityScanRunsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_scan_runs_total",
+			Help: "Total repository security scan runs completed by mode and terminal status",
+		},
+		[]string{"mode", labelStatus},
+	)
+
+	SecurityReviewSlicesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_review_slices_total",
+			Help: "Total repository security review slice outcomes by status (reviewed, inconclusive, failed, skipped)",
+		},
+		[]string{labelStatus},
+	)
+
+	SecurityFindingsIngestedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_findings_ingested_total",
+			Help: "Total repository security findings processed by schema version and result",
+		},
+		[]string{"schema_version", labelResult},
+	)
+
+	SecurityFindingsDroppedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_findings_dropped_total",
+			Help: "Total repository security findings dropped by layer and low-cardinality reason",
+		},
+		[]string{"layer", labelReason},
+	)
+
+	SecurityValidationOutcomesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_validation_outcomes_total",
+			Help: "Total repository security finding validation outcomes by status",
+		},
+		[]string{labelStatus},
+	)
+
+	SecurityReviewContextBytes = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "orka_security_review_context_bytes",
+			Help:    "Bounded review context prompt size in bytes for security review slices",
+			Buckets: []float64{4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288},
+		},
+	)
+
+	SecurityThreatModelUpdatesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_threat_model_updates_total",
+			Help: "Total repository security threat model updates by source",
+		},
+		[]string{"source"},
+	)
+
+	SecurityPatchVerificationTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_patch_verification_total",
+			Help: "Total repository security patch verification attempts by result and reason",
+		},
+		[]string{labelResult, labelReason},
+	)
 	ExecutionEventsAppendedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "orka_execution_events_appended_total",
@@ -405,6 +468,14 @@ func init() {
 		RepositoryMonitorReviewsTotal,
 		RepositoryMonitorReviewFindingsTotal,
 		RepositoryMonitorReviewRoundsToPass,
+		SecurityScanRunsTotal,
+		SecurityReviewSlicesTotal,
+		SecurityFindingsIngestedTotal,
+		SecurityFindingsDroppedTotal,
+		SecurityValidationOutcomesTotal,
+		SecurityReviewContextBytes,
+		SecurityThreatModelUpdatesTotal,
+		SecurityPatchVerificationTotal,
 		ExecutionEventsAppendedTotal,
 		ExecutionEventAppendFailuresTotal,
 		ExecutionEventAppendDuration,
@@ -606,6 +677,43 @@ func RecordRepositoryMonitorReviewRoundsToPass(rounds int) {
 	RepositoryMonitorReviewRoundsToPass.Observe(float64(rounds))
 }
 
+func RecordSecurityScanRun(mode, status string) {
+	SecurityScanRunsTotal.WithLabelValues(normalizeMetricLabel(mode), normalizeMetricLabel(status)).Inc()
+}
+
+func RecordSecurityReviewSlice(status string) {
+	SecurityReviewSlicesTotal.WithLabelValues(normalizeMetricLabel(status)).Inc()
+}
+
+func RecordSecurityFindingsIngested(schemaVersion, result string, count int) {
+	if count <= 0 {
+		return
+	}
+	SecurityFindingsIngestedTotal.WithLabelValues(normalizeMetricLabel(schemaVersion), normalizeMetricLabel(result)).Add(float64(count))
+}
+
+func RecordSecurityFindingDropped(layer, reason string) {
+	SecurityFindingsDroppedTotal.WithLabelValues(normalizeMetricLabel(layer), normalizeMetricLabel(reason)).Inc()
+}
+
+func RecordSecurityValidationOutcome(status string) {
+	SecurityValidationOutcomesTotal.WithLabelValues(normalizeMetricLabel(status)).Inc()
+}
+
+func RecordSecurityReviewContextBytes(bytes int) {
+	if bytes <= 0 {
+		return
+	}
+	SecurityReviewContextBytes.Observe(float64(bytes))
+}
+
+func RecordSecurityThreatModelUpdate(source string) {
+	SecurityThreatModelUpdatesTotal.WithLabelValues(normalizeMetricLabel(source)).Inc()
+}
+
+func RecordSecurityPatchVerification(result, reason string) {
+	SecurityPatchVerificationTotal.WithLabelValues(normalizeMetricLabel(result), normalizeMetricLabel(reason)).Inc()
+}
 func RecordACPWorkspaceRetentionAction(action, reason string) {
 	ACPWorkspaceRetentionActionsTotal.WithLabelValues(normalizeMetricLabel(action), normalizeMetricLabel(reason)).Inc()
 }

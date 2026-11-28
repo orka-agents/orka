@@ -41,6 +41,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -125,6 +126,14 @@ type RepositoryScanReconciler struct {
 	APIReader                     client.Reader
 	HTTPClient                    *http.Client
 	GitHubAPIBaseURL              string
+}
+
+func validationStatusChanged(previousStatus, previousJSON string, finding *store.Finding) bool {
+	if finding == nil {
+		return false
+	}
+	return strings.TrimSpace(previousStatus) != strings.TrimSpace(finding.ValidationStatus) ||
+		strings.TrimSpace(previousJSON) != strings.TrimSpace(finding.ValidationJSON)
 }
 
 func (r *RepositoryScanReconciler) agentRuntimePolicyReader() client.Reader {
@@ -588,6 +597,7 @@ func (r *RepositoryScanReconciler) hasActiveScanRun(
 		if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
 			return false, err
 		}
+		metrics.RecordSecurityScanRun(run.Mode, run.Phase)
 	}
 	return false, nil
 }
@@ -680,14 +690,30 @@ func (r *RepositoryScanReconciler) markScanRunTerminalError(ctx context.Context,
 	if r.SecurityStore == nil || run == nil || failure == nil {
 		return nil
 	}
-	now := time.Now().UTC()
-	message := failure.Error()
-	run.Phase = scanRunPhaseFailed
-	run.CompletedAt = &now
-	run.ErrorMessage = message
-	run.Summary = message
-	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
-		return err
+	if !terminalScanRunPhase(run.Phase) {
+		previousPhase := run.Phase
+		now := time.Now().UTC()
+		message := failure.Error()
+		run.Phase = scanRunPhaseFailed
+		run.CompletedAt = &now
+		run.ErrorMessage = message
+		run.Summary = message
+		if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
+			return err
+		}
+		if !terminalScanRunPhase(previousPhase) {
+			metrics.RecordSecurityScanRun(run.Mode, run.Phase)
+		}
+	} else {
+		now := time.Now().UTC()
+		message := failure.Error()
+		run.Phase = scanRunPhaseFailed
+		run.CompletedAt = &now
+		run.ErrorMessage = message
+		run.Summary = message
+		if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
+			return err
+		}
 	}
 	if scan == nil {
 		return nil
@@ -1006,10 +1032,31 @@ func (r *RepositoryScanReconciler) repositoryScanWithFrozenRunTarget(ctx context
 	return repositoryScanWithFrozenWorkspaceTarget(scan, task.Spec.Workspace)
 }
 
-func trustedFindingsRepositoryForRunTask(scan *corev1alpha1.RepositoryScan, run *store.ScanRun, task *corev1alpha1.Task) (security.FindingsV2Repository, string) {
+func (r *RepositoryScanReconciler) trustedFindingsRepositoryForRunTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, task *corev1alpha1.Task) (security.FindingsV2Repository, string) {
+	if task == nil || task.Spec.Workspace == nil {
+		return security.FindingsV2Repository{}, "scan run workspace target is missing"
+	}
+	if run != nil {
+		if expectedCommit := strings.TrimSpace(run.HeadCommit); expectedCommit != "" &&
+			store.ValidateGitObjectID("scan head commit", expectedCommit) == nil {
+			if actualRef := strings.TrimSpace(task.Spec.Workspace.Ref); actualRef != expectedCommit {
+				return security.FindingsV2Repository{}, "review task workspace commit does not match scan run head commit"
+			}
+		}
+	}
+	if targetScan, err := r.repositoryScanWithFrozenRunTarget(ctx, scan, run); err == nil {
+		return trustedFindingsRepository(targetScan, run), ""
+	}
 	taskScan, err := repositoryScanWithFrozenWorkspaceTarget(scan, task.Spec.Workspace)
 	if err != nil {
 		return security.FindingsV2Repository{}, err.Error()
+	}
+	if pinnedRef := strings.TrimSpace(task.Spec.Workspace.Ref); pinnedRef != "" &&
+		run != nil && strings.TrimSpace(run.HeadCommit) != "" &&
+		pinnedRef == strings.TrimSpace(run.HeadCommit) &&
+		strings.TrimSpace(task.Spec.Workspace.Branch) != "" &&
+		store.ValidateGitObjectID("pinned scan commit", pinnedRef) == nil {
+		taskScan.Spec.Ref = ""
 	}
 	return trustedFindingsRepository(taskScan, run), ""
 }
@@ -1119,6 +1166,7 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 		PolicyDigest:   policy.Digest,
 		ContextDigest:  digest,
 	}
+	metrics.RecordSecurityReviewContextBytes(manifest.PromptBytes)
 	prompt := security.BuildReviewResultPrompt(
 		scan, run.Mode, run.BaseCommit, run.HeadCommit, threatModel, reviewSlice,
 		resultBinding, *manifest, trustedFindingsRepository(scan, run), policy.PromptPolicy(),
@@ -1151,7 +1199,7 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 			Prompt:    prompt,
 			Timeout:   &timeout,
 			Priority:  &priority,
-			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
+			Workspace: repositoryScanTaskWorkspaceAtCommit(scan, corev1alpha1.WorkspaceIntentRead, run.HeadCommit),
 		},
 	}
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
@@ -1594,6 +1642,7 @@ func (r *RepositoryScanReconciler) progressScanRunAfterMapper(ctx context.Contex
 		if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
 			return false, err
 		}
+		metrics.RecordSecurityScanRun(run.Mode, run.Phase)
 		if err := r.updateNoopScanStatus(ctx, scan, run); err != nil {
 			return false, err
 		}
@@ -1610,6 +1659,7 @@ func (r *RepositoryScanReconciler) progressScanRunAfterMapper(ctx context.Contex
 	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
 		return false, err
 	}
+	metrics.RecordSecurityScanRun(run.Mode, run.Phase)
 	if err := r.updateNoopScanStatus(ctx, scan, run); err != nil {
 		return false, err
 	}
@@ -1753,26 +1803,26 @@ func (r *RepositoryScanReconciler) persistThreatModelIfChanged(
 	scanID string,
 	scanStartedAt time.Time,
 	content string,
-) error {
+) (bool, error) {
 	if r.SecurityStore == nil {
-		return nil
+		return false, nil
 	}
 
 	content = strings.TrimSpace(content)
 	if content == "" {
-		return nil
+		return false, nil
 	}
 
 	latest, latestErr := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
 	if latestErr != nil && !errors.Is(latestErr, store.ErrNotFound) {
-		return latestErr
+		return false, latestErr
 	}
 	if latestErr == nil {
 		if strings.TrimSpace(latest.Content) == content {
-			return nil
+			return false, nil
 		}
 		if latest.GeneratedByScan != scanID && !scanStartedAt.IsZero() && scanStartedAt.Before(latest.UpdatedAt) {
-			return nil
+			return false, nil
 		}
 	}
 
@@ -1784,10 +1834,10 @@ func (r *RepositoryScanReconciler) persistThreatModelIfChanged(
 		GeneratedByScan: scanID,
 	}
 	if err := r.SecurityStore.SaveThreatModel(ctx, model); err != nil {
-		return err
+		return false, err
 	}
 
-	return nil
+	return true, nil
 }
 
 func (r *RepositoryScanReconciler) getArtifactWithRetry(ctx context.Context, namespace, taskName, filename string) ([]byte, error) {
@@ -2175,6 +2225,9 @@ func applyScanRunProgress(run *store.ScanRun, progress scanRunProgress) {
 		if progress.reviewUnreviewable > 0 {
 			summary += fmt.Sprintf("; %d could not be reviewed after a retry", progress.reviewUnreviewable)
 		}
+		if existingLimitations := extractSummaryLimitationsSuffix(run.Summary); existingLimitations != "" {
+			summary += existingLimitations
+		}
 		if progress.reviewSucceeded+progress.reviewUnreviewable < progress.reviewCount {
 			run.Phase = scanRunPhaseRunning
 			run.CompletedAt = nil
@@ -2265,6 +2318,9 @@ func (r *RepositoryScanReconciler) refreshScanRunStatus(
 
 	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
 		return err
+	}
+	if !terminalScanRunPhase(previousPhase) && terminalScanRunPhase(run.Phase) {
+		metrics.RecordSecurityScanRun(run.Mode, run.Phase)
 	}
 	if !updateStatus {
 		return nil
@@ -2443,6 +2499,10 @@ func (r *RepositoryScanReconciler) ensureValidationTask(ctx context.Context, sca
 		PolicyDigest:   policy.Digest,
 	}
 
+	pinnedCommit := strings.TrimSpace(finding.CommitSHA)
+	if run != nil && strings.TrimSpace(run.HeadCommit) != "" {
+		pinnedCommit = strings.TrimSpace(run.HeadCommit)
+	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,
@@ -2463,7 +2523,7 @@ func (r *RepositoryScanReconciler) ensureValidationTask(ctx context.Context, sca
 			Prompt:    security.BuildValidationResultPrompt(scan, finding, resultBinding, policy.PromptPolicy()),
 			Timeout:   &timeout,
 			Priority:  &priority,
-			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
+			Workspace: repositoryScanTaskWorkspaceAtCommit(scan, corev1alpha1.WorkspaceIntentRead, pinnedCommit),
 		},
 	}
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
@@ -3193,7 +3253,7 @@ func (r *RepositoryScanReconciler) repositoryScanInconclusiveFindingSlices(ctx c
 			return nil, false, false, err
 		}
 		for i := range dropped {
-			if dropped[i].Layer == "cap" {
+			if dropped[i].Layer == securityDroppedLayerCap {
 				return nil, false, true, nil
 			}
 			sliceID := strings.TrimSpace(dropped[i].SliceID)
@@ -3530,7 +3590,8 @@ func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, sc
 	} else {
 		failure = r.pipelineTaskFailureSummary(ctx, task)
 	}
-	return r.applyScanTaskIngestion(ctx, scan, task, run, func(tx *RepositoryScanReconciler, current *store.ScanRun, _ *store.ScanTaskIngestion) error {
+	var threatModelUpdated bool
+	return r.applyScanTaskIngestionWithCallback(ctx, scan, task, run, func(tx *RepositoryScanReconciler, current *store.ScanRun, _ *store.ScanTaskIngestion) error {
 		current.TaskName = task.Name
 		if mode := task.Labels[labels.LabelSecurityMode]; mode != "" {
 			current.Mode = mode
@@ -3546,12 +3607,18 @@ func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, sc
 				return err
 			}
 		}
-		if err := tx.persistThreatModelIfChanged(ctx, scan, current.ID, current.StartedAt, content); err != nil {
+		saved, err := tx.persistThreatModelIfChanged(ctx, scan, current.ID, current.StartedAt, content)
+		if err != nil {
 			return err
 		}
+		threatModelUpdated = saved
 		clearThreatModelRunError(current)
 		current.Summary = scanSummaryThreatModelPending
 		return nil
+	}, func(_ *store.ScanRun) {
+		if threatModelUpdated {
+			metrics.RecordSecurityThreatModelUpdate("generated")
+		}
 	})
 }
 
@@ -3610,7 +3677,7 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 		return r.failReviewTask(ctx, scan, task, run, sliceID, r.pipelineTaskFailureSummary(ctx, task))
 	}
 
-	trustedRepository, targetProblem := trustedFindingsRepositoryForRunTask(scan, run, task)
+	trustedRepository, targetProblem := r.trustedFindingsRepositoryForRunTask(ctx, scan, run, task)
 	if targetProblem != "" {
 		return r.failReviewTask(ctx, scan, task, run, sliceID, targetProblem)
 	}
@@ -3625,11 +3692,15 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 				return retryErr
 			}
 		}
+		sliceMetricStatus := reviewSliceStatusFailed
+		if strings.HasPrefix(validationProblem, "review result is inconclusive:") {
+			sliceMetricStatus = "inconclusive"
+		}
 		message := validationProblem
 		if sliceID != "" {
 			message = fmt.Sprintf("slice %s: %s", sliceID, validationProblem)
 		}
-		return r.failReviewTask(ctx, scan, task, run, sliceID, message)
+		return r.failReviewTaskWithMetric(ctx, scan, task, run, sliceID, message, sliceMetricStatus)
 	}
 
 	clearReviewRunError(run, sliceID)
@@ -3647,7 +3718,15 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 	filterResult := security.FilterFindings(partition.Accepted)
 	partition.Accepted = filterResult.Kept
 	partition.Dropped = append(partition.Dropped, filterResult.Dropped...)
-	return r.applyScanTaskIngestion(ctx, scan, task, run, func(tx *RepositoryScanReconciler, current *store.ScanRun, ingestion *store.ScanTaskIngestion) error {
+	var (
+		committedAccepted   int
+		committedDuplicates int
+		committedDrops      []security.DroppedFindingDiagnostic
+	)
+	return r.applyScanTaskIngestionWithCallback(ctx, scan, task, run, func(tx *RepositoryScanReconciler, current *store.ScanRun, ingestion *store.ScanTaskIngestion) error {
+		committedAccepted = 0
+		committedDuplicates = 0
+		committedDrops = nil
 		owned, err := tx.SecurityStore.GetReviewSlice(ctx, scan.Namespace, scan.Name, sliceID)
 		if err != nil {
 			return err
@@ -3732,15 +3811,187 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 		current.AcceptedFindings += newlyAccepted
 		current.DroppedFindings += len(dropped)
 		current.ReviewedSliceCount++
-		current.Summary = findingsV2.Scan.Summary
-		if current.Summary == "" {
-			current.Summary = fmt.Sprintf("Reviewed slice %s", sliceID)
-		}
+		current.Summary = mergeReviewSliceSummary(current.Summary, sliceID, findingsV2.Scan)
 		ingestion.Completed = false
+		committedAccepted = newlyAccepted
+		committedDuplicates = len(duplicates)
+		committedDrops = dropped
 		return nil
+	}, func(_ *store.ScanRun) {
+		metrics.RecordSecurityReviewSlice(reviewSliceStatusReviewed)
+		metrics.RecordSecurityFindingsIngested("v2", "accepted", committedAccepted)
+		metrics.RecordSecurityFindingsIngested("v2", "duplicate", committedDuplicates)
+		metrics.RecordSecurityFindingsIngested("v2", "dropped", len(committedDrops))
+		for _, drop := range committedDrops {
+			metrics.RecordSecurityFindingDropped(drop.Layer, securityDroppedReasonBucket(drop.Layer, drop.Reason))
+		}
 	})
 }
 
+const securityDroppedLayerCap = "cap"
+
+func mergeReviewSliceSummary(previousSummary, sliceID string, scan security.FindingsV2Scan) string {
+	prior, priorExtra := extractSummaryLimitations(previousSummary)
+	combined := make([]string, 0, len(prior)+len(scan.Limitations))
+	seen := make(map[string]struct{}, len(prior)+len(scan.Limitations))
+	for _, item := range append(prior, scan.Limitations...) {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, exists := seen[item]; exists {
+			continue
+		}
+		seen[item] = struct{}{}
+		combined = append(combined, item)
+	}
+	summary := strings.TrimSpace(scan.Summary)
+	if summary == "" {
+		summary = fmt.Sprintf("Reviewed slice %s", sliceID)
+	}
+	return appendLimitationsWithExtraToSummary(summary, combined, priorExtra)
+}
+
+func formatReviewSliceSummary(sliceID string, scan security.FindingsV2Scan) string {
+	summary := strings.TrimSpace(scan.Summary)
+	if summary == "" {
+		summary = fmt.Sprintf("Reviewed slice %s", sliceID)
+	}
+	return appendLimitationsWithExtraToSummary(summary, scan.Limitations, 0)
+}
+
+func extractSummaryLimitations(summary string) ([]string, int) {
+	suffix := extractSummaryLimitationsSuffix(summary)
+	if suffix == "" {
+		return nil, 0
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(suffix, " (limitations: "), ")")
+	parts := strings.Split(inner, "; ")
+	out := make([]string, 0, len(parts))
+	extra := 0
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.HasPrefix(part, "+") && strings.HasSuffix(part, " more") {
+			if n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(part, "+"), " more")); err == nil && n > 0 {
+				extra += n
+			}
+			continue
+		}
+		out = append(out, part)
+	}
+	return out, extra
+}
+
+func extractSummaryLimitationsSuffix(summary string) string {
+	idx := strings.LastIndex(summary, " (limitations: ")
+	if idx < 0 || !strings.HasSuffix(summary, ")") {
+		return ""
+	}
+	return summary[idx:]
+}
+
+func appendLimitationsWithExtraToSummary(summary string, limitations []string, priorExtra int) string {
+	if len(limitations) == 0 && priorExtra <= 0 {
+		return summary
+	}
+	const maxSummaryLimitations = 3
+	shown := make([]string, 0, min(len(limitations), maxSummaryLimitations))
+	nonEmpty := 0
+	for _, limitation := range limitations {
+		limitation = strings.TrimSpace(limitation)
+		if limitation == "" {
+			continue
+		}
+		nonEmpty++
+		if len(shown) < maxSummaryLimitations {
+			shown = append(shown, limitation)
+		}
+	}
+	if len(shown) == 0 {
+		return summary
+	}
+	suffix := " (limitations: " + strings.Join(shown, "; ")
+	if extra := (nonEmpty - len(shown)) + priorExtra; extra > 0 {
+		suffix += fmt.Sprintf("; +%d more", extra)
+	}
+	suffix += ")"
+	return summary + suffix
+}
+
+func securityDroppedReasonBucket(layer, reason string) string {
+	normalized := strings.ToLower(strings.TrimSpace(reason))
+	switch strings.ToLower(strings.TrimSpace(layer)) {
+	case securityDroppedLayerCap:
+		return "run_cap"
+	case "filter":
+		switch {
+		case strings.Contains(normalized, "docs-only"):
+			return "docs_only"
+		case strings.Contains(normalized, "test-only"):
+			return "test_only"
+		case strings.Contains(normalized, "demo or example"):
+			return "example_only"
+		case strings.Contains(normalized, "dependency"):
+			return "dependency_version"
+		case strings.Contains(normalized, "rate-limit") || strings.Contains(normalized, "rate limit"):
+			return "generic_rate_limit"
+		case strings.Contains(normalized, "dos") || strings.Contains(normalized, "exhaustion"):
+			return "generic_dos"
+		case strings.Contains(normalized, "client-side"):
+			return "client_side_auth"
+		case strings.Contains(normalized, "react xss"):
+			return "react_xss"
+		case strings.Contains(normalized, "command-injection") || strings.Contains(normalized, "shell"):
+			return "shell_no_untrusted_input"
+		case strings.Contains(normalized, "logging"):
+			return "non_sensitive_logging"
+		case strings.Contains(normalized, "prompt-injection"):
+			return "generic_prompt_injection"
+		case strings.Contains(normalized, "best-practice") || strings.Contains(normalized, "hardening"):
+			return "generic_hardening"
+		default:
+			return "filter_other"
+		}
+	case security.StageValidation:
+		switch {
+		case strings.Contains(normalized, "required"):
+			return "missing_required_field"
+		case strings.Contains(normalized, "severity") || strings.Contains(normalized, "confidence"):
+			return "unsupported_enum"
+		case strings.Contains(normalized, "quote"):
+			return "quote_mismatch"
+		case strings.Contains(normalized, "line") || strings.Contains(normalized, "range"):
+			return "invalid_line_range"
+		case strings.Contains(normalized, "evidence") || strings.Contains(normalized, "path") || strings.Contains(normalized, "manifest"):
+			return "invalid_evidence"
+		default:
+			return "validation_other"
+		}
+	default:
+		return "other"
+	}
+}
+
+func securityPatchFailureReasonBucket(reason string) string {
+	normalized := strings.ToLower(strings.TrimSpace(reason))
+	switch {
+	case strings.Contains(normalized, "changedfiles"):
+		return "changed_files_mismatch"
+	case strings.Contains(normalized, "diff"):
+		return "diff_mismatch"
+	case strings.Contains(normalized, "publication") || strings.Contains(normalized, "commit"):
+		return "publication_unverified"
+	case strings.Contains(normalized, "artifact"):
+		return "artifact_missing_or_invalid"
+	case strings.Contains(normalized, "credential") || strings.Contains(normalized, "token"):
+		return "credential_unavailable"
+	default:
+		return "verification_failed"
+	}
+}
 func (r *RepositoryScanReconciler) leaveReviewSliceUnreviewed(
 	ctx context.Context,
 	scan *corev1alpha1.RepositoryScan,
@@ -3751,14 +4002,17 @@ func (r *RepositoryScanReconciler) leaveReviewSliceUnreviewed(
 ) error {
 	log.FromContext(ctx).Info("Review slice could not be reviewed after its retry; continuing the scan run",
 		"task", task.Name, "slice", sliceID, "reason", message)
-	return r.applyScanTaskIngestion(ctx, scan, task, run, func(tx *RepositoryScanReconciler, current *store.ScanRun, _ *store.ScanTaskIngestion) error {
+	return r.applyScanTaskIngestionWithCallback(ctx, scan, task, run, func(tx *RepositoryScanReconciler, current *store.ScanRun, _ *store.ScanTaskIngestion) error {
 		if sliceID != "" {
 			if err := tx.SecurityStore.UpdateReviewSliceStatus(ctx, scan.Namespace, scan.Name, sliceID, current.ID, reviewSliceStatusFailed); err != nil {
 				return err
 			}
 		}
-		current.Summary = fmt.Sprintf("Review slice %s could not be reviewed after a retry: %s", sliceID, message)
+		current.Summary = fmt.Sprintf("Review slice %s could not be reviewed after a retry: %s", sliceID, message) +
+			extractSummaryLimitationsSuffix(current.Summary)
 		return nil
+	}, func(_ *store.ScanRun) {
+		metrics.RecordSecurityReviewSlice(reviewSliceStatusFailed)
 	})
 }
 
@@ -3770,7 +4024,19 @@ func (r *RepositoryScanReconciler) failReviewTask(
 	sliceID string,
 	message string,
 ) error {
-	return r.applyScanTaskIngestion(ctx, scan, task, run, func(tx *RepositoryScanReconciler, current *store.ScanRun, _ *store.ScanTaskIngestion) error {
+	return r.failReviewTaskWithMetric(ctx, scan, task, run, sliceID, message, reviewSliceStatusFailed)
+}
+
+func (r *RepositoryScanReconciler) failReviewTaskWithMetric(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	task *corev1alpha1.Task,
+	run *store.ScanRun,
+	sliceID string,
+	message string,
+	metricStatus string,
+) error {
+	return r.applyScanTaskIngestionWithCallback(ctx, scan, task, run, func(tx *RepositoryScanReconciler, current *store.ScanRun, _ *store.ScanTaskIngestion) error {
 		if sliceID != "" {
 			if err := tx.SecurityStore.UpdateReviewSliceStatus(ctx, scan.Namespace, scan.Name, sliceID, current.ID, reviewSliceStatusFailed); err != nil {
 				return err
@@ -3778,6 +4044,8 @@ func (r *RepositoryScanReconciler) failReviewTask(
 		}
 		current.ErrorMessage = message
 		return nil
+	}, func(_ *store.ScanRun) {
+		metrics.RecordSecurityReviewSlice(metricStatus)
 	})
 }
 
@@ -3836,6 +4104,9 @@ func (r *RepositoryScanReconciler) validateReviewTaskResult(
 	if err != nil {
 		return nil, nil, err.Error(), true, nil
 	}
+	if security.ReviewResultIsInconclusive(*findings) {
+		return nil, nil, "review result is inconclusive: zero findings with no reviewed files, resolved questions, or summary", true, nil
+	}
 	return manifest, findings, "", false, nil
 }
 
@@ -3870,9 +4141,21 @@ func (r *RepositoryScanReconciler) ensureReviewResultRetry(
 	default:
 		return false, err
 	}
-	targetScan, err := repositoryScanWithFrozenWorkspaceTarget(scan, sourceTask.Spec.Workspace)
+	targetScan, err := r.repositoryScanWithFrozenRunTarget(ctx, scan, run)
 	if err != nil {
-		return false, err
+		targetScan, err = repositoryScanWithFrozenWorkspaceTarget(scan, sourceTask.Spec.Workspace)
+		if err != nil {
+			return false, err
+		}
+		if sourceTask.Spec.Workspace != nil {
+			if pinnedRef := strings.TrimSpace(sourceTask.Spec.Workspace.Ref); pinnedRef != "" &&
+				strings.TrimSpace(run.HeadCommit) != "" &&
+				pinnedRef == strings.TrimSpace(run.HeadCommit) &&
+				strings.TrimSpace(sourceTask.Spec.Workspace.Branch) != "" &&
+				store.ValidateGitObjectID("pinned scan commit", pinnedRef) == nil {
+				targetScan.Spec.Ref = ""
+			}
+		}
 	}
 
 	desired, err := r.buildReviewTask(ctx, targetScan, run, threatModel, *reviewSlice, policy, securityReviewRetryAttempt)
@@ -3941,7 +4224,8 @@ func (r *RepositoryScanReconciler) retryReviewSlice(
 		current.Phase = scanRunPhaseRunning
 		current.CompletedAt = nil
 		current.ErrorMessage = ""
-		current.Summary = fmt.Sprintf("Retrying review slice %s after %s", sliceID, cause)
+		current.Summary = fmt.Sprintf("Retrying review slice %s after %s", sliceID, cause) +
+			extractSummaryLimitationsSuffix(current.Summary)
 		return nil
 	})
 }
@@ -4295,7 +4579,7 @@ func (r *RepositoryScanReconciler) ingestMapperTask(ctx context.Context, scan *c
 		slice.ReviewContextHash = contextHash
 		preparedSlices = append(preparedSlices, slice)
 	}
-	return r.applyScanTaskIngestion(ctx, scan, task, run, func(tx *RepositoryScanReconciler, current *store.ScanRun, _ *store.ScanTaskIngestion) error {
+	return r.applyScanTaskIngestionWithCallback(ctx, scan, task, run, func(tx *RepositoryScanReconciler, current *store.ScanRun, _ *store.ScanTaskIngestion) error {
 		for i := range preparedSlices {
 			slice := &preparedSlices[i]
 			if err := tx.preserveCurrentRunReviewSliceTerminalState(ctx, scan, slice); err != nil {
@@ -4336,6 +4620,10 @@ func (r *RepositoryScanReconciler) ingestMapperTask(ctx context.Context, scan *c
 			current.Summary = fmt.Sprintf("Threat model generated; deterministic mapper produced %d review slices", len(artifact.Slices))
 		}
 		return nil
+	}, func(_ *store.ScanRun) {
+		for range skippedSlices {
+			metrics.RecordSecurityReviewSlice(reviewSliceStatusSkipped)
+		}
 	})
 }
 
@@ -4425,11 +4713,11 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 		}
 	}
 
+	previousValidationStatus := finding.ValidationStatus
+	previousValidationJSON := finding.ValidationJSON
+
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
-		validationProblem := ""
-		if strings.TrimSpace(task.Labels[labels.LabelSecurityScanID]) != strings.TrimSpace(finding.ScanRunID) {
-			validationProblem = "validation task scan identity does not match finding"
-		}
+		validationProblem := validationTaskBindingProblem(task, finding)
 		policy, policyErr := security.LoadScannerPolicy(ctx, r.Client, scan.Namespace, scan.Spec)
 		if policyErr != nil {
 			return policyErr
@@ -4455,10 +4743,13 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 				}
 			}
 		}
+		var validationMetricStatus string
 		if validationProblem != "" {
 			recordValidationError(finding, validationProblem)
+			validationMetricStatus = findingValidationStatusError
 		} else if artifact != nil {
 			finding.ValidationStatus = strings.TrimSpace(artifact.Status)
+			validationMetricStatus = finding.ValidationStatus
 			data, err := json.Marshal(artifact)
 			if err != nil {
 				return err
@@ -4470,10 +4761,42 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 				finding.Evidence = mergeEvidenceRefs(finding.Evidence, ref)
 			}
 		}
-	} else {
-		recordValidationError(finding, r.pipelineTaskSummary(ctx, task, "validation task failed"))
+		if err := r.persistValidatedFinding(ctx, finding, canonical); err != nil {
+			return err
+		}
+		if validationMetricStatus != "" && validationStatusChanged(previousValidationStatus, previousValidationJSON, finding) {
+			metrics.RecordSecurityValidationOutcome(validationMetricStatus)
+		}
+		return nil
 	}
+	recordValidationError(finding, r.pipelineTaskSummary(ctx, task, "validation task failed"))
+	if err := r.persistValidatedFinding(ctx, finding, canonical); err != nil {
+		return err
+	}
+	if validationStatusChanged(previousValidationStatus, previousValidationJSON, finding) {
+		metrics.RecordSecurityValidationOutcome(findingValidationStatusError)
+	}
+	return nil
+}
 
+func validationTaskBindingProblem(task *corev1alpha1.Task, finding *store.Finding) string {
+	if strings.TrimSpace(task.Labels[labels.LabelSecurityScanID]) != strings.TrimSpace(finding.ScanRunID) {
+		return "validation task scan identity does not match finding"
+	}
+	expectedCommit := strings.TrimSpace(finding.CommitSHA)
+	if expectedCommit == "" || store.ValidateGitObjectID("finding commit", expectedCommit) != nil {
+		return ""
+	}
+	if task.Spec.Workspace == nil {
+		return "validation task workspace is missing"
+	}
+	if actualRef := strings.TrimSpace(task.Spec.Workspace.Ref); actualRef != expectedCommit {
+		return "validation task workspace commit does not match finding commit"
+	}
+	return ""
+}
+
+func (r *RepositoryScanReconciler) persistValidatedFinding(ctx context.Context, finding, canonical *store.Finding) error {
 	if finding.DuplicateOf == "" {
 		return r.SecurityStore.UpsertFinding(ctx, finding)
 	}
@@ -4895,6 +5218,7 @@ func (r *RepositoryScanReconciler) updatePatchProposalFromSucceededTask(ctx cont
 	proposal.PRURL = publication.prURL
 	proposal.PublicationEvidence = publication.publication
 	proposal.Status = patchProposalStatusPROpened
+	metrics.RecordSecurityPatchVerification("verified", "ok")
 	r.decorateSecurityPatchPullRequest(ctx, scan, task, findingID, publication.prNumber, publication.publication.PRIntent.PublicationGeneration, verified.summaryArtifact)
 	return nil
 }
@@ -4902,6 +5226,7 @@ func (r *RepositoryScanReconciler) updatePatchProposalFromSucceededTask(ctx cont
 func (r *RepositoryScanReconciler) failPatchProposal(ctx context.Context, task *corev1alpha1.Task, proposal *store.PatchProposal, reason string) {
 	proposal.Status = scanRunPhaseFailed
 	proposal.Reason = boundACPStatusMessage(repositoryMonitorReviewContextSanitize(reason))
+	metrics.RecordSecurityPatchVerification("failed", securityPatchFailureReasonBucket(reason))
 	log.FromContext(ctx).Info("security patch proposal failed verification",
 		"namespace", task.Namespace, "task", task.Name, "finding", proposal.FindingID, "proposal", proposal.ID, "reason", proposal.Reason)
 }

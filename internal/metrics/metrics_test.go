@@ -309,3 +309,49 @@ func TestRecordExecutionEventMetrics(t *testing.T) {
 		t.Fatalf("truncations=%v, want 1", got)
 	}
 }
+
+func TestRecordSecurityScannerMetrics(t *testing.T) {
+	SecurityScanRunsTotal.Reset()
+	SecurityReviewSlicesTotal.Reset()
+	SecurityFindingsIngestedTotal.Reset()
+	SecurityFindingsDroppedTotal.Reset()
+	SecurityValidationOutcomesTotal.Reset()
+	SecurityThreatModelUpdatesTotal.Reset()
+	SecurityPatchVerificationTotal.Reset()
+
+	RecordSecurityScanRun("initial", "succeeded")
+	RecordSecurityReviewSlice("reviewed")
+	RecordSecurityReviewSlice("inconclusive")
+	RecordSecurityFindingsIngested("v2", "accepted", 2)
+	RecordSecurityFindingsIngested("v2", "dropped", 1)
+	RecordSecurityFindingDropped("filter", "docs_only")
+	RecordSecurityValidationOutcome("validated")
+	RecordSecurityReviewContextBytes(16384)
+	RecordSecurityThreatModelUpdate("generated")
+	RecordSecurityPatchVerification("verified", "ok")
+
+	if got := getCounterValue(SecurityScanRunsTotal, "initial", "succeeded"); got != 1 {
+		t.Fatalf("scan runs=%v, want 1", got)
+	}
+	if got := getCounterValue(SecurityReviewSlicesTotal, "reviewed"); got != 1 {
+		t.Fatalf("reviewed slices=%v, want 1", got)
+	}
+	if got := getCounterValue(SecurityReviewSlicesTotal, "inconclusive"); got != 1 {
+		t.Fatalf("inconclusive slices=%v, want 1", got)
+	}
+	if got := getCounterValue(SecurityFindingsIngestedTotal, "v2", "accepted"); got != 2 {
+		t.Fatalf("accepted findings=%v, want 2", got)
+	}
+	if got := getCounterValue(SecurityFindingsDroppedTotal, "filter", "docs_only"); got != 1 {
+		t.Fatalf("dropped findings=%v, want 1", got)
+	}
+	if got := getCounterValue(SecurityValidationOutcomesTotal, "validated"); got != 1 {
+		t.Fatalf("validation outcomes=%v, want 1", got)
+	}
+	if got := getCounterValue(SecurityThreatModelUpdatesTotal, "generated"); got != 1 {
+		t.Fatalf("threat model updates=%v, want 1", got)
+	}
+	if got := getCounterValue(SecurityPatchVerificationTotal, "verified", "ok"); got != 1 {
+		t.Fatalf("patch verifications=%v, want 1", got)
+	}
+}

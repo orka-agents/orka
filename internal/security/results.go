@@ -246,6 +246,9 @@ func ParseThreatModelResult(data []byte, expected AgentResultBinding) (string, e
 	if content == "" {
 		return "", fmt.Errorf("threatModel is required")
 	}
+	if isPlaceholderThreatModel(content) {
+		return "", fmt.Errorf("threatModel is a prompt placeholder")
+	}
 	if !strings.HasPrefix(content, "#") {
 		return "", fmt.Errorf("threatModel must be markdown beginning with a heading")
 	}
@@ -432,6 +435,48 @@ func truncateUTF8(value string, limit int) string {
 	return value
 }
 
+func isPlaceholderResultText(value string) bool {
+	trimmed := strings.TrimSpace(stripUnsafeTextRunes(value))
+	return trimmed == truncationSuffix || trimmed == "…"
+}
+
+func isPlaceholderThreatModel(content string) bool {
+	if isPlaceholderResultText(content) {
+		return true
+	}
+	lines := strings.Split(content, "\n")
+	nonEmpty := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			nonEmpty = append(nonEmpty, trimmed)
+		}
+	}
+	if len(nonEmpty) == 2 && strings.EqualFold(nonEmpty[0], "# Threat Model") && isPlaceholderResultText(nonEmpty[1]) {
+		return true
+	}
+	return false
+}
+
+func ReviewResultIsInconclusive(artifact FindingsV2Artifact) bool {
+	if len(artifact.Findings) > 0 {
+		return false
+	}
+	for _, file := range artifact.Scan.ReviewedFiles {
+		if trimmed := strings.TrimSpace(file); trimmed != "" && !isPlaceholderResultText(trimmed) {
+			return false
+		}
+	}
+	for _, question := range artifact.Scan.ResolvedQuestions {
+		q := strings.TrimSpace(question.Question)
+		r := strings.TrimSpace(question.Resolution)
+		if q != "" && !isPlaceholderResultText(q) && r != "" && !isPlaceholderResultText(r) {
+			return false
+		}
+	}
+	summary := strings.TrimSpace(stripUnsafeTextRunes(artifact.Scan.Summary))
+	return summary == "" || isPlaceholderResultText(summary)
+}
+
 func validateFindingsResultArtifact(artifact FindingsV2Artifact, expected FindingsResultExpectation) error {
 	if artifact.SchemaVersion != SchemaVersionFindingsV2 {
 		return fmt.Errorf("unsupported findings schemaVersion %d", artifact.SchemaVersion)
@@ -453,6 +498,9 @@ func validateFindingsResultArtifact(artifact FindingsV2Artifact, expected Findin
 	}
 	if err := boundedString("findings scan.summary", artifact.Scan.Summary, maxFindingSummaryBytes); err != nil {
 		return err
+	}
+	if isPlaceholderResultText(artifact.Scan.Summary) {
+		return fmt.Errorf("findings scan.summary is a prompt placeholder")
 	}
 	for i := range artifact.Findings {
 		if err := validateBoundedFinding(i, artifact.Findings[i]); err != nil {
@@ -519,6 +567,9 @@ func validateValidationArtifact(artifact ValidationArtifact, finding *store.Find
 	}
 	if strings.TrimSpace(artifact.Summary) == "" {
 		return fmt.Errorf("validation summary is required")
+	}
+	if isPlaceholderResultText(artifact.Summary) {
+		return fmt.Errorf("validation summary is a prompt placeholder")
 	}
 	for _, field := range []struct {
 		name  string

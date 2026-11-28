@@ -7,6 +7,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/security"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func workspaceCredentialReference(ref *corev1.LocalObjectReference) *corev1alpha1.WorkspaceCredentialReference {
@@ -27,14 +28,22 @@ func repositoryScanReadCredentialRef(scan *corev1alpha1.RepositoryScan) *corev1.
 }
 
 func repositoryScanTaskWorkspace(scan *corev1alpha1.RepositoryScan, intent corev1alpha1.WorkspaceIntent) *corev1alpha1.WorkspaceConfig {
+	return repositoryScanTaskWorkspaceAtCommit(scan, intent, "")
+}
+
+func repositoryScanTaskWorkspaceAtCommit(scan *corev1alpha1.RepositoryScan, intent corev1alpha1.WorkspaceIntent, pinnedCommit string) *corev1alpha1.WorkspaceConfig {
 	if scan == nil {
 		return nil
+	}
+	ref := security.EffectiveRef(scan)
+	if candidate := strings.TrimSpace(pinnedCommit); candidate != "" && store.ValidateGitObjectID("pinned scan commit", candidate) == nil {
+		ref = candidate
 	}
 	workspace := &corev1alpha1.WorkspaceConfig{
 		Intent:            intent,
 		GitRepo:           security.CanonicalRepositoryCloneURL(scan.Spec.RepoURL),
 		Branch:            security.EffectiveWorkspaceBranch(scan),
-		Ref:               security.EffectiveRef(scan),
+		Ref:               ref,
 		ReadCredentialRef: workspaceCredentialReference(repositoryScanReadCredentialRef(scan)),
 		SubPath:           scan.Spec.SubPath,
 	}

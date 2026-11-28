@@ -479,6 +479,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 	if err != nil {
 		return err
 	}
+	pinnedCommit := strings.TrimSpace(finding.CommitSHA)
 	if h.securityStore != nil && strings.TrimSpace(finding.ScanRunID) != "" {
 		run, err := h.securityStore.GetScanRun(ctx, scan.Namespace, finding.ScanRunID)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -486,6 +487,19 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 		}
 		if run != nil && (run.Phase == securityScanRunPhasePending || run.Phase == securityScanRunPhaseRunning) && run.PolicyDigest != "" && policy.Digest != "" && run.PolicyDigest != policy.Digest {
 			return fiber.NewError(fiber.StatusConflict, "scanner policy changed during active scan run")
+		}
+		if run != nil && strings.TrimSpace(run.HeadCommit) != "" {
+			pinnedCommit = strings.TrimSpace(run.HeadCommit)
+		}
+	}
+	if pinnedCommit != "" && strings.TrimSpace(finding.TargetKey) != "" {
+		logicalBranch := security.EffectiveBranch(scan)
+		if ref := security.EffectiveRef(scan); ref != "" {
+			logicalBranch = "ref:" + ref
+		}
+		currentTargetKey := security.FindingV2TargetKey(scan.Spec.RepoURL, logicalBranch, scan.Spec.SubPath)
+		if strings.TrimSpace(finding.TargetKey) != currentTargetKey {
+			return fiber.NewError(fiber.StatusConflict, "finding belongs to a different scan target than the current RepositoryScan")
 		}
 	}
 	timeout := metav1.Duration{Duration: 90 * time.Minute}
@@ -540,6 +554,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 	if err := authorizeAndStampTaskContext(ctx, h.uncachedReader(), h.clientset, contextTokenFromUserInfo(ui), h.contextTokenAuthorization, "createSecurityValidationTask", ui, task); err != nil {
 		return err
 	}
+	task.Spec.Workspace = repositoryScanTaskWorkspaceAtCommit(scan, corev1alpha1.WorkspaceIntentRead, pinnedCommit)
 	createErr := h.client.Create(ctx, task)
 	if createErr == nil {
 		sealRequesterStamp(ctx, h.client, task)

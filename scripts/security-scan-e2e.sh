@@ -1084,7 +1084,7 @@ assert_positive_scan_snapshot() {
       any(.metadata.ownerReferences[]?; .kind == "RepositoryScan" and .name == $scanName and .controller == true) and
       .status.phase == "Succeeded"
     ) and
-    all(($threatTasks + $reviewTasks)[];
+    all($threatTasks[];
       .spec.type == "agent" and
       .spec.agentRef.name == $agent and
       ((.spec.env // []) | length) == 0 and
@@ -1092,6 +1092,22 @@ assert_positive_scan_snapshot() {
       .spec.workspace.gitRepo == $repo and
       .spec.workspace.branch == $branch and
       .spec.workspace.ref == $ref and
+      .status.resultRef.available == true and
+      .status.agentExecutionBinding.contractVersion == "orka.harness.v2" and
+      .status.agentExecutionBinding.backend == "runtime-pool" and
+      .status.execution.state == "Succeeded" and
+      .status.execution.outcome == "Succeeded" and
+      .status.delivery.state == "ReadValidated" and
+      .status.delivery.outcome == "ReadValidated"
+    ) and
+    all($reviewTasks[];
+      .spec.type == "agent" and
+      .spec.agentRef.name == $agent and
+      ((.spec.env // []) | length) == 0 and
+      .spec.workspace.intent == "read" and
+      .spec.workspace.gitRepo == $repo and
+      .spec.workspace.branch == $branch and
+      (.spec.workspace.ref == $ref or (.spec.workspace.ref == $runItems[0].headCommit and ($runItems[0].headCommit | length) >= 40)) and
       .status.resultRef.available == true and
       .status.agentExecutionBinding.contractVersion == "orka.harness.v2" and
       .status.agentExecutionBinding.backend == "runtime-pool" and
