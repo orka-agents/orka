@@ -148,7 +148,21 @@ func TestEvaluateControllerPoCVerificationRejectsZeroExitAndDisallowedHarness(t 
 
 	allowed := &security.ValidationArtifact{
 		Version: 1, FindingID: finding.ID, Status: findingValidationStatusValidated, Summary: "Confirmed",
+		PoC: &security.ValidationPoC{Harness: security.PoCHarnessGoTest, Command: "go test ./...", ExpectedExitCode: 1},
+	}
+	missingOracle := &security.ValidationArtifact{
+		Version: 1, FindingID: finding.ID, Status: findingValidationStatusValidated, Summary: "Confirmed",
 		PoC: &security.ValidationPoC{Harness: security.PoCHarnessGoTest, Command: "go test ./..."},
+	}
+	if p, v, e := reconciler.evaluateControllerPoCVerification(ctx, scan, validationTask, finding, missingOracle); e != nil || p || v == nil || v.Status != pocVerifyStatusFailed {
+		t.Fatalf("missing oracle = (pending=%v, verification=%#v, err=%v), want failed", p, v, e)
+	}
+	spoofedHarness := &security.ValidationArtifact{
+		Version: 1, FindingID: finding.ID, Status: findingValidationStatusValidated, Summary: "Confirmed",
+		PoC: &security.ValidationPoC{Harness: security.PoCHarnessGoTest, Command: "sh -c 'exit 1'", ExpectedExitCode: 1},
+	}
+	if p, v, e := reconciler.evaluateControllerPoCVerification(ctx, scan, validationTask, finding, spoofedHarness); e != nil || p || v == nil || v.Status != pocVerifyStatusFailed {
+		t.Fatalf("spoofed harness = (pending=%v, verification=%#v, err=%v), want failed", p, v, e)
 	}
 	pending, _, err = reconciler.evaluateControllerPoCVerification(ctx, scan, validationTask, finding, allowed)
 	if err != nil || !pending {

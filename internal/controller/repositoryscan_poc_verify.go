@@ -12,13 +12,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -39,7 +43,26 @@ const (
 	pocVerifyMaxTaskNameSize = 63
 )
 
-func preservedValidationPoCVerification(finding *store.Finding, artifact *security.ValidationArtifact) *security.ValidationPoCVerification {
+func pocExecutionPolicyDigest(scan *corev1alpha1.RepositoryScan) string {
+	if scan == nil || scan.Spec.PoCExecution == nil {
+		return ""
+	}
+	allowed := make([]string, 0, len(scan.Spec.PoCExecution.AllowedHarnesses))
+	for _, h := range scan.Spec.PoCExecution.AllowedHarnesses {
+		if trimmed := strings.ToLower(strings.TrimSpace(h)); trimmed != "" {
+			allowed = append(allowed, trimmed)
+		}
+	}
+	slices.Sort(allowed)
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		effectivePoCVerificationImage(scan),
+		effectivePoCVerificationTimeout(scan.Spec.PoCExecution).String(),
+		strings.Join(allowed, ","),
+	}, "\n")))
+	return "sha256:" + hex.EncodeToString(sum[:8])
+}
+
+func preservedValidationPoCVerification(scan *corev1alpha1.RepositoryScan, finding *store.Finding, artifact *security.ValidationArtifact) *security.ValidationPoCVerification {
 	if finding == nil || artifact == nil || strings.TrimSpace(finding.ValidationJSON) == "" {
 		return nil
 	}
@@ -59,6 +82,15 @@ func preservedValidationPoCVerification(finding *store.Finding, artifact *securi
 	}
 	if !reflect.DeepEqual(prior.PoC, artifact.PoC) {
 		return nil
+	}
+	if scan != nil && scan.Spec.PoCExecution != nil {
+		currentDigest := pocExecutionPolicyDigest(scan)
+		if prior.PoCVerification.PolicyDigest != "" && prior.PoCVerification.PolicyDigest != currentDigest {
+			return nil
+		}
+		if prior.PoCVerification.Status == pocVerifyStatusSkipped && prior.PoCVerification.PolicyDigest != currentDigest {
+			return nil
+		}
 	}
 	return prior.PoCVerification
 }
@@ -129,10 +161,36 @@ func validateRepositoryScanPoCExecutionSpec(scan *corev1alpha1.RepositoryScan) s
 			return fmt.Sprintf("controller PoC verification policy is invalid: unsupported harness %q", harness)
 		}
 	}
-	if scan.Spec.PoCExecution.Timeout != nil && scan.Spec.PoCExecution.Timeout.Duration <= 0 {
-		return "controller PoC verification policy is invalid: timeout must be positive"
+	if scan.Spec.PoCExecution.Timeout != nil && scan.Spec.PoCExecution.Timeout.Duration < time.Second {
+		return "controller PoC verification policy is invalid: timeout must be at least 1s"
 	}
 	return ""
+}
+
+func pocCommandMatchesHarness(harness, command string) bool {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(harness)) {
+	case security.PoCHarnessGoTest:
+		if strings.ContainsAny(trimmed, ";|&`$()<>") {
+			return false
+		}
+		fields := strings.Fields(trimmed)
+		return len(fields) >= 2 && fields[0] == "go" && fields[1] == "test"
+	case security.PoCHarnessPytest:
+		if strings.ContainsAny(trimmed, ";|&`$()<>") {
+			return false
+		}
+		fields := strings.Fields(trimmed)
+		return (len(fields) >= 1 && fields[0] == "pytest") ||
+			(len(fields) >= 3 && (fields[0] == "python" || fields[0] == "python3") && fields[1] == "-m" && fields[2] == "pytest")
+	case security.PoCHarnessShell:
+		return true
+	default:
+		return false
+	}
 }
 
 func pocVerifyTaskName(scanName, findingID, validationTaskName, phase, commitSHA, image, command string, timeout time.Duration) string {
@@ -167,6 +225,9 @@ func pocTaskCommandExitCode(task *corev1alpha1.Task) (int, bool) {
 	if !strings.HasPrefix(msg, prefix) {
 		return 0, false
 	}
+	if strings.Contains(msg, "reason=StartError") || strings.Contains(msg, "reason=ContainerCannotRun") || strings.Contains(msg, "Evicted") {
+		return 0, false
+	}
 	rest := strings.TrimPrefix(msg, prefix)
 	codeText, _, _ := strings.Cut(rest, " ")
 	code, err := strconv.Atoi(codeText)
@@ -174,6 +235,38 @@ func pocTaskCommandExitCode(task *corev1alpha1.Task) (int, bool) {
 		return 0, false
 	}
 	return code, true
+}
+
+func (r *RepositoryScanReconciler) pocTaskWorkerPodExecuted(ctx context.Context, task *corev1alpha1.Task) bool {
+	if task == nil || strings.TrimSpace(task.Status.JobName) == "" || r.Client == nil {
+		return true
+	}
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Status.JobName}, job); err != nil {
+		return true
+	}
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(task.Namespace), client.MatchingLabels{
+		batchv1.JobNameLabel: job.Name,
+	}); err != nil || len(pods.Items) == 0 {
+		return true
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if !metav1.IsControlledBy(pod, job) {
+			continue
+		}
+		if repositoryMonitorValidationPodDisrupted(pod) {
+			return false
+		}
+		for j := range pod.Status.ContainerStatuses {
+			status := &pod.Status.ContainerStatuses[j]
+			if status.State.Terminated != nil {
+				return repositoryMonitorValidationTerminationExecuted(status.State.Terminated)
+			}
+		}
+	}
+	return false
 }
 
 func pocCommandTriggered(task *corev1alpha1.Task, expectedExitCode int) bool {
@@ -298,26 +391,47 @@ func (r *RepositoryScanReconciler) evaluateControllerPoCVerification(
 		return false, nil, nil
 	}
 	poc := artifact.PoC
+	policyDigest := pocExecutionPolicyDigest(scan)
 	if problem := validateRepositoryScanPoCExecutionSpec(scan); problem != "" {
 		return false, &security.ValidationPoCVerification{
-			Status:  pocVerifyStatusSkipped,
-			Harness: poc.Harness,
-			Reason:  problem,
+			Status:       pocVerifyStatusSkipped,
+			Harness:      poc.Harness,
+			PolicyDigest: policyDigest,
+			Reason:       problem,
 		}, nil
 	}
 	if !pocHarnessAllowed(scan.Spec.PoCExecution, poc.Harness) {
 		return false, &security.ValidationPoCVerification{
-			Status:  pocVerifyStatusSkipped,
-			Harness: poc.Harness,
-			Reason:  fmt.Sprintf("PoC harness %q is not permitted by spec.pocExecution.allowedHarnesses", poc.Harness),
+			Status:       pocVerifyStatusSkipped,
+			Harness:      poc.Harness,
+			PolicyDigest: policyDigest,
+			Reason:       fmt.Sprintf("PoC harness %q is not permitted by spec.pocExecution.allowedHarnesses", poc.Harness),
+		}, nil
+	}
+	if !pocCommandMatchesHarness(poc.Harness, poc.Command) ||
+		(strings.TrimSpace(poc.ControlCommand) != "" && !pocCommandMatchesHarness(poc.Harness, poc.ControlCommand)) {
+		return false, &security.ValidationPoCVerification{
+			Status:       pocVerifyStatusFailed,
+			Harness:      poc.Harness,
+			PolicyDigest: policyDigest,
+			Reason:       fmt.Sprintf("PoC command does not match declared harness %q", poc.Harness),
+		}, nil
+	}
+	if poc.ExpectedExitCode <= 0 && strings.TrimSpace(poc.ControlCommand) == "" {
+		return false, &security.ValidationPoCVerification{
+			Status:       pocVerifyStatusFailed,
+			Harness:      poc.Harness,
+			PolicyDigest: policyDigest,
+			Reason:       "PoC verification requires either expected_exit_code or control_command to avoid accepting arbitrary failures",
 		}, nil
 	}
 	commitSHA := strings.TrimSpace(finding.CommitSHA)
 	if commitSHA == "" || store.ValidateGitObjectID("finding commit", commitSHA) != nil {
 		return false, &security.ValidationPoCVerification{
-			Status:  pocVerifyStatusSkipped,
-			Harness: poc.Harness,
-			Reason:  "controller PoC verification requires a valid finding commit SHA",
+			Status:       pocVerifyStatusSkipped,
+			Harness:      poc.Harness,
+			PolicyDigest: policyDigest,
+			Reason:       "controller PoC verification requires a valid finding commit SHA",
 		}, nil
 	}
 	image := effectivePoCVerificationImage(scan)
@@ -328,10 +442,11 @@ func (r *RepositoryScanReconciler) evaluateControllerPoCVerification(
 	}
 	if problem != "" {
 		return false, &security.ValidationPoCVerification{
-			Status:    pocVerifyStatusFailed,
-			Harness:   poc.Harness,
-			CommitSHA: commitSHA,
-			Reason:    problem,
+			Status:       pocVerifyStatusFailed,
+			Harness:      poc.Harness,
+			CommitSHA:    commitSHA,
+			PolicyDigest: policyDigest,
+			Reason:       problem,
 		}, nil
 	}
 	if !pocTask.Status.Phase.IsTerminal() {
@@ -339,18 +454,20 @@ func (r *RepositoryScanReconciler) evaluateControllerPoCVerification(
 	}
 	if pocTask.Status.Phase == corev1alpha1.TaskPhaseCancelled {
 		return false, &security.ValidationPoCVerification{
-			Status:      pocVerifyStatusFailed,
-			Harness:     poc.Harness,
-			CommitSHA:   commitSHA,
-			PoCTaskName: pocTask.Name,
-			Reason:      "controller PoC verification task was cancelled",
+			Status:       pocVerifyStatusFailed,
+			Harness:      poc.Harness,
+			CommitSHA:    commitSHA,
+			PolicyDigest: policyDigest,
+			PoCTaskName:  pocTask.Name,
+			Reason:       "controller PoC verification task was cancelled",
 		}, nil
 	}
-	triggered := pocCommandTriggered(pocTask, poc.ExpectedExitCode)
+	triggered := pocCommandTriggered(pocTask, poc.ExpectedExitCode) && r.pocTaskWorkerPodExecuted(ctx, pocTask)
 	result := &security.ValidationPoCVerification{
 		Status:       pocVerifyStatusVerified,
 		Harness:      poc.Harness,
 		CommitSHA:    commitSHA,
+		PolicyDigest: policyDigest,
 		PoCTaskName:  pocTask.Name,
 		PoCTriggered: &triggered,
 	}

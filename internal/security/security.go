@@ -52,6 +52,7 @@ type ValidationPoCVerification struct {
 	Status          string `json:"status"`
 	Harness         string `json:"harness"`
 	CommitSHA       string `json:"commit_sha"`
+	PolicyDigest    string `json:"policy_digest,omitempty"`
 	PoCTaskName     string `json:"poc_task_name,omitempty"`
 	ControlTaskName string `json:"control_task_name,omitempty"`
 	PoCTriggered    *bool  `json:"poc_triggered,omitempty"`
