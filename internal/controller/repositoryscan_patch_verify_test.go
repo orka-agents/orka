@@ -392,4 +392,16 @@ func TestRepositoryScanPatchVerifyJobAndConfinementLifecycle(t *testing.T) {
 	if gate.Data[repositoryMonitorValidationNetworkGateKey] != repositoryMonitorValidationNetworkGateReady {
 		t.Fatalf("gate state = %q, want %q", gate.Data[repositoryMonitorValidationNetworkGateKey], repositoryMonitorValidationNetworkGateReady)
 	}
+	if !reconciler.repositoryMonitorValidationSafetyTask(ctx, task) {
+		t.Fatal("expected patch-verify task to require foreground confinement cleanup via repositoryMonitorValidationSafetyTask")
+	}
+	baseUnavailable := &corev1alpha1.Task{
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseFailed,
+			Message: "job failed: container exited with code 125 (reason=Error)",
+		},
+	}
+	if patchVerifyBaseCommandExitedNonZero(baseUnavailable) {
+		t.Fatal("expected reserved sandbox exit code 125 to be rejected as a base fail->pass signal")
+	}
 }
