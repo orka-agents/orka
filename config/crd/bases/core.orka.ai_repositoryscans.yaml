@@ -249,6 +249,21 @@ spec:
               timeZone:
                 description: TimeZone is the IANA time zone for the schedule.
                 type: string
+              validationAgentRef:
+                description: |-
+                  ValidationAgentRef is the optional agent used for finding validation runs.
+                  Defaults to AnalysisAgentRef when omitted.
+                properties:
+                  name:
+                    description: Name is the name of the Agent
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace of the Agent (defaults
+                      to Task namespace)
+                    type: string
+                required:
+                - name
+                type: object
               validationMaxFindingsPerRun:
                 description: ValidationMaxFindingsPerRun bounds automatic validation
                   tasks for light mode.

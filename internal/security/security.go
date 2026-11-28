@@ -691,7 +691,7 @@ func BuildReviewResultPrompt(
 		prompt.WriteString("\n")
 	}
 	appendReferenceFilesPrompt(&prompt, manifest.ReferenceFiles)
-	prompt.WriteString("Each finding object must use these keys: title, category, severity, confidence, triage, evidence, summary, rootCause, reproduction, remediation, suggestedAction, whyTestsDoNotAlreadyCoverThis, suggestedRegressionTest, minimumFixScope.\n")
+	prompt.WriteString("Each finding object must use these keys: title, category, severity, confidence, triage, evidence, summary, rootCause, reproduction, remediation, suggestedAction, whyTestsDoNotAlreadyCoverThis, suggestedRegressionTest, minimumFixScope, and optional threat-model fields attacker, trustBoundary, brokenControl (omit or populate with concrete non-placeholder values).\n")
 	prompt.WriteString("Use severity exactly one of: critical, high, medium, low. Use confidence exactly one of: high, medium, low.\n")
 	prompt.WriteString("Set scan.sliceId exactly to the slice ID above. Even when this slice has zero findings, write valid JSON with an empty findings array.\n")
 

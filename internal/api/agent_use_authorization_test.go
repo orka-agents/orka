@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
@@ -124,15 +125,173 @@ func TestAgentRefsUseChecksOnlyNewlyNamedAgents(t *testing.T) {
 	require.Equal(t, "repairer", (*seen)[0].Name)
 
 	scanRefs := repositoryScanSpecAgentRefs(corev1alpha1.RepositoryScanSpec{
-		AnalysisAgentRef: corev1alpha1.AgentReference{Name: "repairer"},
-		PatchAgentRef:    &corev1alpha1.AgentReference{Name: "patcher"},
+		AnalysisAgentRef:   corev1alpha1.AgentReference{Name: "repairer"},
+		ValidationAgentRef: &corev1alpha1.AgentReference{Name: "validator"},
+		PatchAgentRef:      &corev1alpha1.AgentReference{Name: "patcher"},
 	})
+	require.Len(t, scanRefs, 3)
 	requireForbidden(t, authorizeAgentRefsUse(context.Background(), clientset, user, "team-a", "repositoryscan", "scan", scanRefs, nil))
 
 	for _, stale := range []corev1alpha1.AgentReference{{Name: "patcher "}, {Name: "patcher", Namespace: " team-a"}} {
 		requireForbidden(t, authorizeAgentRefsUse(context.Background(), clientset, user, "team-a", "repositoryscan", "scan",
 			[]corev1alpha1.AgentReference{{Name: "patcher"}}, []corev1alpha1.AgentReference{stale}))
 	}
+}
+
+func TestCreateManualSecurityScanEnforcesValidationAgentUse(t *testing.T) {
+	enableAgentUseAuthorization(t)
+	clientset := kubefake.NewClientset()
+	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+		attributes := review.Spec.ResourceAttributes
+		review.Status.Allowed = attributes != nil && attributes.Verb == agentUseVerb && attributes.Name == "analysis"
+		return true, review, nil
+	})
+
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "scan-1",
+			Namespace: "demo",
+		},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:            securityTestRepoURL,
+			Branch:             "main",
+			AnalysisAgentRef:   corev1alpha1.AgentReference{Name: "analysis"},
+			ValidationAgentRef: &corev1alpha1.AgentReference{Name: "restricted-validator"},
+		},
+	}
+	_, handlers := setupSecurityHandlersWithAuthzFixture(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, scan)
+	handlers.clientset = clientset
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "alice", AuthType: AuthTypeTokenReview})
+		return c.Next()
+	})
+	app.Post("/security/repositories/:name/scans", handlers.CreateManualSecurityScan)
+
+	req := httptest.NewRequest(http.MethodPost, "/security/repositories/scan-1/scans?namespace=demo", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestCreateManualSecurityScan_WorkerDeniedForIdentityBoundValidator(t *testing.T) {
+	enableAgentUseAuthorization(t)
+	clientset := kubefake.NewClientset()
+	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+		review.Status.Allowed = true
+		return true, review, nil
+	})
+
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "scan-1",
+			Namespace: "demo",
+		},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:            securityTestRepoURL,
+			Branch:             "main",
+			AnalysisAgentRef:   corev1alpha1.AgentReference{Name: "analysis"},
+			ValidationAgentRef: &corev1alpha1.AgentReference{Name: "identity-validator"},
+		},
+	}
+	analysisAgent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "analysis", Namespace: "demo"},
+	}
+	identityValidator := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "identity-validator", Namespace: "demo"},
+		Spec: corev1alpha1.AgentSpec{
+			Identity: &corev1alpha1.AgentIdentity{
+				Entra: &corev1alpha1.EntraAgentIdentity{
+					AgentIdentityID: "11111111-2222-3333-4444-555555555555",
+				},
+			},
+		},
+	}
+	_, handlers := setupSecurityHandlersWithAuthzFixture(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, scan, analysisAgent, identityValidator)
+	handlers.clientset = clientset
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username: "system:serviceaccount:demo:orka-ai-worker",
+			AuthType: AuthTypeTokenReview,
+		})
+		return c.Next()
+	})
+	app.Post("/security/repositories/:name/scans", handlers.CreateManualSecurityScan)
+
+	req := httptest.NewRequest(http.MethodPost, "/security/repositories/scan-1/scans?namespace=demo", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	var tasks corev1alpha1.TaskList
+	require.NoError(t, handlers.client.List(context.Background(), &tasks, client.InNamespace("demo")))
+	require.Empty(t, tasks.Items)
+}
+
+func TestCreateAndUpdateRepositoryScan_WorkerDeniedForIdentityBoundValidator(t *testing.T) {
+	enableAgentUseAuthorization(t)
+	clientset := kubefake.NewClientset()
+	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+		review.Status.Allowed = true
+		return true, review, nil
+	})
+
+	existing := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "scan-existing",
+			Namespace: "demo",
+		},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:          securityTestRepoURL,
+			Branch:           "main",
+			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+		},
+	}
+	analysisAgent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "analysis", Namespace: "demo"},
+		Spec:       corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}},
+	}
+	identityValidator := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "identity-validator", Namespace: "demo"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			Identity: &corev1alpha1.AgentIdentity{
+				Entra: &corev1alpha1.EntraAgentIdentity{
+					AgentIdentityID: "11111111-2222-3333-4444-555555555555",
+				},
+			},
+		},
+	}
+	_, handlers := setupSecurityHandlersWithAuthzFixture(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, existing, analysisAgent, identityValidator)
+	handlers.clientset = clientset
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username: "system:serviceaccount:demo:orka-ai-worker",
+			AuthType: AuthTypeTokenReview,
+		})
+		return c.Next()
+	})
+	app.Post("/security/repositories", handlers.CreateRepositoryScan)
+	app.Put("/security/repositories/:name", handlers.UpdateRepositoryScan)
+
+	createBody := fmt.Sprintf(`{"name":"scan-new","namespace":"demo","spec":{"repoURL":%q,"branch":"main","analysisAgentRef":{"name":"analysis"},"validationAgentRef":{"name":"identity-validator"}}}`, securityTestRepoURL)
+	createReq := httptest.NewRequest(http.MethodPost, "/security/repositories", strings.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createResp, err := app.Test(createReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, createResp.StatusCode)
+
+	updateBody := fmt.Sprintf(`{"spec":{"repoURL":%q,"branch":"main","analysisAgentRef":{"name":"analysis"},"validationAgentRef":{"name":"identity-validator"}}}`, securityTestRepoURL)
+	updateReq := httptest.NewRequest(http.MethodPut, "/security/repositories/scan-existing?namespace=demo", strings.NewReader(updateBody))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateResp, err := app.Test(updateReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, updateResp.StatusCode)
 }
 
 func TestCreateRepositoryMonitorEnforcesAgentUse(t *testing.T) {

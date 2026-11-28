@@ -114,6 +114,18 @@ func validateFindingRequiredFields(finding FindingsV2Finding) string {
 	if len(finding.Evidence) == 0 {
 		return "evidence is required"
 	}
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{name: "attacker", value: finding.Attacker},
+		{name: "trustBoundary", value: finding.TrustBoundary},
+		{name: "brokenControl", value: finding.BrokenControl},
+	} {
+		if isPlaceholderResultText(field.value) {
+			return field.name + " is a prompt placeholder"
+		}
+	}
 	return ""
 }
 
@@ -374,7 +386,7 @@ func ToFindingV2(
 		FilePath:                      filePath,
 		Line:                          line,
 		CommitSHA:                     repo.HeadSHA,
-		RootCause:                     item.RootCause,
+		RootCause:                     findingRootCauseWithThreatModel(item),
 		Reproduction:                  item.Reproduction,
 		Remediation:                   item.Remediation,
 		SuggestedAction:               item.SuggestedAction,
@@ -383,6 +395,26 @@ func ToFindingV2(
 		MinimumFixScope:               item.MinimumFixScope,
 		Evidence:                      evidence,
 	}
+}
+
+func findingRootCauseWithThreatModel(item FindingsV2Finding) string {
+	parts := make([]string, 0, 4)
+	if root := strings.TrimSpace(item.RootCause); root != "" {
+		parts = append(parts, root)
+	}
+	for _, field := range []struct {
+		label string
+		value string
+	}{
+		{label: "Attacker", value: item.Attacker},
+		{label: "Trust boundary", value: item.TrustBoundary},
+		{label: "Broken control", value: item.BrokenControl},
+	} {
+		if v := strings.TrimSpace(field.value); v != "" {
+			parts = append(parts, field.label+": "+v)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func canonicalEvidenceRefs(refs []FindingsV2EvidenceRef) []FindingsV2EvidenceRef {

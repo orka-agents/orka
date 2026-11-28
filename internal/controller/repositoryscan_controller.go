@@ -2503,6 +2503,10 @@ func (r *RepositoryScanReconciler) ensureValidationTask(ctx context.Context, sca
 	if run != nil && strings.TrimSpace(run.HeadCommit) != "" {
 		pinnedCommit = strings.TrimSpace(run.HeadCommit)
 	}
+	validationAgentRef := scan.Spec.AnalysisAgentRef
+	if scan.Spec.ValidationAgentRef != nil && strings.TrimSpace(scan.Spec.ValidationAgentRef.Name) != "" {
+		validationAgentRef = *scan.Spec.ValidationAgentRef
+	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,
@@ -2519,7 +2523,7 @@ func (r *RepositoryScanReconciler) ensureValidationTask(ctx context.Context, sca
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:      corev1alpha1.TaskTypeAgent,
-			AgentRef:  &scan.Spec.AnalysisAgentRef,
+			AgentRef:  &validationAgentRef,
 			Prompt:    security.BuildValidationResultPrompt(scan, finding, resultBinding, policy.PromptPolicy()),
 			Timeout:   &timeout,
 			Priority:  &priority,
@@ -4438,8 +4442,14 @@ func findingWithSharedAnchor(finding *store.Finding, kept []*store.Finding) *sto
 			if candidate == nil || candidate.ID == finding.ID || candidate.DuplicateOf != "" {
 				continue
 			}
-			if role == "sink" && len(findingEvidenceWithRole(candidate, "root_control")) > 0 {
-				continue
+			if role == "sink" {
+				if len(findingEvidenceWithRole(candidate, "root_control")) > 0 {
+					continue
+				}
+				if strings.TrimSpace(finding.Category) != "" && strings.TrimSpace(candidate.Category) != "" &&
+					!findingCategoryMatches(finding.Category, candidate.Category) {
+					continue
+				}
 			}
 			for _, left := range anchors {
 				for _, right := range findingEvidenceWithRole(candidate, role) {

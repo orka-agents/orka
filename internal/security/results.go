@@ -518,6 +518,9 @@ func validateBoundedFinding(index int, finding FindingsV2Finding) error {
 	}{
 		{"title", finding.Title, maxFindingSummaryBytes},
 		{"category", finding.Category, maxFindingSummaryBytes},
+		{"attacker", finding.Attacker, maxFindingSummaryBytes},
+		{"trustBoundary", finding.TrustBoundary, maxFindingSummaryBytes},
+		{"brokenControl", finding.BrokenControl, maxFindingSummaryBytes},
 		{"severity", finding.Severity, 32},
 		{"confidence", finding.Confidence, 32},
 		{"triage", finding.Triage, maxFindingSummaryBytes},

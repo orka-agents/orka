@@ -213,6 +213,9 @@ type FindingsV2ResolvedQuestion struct {
 type FindingsV2Finding struct {
 	Title                         string                  `json:"title"`
 	Category                      string                  `json:"category"`
+	Attacker                      string                  `json:"attacker,omitempty"`
+	TrustBoundary                 string                  `json:"trustBoundary,omitempty"`
+	BrokenControl                 string                  `json:"brokenControl,omitempty"`
 	Severity                      string                  `json:"severity"`
 	Confidence                    string                  `json:"confidence"`
 	Triage                        string                  `json:"triage"`
@@ -231,6 +234,9 @@ func (f *FindingsV2Finding) UnmarshalJSON(data []byte) error {
 	type plain FindingsV2Finding
 	var raw struct {
 		plain
+		Attacker                      FlexibleText `json:"attacker"`
+		TrustBoundary                 FlexibleText `json:"trustBoundary"`
+		BrokenControl                 FlexibleText `json:"brokenControl"`
 		Triage                        FlexibleText `json:"triage"`
 		Summary                       FlexibleText `json:"summary"`
 		RootCause                     FlexibleText `json:"rootCause"`
@@ -245,6 +251,9 @@ func (f *FindingsV2Finding) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*f = FindingsV2Finding(raw.plain)
+	f.Attacker = string(raw.Attacker)
+	f.TrustBoundary = string(raw.TrustBoundary)
+	f.BrokenControl = string(raw.BrokenControl)
 	f.Triage = string(raw.Triage)
 	f.Summary = string(raw.Summary)
 	f.RootCause = string(raw.RootCause)
