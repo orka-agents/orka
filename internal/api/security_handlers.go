@@ -1242,6 +1242,13 @@ func (h *Handlers) ListSecurityFindings(c fiber.Ctx) error {
 		}
 	}
 
+	if failOn := strings.TrimSpace(c.Query("failOn")); failOn != "" {
+		switch strings.ToLower(failOn) {
+		case "critical", "high", "medium", "low":
+		default:
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid failOn severity %q: must be one of critical, high, medium, low", failOn))
+		}
+	}
 	if strings.EqualFold(strings.TrimSpace(c.Query("format")), "sarif") {
 		sarifFindings := findings
 		if next != "" || filter.Cursor != "" {

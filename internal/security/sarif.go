@@ -48,13 +48,20 @@ type SARIFMessageText struct {
 	Text string `json:"text"`
 }
 
+type SARIFSuppression struct {
+	Kind          string `json:"kind"`
+	Status        string `json:"status,omitempty"`
+	Justification string `json:"justification,omitempty"`
+}
+
 type SARIFResult struct {
-	RuleID              string            `json:"ruleId"`
-	Level               string            `json:"level"`
-	Message             SARIFMessageText  `json:"message"`
-	Locations           []SARIFLocation   `json:"locations,omitempty"`
-	PartialFingerprints map[string]string `json:"partialFingerprints,omitempty"`
-	Properties          map[string]any    `json:"properties,omitempty"`
+	RuleID              string             `json:"ruleId"`
+	Level               string             `json:"level"`
+	Message             SARIFMessageText   `json:"message"`
+	Locations           []SARIFLocation    `json:"locations,omitempty"`
+	Suppressions        []SARIFSuppression `json:"suppressions,omitempty"`
+	PartialFingerprints map[string]string  `json:"partialFingerprints,omitempty"`
+	Properties          map[string]any     `json:"properties,omitempty"`
 }
 
 type SARIFLocation struct {
@@ -82,6 +89,10 @@ func BuildSARIFLog(findings []store.Finding) SARIFLog {
 
 	for i := range findings {
 		finding := findings[i]
+		state := strings.ToLower(strings.TrimSpace(finding.State))
+		if state == "fixed" || state == "resolved" {
+			continue
+		}
 		ruleID := sarifRuleID(finding.Category)
 		if _, ok := ruleSeen[ruleID]; !ok {
 			ruleSeen[ruleID] = struct{}{}
@@ -107,6 +118,13 @@ func BuildSARIFLog(findings []store.Finding) SARIFLog {
 				"state":            finding.State,
 				"validationStatus": finding.ValidationStatus,
 			},
+		}
+		if state == "false_positive" || state == "wont_fix" || state == "dismissed" {
+			result.Suppressions = []SARIFSuppression{{
+				Kind:          "external",
+				Status:        "accepted",
+				Justification: state,
+			}}
 		}
 		if fp := strings.TrimSpace(finding.Fingerprint); fp != "" {
 			result.PartialFingerprints = map[string]string{"orkaFingerprint": fp}

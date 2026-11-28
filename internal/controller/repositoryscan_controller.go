@@ -1971,11 +1971,15 @@ func (r *RepositoryScanReconciler) loadMapperReviewContext(
 		return "", "", fmt.Sprintf("%s sliceId does not match mapper slice", artifactName), nil
 	}
 	manifest.DismissedFeedback = dismissedFeedback
-	digest, err := security.ReviewContextDigest(*manifest)
+	canonical, err := security.MarshalReviewContext(*manifest)
 	if err != nil {
 		return "", "", "", err
 	}
-	canonical, err := json.Marshal(manifest)
+	bounded, digest, err := security.ParseTrustedReviewContextManifest(canonical)
+	if err != nil {
+		return "", "", fmt.Sprintf("%s is invalid after feedback: %v", artifactName, err), nil
+	}
+	canonical, err = json.Marshal(bounded)
 	if err != nil {
 		return "", "", "", err
 	}
