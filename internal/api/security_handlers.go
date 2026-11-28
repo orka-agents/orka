@@ -117,6 +117,9 @@ func validateRepositoryScanSpecValues(spec corev1alpha1.RepositoryScanSpec) erro
 		if spec.PoCExecution.Timeout != nil && spec.PoCExecution.Timeout.Duration <= 0 {
 			return fiber.NewError(fiber.StatusBadRequest, "spec.pocExecution.timeout must be positive")
 		}
+		if spec.PoCExecution.SandboxWorkspaceClassRef != nil && strings.TrimSpace(spec.PoCExecution.SandboxWorkspaceClassRef.Name) == "" {
+			return fiber.NewError(fiber.StatusBadRequest, "spec.pocExecution.sandboxWorkspaceClassRef.name is required")
+		}
 	}
 	return nil
 }
@@ -164,13 +167,11 @@ func repositoryScanValidationExecution(scan *corev1alpha1.RepositoryScan) *corev
 	if scan == nil || scan.Spec.PoCExecution == nil || scan.Spec.PoCExecution.SandboxWorkspaceClassRef == nil {
 		return nil
 	}
-	className := strings.TrimSpace(scan.Spec.PoCExecution.SandboxWorkspaceClassRef.Name)
-	if className == "" {
-		return nil
-	}
 	return &corev1alpha1.ExecutionSpec{
 		Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-			ClassRef: &corev1alpha1.WorkspaceClassReference{Name: className},
+			ClassRef: &corev1alpha1.WorkspaceClassReference{
+				Name: strings.TrimSpace(scan.Spec.PoCExecution.SandboxWorkspaceClassRef.Name),
+			},
 		},
 	}
 }
@@ -870,6 +871,9 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	if err := h.authorizeRepositoryScanValidationAgent(c, "createRepositoryScanValidation", scan, false); err != nil {
 		return err
 	}
+	if err := authorizeRepositoryScanSandboxWorkspaceClassUse(c.Context(), h.clientset, GetUserInfo(c), scan); err != nil {
+		return err
+	}
 	if err := h.client.Create(c.Context(), scan); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "repository scan already exists")
@@ -957,6 +961,9 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 		return err
 	}
 	if err := h.authorizeRepositoryScanValidationAgent(c, "updateRepositoryScanValidation", updated, false); err != nil {
+		return err
+	}
+	if err := authorizeRepositoryScanSandboxWorkspaceClassUse(c.Context(), h.clientset, GetUserInfo(c), updated); err != nil {
 		return err
 	}
 	if err := h.client.Update(c.Context(), updated); err != nil {
@@ -1247,8 +1254,15 @@ func (h *Handlers) ListSecurityFindings(c fiber.Ctx) error {
 	}
 
 	if strings.EqualFold(strings.TrimSpace(c.Query("format")), "sarif") {
-		c.Set("Content-Type", "application/sarif+json")
-		return c.JSON(security.BuildSARIFLog(findings))
+		sarifFindings := findings
+		if next != "" || filter.Cursor != "" {
+			allFindings, listErr := h.listAllMatchingSecurityFindings(c.Context(), filter)
+			if listErr != nil {
+				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to export SARIF findings: %v", listErr))
+			}
+			sarifFindings = allFindings
+		}
+		return c.JSON(security.BuildSARIFLog(sarifFindings), "application/sarif+json")
 	}
 	resp := fiber.Map{apiFieldItems: findings, apiFieldMetadata: fiber.Map{commandIntentContinue: next}}
 	if failOn := strings.TrimSpace(c.Query("failOn")); failOn != "" {

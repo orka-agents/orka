@@ -21,6 +21,7 @@ func TestBuildSARIFLogAndGate(t *testing.T) {
 			ValidationStatus: "validated",
 			Evidence: []store.FindingEvidenceRef{
 				{Kind: "file", Path: "internal/archive/extract.go", StartLine: 40, EndLine: 55},
+				{Kind: "file", Path: "src/a#b/my handler%20.go", StartLine: 1, EndLine: 2},
 			},
 		},
 		{
@@ -45,8 +46,11 @@ func TestBuildSARIFLogAndGate(t *testing.T) {
 	if sarif.Runs[0].Results[0].Level != "error" || sarif.Runs[0].Results[0].RuleID != "orka/path-traversal" {
 		t.Fatalf("unexpected first SARIF result: %#v", sarif.Runs[0].Results[0])
 	}
-	if len(sarif.Runs[0].Results[0].Locations) != 1 || sarif.Runs[0].Results[0].Locations[0].PhysicalLocation.Region.StartLine != 40 {
+	if len(sarif.Runs[0].Results[0].Locations) != 2 || sarif.Runs[0].Results[0].Locations[0].PhysicalLocation.Region.StartLine != 40 {
 		t.Fatalf("unexpected SARIF locations: %#v", sarif.Runs[0].Results[0].Locations)
+	}
+	if got := sarif.Runs[0].Results[0].Locations[1].PhysicalLocation.ArtifactLocation.URI; got != "src/a%23b/my%20handler%2520.go" {
+		t.Fatalf("encoded SARIF URI = %q, want %q", got, "src/a%23b/my%20handler%2520.go")
 	}
 
 	gateHigh := EvaluateFindingsGate(findings, "high")

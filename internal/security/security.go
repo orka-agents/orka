@@ -790,9 +790,9 @@ func BuildValidationResultPrompt(scan *corev1alpha1.RepositoryScan, finding *sto
 	prompt.WriteString("Use status=failed when the original claim does not hold after review or reproduction attempts.\n")
 	prompt.WriteString("Use status=skipped when the environment or safety constraints prevent meaningful validation.\n")
 	if scan != nil && scan.Spec.PoCExecution != nil {
-		prompt.WriteString("When status=validated and a deterministic command can reproduce the issue on the pinned commit, include validation.poc with harness (go-test, pytest, or sh), command (must exit non-zero on the vulnerable commit), optional control_command (must exit 0 for a benign control), and optional expected_exit_code (1-125). Orka will replay it independently in an egress-denied container.\n")
+		prompt.WriteString("When status=validated and a deterministic command can reproduce the issue on the pinned commit, include validation.poc with harness (go-test, pytest, or sh), command (must exit non-zero on the vulnerable commit), optional control_command (must exit 0 for a benign control), and optional expected_exit_code (1-124). Orka will replay it independently in an egress-denied container.\n")
 		if scan.Spec.PoCExecution.SandboxWorkspaceClassRef != nil && strings.TrimSpace(scan.Spec.PoCExecution.SandboxWorkspaceClassRef.Name) != "" {
-			prompt.WriteString("An isolated sandbox execution workspace is attached for iterative PoC authoring; verify the minimal reproducer locally, then return it in validation.poc for clean controller replay.\n")
+			prompt.WriteString("An isolated sandbox execution workspace is attached; inspect the read-only checkout and return a minimal reproducer in validation.poc for clean controller replay.\n")
 		}
 	}
 	prompt.WriteString("If you create additional evidence or transcript artifacts, reference them in the evidence array.\n")

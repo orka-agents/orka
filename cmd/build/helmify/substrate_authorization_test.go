@@ -57,7 +57,12 @@ func TestWorkspaceUsePoliciesMatchSharedAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	chart := requireHelmRender(t, "--show-only", "templates/workspace-class-use-policy.yaml")
-	for _, name := range []string{"task-workspace-class-use", "tool-workspace-class-use", "checkpoint-source-use"} {
+	for _, name := range []string{
+		"task-workspace-class-use",
+		"tool-workspace-class-use",
+		"repositoryscan-workspace-class-use",
+		"checkpoint-source-use",
+	} {
 		t.Run(name, func(t *testing.T) {
 			sharedDoc := requireRenderedDocument(t, string(shared),
 				"kind: ValidatingAdmissionPolicy\n", "name: "+name+".orka.ai")
