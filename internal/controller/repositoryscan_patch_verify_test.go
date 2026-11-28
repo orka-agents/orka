@@ -67,6 +67,7 @@ func TestIngestPatchTaskControllerVerificationFailBeforePass(t *testing.T) {
 		sourceBaselineSHA,
 		fixture.scan.Spec.PatchVerification.Image,
 		fixture.scan.Spec.PatchVerification.Command,
+		patchVerifyTimeout,
 	)
 	baseTask := &corev1alpha1.Task{}
 	if err := fixture.reconciler.Get(ctx, types.NamespacedName{Namespace: fixture.scan.Namespace, Name: baseTaskName}, baseTask); err != nil {
@@ -100,6 +101,7 @@ func TestIngestPatchTaskControllerVerificationFailBeforePass(t *testing.T) {
 		strings.Repeat("b", 40),
 		fixture.scan.Spec.PatchVerification.Image,
 		fixture.scan.Spec.PatchVerification.Command,
+		patchVerifyTimeout,
 	)
 	patchedTask := &corev1alpha1.Task{}
 	if err := fixture.reconciler.Get(ctx, types.NamespacedName{Namespace: fixture.scan.Namespace, Name: patchedTaskName}, patchedTask); err != nil {
@@ -189,6 +191,7 @@ func TestIngestPatchTaskControllerVerificationRejectsBasePass(t *testing.T) {
 		strings.Repeat("1", 40),
 		fixture.scan.Spec.PatchVerification.Image,
 		fixture.scan.Spec.PatchVerification.Command,
+		patchVerifyTimeout,
 	)
 	baseTask := &corev1alpha1.Task{}
 	if err := fixture.reconciler.Get(ctx, types.NamespacedName{Namespace: fixture.scan.Namespace, Name: baseTaskName}, baseTask); err != nil {
@@ -242,6 +245,7 @@ func TestIngestPatchTaskControllerVerificationRejectsBaseOrchestrationFailure(t 
 		strings.Repeat("1", 40),
 		fixture.scan.Spec.PatchVerification.Image,
 		fixture.scan.Spec.PatchVerification.Command,
+		patchVerifyTimeout,
 	)
 	baseTask := &corev1alpha1.Task{}
 	if err := fixture.reconciler.Get(ctx, types.NamespacedName{Namespace: fixture.scan.Namespace, Name: baseTaskName}, baseTask); err != nil {

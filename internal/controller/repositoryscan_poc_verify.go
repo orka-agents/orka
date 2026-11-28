@@ -56,25 +56,25 @@ func repositoryScanValidationExecution(scan *corev1alpha1.RepositoryScan) *corev
 	}
 }
 
-func validatedFindingPoCCommand(finding *store.Finding) (string, int, bool) {
+func validatedFindingPoCCommand(finding *store.Finding) (command, controlCommand string, expectedExitCode int, ok bool) {
 	if finding == nil || strings.TrimSpace(finding.ValidationJSON) == "" {
-		return "", 0, false
+		return "", "", 0, false
 	}
 	var artifact security.ValidationArtifact
 	if err := json.Unmarshal([]byte(finding.ValidationJSON), &artifact); err != nil {
-		return "", 0, false
+		return "", "", 0, false
 	}
 	if artifact.PoC == nil || artifact.PoCVerification == nil {
-		return "", 0, false
+		return "", "", 0, false
 	}
 	if strings.TrimSpace(artifact.PoCVerification.Status) != pocVerifyStatusVerified {
-		return "", 0, false
+		return "", "", 0, false
 	}
 	cmd := strings.TrimSpace(artifact.PoC.Command)
 	if cmd == "" {
-		return "", 0, false
+		return "", "", 0, false
 	}
-	return cmd, artifact.PoC.ExpectedExitCode, true
+	return cmd, strings.TrimSpace(artifact.PoC.ControlCommand), artifact.PoC.ExpectedExitCode, true
 }
 
 func pocExecutionPolicyDigest(scan *corev1alpha1.RepositoryScan) string {
@@ -208,13 +208,13 @@ func pocCommandMatchesHarness(harness, command string) bool {
 	}
 	switch strings.ToLower(strings.TrimSpace(harness)) {
 	case security.PoCHarnessGoTest:
-		if strings.ContainsAny(trimmed, ";|&`$()<>") {
+		if strings.ContainsAny(trimmed, ";|&`$()<>\r\n") {
 			return false
 		}
 		fields := strings.Fields(trimmed)
 		return len(fields) >= 2 && fields[0] == "go" && fields[1] == "test"
 	case security.PoCHarnessPytest:
-		if strings.ContainsAny(trimmed, ";|&`$()<>") {
+		if strings.ContainsAny(trimmed, ";|&`$()<>\r\n") {
 			return false
 		}
 		fields := strings.Fields(trimmed)
@@ -272,18 +272,21 @@ func pocTaskCommandExitCode(task *corev1alpha1.Task) (int, bool) {
 }
 
 func (r *RepositoryScanReconciler) pocTaskWorkerPodExecuted(ctx context.Context, task *corev1alpha1.Task) bool {
-	if task == nil || strings.TrimSpace(task.Status.JobName) == "" || r.Client == nil {
+	if task == nil || r.Client == nil {
+		return false
+	}
+	if strings.TrimSpace(task.Status.JobName) == "" {
 		return true
 	}
 	job := &batchv1.Job{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Status.JobName}, job); err != nil {
-		return true
+		return false
 	}
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(task.Namespace), client.MatchingLabels{
 		batchv1.JobNameLabel: job.Name,
 	}); err != nil || len(pods.Items) == 0 {
-		return true
+		return false
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
