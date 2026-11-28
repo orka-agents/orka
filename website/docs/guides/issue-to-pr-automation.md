@@ -116,6 +116,60 @@ label-to-Task trigger, and ordinary progress needs no label for each step. Plann
 research, decomposition, review, and repair can still be requested through the monitor API
 or CLI for ad hoc work.
 
+## Start from a comment
+
+A maintainer can also start issue work with a comment. Enable
+`spec.triggers.github.comments`, choose a prefix, and subscribe the repository webhook to
+`Issue comments` events:
+
+```yaml
+spec:
+  forgeCredentialRef:
+    name: orka-forge
+  triggers:
+    github:
+      comments:
+        enabled: true
+        prefix: /orka
+        requireActorPermission: maintain
+```
+
+A comment is a command only when its first line is `<prefix> <command>`:
+
+```text
+/orka plan keep the public API unchanged
+The parser change should stay behind the existing flag.
+```
+
+By default the commands are `triage`, `research`, `plan`, `implement`, `decompose`, `stop`,
+and `resume`, each starting the issue workflow intent of the same name. List
+`spec.triggers.github.comments.commands` to choose other words; only the listed words are
+then accepted. No model decides whether a comment is a command.
+
+Intake follows the label path. The controller verifies `X-Hub-Signature-256`, checks that the
+issue belongs to the monitor's repository and target scope, checks the comment author's
+current repository permission, and records a durable command before starting any work. Every
+comment command, including the read-only ones, needs the
+`triggers.github.comments.requireActorPermission` minimum (default `maintain`), and
+`spec.policy.allowedRepositoryPermissions` also applies. A command from an author below the
+minimum is recorded as rejected and starts nothing.
+
+- Only newly created comments count. Edited and deleted comments are ignored, so an edit can
+  never turn a comment into a command or change one.
+- Comments from bots, GitHub Apps, and the account behind `forgeCredentialRef` are ignored.
+- The command ID is derived from the comment ID, so a redelivered webhook is a no-op. A second
+  comment asking for the same work while it is active is coalesced into it.
+- Comments on pull requests are ignored.
+
+Everything after the command word, including the following lines, is stored as command
+context. Before it is stored, hidden HTML comments, images, links, and URLs are removed,
+control characters are stripped, credentials are redacted, and the text is bounded to 80
+lines and 4 KiB. The context is frozen with a digest in the command's workflow action and
+passed to the action's agent as a separate, untrusted `commandContext` input. It can guide
+what the agent looks at, but it never selects the intent, the agent, the tools, the
+repository, the branch, or the output schema. The context is sent to the model provider
+with the rest of the prompt.
+
 ## Pause and stop
 
 - **`orka:pause`** (configurable with `spec.policy.pauseLabels`) is a persistent guard on one

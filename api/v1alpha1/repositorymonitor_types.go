@@ -239,6 +239,61 @@ type RepositoryMonitorGitHubTriggers struct {
 	// Labels maps GitHub labels to durable RepositoryMonitor commands.
 	// +optional
 	Labels RepositoryMonitorGitHubLabelTriggers `json:"labels,omitempty"`
+
+	// Comments maps issue comments that start with a fixed command grammar to
+	// durable RepositoryMonitor commands.
+	// +optional
+	Comments RepositoryMonitorGitHubCommentTriggers `json:"comments,omitempty"`
+}
+
+// RepositoryMonitorGitHubCommentTriggers configures issue comment command intake.
+//
+// Only newly created issue comments are commands; edited and deleted comments
+// are ignored. A comment is a command only when its first line is
+// "<prefix> <command>", where the prefix and command match this spec exactly.
+// The remaining text is stored, sanitized and bounded, as untrusted context
+// for the run the command starts. It never selects the intent, the agent, the
+// tools, or the repository scope.
+type RepositoryMonitorGitHubCommentTriggers struct {
+	// Enabled enables durable command intake for issue comments.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Prefix is the first word of a command comment, for example /orka or
+	// @my-bot. It is matched case-insensitively. Required when enabled.
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[^\s]+$`
+	// +optional
+	Prefix string `json:"prefix,omitempty"`
+
+	// RequireActorPermission is the minimum GitHub repository permission the
+	// comment author needs for every comment command, including read-only
+	// ones. Supported values are write, maintain, and admin. Defaults to
+	// maintain. spec.policy.allowedRepositoryPermissions also applies.
+	// +kubebuilder:validation:Enum=write;maintain;admin
+	// +kubebuilder:default=maintain
+	// +optional
+	RequireActorPermission string `json:"requireActorPermission,omitempty"`
+
+	// Commands maps command words to intents. When empty, each supported
+	// intent is available under its own name.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
+	// +optional
+	Commands []RepositoryMonitorGitHubCommentCommand `json:"commands,omitempty"`
+}
+
+// RepositoryMonitorGitHubCommentCommand maps one comment command word to an intent.
+type RepositoryMonitorGitHubCommentCommand struct {
+	// Name is the command word that follows the prefix. It is matched
+	// case-insensitively.
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]{0,31}$`
+	Name string `json:"name"`
+
+	// Intent is the issue workflow intent the command starts.
+	// +kubebuilder:validation:Enum=triage;research;plan;implement;decompose;stop;resume
+	Intent string `json:"intent"`
 }
 
 // RepositoryMonitorGitHubLabelTriggers configures orka:* label command intake.

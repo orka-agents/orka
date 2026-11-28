@@ -23,6 +23,10 @@ const (
 	repositoryMonitorCommandMaxRetries             = 3
 	repositoryMonitorCommandProcessed              = "processed"
 	repositoryMonitorCommandCompleted              = "completed"
+	repositoryMonitorCommandRecording              = "recording"
+	repositoryMonitorCommandRejected               = "rejected"
+	repositoryMonitorCommandRecordingGrace         = 2 * time.Minute
+	repositoryMonitorCommandRecordingInterrupted   = "command intake was interrupted before its context was stored"
 	repositoryMonitorRetiredAutomergeIntent        = "automerge"
 	repositoryMonitorRetiredApprovePlanIntent      = "approve_plan"
 	repositoryMonitorAutomergeCommandRetiredReason = "automerge_command_retired"
@@ -335,4 +339,82 @@ func repositoryMonitorFailedCommandRunRetryable(runError string) bool {
 func repositoryMonitorCommandRunIDFromCommand(commandID string) string {
 	sum := sha256.Sum256([]byte(commandID + "|run"))
 	return "monrun-" + hex.EncodeToString(sum[:])[:12]
+}
+
+func (r *RepositoryMonitorReconciler) recoverInterruptedRepositoryMonitorCommandRecordings(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
+	var recordings []store.CommandEvent
+	cursor := ""
+	for {
+		commands, next, err := r.Store.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Status: repositoryMonitorCommandRecording, Limit: 100, Cursor: cursor})
+		if err != nil {
+			return false, err
+		}
+		recordings = append(recordings, commands...)
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	pending := false
+	for i := range recordings {
+		settled, err := r.recoverRepositoryMonitorCommandRecording(ctx, monitor, &recordings[i])
+		if err != nil {
+			return pending, err
+		}
+		pending = pending || !settled
+	}
+	return pending, nil
+}
+
+func (r *RepositoryMonitorReconciler) recoverRepositoryMonitorCommandRecording(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent) (bool, error) {
+	if time.Since(command.CreatedAt) < repositoryMonitorCommandRecordingGrace {
+		return false, nil
+	}
+	current, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, command.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if current.Status != repositoryMonitorCommandRecording {
+		return true, nil
+	}
+	command = current
+	action, err := r.Store.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent)))
+	if errors.Is(err, store.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	switch {
+	case action.CommandEventID != command.ID:
+		return true, nil
+	case action.Status == store.RepositoryMonitorWorkActionStatusRetryPending:
+		return true, nil
+	case action.Status == store.RepositoryMonitorWorkActionStatusCompleted && action.Phase == "coalesced":
+		command.Status = repositoryMonitorCommandCompleted
+		command.Error = store.RepositoryMonitorCoalescedCommandError(action.DependsOnActionID)
+	case action.Status != store.RepositoryMonitorWorkActionStatusQueued:
+		command.Status = repositoryMonitorCommandRejected
+		command.Error = repositoryMonitorCommandRecordingInterrupted
+	default:
+		if _, contextErr := repositoryMonitorCommandContextFromMetadata(action.MetadataJSON); contextErr != nil {
+			now := time.Now()
+			action.Status = store.RepositoryMonitorWorkActionStatusFailed
+			action.Phase = repositoryMonitorCommandRejected
+			action.BlockedReason = repositoryMonitorCommandRecordingInterrupted
+			action.CompletedAt = &now
+			if err := r.Store.UpdateWorkAction(ctx, action); err != nil {
+				return false, err
+			}
+			command.Status = repositoryMonitorCommandRejected
+			command.Error = repositoryMonitorCommandRecordingInterrupted
+		} else {
+			command.Status = repositoryMonitorCommandAccepted
+			command.Error = ""
+		}
+	}
+	return true, r.Store.UpdateCommandEvent(ctx, command)
 }

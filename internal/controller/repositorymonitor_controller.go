@@ -54,6 +54,9 @@ const (
 	repositoryMonitorCommandIntentFixCI        = "fix_ci"
 	repositoryMonitorCommandIntentUpdateBranch = "update_branch"
 	repositoryMonitorCommandIntentDecompose    = "decompose"
+	repositoryMonitorCommandIntentTriage       = "triage"
+	repositoryMonitorCommandIntentResearch     = "research"
+	repositoryMonitorCommandIntentPlan         = "plan"
 
 	repositoryMonitorRunningRunTimeout           = 30 * time.Minute
 	repositoryMonitorValidationRetry             = time.Minute
@@ -243,6 +246,10 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorSpec(ctx context.
 	}
 	if err := validateRepositoryMonitorCommandLabels(monitor.Spec); err != nil {
 		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, "InvalidCommandLabels", err.Error())
+		return "", "", true, repositoryMonitorValidationRetry, updateErr
+	}
+	if err := ValidateRepositoryMonitorCommentTriggers(monitor.Spec); err != nil {
+		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, "InvalidCommentTriggers", err.Error())
 		return "", "", true, repositoryMonitorValidationRetry, updateErr
 	}
 	if reason, message, err := r.validateRepositoryMonitorIssueReadOnlyAgents(ctx, monitor); reason != "" || err != nil {
@@ -491,6 +498,12 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 		logger.Error(err, "failed to publish pending repository monitor review")
 		return ctrl.Result{}, err
 	}
+	pendingRecordings, err := r.recoverInterruptedRepositoryMonitorCommandRecordings(ctx, monitor)
+	if err != nil {
+		logger.Error(err, "failed to recover interrupted repository monitor commands")
+		return ctrl.Result{}, err
+	}
+	pendingReviews = pendingReviews || pendingRecordings
 	queuedCommands, err := r.enqueueAcceptedRepositoryMonitorCommands(ctx, monitor)
 	if err != nil {
 		logger.Error(err, "failed to enqueue accepted repository monitor commands")

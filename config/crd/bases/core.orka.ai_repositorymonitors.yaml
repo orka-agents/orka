@@ -796,6 +796,70 @@ spec:
                   github:
                     description: GitHub configures GitHub webhook triggers.
                     properties:
+                      comments:
+                        description: |-
+                          Comments maps issue comments that start with a fixed command grammar to
+                          durable RepositoryMonitor commands.
+                        properties:
+                          commands:
+                            description: |-
+                              Commands maps command words to intents. When empty, each supported
+                              intent is available under its own name.
+                            items:
+                              description: RepositoryMonitorGitHubCommentCommand maps
+                                one comment command word to an intent.
+                              properties:
+                                intent:
+                                  description: Intent is the issue workflow intent
+                                    the command starts.
+                                  enum:
+                                  - triage
+                                  - research
+                                  - plan
+                                  - implement
+                                  - decompose
+                                  - stop
+                                  - resume
+                                  type: string
+                                name:
+                                  description: |-
+                                    Name is the command word that follows the prefix. It is matched
+                                    case-insensitively.
+                                  pattern: ^[a-z][a-z0-9-]{0,31}$
+                                  type: string
+                              required:
+                              - intent
+                              - name
+                              type: object
+                            maxItems: 16
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          enabled:
+                            description: Enabled enables durable command intake for
+                              issue comments.
+                            type: boolean
+                          prefix:
+                            description: |-
+                              Prefix is the first word of a command comment, for example /orka or
+                              @my-bot. It is matched case-insensitively. Required when enabled.
+                            maxLength: 64
+                            pattern: ^[^\s]+$
+                            type: string
+                          requireActorPermission:
+                            default: maintain
+                            description: |-
+                              RequireActorPermission is the minimum GitHub repository permission the
+                              comment author needs for every comment command, including read-only
+                              ones. Supported values are write, maintain, and admin. Defaults to
+                              maintain. spec.policy.allowedRepositoryPermissions also applies.
+                            enum:
+                            - write
+                            - maintain
+                            - admin
+                            type: string
+                        type: object
                       labels:
                         description: Labels maps GitHub labels to durable RepositoryMonitor
                           commands.

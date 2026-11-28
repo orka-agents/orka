@@ -58,6 +58,7 @@ const (
 	githubMonitorTriggerLabelCommand           = "github_label_command"
 	githubCommandEventSourceLabel              = "github_label"
 	githubCommandStatusAccepted                = "accepted"
+	githubCommandStatusRecording               = "recording"
 	githubCommandStatusRejected                = "rejected"
 	githubCommandStatusBlocked                 = "blocked"
 	githubCommandStatusCompleted               = "completed"
@@ -84,6 +85,7 @@ type githubWebhookLabel struct {
 
 type githubWebhookUser struct {
 	Login string `json:"login"`
+	Type  string `json:"type,omitempty"`
 }
 
 type githubWebhookRepository struct {
@@ -175,6 +177,9 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 			apiFieldStatus:  "ok",
 			apiFieldMessage: "GitHub webhook signature verified",
 		})
+	}
+	if event == githubEventIssueComment {
+		return h.handleGitHubIssueCommentWebhook(c, body)
 	}
 	if event == githubEventPullRequestReview || event == githubEventPullRequestReviewComment {
 		var payload githubLabelWebhookPayload
