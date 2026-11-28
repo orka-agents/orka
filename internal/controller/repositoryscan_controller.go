@@ -1091,6 +1091,27 @@ func trustedFindingsBranch(scan *corev1alpha1.RepositoryScan) string {
 	return security.EffectiveBranch(scan)
 }
 
+func reviewSliceAgentRef(scan *corev1alpha1.RepositoryScan, reviewSlice store.ReviewSlice) corev1alpha1.AgentReference {
+	reviewAgentRef := scan.Spec.AnalysisAgentRef
+	if scan.Spec.ScoutAgentRef != nil && strings.TrimSpace(scan.Spec.ScoutAgentRef.Name) != "" &&
+		reviewSlice.Kind != security.SliceKindInvestigation && reviewSlice.Kind != security.SliceKindBaseline {
+		reviewAgentRef = *scan.Spec.ScoutAgentRef
+	}
+	return reviewAgentRef
+}
+
+func sameAgentReference(defaultNamespace string, a, b corev1alpha1.AgentReference) bool {
+	nsA := strings.TrimSpace(a.Namespace)
+	if nsA == "" {
+		nsA = defaultNamespace
+	}
+	nsB := strings.TrimSpace(b.Namespace)
+	if nsB == "" {
+		nsB = defaultNamespace
+	}
+	return nsA == nsB && strings.TrimSpace(a.Name) == strings.TrimSpace(b.Name)
+}
+
 func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, threatModel string, reviewSlices []store.ReviewSlice) error {
 	if !security.ScanRunMatchesRepositoryScan(run, scan) {
 		return store.ErrConflict
@@ -1112,20 +1133,27 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 	if err != nil {
 		return err
 	}
-	var pool types.NamespacedName
+	var existingTasks []corev1alpha1.Task
 	if r.Client != nil {
 		existing, err := r.listCurrentScanTasksFrom(ctx, uncachedReader(r.APIReader, r.Client), scan, "")
 		if err != nil {
 			return err
 		}
-		available, err := r.reviewTaskBudget(ctx, existing.Items, run.ID)
-		if err != nil {
-			return err
-		}
-		reviewSlices = reviewSlices[:min(len(reviewSlices), available)]
-		pool, _ = r.reviewRuntimePool(ctx, existing.Items, run.ID)
+		existingTasks = existing.Items
 	}
 	for _, reviewSlice := range reviewSlices {
+		agentRef := reviewSliceAgentRef(targetScan, reviewSlice)
+		var pool types.NamespacedName
+		if r.Client != nil {
+			available, err := r.reviewTaskBudgetForAgent(ctx, existingTasks, run.ID, scan.Namespace, agentRef)
+			if err != nil {
+				return err
+			}
+			if available <= 0 {
+				continue
+			}
+			pool, _ = r.reviewRuntimePoolForAgent(ctx, existingTasks, run.ID, scan.Namespace, agentRef)
+		}
 		task, err := r.buildReviewTask(ctx, targetScan, run, threatModel, reviewSlice, policy, securityReviewInitialAttempt)
 		if err != nil {
 			return err
@@ -1134,6 +1162,7 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 			return err
 		}
 		r.reviewTaskLedger().record(client.ObjectKeyFromObject(task), pool, time.Now())
+		existingTasks = append(existingTasks, *task)
 	}
 	return nil
 }
@@ -1180,11 +1209,7 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 	}
 	timeout := metav1.Duration{Duration: 2 * time.Hour}
 	priority := int32(700)
-	reviewAgentRef := scan.Spec.AnalysisAgentRef
-	if scan.Spec.ScoutAgentRef != nil && strings.TrimSpace(scan.Spec.ScoutAgentRef.Name) != "" &&
-		reviewSlice.Kind != security.SliceKindInvestigation && reviewSlice.Kind != security.SliceKindBaseline {
-		reviewAgentRef = *scan.Spec.ScoutAgentRef
-	}
+	reviewAgentRef := reviewSliceAgentRef(scan, reviewSlice)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,
@@ -1407,6 +1432,103 @@ func (r *RepositoryScanReconciler) reviewTaskWindow(ctx context.Context, tasks [
 		prompts = live
 	}
 	return maxOutstandingReviewTasks / DefaultACPDispatchWorkers * min(dispatch, prompts)
+}
+
+func (r *RepositoryScanReconciler) reviewRuntimePoolForAgent(
+	ctx context.Context,
+	tasks []corev1alpha1.Task,
+	runID string,
+	defaultNamespace string,
+	agentRef corev1alpha1.AgentReference,
+) (types.NamespacedName, int) {
+	if r.Client == nil {
+		return types.NamespacedName{}, 0
+	}
+	for i := range tasks {
+		task := &tasks[i]
+		stage := taskSecurityStage(task)
+		if scanTaskRunID(task) != runID || (stage != security.StageReview && stage != security.StageThreatModel) || task.Status.Execution == nil {
+			continue
+		}
+		if task.Spec.AgentRef == nil || !sameAgentReference(defaultNamespace, *task.Spec.AgentRef, agentRef) {
+			continue
+		}
+		name := strings.TrimSpace(task.Status.Execution.RuntimePoolName)
+		if name == "" {
+			continue
+		}
+		key := types.NamespacedName{Namespace: task.Namespace, Name: name}
+		pool := &corev1alpha1.RuntimePool{}
+		if err := r.Get(ctx, key, pool); err != nil {
+			return types.NamespacedName{}, 0
+		}
+		if pool.Status.Capacity.MaxRunningPrompts > 0 {
+			return key, int(pool.Status.Capacity.MaxRunningPrompts)
+		}
+		if pool.Spec.Capacity != nil && pool.Spec.Capacity.MaxRunningPrompts > 0 {
+			return key, int(pool.Spec.Capacity.MaxRunningPrompts)
+		}
+		return types.NamespacedName{}, 0
+	}
+	return types.NamespacedName{}, 0
+}
+
+func (r *RepositoryScanReconciler) reviewTaskWindowForPool(live int) int {
+	dispatch := r.ACPDispatchMaxConcurrentTasks
+	if dispatch <= 0 {
+		dispatch = DefaultACPDispatchWorkers
+	}
+	prompts := 1
+	if live > 0 {
+		prompts = live
+	}
+	return maxOutstandingReviewTasks / DefaultACPDispatchWorkers * min(dispatch, prompts)
+}
+
+func (r *RepositoryScanReconciler) reviewTaskBudgetForAgent(
+	ctx context.Context,
+	runTasks []corev1alpha1.Task,
+	runID string,
+	defaultNamespace string,
+	agentRef corev1alpha1.AgentReference,
+) (int, error) {
+	pool, poolPrompts := r.reviewRuntimePoolForAgent(ctx, runTasks, runID, defaultNamespace, agentRef)
+	available := max(r.reviewTaskWindowForPool(poolPrompts)-outstandingReviewTasks(runTasks, runID), 0)
+	var all corev1alpha1.TaskList
+	if err := r.List(ctx, &all, client.MatchingLabels{labels.LabelSecurityStage: security.StageReview}); err != nil {
+		return 0, err
+	}
+	shared, onPool := 0, 0
+	settled := make(map[types.NamespacedName]bool, len(all.Items))
+	for i := range all.Items {
+		task := &all.Items[i]
+		named := task.Status.Execution != nil && strings.TrimSpace(task.Status.Execution.RuntimePoolName) != ""
+		active := task.Status.Phase == "" || isActiveTaskPhase(task.Status.Phase)
+		settled[client.ObjectKeyFromObject(task)] = named || !active
+		if !active {
+			continue
+		}
+		shared++
+		if poolPrompts > 0 && named && task.Namespace == pool.Namespace &&
+			strings.TrimSpace(task.Status.Execution.RuntimePoolName) == pool.Name {
+			onPool++
+		}
+	}
+	unlisted, unqueuedOnPool := r.reviewTaskLedger().pending(settled, pool, time.Now())
+	shared += unlisted
+	if poolPrompts > 0 {
+		onPool += unqueuedOnPool
+	}
+	dispatch := r.ACPDispatchMaxConcurrentTasks
+	if dispatch <= 0 {
+		dispatch = DefaultACPDispatchWorkers
+	}
+	perPlace := maxOutstandingReviewTasks / DefaultACPDispatchWorkers
+	available = min(available, max(perPlace*dispatch-shared, 0))
+	if poolPrompts > 0 {
+		available = min(available, max(perPlace*poolPrompts-onPool, 0))
+	}
+	return available, nil
 }
 
 func (r *RepositoryScanReconciler) reviewRuntimePool(ctx context.Context, tasks []corev1alpha1.Task, runID string) (types.NamespacedName, int) {
