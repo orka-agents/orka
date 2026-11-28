@@ -26,6 +26,7 @@ import (
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
@@ -82,7 +83,7 @@ func patchVerifyBaseCommandExitedNonZero(task *corev1alpha1.Task) bool {
 	if err != nil {
 		return false
 	}
-	return code >= 1 && code <= patchVerifyMaxExitCode
+	return code >= 1 && code <= patchVerifyMaxExitCode && code != workerenv.RepositoryValidationUnavailableExitCode
 }
 
 func patchVerifyTaskName(scanName, findingID, patchTaskName, phase, commitSHA, image, command string) string {
