@@ -738,6 +738,12 @@ func NormalizePatchSummaryArtifact(artifact PatchSummaryArtifact) (*PatchSummary
 	if artifact.SchemaVersion != SchemaVersionPatchSummary {
 		return nil, fmt.Errorf("unsupported patch summary schemaVersion %d", artifact.SchemaVersion)
 	}
+	if artifact.ControllerVerification != nil {
+		return nil, fmt.Errorf("patch summary controllerVerification is controller-managed")
+	}
+	if artifact.ControllerVerification != nil {
+		return nil, fmt.Errorf("patch summary must not include controllerVerification")
+	}
 	if strings.TrimSpace(artifact.FindingID) == "" {
 		return nil, fmt.Errorf("patch summary findingId is required")
 	}

@@ -22,6 +22,25 @@ type PolicyConfigMapKeyRef struct {
 	Key string `json:"key,omitempty"`
 }
 
+// RepositoryScanPatchVerificationSpec configures controller-executed patch verification.
+type RepositoryScanPatchVerificationSpec struct {
+	// Image is the digest-pinned OCI container image used to execute patch verification tests.
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^[^\s@]+@sha256:[a-f0-9]{64}$`
+	Image string `json:"image"`
+
+	// Command is the shell command executed inside the verification container
+	// against the checked-out workspace.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=4096
+	Command string `json:"command"`
+
+	// RequireFailBeforePass requires the verification command to fail on the
+	// unpatched base commit before passing on the patched commit (fail->pass gate).
+	// +optional
+	RequireFailBeforePass bool `json:"requireFailBeforePass,omitempty"`
+}
+
 // RepositoryScanSpec defines the desired state of RepositoryScan.
 // +kubebuilder:validation:XValidation:rule="self.repoURL == oldSelf.repoURL",message="repoURL is immutable; create a new RepositoryScan for a different repository"
 type RepositoryScanSpec struct {
@@ -145,6 +164,14 @@ type RepositoryScanSpec struct {
 	// PatchAgentRef is the agent used for patch proposal runs.
 	// +optional
 	PatchAgentRef *AgentReference `json:"patchAgentRef,omitempty"`
+
+	// PatchVerification configures optional controller-executed test verification
+	// for remediation patches. When configured with a digest-pinned image and
+	// test command, Orka runs the test command against both the base commit
+	// (expecting failure when RequireFailBeforePass is true) and the patched
+	// commit (expecting success) before opening or accepting a verified fix.
+	// +optional
+	PatchVerification *RepositoryScanPatchVerificationSpec `json:"patchVerification,omitempty"`
 
 	// MaxFindingsPerRun bounds scan output volume.
 	// +optional

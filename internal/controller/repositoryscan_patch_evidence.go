@@ -538,6 +538,31 @@ const (
 	repositoryScanPullRequestTitleField = "title"
 )
 
+func (r *RepositoryScanReconciler) loadPatchSummaryForDecoration(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	task *corev1alpha1.Task,
+	summaryArtifact string,
+) *security.PatchSummaryArtifact {
+	var summary *security.PatchSummaryArtifact
+	owner := store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}
+	if strings.TrimSpace(summaryArtifact) != "" {
+		if data, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: owner, Filename: summaryArtifact}); err == nil {
+			var parsed security.PatchSummaryArtifact
+			if json.Unmarshal(data, &parsed) == nil {
+				parsed.ControllerVerification = nil
+				summary = &parsed
+			}
+		}
+	}
+	if summary != nil && scan != nil && scan.Spec.PatchVerification != nil {
+		if verification := r.loadControllerVerificationArtifact(ctx, task, summaryArtifact); verification != nil {
+			summary.ControllerVerification = verification
+		}
+	}
+	return summary
+}
+
 func (r *RepositoryScanReconciler) decorateSecurityPatchPullRequest(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, findingID string, prNumber int, generation int64, summaryArtifact string) {
 	logger := log.FromContext(ctx).WithValues("namespace", task.Namespace, "task", task.Name, "finding", findingID, "pullRequest", prNumber)
 	if prNumber <= 0 || r.SecurityStore == nil || r.ArtifactStore == nil {
@@ -548,15 +573,7 @@ func (r *RepositoryScanReconciler) decorateSecurityPatchPullRequest(ctx context.
 		logger.Info("skipping remediation pull request decoration", "reason", "finding unavailable")
 		return
 	}
-	var summary *security.PatchSummaryArtifact
-	if strings.TrimSpace(summaryArtifact) != "" {
-		if data, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: summaryArtifact}); err == nil {
-			var parsed security.PatchSummaryArtifact
-			if json.Unmarshal(data, &parsed) == nil {
-				summary = &parsed
-			}
-		}
-	}
+	summary := r.loadPatchSummaryForDecoration(ctx, scan, task, summaryArtifact)
 	token, reason, err := r.repositoryScanForgeToken(ctx, scan)
 	if err != nil || reason != "" {
 		logger.Info("skipping remediation pull request decoration", "reason", "forge credential unavailable")

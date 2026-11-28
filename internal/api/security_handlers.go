@@ -23,6 +23,7 @@ import (
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 const (
@@ -90,6 +91,14 @@ func validateRepositoryScanSpecValues(spec corev1alpha1.RepositoryScanSpec) erro
 	if spec.Schedule != "" {
 		if _, err := controller.ParseRepositoryScanSchedule(spec.Schedule); err != nil {
 			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.schedule is invalid: %v", err))
+		}
+	}
+	if spec.PatchVerification != nil {
+		if !tools.ValidRepositoryValidationImage(spec.PatchVerification.Image) {
+			return fiber.NewError(fiber.StatusBadRequest, "spec.patchVerification.image must be a digest-pinned OCI image reference with sha256")
+		}
+		if strings.TrimSpace(spec.PatchVerification.Command) == "" {
+			return fiber.NewError(fiber.StatusBadRequest, "spec.patchVerification.command is required")
 		}
 	}
 	return nil
@@ -165,7 +174,7 @@ func (h *Handlers) hasActiveSecurityScanPipelineTask(ctx context.Context, scan *
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		stage := strings.TrimSpace(task.Labels[labels.LabelSecurityStage])
-		if stage == security.StagePatch || stage == security.StageValidation {
+		if stage == security.StagePatch || stage == security.StagePatchVerify || stage == security.StageValidation {
 			continue
 		}
 		switch task.Status.Phase {

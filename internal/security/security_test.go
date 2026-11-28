@@ -812,6 +812,21 @@ func TestRemediationPullRequestBodyDistinguishesDiffAndTestVerification(t *testi
 	if strings.Contains(failingTestsBody, "Agent-reported tests passed") {
 		t.Fatalf("PR body with failing test falsely claimed tests passed:\n%s", failingTestsBody)
 	}
+
+	controllerVerifiedBody := RemediationPullRequestBody(finding, &PatchSummaryArtifact{
+		FindingID:    "fnd_verify",
+		Summary:      "Enforced role check.",
+		ChangedFiles: []string{"auth.go"},
+		ControllerVerification: &PatchControllerVerification{
+			Status:                "verified",
+			Command:               "go test ./...",
+			RequireFailBeforePass: true,
+		},
+		Risk: "low",
+	})
+	if !strings.Contains(controllerVerifiedBody, "Controller-verified fix (fail->pass)") || !strings.Contains(controllerVerifiedBody, "**Controller verification command:**") {
+		t.Fatalf("PR body with controller verification missing disclosure:\n%s", controllerVerifiedBody)
+	}
 }
 
 func TestRemediationPullRequestBodyWithholdsLineWrappedCredential(t *testing.T) {

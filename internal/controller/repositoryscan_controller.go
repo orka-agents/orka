@@ -350,6 +350,8 @@ func taskSecurityStage(task *corev1alpha1.Task) string {
 		switch strings.TrimSpace(task.Labels[labels.LabelSecurityMode]) {
 		case security.StagePatch:
 			return security.StagePatch
+		case security.StagePatchVerify:
+			return security.StagePatchVerify
 		case security.StageValidation:
 			return security.StageValidation
 		}
@@ -1747,6 +1749,9 @@ func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *c
 			continue
 		}
 		if task.Status.Phase == corev1alpha1.TaskPhaseCancelled && !isScanPipelineStage(stage) {
+			continue
+		}
+		if stage == security.StagePatchVerify {
 			continue
 		}
 		if stage == security.StagePatch {
@@ -5195,7 +5200,8 @@ func (r *RepositoryScanReconciler) verifiedSecurityPatchPublication(
 	}, "", nil
 }
 
-func (r *RepositoryScanReconciler) updatePatchProposalFromSucceededTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, findingID string, proposal *store.PatchProposal) error {
+func (r *RepositoryScanReconciler) updatePatchProposalFromSucceededTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, finding *store.Finding, proposal *store.PatchProposal) error {
+	findingID := finding.ID
 	requestedBranch := ""
 	if task.Spec.Workspace != nil {
 		requestedBranch = strings.TrimSpace(task.Spec.Workspace.PushBranch)
@@ -5219,6 +5225,19 @@ func (r *RepositoryScanReconciler) updatePatchProposalFromSucceededTask(ctx cont
 			r.failPatchProposal(ctx, task, proposal, reason)
 			return nil
 		}
+	}
+	if pending, reason, err := r.evaluateControllerPatchVerification(ctx, scan, task, finding, publication, verified); err != nil {
+		return err
+	} else if reason != "" {
+		r.failPatchProposal(ctx, task, proposal, reason)
+		return nil
+	} else if pending {
+		proposal.Status = scanRunPhasePending
+		proposal.Branch = publication.branch
+		proposal.DiffArtifact = verified.diffArtifact
+		proposal.SummaryArtifact = verified.summaryArtifact
+		proposal.Reason = "awaiting controller patch verification"
+		return nil
 	}
 	proposal.Reason = ""
 	proposal.Branch = publication.branch
@@ -5299,7 +5318,7 @@ func (r *RepositoryScanReconciler) ingestPatchTask(ctx context.Context, scan *co
 	}
 
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
-		if err := r.updatePatchProposalFromSucceededTask(ctx, scan, task, findingID, proposal); err != nil {
+		if err := r.updatePatchProposalFromSucceededTask(ctx, scan, task, finding, proposal); err != nil {
 			return err
 		}
 	}
