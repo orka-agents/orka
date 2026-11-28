@@ -29,6 +29,12 @@ export const coreHandlers = [
       : apiError(401, 'the demo signs in only with its own sample credential'),
   ),
 
+  http.get(api('/auth/whoami'), ({ request }) =>
+    request.headers.get('Authorization') === `Bearer ${DEMO_TOKEN}`
+      ? HttpResponse.json({ authenticated: true, authType: 'demo', username: 'demo-user', namespace: DEMO_NAMESPACE })
+      : apiError(401, 'the demo signs in only with its own sample credential'),
+  ),
+
   http.get(api('/chat/config'), () =>
     HttpResponse.json({
       enabled: true,
