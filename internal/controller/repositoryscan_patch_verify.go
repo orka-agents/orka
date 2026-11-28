@@ -86,7 +86,10 @@ func patchVerifyBaseCommandExitedNonZero(task *corev1alpha1.Task) bool {
 	return code >= 1 && code <= patchVerifyMaxExitCode && code != workerenv.RepositoryValidationUnavailableExitCode
 }
 
-func patchVerifyTaskName(scanName, findingID, patchTaskName, phase, commitSHA, image, command string) string {
+func patchVerifyTaskName(scanName, findingID, patchTaskName, phase, commitSHA, image, command string, timeout time.Duration) string {
+	if timeout <= 0 {
+		timeout = patchVerifyTimeout
+	}
 	sum := sha256.Sum256([]byte(strings.Join([]string{
 		scanName,
 		findingID,
@@ -95,6 +98,7 @@ func patchVerifyTaskName(scanName, findingID, patchTaskName, phase, commitSHA, i
 		strings.TrimSpace(commitSHA),
 		strings.TrimSpace(image),
 		strings.TrimSpace(command),
+		timeout.String(),
 	}, "\n")))
 	suffix := hex.EncodeToString(sum[:8])
 	prefix := strings.ToLower(strings.TrimSpace(scanName)) + "-pv-" + phase + "-"
@@ -119,6 +123,7 @@ func controllerVerificationArtifactName(summaryArtifact string) string {
 type patchVerificationStep struct {
 	image                 string
 	command               string
+	controlCommand        string
 	requireFailBeforePass bool
 	expectedBaseExitCode  int
 	timeout               time.Duration
@@ -137,35 +142,38 @@ func effectivePatchVerificationPlans(scan *corev1alpha1.RepositoryScan, finding 
 			timeout:               patchVerifyTimeout,
 		})
 	}
-	if pocCmd, expectedExitCode, ok := validatedFindingPoCCommand(finding); ok {
+	if pocCmd, controlCmd, expectedExitCode, ok := validatedFindingPoCCommand(finding); ok {
 		img := effectivePoCVerificationImage(scan)
 		if img == "" && scan != nil && scan.Spec.PatchVerification != nil {
 			img = strings.TrimSpace(scan.Spec.PatchVerification.Image)
+		}
+		if !tools.ValidRepositoryValidationImage(img) {
+			return nil, "controller PoC patch verification requires a digest-pinned image in spec.pocExecution.image or spec.patchVerification.image"
 		}
 		pocTimeout := effectivePoCVerificationTimeout(nil)
 		if scan != nil && scan.Spec.PoCExecution != nil {
 			pocTimeout = effectivePoCVerificationTimeout(scan.Spec.PoCExecution)
 		}
-		if tools.ValidRepositoryValidationImage(img) {
-			duplicate := false
-			for i := range plans {
-				if plans[i].image == img && plans[i].command == pocCmd {
-					plans[i].requireFailBeforePass = true
-					plans[i].expectedBaseExitCode = expectedExitCode
-					plans[i].timeout = pocTimeout
-					duplicate = true
-					break
-				}
+		duplicate := false
+		for i := range plans {
+			if plans[i].image == img && plans[i].command == pocCmd {
+				plans[i].requireFailBeforePass = true
+				plans[i].controlCommand = controlCmd
+				plans[i].expectedBaseExitCode = expectedExitCode
+				plans[i].timeout = pocTimeout
+				duplicate = true
+				break
 			}
-			if !duplicate {
-				plans = append(plans, patchVerificationStep{
-					image:                 img,
-					command:               pocCmd,
-					requireFailBeforePass: true,
-					expectedBaseExitCode:  expectedExitCode,
-					timeout:               pocTimeout,
-				})
-			}
+		}
+		if !duplicate {
+			plans = append(plans, patchVerificationStep{
+				image:                 img,
+				command:               pocCmd,
+				controlCommand:        controlCmd,
+				requireFailBeforePass: true,
+				expectedBaseExitCode:  expectedExitCode,
+				timeout:               pocTimeout,
+			})
 		}
 	}
 	return plans, ""
@@ -315,6 +323,28 @@ func (r *RepositoryScanReconciler) evaluatePatchVerificationStep(
 			}
 			return false, failedVerification, "controller fail->pass verification rejected: base task did not record a normal non-zero command exit code", nil
 		}
+		if strings.TrimSpace(plan.controlCommand) != "" {
+			controlTask, controlProblem, controlErr := r.ensurePatchVerifyTask(ctx, scan, patchTask, finding, pocVerifyPhaseControl, baseCommit, plan.image, plan.controlCommand, plan.timeout, false)
+			if controlErr != nil {
+				return false, nil, "", controlErr
+			}
+			if controlProblem != "" {
+				return false, nil, controlProblem, nil
+			}
+			if !controlTask.Status.Phase.IsTerminal() {
+				return true, nil, "", nil
+			}
+			if controlTask.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+				return false, &security.PatchControllerVerification{
+					Status:                patchVerifyStatusFailed,
+					Command:               plan.command,
+					RequireFailBeforePass: true,
+					BaseCommit:            baseCommit,
+					PatchedCommit:         patchedCommit,
+					BaseTaskName:          baseTask.Name,
+				}, "controller fail->pass verification rejected: PoC benign control command failed on publication baseline", nil
+			}
+		}
 	}
 
 	patchedTask, problem, err := r.ensurePatchVerifyTask(ctx, scan, patchTask, finding, patchVerifyPhasePatched, patchedCommit, plan.image, plan.command, plan.timeout, true)
@@ -365,7 +395,7 @@ func buildDesiredPatchVerifyTask(
 	if timeoutDuration <= 0 {
 		timeoutDuration = patchVerifyTimeout
 	}
-	taskName := patchVerifyTaskName(scan.Name, finding.ID, patchTask.Name, phase, commitSHA, image, command)
+	taskName := patchVerifyTaskName(scan.Name, finding.ID, patchTask.Name, phase, commitSHA, image, command, timeoutDuration)
 	workspace := repositoryScanTaskWorkspaceAtCommit(scan, corev1alpha1.WorkspaceIntentRead, commitSHA)
 	if useTargetRepo {
 		if strings.TrimSpace(scan.Spec.ForkRepo) != "" {

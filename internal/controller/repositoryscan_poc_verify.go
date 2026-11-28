@@ -56,25 +56,25 @@ func repositoryScanValidationExecution(scan *corev1alpha1.RepositoryScan) *corev
 	}
 }
 
-func validatedFindingPoCCommand(finding *store.Finding) (string, int, bool) {
+func validatedFindingPoCCommand(finding *store.Finding) (command, controlCommand string, expectedExitCode int, ok bool) {
 	if finding == nil || strings.TrimSpace(finding.ValidationJSON) == "" {
-		return "", 0, false
+		return "", "", 0, false
 	}
 	var artifact security.ValidationArtifact
 	if err := json.Unmarshal([]byte(finding.ValidationJSON), &artifact); err != nil {
-		return "", 0, false
+		return "", "", 0, false
 	}
 	if artifact.PoC == nil || artifact.PoCVerification == nil {
-		return "", 0, false
+		return "", "", 0, false
 	}
 	if strings.TrimSpace(artifact.PoCVerification.Status) != pocVerifyStatusVerified {
-		return "", 0, false
+		return "", "", 0, false
 	}
 	cmd := strings.TrimSpace(artifact.PoC.Command)
 	if cmd == "" {
-		return "", 0, false
+		return "", "", 0, false
 	}
-	return cmd, artifact.PoC.ExpectedExitCode, true
+	return cmd, strings.TrimSpace(artifact.PoC.ControlCommand), artifact.PoC.ExpectedExitCode, true
 }
 
 func pocExecutionPolicyDigest(scan *corev1alpha1.RepositoryScan) string {
