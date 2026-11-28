@@ -155,6 +155,9 @@ func repositoryMonitorSpecAgentRefs(spec corev1alpha1.RepositoryMonitorSpec) []c
 
 func repositoryScanSpecAgentRefs(spec corev1alpha1.RepositoryScanSpec) []corev1alpha1.AgentReference {
 	refs := []corev1alpha1.AgentReference{spec.AnalysisAgentRef}
+	if spec.ScoutAgentRef != nil {
+		refs = append(refs, *spec.ScoutAgentRef)
+	}
 	if spec.ValidationAgentRef != nil {
 		refs = append(refs, *spec.ValidationAgentRef)
 	}

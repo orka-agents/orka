@@ -130,6 +130,7 @@ func (h *Handlers) validateRepositoryScanAgentRuntimes(ctx context.Context, name
 		ref   *corev1alpha1.AgentReference
 	}{
 		{field: "spec.analysisAgentRef", ref: &spec.AnalysisAgentRef},
+		{field: "spec.scoutAgentRef", ref: spec.ScoutAgentRef},
 		{field: "spec.validationAgentRef", ref: spec.ValidationAgentRef},
 		{field: "spec.patchAgentRef", ref: spec.PatchAgentRef},
 	}
@@ -842,6 +843,11 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenSecurityScanTask(c, "createRepositoryScan", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
+	if scan.Spec.ScoutAgentRef != nil && strings.TrimSpace(scan.Spec.ScoutAgentRef.Name) != "" {
+		if err := h.authorizeContextTokenSecurityScanTask(c, "createRepositoryScan", scan, *scan.Spec.ScoutAgentRef); err != nil {
+			return err
+		}
+	}
 	if scan.Spec.ValidationAgentRef != nil && strings.TrimSpace(scan.Spec.ValidationAgentRef.Name) != "" {
 		if err := h.authorizeContextTokenSecurityScanTask(c, "createRepositoryScan", scan, *scan.Spec.ValidationAgentRef); err != nil {
 			return err
@@ -863,6 +869,9 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 		return err
 	}
 	if err := h.authorizeRepositoryScanValidationAgent(c, "createRepositoryScanValidation", scan, false); err != nil {
+		return err
+	}
+	if err := h.authorizeRepositoryScanScoutAgent(c, "createRepositoryScanScout", scan, false); err != nil {
 		return err
 	}
 	if err := authorizeRepositoryScanSandboxWorkspaceClassUse(c.Context(), h.clientset, GetUserInfo(c), scan); err != nil {
@@ -929,6 +938,11 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenSecurityScanTask(c, "updateRepositoryScan", updated, updated.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
+	if updated.Spec.ScoutAgentRef != nil && strings.TrimSpace(updated.Spec.ScoutAgentRef.Name) != "" {
+		if err := h.authorizeContextTokenSecurityScanTask(c, "updateRepositoryScan", updated, *updated.Spec.ScoutAgentRef); err != nil {
+			return err
+		}
+	}
 	if updated.Spec.ValidationAgentRef != nil && strings.TrimSpace(updated.Spec.ValidationAgentRef.Name) != "" {
 		if err := h.authorizeContextTokenSecurityScanTask(c, "updateRepositoryScan", updated, *updated.Spec.ValidationAgentRef); err != nil {
 			return err
@@ -950,6 +964,9 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 		return err
 	}
 	if err := h.authorizeRepositoryScanValidationAgent(c, "updateRepositoryScanValidation", updated, false); err != nil {
+		return err
+	}
+	if err := h.authorizeRepositoryScanScoutAgent(c, "updateRepositoryScanScout", updated, false); err != nil {
 		return err
 	}
 	if err := authorizeRepositoryScanSandboxWorkspaceClassUse(c.Context(), h.clientset, GetUserInfo(c), updated); err != nil {
@@ -1171,6 +1188,9 @@ func (h *Handlers) CreateManualSecurityScan(c fiber.Ctx) error {
 		return err
 	}
 	if err := h.authorizeRepositoryScanValidationAgent(c, "createManualSecurityScanValidation", scan, true); err != nil {
+		return err
+	}
+	if err := h.authorizeRepositoryScanScoutAgent(c, "createManualSecurityScanScout", scan, true); err != nil {
 		return err
 	}
 	if err := security.ValidateRepositoryScanSource(scan.Spec); err != nil {
@@ -1683,6 +1703,19 @@ func (h *Handlers) contextTokenSecurityScanAllowed(c fiber.Ctx, scan *corev1alph
 	return true
 }
 
+func (h *Handlers) authorizeRepositoryScanScoutAgent(
+	c fiber.Ctx,
+	action string,
+	scan *corev1alpha1.RepositoryScan,
+	enforceTaskCreate bool,
+) error {
+	if scan == nil || scan.Spec.ScoutAgentRef == nil || strings.TrimSpace(scan.Spec.ScoutAgentRef.Name) == "" {
+		return nil
+	}
+	scoutAgentRef := *scan.Spec.ScoutAgentRef
+	return h.authorizeRepositoryScanAgentProbe(c, action, "scout", scan, scoutAgentRef, enforceTaskCreate)
+}
+
 func (h *Handlers) authorizeRepositoryScanValidationAgent(
 	c fiber.Ctx,
 	action string,
@@ -1694,35 +1727,46 @@ func (h *Handlers) authorizeRepositoryScanValidationAgent(
 		return nil
 	}
 	validationAgentRef := securityValidationAgentRef(scan)
+	return h.authorizeRepositoryScanAgentProbe(c, action, "validation", scan, validationAgentRef, enforceTaskCreate)
+}
+
+func (h *Handlers) authorizeRepositoryScanAgentProbe(
+	c fiber.Ctx,
+	action string,
+	role string,
+	scan *corev1alpha1.RepositoryScan,
+	agentRef corev1alpha1.AgentReference,
+	enforceTaskCreate bool,
+) error {
 	if enforceTaskCreate {
-		if err := h.authorizeContextTokenSecurityScanTask(c, "createManualSecurityScan", scan, validationAgentRef); err != nil {
+		if err := h.authorizeContextTokenSecurityScanTask(c, "createManualSecurityScan", scan, agentRef); err != nil {
 			return err
 		}
 	}
-	validationProbeTask := &corev1alpha1.Task{
+	probeTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: scan.Namespace,
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:      corev1alpha1.TaskTypeAgent,
-			AgentRef:  &validationAgentRef,
+			AgentRef:  &agentRef,
 			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
 		},
 	}
 	ui := GetUserInfo(c)
-	if err := refuseWorkerRootTaskForIdentityAgent(c.Context(), h.uncachedReader(), ui, validationProbeTask); err != nil {
+	if err := refuseWorkerRootTaskForIdentityAgent(c.Context(), h.uncachedReader(), ui, probeTask); err != nil {
 		return err
 	}
 	if enforceTaskCreate {
-		if err := authorizeKubernetesTaskCreate(c.Context(), h.uncachedReader(), h.clientset, ui, validationProbeTask); err != nil {
+		if err := authorizeKubernetesTaskCreate(c.Context(), h.uncachedReader(), h.clientset, ui, probeTask); err != nil {
 			return err
 		}
 	}
 	if token := contextTokenFromUserInfo(ui); h.contextTokenAuthorization.Enabled() && token != nil {
-		if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(c.Context(), h.uncachedReader(), validationProbeTask); err != nil {
-			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid validation AgentRuntime policy: %v", err))
+		if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(c.Context(), h.uncachedReader(), probeTask); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid %s AgentRuntime policy: %v", role, err))
 		}
-		if err := authorizeContextTokenTaskContextObject(c.Context(), h.uncachedReader(), token, h.contextTokenAuthorization, action, validationProbeTask); err != nil {
+		if err := authorizeContextTokenTaskContextObject(c.Context(), h.uncachedReader(), token, h.contextTokenAuthorization, action, probeTask); err != nil {
 			return err
 		}
 	}

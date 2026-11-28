@@ -73,7 +73,9 @@ func MapRepository(root string, opts MapperOptions) ([]store.ReviewSlice, error)
 	if opts.BaselineAudit {
 		addBaselineAuditSlice(builder, files)
 	}
-	return builder.slices(), nil
+	slices := builder.slices()
+	annotateGoSliceBlastRadius(root, files, slices)
+	return slices, nil
 }
 
 type repoFile struct {

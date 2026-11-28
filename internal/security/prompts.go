@@ -49,6 +49,9 @@ func appendSliceScopePrompt(prompt *strings.Builder, slice store.ReviewSlice) {
 		prompt.WriteString("\nAnswer it by tracing the full path through the repository, including code outside the listed files. Report a finding only when the trace supports one; otherwise record the answer in scan.resolvedQuestions.\n")
 	case SliceKindBaseline:
 		prompt.WriteString("\nINDEPENDENT AUDIT SLICE:\nOther slices review the repository one component at a time. Audit it independently: map its trust boundaries, then look for vulnerabilities whose attacker-controlled source, failing control, and sensitive operation sit in different components, where a component-by-component review is least likely to see them. The listed files are starting points only.\n")
+		prompt.WriteString("Apply two complementary lenses across components:\n")
+		prompt.WriteString("1. Semantic guard / invariant consistency: identify security checks enforced consistently across sibling handlers or reconcilers (authentication, tenant/namespace scoping, ownership, path containment, credential isolation) and flag any sibling path that omits or weakens that check.\n")
+		prompt.WriteString("2. Coupled state-desync: trace every mutation path where CRD status, database rows, and external/Kubernetes resources must stay consistent, and flag desynchronization windows that bypass authorization, fencing, or cleanup.\n")
 	}
 }
 
