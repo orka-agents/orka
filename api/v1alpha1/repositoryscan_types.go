@@ -41,6 +41,26 @@ type RepositoryScanPatchVerificationSpec struct {
 	RequireFailBeforePass bool `json:"requireFailBeforePass,omitempty"`
 }
 
+// RepositoryScanPoCExecutionSpec configures controller-replayed proof-of-concept
+// execution for validated findings in an egress-denied container.
+type RepositoryScanPoCExecutionSpec struct {
+	// Image is the digest-pinned OCI container image used to replay validator PoCs.
+	// When omitted, PatchVerification.Image is reused if configured.
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^[^\s@]+@sha256:[a-f0-9]{64}$`
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// AllowedHarnesses restricts which PoC harness types the controller will replay.
+	// Defaults to ["go-test", "pytest", "sh"] when omitted.
+	// +optional
+	AllowedHarnesses []string `json:"allowedHarnesses,omitempty"`
+
+	// Timeout bounds each controller-replayed PoC execution. Defaults to 5m when omitted.
+	// +optional
+	Timeout *metav1.Duration `json:"timeout,omitempty"`
+}
+
 // RepositoryScanSpec defines the desired state of RepositoryScan.
 // +kubebuilder:validation:XValidation:rule="self.repoURL == oldSelf.repoURL",message="repoURL is immutable; create a new RepositoryScan for a different repository"
 type RepositoryScanSpec struct {
@@ -172,6 +192,11 @@ type RepositoryScanSpec struct {
 	// commit (expecting success) before opening or accepting a verified fix.
 	// +optional
 	PatchVerification *RepositoryScanPatchVerificationSpec `json:"patchVerification,omitempty"`
+
+	// PoCExecution configures optional controller-replayed PoC verification for
+	// validated findings in an egress-denied container.
+	// +optional
+	PoCExecution *RepositoryScanPoCExecutionSpec `json:"pocExecution,omitempty"`
 
 	// MaxFindingsPerRun bounds scan output volume.
 	// +optional

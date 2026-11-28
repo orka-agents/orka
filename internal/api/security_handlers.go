@@ -101,6 +101,23 @@ func validateRepositoryScanSpecValues(spec corev1alpha1.RepositoryScanSpec) erro
 			return fiber.NewError(fiber.StatusBadRequest, "spec.patchVerification.command is required")
 		}
 	}
+	if spec.PoCExecution != nil {
+		image := strings.TrimSpace(spec.PoCExecution.Image)
+		if image == "" && spec.PatchVerification != nil {
+			image = strings.TrimSpace(spec.PatchVerification.Image)
+		}
+		if !tools.ValidRepositoryValidationImage(image) {
+			return fiber.NewError(fiber.StatusBadRequest, "spec.pocExecution.image (or spec.patchVerification.image) must be a digest-pinned OCI image reference with sha256")
+		}
+		for _, harness := range spec.PoCExecution.AllowedHarnesses {
+			if !security.ValidPoCHarness(harness) {
+				return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.pocExecution.allowedHarnesses contains unsupported harness %q", harness))
+			}
+		}
+		if spec.PoCExecution.Timeout != nil && spec.PoCExecution.Timeout.Duration <= 0 {
+			return fiber.NewError(fiber.StatusBadRequest, "spec.pocExecution.timeout must be positive")
+		}
+	}
 	return nil
 }
 
@@ -174,7 +191,7 @@ func (h *Handlers) hasActiveSecurityScanPipelineTask(ctx context.Context, scan *
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		stage := strings.TrimSpace(task.Labels[labels.LabelSecurityStage])
-		if stage == security.StagePatch || stage == security.StagePatchVerify || stage == security.StageValidation {
+		if stage == security.StagePatch || stage == security.StagePatchVerify || stage == security.StageValidation || stage == security.StagePoCVerify {
 			continue
 		}
 		switch task.Status.Phase {

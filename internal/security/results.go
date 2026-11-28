@@ -611,6 +611,72 @@ func validateValidationArtifact(artifact ValidationArtifact, finding *store.Find
 			return err
 		}
 	}
+	if artifact.PoCVerification != nil {
+		return fmt.Errorf("validation.poc_verification is controller-owned and may not be supplied by the agent")
+	}
+	if artifact.PoC != nil {
+		if err := ValidateValidationPoC(artifact.PoC); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+const (
+	PoCHarnessGoTest = "go-test"
+	PoCHarnessPytest = "pytest"
+	PoCHarnessShell  = "sh"
+
+	maxPoCCommandBytes = 4096
+	maxPoCSignalBytes  = 512
+)
+
+func ValidPoCHarness(harness string) bool {
+	switch strings.ToLower(strings.TrimSpace(harness)) {
+	case PoCHarnessGoTest, PoCHarnessPytest, PoCHarnessShell:
+		return true
+	default:
+		return false
+	}
+}
+
+func ValidateValidationPoC(poc *ValidationPoC) error {
+	if poc == nil {
+		return nil
+	}
+	harness := strings.ToLower(strings.TrimSpace(poc.Harness))
+	if !ValidPoCHarness(harness) {
+		return fmt.Errorf("validation.poc.harness %q is not supported (use go-test, pytest, or sh)", poc.Harness)
+	}
+	poc.Harness = harness
+	poc.Command = strings.TrimSpace(poc.Command)
+	if poc.Command == "" {
+		return fmt.Errorf("validation.poc.command is required")
+	}
+	if err := boundedString("validation.poc.command", poc.Command, maxPoCCommandBytes); err != nil {
+		return err
+	}
+	if LooksLikeSecret(poc.Command) {
+		return fmt.Errorf("validation.poc.command contains a credential-shaped value")
+	}
+	poc.ControlCommand = strings.TrimSpace(poc.ControlCommand)
+	if poc.ControlCommand != "" {
+		if err := boundedString("validation.poc.control_command", poc.ControlCommand, maxPoCCommandBytes); err != nil {
+			return err
+		}
+		if LooksLikeSecret(poc.ControlCommand) {
+			return fmt.Errorf("validation.poc.control_command contains a credential-shaped value")
+		}
+	}
+	poc.ExpectedSignal = strings.TrimSpace(poc.ExpectedSignal)
+	if poc.ExpectedSignal != "" {
+		if err := boundedString("validation.poc.expected_signal", poc.ExpectedSignal, maxPoCSignalBytes); err != nil {
+			return err
+		}
+	}
+	if poc.ExpectedExitCode < 0 || poc.ExpectedExitCode > 125 {
+		return fmt.Errorf("validation.poc.expected_exit_code must be between 0 and 125")
+	}
 	return nil
 }
 

@@ -196,6 +196,30 @@ spec:
                 - command
                 - image
                 type: object
+              pocExecution:
+                description: |-
+                  PoCExecution configures optional controller-replayed PoC verification for
+                  validated findings in an egress-denied container.
+                properties:
+                  allowedHarnesses:
+                    description: |-
+                      AllowedHarnesses restricts which PoC harness types the controller will replay.
+                      Defaults to ["go-test", "pytest", "sh"] when omitted.
+                    items:
+                      type: string
+                    type: array
+                  image:
+                    description: |-
+                      Image is the digest-pinned OCI container image used to replay validator PoCs.
+                      When omitted, PatchVerification.Image is reused if configured.
+                    maxLength: 2048
+                    pattern: ^[^\s@]+@sha256:[a-f0-9]{64}$
+                    type: string
+                  timeout:
+                    description: Timeout bounds each controller-replayed PoC execution.
+                      Defaults to 5m when omitted.
+                    type: string
+                type: object
               prBaseBranch:
                 description: PRBaseBranch is the pull request base branch for remediation.
                 type: string

@@ -240,7 +240,7 @@ func (r *TaskReconciler) ensureRepositoryMonitorValidationNetworkGate(ctx contex
 }
 
 func isConfinedVerificationTask(task *corev1alpha1.Task, monitorValidation bool) bool {
-	return monitorValidation || isRepositoryScanPatchVerifyTask(task)
+	return monitorValidation || isRepositoryScanPatchVerifyTask(task) || isRepositoryScanPoCVerifyTask(task)
 }
 
 func (r *TaskReconciler) ensureRepositoryMonitorValidationNetworkGateForTask(ctx context.Context, task *corev1alpha1.Task, validationTask bool) (bool, error) {
