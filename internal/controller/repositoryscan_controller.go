@@ -4763,14 +4763,18 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 			recordValidationError(finding, validationProblem)
 			validationMetricStatus = findingValidationStatusError
 		} else if artifact != nil {
-			pendingPoC, pocVerification, pocErr := r.evaluateControllerPoCVerification(ctx, scan, task, finding, artifact)
-			if pocErr != nil {
-				return pocErr
+			if existing := preservedValidationPoCVerification(finding, artifact); existing != nil {
+				artifact.PoCVerification = existing
+			} else {
+				pendingPoC, pocVerification, pocErr := r.evaluateControllerPoCVerification(ctx, scan, task, finding, artifact)
+				if pocErr != nil {
+					return pocErr
+				}
+				if pendingPoC {
+					return nil
+				}
+				artifact.PoCVerification = pocVerification
 			}
-			if pendingPoC {
-				return nil
-			}
-			artifact.PoCVerification = pocVerification
 			finding.ValidationStatus = strings.TrimSpace(artifact.Status)
 			validationMetricStatus = finding.ValidationStatus
 			data, err := json.Marshal(artifact)

@@ -70,7 +70,7 @@ func TestEvaluateControllerPoCVerificationLifecycle(t *testing.T) {
 		t.Fatalf("first PoC eval = (pending=%v, verification=%#v, err=%v), want pending PoC task", pending, verification, err)
 	}
 
-	pocTaskName := pocVerifyTaskName(scan.Name, finding.ID, validationTask.Name, pocVerifyPhasePoC, commitSHA, testPatchVerificationImage, artifact.PoC.Command)
+	pocTaskName := pocVerifyTaskName(scan.Name, finding.ID, validationTask.Name, pocVerifyPhasePoC, commitSHA, testPatchVerificationImage, artifact.PoC.Command, pocVerifyDefaultTimeout)
 	pocTask := &corev1alpha1.Task{}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: scan.Namespace, Name: pocTaskName}, pocTask); err != nil {
 		t.Fatalf("expected PoC task %s: %v", pocTaskName, err)
@@ -93,7 +93,7 @@ func TestEvaluateControllerPoCVerificationLifecycle(t *testing.T) {
 		t.Fatalf("second PoC eval = (pending=%v, verification=%#v, err=%v), want pending control task", pending, verification, err)
 	}
 
-	controlTaskName := pocVerifyTaskName(scan.Name, finding.ID, validationTask.Name, pocVerifyPhaseControl, commitSHA, testPatchVerificationImage, artifact.PoC.ControlCommand)
+	controlTaskName := pocVerifyTaskName(scan.Name, finding.ID, validationTask.Name, pocVerifyPhaseControl, commitSHA, testPatchVerificationImage, artifact.PoC.ControlCommand, pocVerifyDefaultTimeout)
 	controlTask := &corev1alpha1.Task{}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: scan.Namespace, Name: controlTaskName}, controlTask); err != nil {
 		t.Fatalf("expected control task %s: %v", controlTaskName, err)
@@ -154,7 +154,7 @@ func TestEvaluateControllerPoCVerificationRejectsZeroExitAndDisallowedHarness(t 
 	if err != nil || !pending {
 		t.Fatalf("expected pending PoC task, got pending=%v err=%v", pending, err)
 	}
-	pocTaskName := pocVerifyTaskName(scan.Name, finding.ID, validationTask.Name, pocVerifyPhasePoC, commitSHA, testPatchVerificationImage, allowed.PoC.Command)
+	pocTaskName := pocVerifyTaskName(scan.Name, finding.ID, validationTask.Name, pocVerifyPhasePoC, commitSHA, testPatchVerificationImage, allowed.PoC.Command, pocVerifyDefaultTimeout)
 	pocTask := &corev1alpha1.Task{}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: scan.Namespace, Name: pocTaskName}, pocTask); err != nil {
 		t.Fatal(err)
@@ -220,6 +220,21 @@ func TestRepositoryScanPoCVerifyJobUsesSharedConfinement(t *testing.T) {
 	worker := job.Spec.Template.Spec.Containers[0]
 	if len(worker.Command) != 1 || !strings.HasSuffix(worker.Command[0], "/"+repositoryMonitorValidationNetworkSandboxBinary) {
 		t.Fatalf("worker command = %#v, want network sandbox binary", worker.Command)
+	}
+	if _, ok := pocTaskCommandExitCode(&corev1alpha1.Task{
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseFailed,
+			Message: "job failed: container exited with code 125 (reason=Error)",
+		},
+	}); ok {
+		t.Fatal("expected reserved sandbox exit code 125 to be rejected")
+	}
+	if err := security.ValidateValidationPoC(&security.ValidationPoC{
+		Harness:        security.PoCHarnessGoTest,
+		Command:        "go test ./...",
+		ExpectedSignal: "panic: index out of range",
+	}); err == nil {
+		t.Fatal("expected nonempty expected_signal to be rejected until supported")
 	}
 	_ = corev1.Pod{}
 }
