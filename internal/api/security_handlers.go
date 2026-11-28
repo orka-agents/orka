@@ -1429,6 +1429,13 @@ func (h *Handlers) GetSecurityFinding(c fiber.Ctx) error {
 			finding.ScanTaskName = run.TaskName
 		}
 	}
+	if strings.EqualFold(strings.TrimSpace(c.Query("format")), "rule") {
+		rule, ruleErr := security.DistillFindingRule(finding)
+		if ruleErr != nil {
+			return fiber.NewError(fiber.StatusBadRequest, ruleErr.Error())
+		}
+		return c.JSON(rule)
+	}
 	return c.JSON(finding)
 }
 

@@ -807,6 +807,21 @@ func (r *RepositoryScanReconciler) mapperCrossComponentEnv(ctx context.Context, 
 		return nil, err
 	}
 	if investigations := security.ThreatModelInvestigations(model.Content); len(investigations) > 0 {
+		if r.SecurityStore != nil {
+			if existingFindings, _, listErr := r.SecurityStore.ListFindings(ctx, store.FindingFilter{
+				Namespace:        scan.Namespace,
+				RepositoryScan:   scan.Name,
+				ValidationStatus: findingValidationStatusValidated,
+				Limit:            10,
+			}); listErr == nil {
+				for i := range existingFindings {
+					if inv, ok := security.BuildVariantInvestigation(&existingFindings[i]); ok {
+						investigations = append(investigations, inv)
+					}
+				}
+				investigations = security.SanitizeInvestigations(investigations)
+			}
+		}
 		data, err := json.Marshal(investigations)
 		if err != nil {
 			return nil, err
