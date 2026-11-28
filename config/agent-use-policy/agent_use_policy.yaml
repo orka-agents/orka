@@ -49,13 +49,19 @@ spec:
   - name: previousAgents
     expression: >-
       oldObject == null ? [] :
-      [?oldObject.spec.?analysisAgentRef, ?oldObject.spec.?validationAgentRef, ?oldObject.spec.?patchAgentRef].map(r, (r.?namespace.orValue('') == '' ? request.namespace : r.namespace) + '/' + r.name)
+      [?oldObject.spec.?analysisAgentRef, ?oldObject.spec.?scoutAgentRef, ?oldObject.spec.?validationAgentRef, ?oldObject.spec.?patchAgentRef].map(r, (r.?namespace.orValue('') == '' ? request.namespace : r.namespace) + '/' + r.name)
   validations:
   - expression: >-
       !has(object.spec.analysisAgentRef) ||
       ((object.spec.analysisAgentRef.?namespace.orValue('') == '' ? request.namespace : object.spec.analysisAgentRef.namespace) + '/' + object.spec.analysisAgentRef.name) in variables.previousAgents ||
       authorizer.group('core.orka.ai').resource('agents').namespace((object.spec.analysisAgentRef.?namespace.orValue('') == '' ? request.namespace : object.spec.analysisAgentRef.namespace)).name(object.spec.analysisAgentRef.name).check('use').allowed()
     message: caller is not authorized to use the analysis Agent
+    reason: Forbidden
+  - expression: >-
+      !has(object.spec.scoutAgentRef) ||
+      ((object.spec.scoutAgentRef.?namespace.orValue('') == '' ? request.namespace : object.spec.scoutAgentRef.namespace) + '/' + object.spec.scoutAgentRef.name) in variables.previousAgents ||
+      authorizer.group('core.orka.ai').resource('agents').namespace((object.spec.scoutAgentRef.?namespace.orValue('') == '' ? request.namespace : object.spec.scoutAgentRef.namespace)).name(object.spec.scoutAgentRef.name).check('use').allowed()
+    message: caller is not authorized to use the scout Agent
     reason: Forbidden
   - expression: >-
       !has(object.spec.validationAgentRef) ||

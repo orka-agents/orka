@@ -1106,6 +1106,27 @@ func trustedFindingsBranch(scan *corev1alpha1.RepositoryScan) string {
 	return security.EffectiveBranch(scan)
 }
 
+func reviewSliceAgentRef(scan *corev1alpha1.RepositoryScan, reviewSlice store.ReviewSlice) corev1alpha1.AgentReference {
+	reviewAgentRef := scan.Spec.AnalysisAgentRef
+	if scan.Spec.ScoutAgentRef != nil && strings.TrimSpace(scan.Spec.ScoutAgentRef.Name) != "" &&
+		reviewSlice.Kind != security.SliceKindInvestigation && reviewSlice.Kind != security.SliceKindBaseline {
+		reviewAgentRef = *scan.Spec.ScoutAgentRef
+	}
+	return reviewAgentRef
+}
+
+func sameAgentReference(defaultNamespace string, a, b corev1alpha1.AgentReference) bool {
+	nsA := strings.TrimSpace(a.Namespace)
+	if nsA == "" {
+		nsA = defaultNamespace
+	}
+	nsB := strings.TrimSpace(b.Namespace)
+	if nsB == "" {
+		nsB = defaultNamespace
+	}
+	return nsA == nsB && strings.TrimSpace(a.Name) == strings.TrimSpace(b.Name)
+}
+
 func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, threatModel string, reviewSlices []store.ReviewSlice) error {
 	if !security.ScanRunMatchesRepositoryScan(run, scan) {
 		return store.ErrConflict
@@ -1127,20 +1148,27 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 	if err != nil {
 		return err
 	}
-	var pool types.NamespacedName
+	var existingTasks []corev1alpha1.Task
 	if r.Client != nil {
 		existing, err := r.listCurrentScanTasksFrom(ctx, uncachedReader(r.APIReader, r.Client), scan, "")
 		if err != nil {
 			return err
 		}
-		available, err := r.reviewTaskBudget(ctx, existing.Items, run.ID)
-		if err != nil {
-			return err
-		}
-		reviewSlices = reviewSlices[:min(len(reviewSlices), available)]
-		pool, _ = r.reviewRuntimePool(ctx, existing.Items, run.ID)
+		existingTasks = existing.Items
 	}
 	for _, reviewSlice := range reviewSlices {
+		agentRef := reviewSliceAgentRef(targetScan, reviewSlice)
+		var pool types.NamespacedName
+		if r.Client != nil {
+			available, err := r.reviewTaskBudgetForAgent(ctx, existingTasks, run.ID, scan.Namespace, agentRef)
+			if err != nil {
+				return err
+			}
+			if available <= 0 {
+				continue
+			}
+			pool, _ = r.reviewRuntimePoolForAgent(ctx, existingTasks, run.ID, scan.Namespace, agentRef)
+		}
 		task, err := r.buildReviewTask(ctx, targetScan, run, threatModel, reviewSlice, policy, securityReviewInitialAttempt)
 		if err != nil {
 			return err
@@ -1149,6 +1177,7 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 			return err
 		}
 		r.reviewTaskLedger().record(client.ObjectKeyFromObject(task), pool, time.Now())
+		existingTasks = append(existingTasks, *task)
 	}
 	return nil
 }
@@ -1185,15 +1214,7 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 	}
 	metrics.RecordSecurityReviewContextBytes(manifest.PromptBytes)
 	promptPolicy := policy.PromptPolicy()
-	if r.SecurityStore != nil {
-		if dismissed, _, listErr := r.SecurityStore.ListFindings(ctx, store.FindingFilter{
-			Namespace:      scan.Namespace,
-			RepositoryScan: scan.Name,
-			Limit:          50,
-		}); listErr == nil {
-			promptPolicy.DismissedFeedback = security.BuildDismissedFindingsFeedback(dismissed)
-		}
-	}
+	promptPolicy.DismissedFeedback = manifest.DismissedFeedback
 	prompt := security.BuildReviewResultPrompt(
 		scan, run.Mode, run.BaseCommit, run.HeadCommit, threatModel, reviewSlice,
 		resultBinding, *manifest, trustedFindingsRepository(scan, run), promptPolicy,
@@ -1203,11 +1224,7 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 	}
 	timeout := metav1.Duration{Duration: 2 * time.Hour}
 	priority := int32(700)
-	reviewAgentRef := scan.Spec.AnalysisAgentRef
-	if scan.Spec.ScoutAgentRef != nil && strings.TrimSpace(scan.Spec.ScoutAgentRef.Name) != "" &&
-		reviewSlice.Kind != security.SliceKindInvestigation && reviewSlice.Kind != security.SliceKindBaseline {
-		reviewAgentRef = *scan.Spec.ScoutAgentRef
-	}
+	reviewAgentRef := reviewSliceAgentRef(scan, reviewSlice)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,
@@ -1430,6 +1447,103 @@ func (r *RepositoryScanReconciler) reviewTaskWindow(ctx context.Context, tasks [
 		prompts = live
 	}
 	return maxOutstandingReviewTasks / DefaultACPDispatchWorkers * min(dispatch, prompts)
+}
+
+func (r *RepositoryScanReconciler) reviewRuntimePoolForAgent(
+	ctx context.Context,
+	tasks []corev1alpha1.Task,
+	runID string,
+	defaultNamespace string,
+	agentRef corev1alpha1.AgentReference,
+) (types.NamespacedName, int) {
+	if r.Client == nil {
+		return types.NamespacedName{}, 0
+	}
+	for i := range tasks {
+		task := &tasks[i]
+		stage := taskSecurityStage(task)
+		if scanTaskRunID(task) != runID || (stage != security.StageReview && stage != security.StageThreatModel) || task.Status.Execution == nil {
+			continue
+		}
+		if task.Spec.AgentRef == nil || !sameAgentReference(defaultNamespace, *task.Spec.AgentRef, agentRef) {
+			continue
+		}
+		name := strings.TrimSpace(task.Status.Execution.RuntimePoolName)
+		if name == "" {
+			continue
+		}
+		key := types.NamespacedName{Namespace: task.Namespace, Name: name}
+		pool := &corev1alpha1.RuntimePool{}
+		if err := r.Get(ctx, key, pool); err != nil {
+			return types.NamespacedName{}, 0
+		}
+		if pool.Status.Capacity.MaxRunningPrompts > 0 {
+			return key, int(pool.Status.Capacity.MaxRunningPrompts)
+		}
+		if pool.Spec.Capacity != nil && pool.Spec.Capacity.MaxRunningPrompts > 0 {
+			return key, int(pool.Spec.Capacity.MaxRunningPrompts)
+		}
+		return types.NamespacedName{}, 0
+	}
+	return types.NamespacedName{}, 0
+}
+
+func (r *RepositoryScanReconciler) reviewTaskWindowForPool(live int) int {
+	dispatch := r.ACPDispatchMaxConcurrentTasks
+	if dispatch <= 0 {
+		dispatch = DefaultACPDispatchWorkers
+	}
+	prompts := 1
+	if live > 0 {
+		prompts = live
+	}
+	return maxOutstandingReviewTasks / DefaultACPDispatchWorkers * min(dispatch, prompts)
+}
+
+func (r *RepositoryScanReconciler) reviewTaskBudgetForAgent(
+	ctx context.Context,
+	runTasks []corev1alpha1.Task,
+	runID string,
+	defaultNamespace string,
+	agentRef corev1alpha1.AgentReference,
+) (int, error) {
+	pool, poolPrompts := r.reviewRuntimePoolForAgent(ctx, runTasks, runID, defaultNamespace, agentRef)
+	available := max(r.reviewTaskWindowForPool(poolPrompts)-outstandingReviewTasks(runTasks, runID), 0)
+	var all corev1alpha1.TaskList
+	if err := r.List(ctx, &all, client.MatchingLabels{labels.LabelSecurityStage: security.StageReview}); err != nil {
+		return 0, err
+	}
+	shared, onPool := 0, 0
+	settled := make(map[types.NamespacedName]bool, len(all.Items))
+	for i := range all.Items {
+		task := &all.Items[i]
+		named := task.Status.Execution != nil && strings.TrimSpace(task.Status.Execution.RuntimePoolName) != ""
+		active := task.Status.Phase == "" || isActiveTaskPhase(task.Status.Phase)
+		settled[client.ObjectKeyFromObject(task)] = named || !active
+		if !active {
+			continue
+		}
+		shared++
+		if poolPrompts > 0 && named && task.Namespace == pool.Namespace &&
+			strings.TrimSpace(task.Status.Execution.RuntimePoolName) == pool.Name {
+			onPool++
+		}
+	}
+	unlisted, unqueuedOnPool := r.reviewTaskLedger().pending(settled, pool, time.Now())
+	shared += unlisted
+	if poolPrompts > 0 {
+		onPool += unqueuedOnPool
+	}
+	dispatch := r.ACPDispatchMaxConcurrentTasks
+	if dispatch <= 0 {
+		dispatch = DefaultACPDispatchWorkers
+	}
+	perPlace := maxOutstandingReviewTasks / DefaultACPDispatchWorkers
+	available = min(available, max(perPlace*dispatch-shared, 0))
+	if poolPrompts > 0 {
+		available = min(available, max(perPlace*poolPrompts-onPool, 0))
+	}
+	return available, nil
 }
 
 func (r *RepositoryScanReconciler) reviewRuntimePool(ctx context.Context, tasks []corev1alpha1.Task, runID string) (types.NamespacedName, int) {
@@ -1918,10 +2032,66 @@ func (r *RepositoryScanReconciler) loadReviewSlicesArtifact(ctx context.Context,
 	}
 }
 
+func (r *RepositoryScanReconciler) collectDismissedFeedbackForRun(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	run *store.ScanRun,
+) (string, error) {
+	if r.SecurityStore == nil || scan == nil || run == nil {
+		return "", nil
+	}
+	targetScan, err := r.repositoryScanWithFrozenRunTarget(ctx, scan, run)
+	if err != nil {
+		targetScan = scan
+	}
+	target := trustedFindingsRepository(targetScan, run)
+	targetKey := security.FindingV2TargetKey(target.RepoURL, target.Branch, target.SubPath)
+	targetKeysByRun := make(map[string]findingRunTargetKey)
+	var dismissed []store.Finding
+	for _, state := range []string{"false_positive", "wont_fix", "dismissed"} {
+		cursor := ""
+		for len(dismissed) < 12 {
+			page, next, listErr := r.SecurityStore.ListFindings(ctx, store.FindingFilter{
+				Namespace:      scan.Namespace,
+				RepositoryScan: scan.Name,
+				State:          state,
+				Limit:          50,
+				Cursor:         cursor,
+			})
+			if listErr != nil {
+				return "", listErr
+			}
+			for i := range page {
+				candidate := page[i]
+				matched, matchErr := r.findingTargetKeyMatches(ctx, targetScan, target, targetKey, &candidate, targetKeysByRun)
+				if matchErr != nil {
+					return "", matchErr
+				}
+				if !matched {
+					continue
+				}
+				dismissed = append(dismissed, candidate)
+				if len(dismissed) >= 12 {
+					break
+				}
+			}
+			if next == "" {
+				break
+			}
+			cursor = next
+		}
+		if len(dismissed) >= 12 {
+			break
+		}
+	}
+	return security.BuildDismissedFindingsFeedback(dismissed), nil
+}
+
 func (r *RepositoryScanReconciler) loadMapperReviewContext(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	sliceID string,
+	dismissedFeedback string,
 ) (string, string, string, error) {
 	if r.ArtifactStore == nil {
 		return "", "", repositoryScanArtifactStoreNotConfigured, nil
@@ -1935,12 +2105,17 @@ func (r *RepositoryScanReconciler) loadMapperReviewContext(
 	default:
 		return "", "", "", err
 	}
-	manifest, digest, err := security.ParseTrustedReviewContextManifest(data)
+	manifest, _, err := security.ParseTrustedReviewContextManifest(data)
 	if err != nil {
 		return "", "", fmt.Sprintf("%s is invalid: %v", artifactName, err), nil
 	}
 	if strings.TrimSpace(manifest.SliceID) != strings.TrimSpace(sliceID) {
 		return "", "", fmt.Sprintf("%s sliceId does not match mapper slice", artifactName), nil
+	}
+	manifest.DismissedFeedback = dismissedFeedback
+	digest, err := security.ReviewContextDigest(*manifest)
+	if err != nil {
+		return "", "", "", err
 	}
 	canonical, err := json.Marshal(manifest)
 	if err != nil {
@@ -4598,6 +4773,10 @@ func (r *RepositoryScanReconciler) ingestMapperTask(ctx context.Context, scan *c
 	annotateChangedMetadata := artifact.ChangedFilesComputed && (run.Mode == scanModeIncremental || run.Mode == scanModeManual)
 	skippedSlices := 0
 	preparedSlices := make([]store.ReviewSlice, 0, len(artifact.Slices))
+	dismissedFeedback, err := r.collectDismissedFeedbackForRun(ctx, scan, run)
+	if err != nil {
+		return err
+	}
 	for i := range artifact.Slices {
 		slice := artifact.Slices[i]
 		slice.Namespace = scan.Namespace
@@ -4614,7 +4793,7 @@ func (r *RepositoryScanReconciler) ingestMapperTask(ctx context.Context, scan *c
 				skippedSlices++
 			}
 		}
-		contextJSON, contextHash, contextProblem, err := r.loadMapperReviewContext(ctx, task, slice.ID)
+		contextJSON, contextHash, contextProblem, err := r.loadMapperReviewContext(ctx, task, slice.ID, dismissedFeedback)
 		if err != nil {
 			return err
 		}
@@ -4794,14 +4973,18 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 			recordValidationError(finding, validationProblem)
 			validationMetricStatus = findingValidationStatusError
 		} else if artifact != nil {
-			pendingPoC, pocVerification, pocErr := r.evaluateControllerPoCVerification(ctx, scan, task, finding, artifact)
-			if pocErr != nil {
-				return pocErr
+			if existing := preservedValidationPoCVerification(finding, artifact); existing != nil {
+				artifact.PoCVerification = existing
+			} else {
+				pendingPoC, pocVerification, pocErr := r.evaluateControllerPoCVerification(ctx, scan, task, finding, artifact)
+				if pocErr != nil {
+					return pocErr
+				}
+				if pendingPoC {
+					return nil
+				}
+				artifact.PoCVerification = pocVerification
 			}
-			if pendingPoC {
-				return nil
-			}
-			artifact.PoCVerification = pocVerification
 			finding.ValidationStatus = strings.TrimSpace(artifact.Status)
 			validationMetricStatus = finding.ValidationStatus
 			data, err := json.Marshal(artifact)

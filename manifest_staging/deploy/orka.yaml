@@ -3900,6 +3900,34 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: orka-repositoryscan-workspace-class-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - repositoryscans
+  validations:
+  - expression: |-
+      !has(object.spec.pocExecution) || !has(object.spec.pocExecution.sandboxWorkspaceClassRef) || (size(object.spec.pocExecution.sandboxWorkspaceClassRef.name.trim()) > 0 && authorizer.group('workspace.orka.ai')
+
+        .resource('executionworkspaceclasses')
+        .namespace(request.namespace)
+        .name(object.spec.pocExecution.sandboxWorkspaceClassRef.name.trim())
+        .check('use').allowed())
+    message: caller is not authorized to use the selected ExecutionWorkspaceClass
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: orka-task-memory-consolidation.orka.ai
 spec:
   failurePolicy: Fail
@@ -4093,6 +4121,15 @@ metadata:
   name: orka-namespace-mode-protection
 spec:
   policyName: orka-namespace-mode-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-repositoryscan-workspace-class-use.orka.ai
+spec:
+  policyName: orka-repositoryscan-workspace-class-use.orka.ai
   validationActions:
   - Deny
 ---

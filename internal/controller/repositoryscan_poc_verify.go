@@ -25,6 +25,7 @@ import (
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
@@ -42,36 +43,58 @@ func repositoryScanValidationExecution(scan *corev1alpha1.RepositoryScan) *corev
 	if scan == nil || scan.Spec.PoCExecution == nil || scan.Spec.PoCExecution.SandboxWorkspaceClassRef == nil {
 		return nil
 	}
-	className := strings.TrimSpace(scan.Spec.PoCExecution.SandboxWorkspaceClassRef.Name)
-	if className == "" {
-		return nil
-	}
 	return &corev1alpha1.ExecutionSpec{
 		Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-			ClassRef: &corev1alpha1.WorkspaceClassReference{Name: className},
+			ClassRef: &corev1alpha1.WorkspaceClassReference{
+				Name: strings.TrimSpace(scan.Spec.PoCExecution.SandboxWorkspaceClassRef.Name),
+			},
 		},
 	}
 }
 
-func validatedFindingPoCCommand(finding *store.Finding) (string, bool) {
+func validatedFindingPoCCommand(finding *store.Finding) (string, int, bool) {
 	if finding == nil || strings.TrimSpace(finding.ValidationJSON) == "" {
-		return "", false
+		return "", 0, false
 	}
 	var artifact security.ValidationArtifact
 	if err := json.Unmarshal([]byte(finding.ValidationJSON), &artifact); err != nil {
-		return "", false
+		return "", 0, false
 	}
 	if artifact.PoC == nil || artifact.PoCVerification == nil {
-		return "", false
+		return "", 0, false
 	}
 	if strings.TrimSpace(artifact.PoCVerification.Status) != pocVerifyStatusVerified {
-		return "", false
+		return "", 0, false
 	}
 	cmd := strings.TrimSpace(artifact.PoC.Command)
 	if cmd == "" {
-		return "", false
+		return "", 0, false
 	}
-	return cmd, true
+	return cmd, artifact.PoC.ExpectedExitCode, true
+}
+
+func preservedValidationPoCVerification(finding *store.Finding, artifact *security.ValidationArtifact) *security.ValidationPoCVerification {
+	if finding == nil || artifact == nil || strings.TrimSpace(finding.ValidationJSON) == "" {
+		return nil
+	}
+	var prior security.ValidationArtifact
+	if err := json.Unmarshal([]byte(finding.ValidationJSON), &prior); err != nil {
+		return nil
+	}
+	if prior.PoCVerification == nil || strings.TrimSpace(prior.PoCVerification.Status) == "" {
+		return nil
+	}
+	if strings.TrimSpace(prior.FindingID) != strings.TrimSpace(artifact.FindingID) {
+		return nil
+	}
+	if prior.PoCVerification.CommitSHA != "" && strings.TrimSpace(finding.CommitSHA) != "" &&
+		strings.TrimSpace(prior.PoCVerification.CommitSHA) != strings.TrimSpace(finding.CommitSHA) {
+		return nil
+	}
+	if !reflect.DeepEqual(prior.PoC, artifact.PoC) {
+		return nil
+	}
+	return prior.PoCVerification
 }
 
 func isRepositoryScanPoCVerifyTask(task *corev1alpha1.Task) bool {
@@ -146,7 +169,7 @@ func validateRepositoryScanPoCExecutionSpec(scan *corev1alpha1.RepositoryScan) s
 	return ""
 }
 
-func pocVerifyTaskName(scanName, findingID, validationTaskName, phase, commitSHA, image, command string) string {
+func pocVerifyTaskName(scanName, findingID, validationTaskName, phase, commitSHA, image, command string, timeout time.Duration) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{
 		scanName,
 		findingID,
@@ -155,6 +178,7 @@ func pocVerifyTaskName(scanName, findingID, validationTaskName, phase, commitSHA
 		strings.TrimSpace(commitSHA),
 		strings.TrimSpace(image),
 		strings.TrimSpace(command),
+		timeout.String(),
 	}, "\n")))
 	suffix := hex.EncodeToString(sum[:8])
 	prefix := strings.ToLower(strings.TrimSpace(scanName)) + "-poc-" + phase + "-"
@@ -180,7 +204,7 @@ func pocTaskCommandExitCode(task *corev1alpha1.Task) (int, bool) {
 	rest := strings.TrimPrefix(msg, prefix)
 	codeText, _, _ := strings.Cut(rest, " ")
 	code, err := strconv.Atoi(codeText)
-	if err != nil || code < 1 || code > patchVerifyMaxExitCode {
+	if err != nil || code < 1 || code > patchVerifyMaxExitCode || code == workerenv.RepositoryValidationUnavailableExitCode {
 		return 0, false
 	}
 	return code, true
@@ -206,9 +230,10 @@ func buildDesiredPoCVerifyTask(
 	image string,
 	command string,
 ) *corev1alpha1.Task {
-	taskName := pocVerifyTaskName(scan.Name, finding.ID, validationTask.Name, phase, commitSHA, image, command)
+	timeoutDur := effectivePoCVerificationTimeout(scan.Spec.PoCExecution)
+	taskName := pocVerifyTaskName(scan.Name, finding.ID, validationTask.Name, phase, commitSHA, image, command, timeoutDur)
 	workspace := repositoryScanTaskWorkspaceAtCommit(scan, corev1alpha1.WorkspaceIntentRead, commitSHA)
-	timeout := metav1.Duration{Duration: effectivePoCVerificationTimeout(scan.Spec.PoCExecution)}
+	timeout := metav1.Duration{Duration: timeoutDur}
 	priority := int32(730)
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{

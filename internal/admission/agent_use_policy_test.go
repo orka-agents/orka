@@ -207,15 +207,23 @@ func TestAgentUsePolicyRepositoryScanAndGatewayBinding(t *testing.T) {
 	scan := agentUseObject("RepositoryScan", "core.orka.ai/v1alpha1", map[string]any{
 		"repoURL":          "https://github.com/example/repo",
 		"analysisAgentRef": map[string]any{"name": "analyst"},
+		"scoutAgentRef":    map[string]any{"name": "scout"},
 		"patchAgentRef":    map[string]any{"name": "patcher"},
 	})
 	analystOnly := &agentUseGrants{allowed: map[string]bool{admissionTestNamespace + "/analyst": true}}
 	require.False(t, admitsAgentUse(t, policies["repositoryscans"], scanKind, "repositoryscans", analystOnly, scan, nil),
-		"the patch Agent needs its own grant")
-	both := &agentUseGrants{allowed: map[string]bool{
+		"the scout and patch Agents need their own grants")
+	noScout := &agentUseGrants{allowed: map[string]bool{
 		admissionTestNamespace + "/analyst": true, admissionTestNamespace + "/patcher": true,
 	}}
-	require.True(t, admitsAgentUse(t, policies["repositoryscans"], scanKind, "repositoryscans", both, scan, nil))
+	require.False(t, admitsAgentUse(t, policies["repositoryscans"], scanKind, "repositoryscans", noScout, scan, nil),
+		"the scout Agent needs its own grant")
+	all := &agentUseGrants{allowed: map[string]bool{
+		admissionTestNamespace + "/analyst": true,
+		admissionTestNamespace + "/scout":   true,
+		admissionTestNamespace + "/patcher": true,
+	}}
+	require.True(t, admitsAgentUse(t, policies["repositoryscans"], scanKind, "repositoryscans", all, scan, nil))
 
 	bindingKind := schema.GroupVersionKind{Group: "gateway.orka.ai", Version: "v1alpha1", Kind: "GatewayBinding"}
 	binding := agentUseObject("GatewayBinding", "gateway.orka.ai/v1alpha1", map[string]any{

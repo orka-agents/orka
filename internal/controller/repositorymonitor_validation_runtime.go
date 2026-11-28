@@ -81,7 +81,7 @@ func mayBeRepositoryMonitorValidationTask(task *corev1alpha1.Task) bool {
 }
 
 func (r *TaskReconciler) repositoryMonitorValidationSafetyTask(ctx context.Context, task *corev1alpha1.Task) bool {
-	if isRepositoryMonitorValidationTask(task) {
+	if isConfinedVerificationTask(task, isRepositoryMonitorValidationTask(task)) {
 		return true
 	}
 	if !mayBeRepositoryMonitorValidationTask(task) {
