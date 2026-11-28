@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -119,7 +120,7 @@ func BuildSARIFLog(findings []store.Finding) SARIFLog {
 				"validationStatus": finding.ValidationStatus,
 			},
 		}
-		if state == "false_positive" || state == "wont_fix" || state == "dismissed" {
+		if state == "false_positive" || state == "wont_fix" || state == "dismissed" || state == "suppressed" {
 			result.Suppressions = []SARIFSuppression{{
 				Kind:          "external",
 				Status:        "accepted",
@@ -175,7 +176,7 @@ func sarifLevel(severity string) string {
 func sarifRelativeURI(repoPath string) string {
 	parts := strings.Split(strings.TrimSpace(repoPath), "/")
 	for i := range parts {
-		parts[i] = url.PathEscape(parts[i])
+		parts[i] = strings.ReplaceAll(url.PathEscape(parts[i]), ":", "%3A")
 	}
 	return strings.Join(parts, "/")
 }
@@ -266,9 +267,9 @@ func BuildDismissedFindingsFeedback(findings []store.Finding) string {
 		if state != "false_positive" && state != "wont_fix" && state != "dismissed" {
 			continue
 		}
-		title := sanitizeDroppedSampleValue(f.Title)
-		category := sanitizeDroppedSampleValue(f.Category)
-		filePath := sanitizeDroppedSampleValue(f.FilePath)
+		title := sanitizeDroppedSampleValue(redact.SensitiveText(f.Title))
+		category := sanitizeDroppedSampleValue(redact.SensitiveText(f.Category))
+		filePath := sanitizeDroppedSampleValue(redact.SensitiveText(f.FilePath))
 		if title == "" {
 			continue
 		}
