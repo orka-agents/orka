@@ -35,9 +35,30 @@ const (
 	StageMapper      = "mapper"
 	StageReview      = "review"
 	StageValidation  = "validation"
+	StagePoCVerify   = "poc-verify"
 	StagePatch       = "patch"
 	StagePatchVerify = "patch-verify"
 )
+
+type ValidationPoC struct {
+	Harness          string `json:"harness"`
+	Command          string `json:"command"`
+	ControlCommand   string `json:"control_command,omitempty"`
+	ExpectedExitCode int    `json:"expected_exit_code,omitempty"`
+	ExpectedSignal   string `json:"expected_signal,omitempty"`
+}
+
+type ValidationPoCVerification struct {
+	Status          string `json:"status"`
+	Harness         string `json:"harness"`
+	CommitSHA       string `json:"commit_sha"`
+	PolicyDigest    string `json:"policy_digest,omitempty"`
+	PoCTaskName     string `json:"poc_task_name,omitempty"`
+	ControlTaskName string `json:"control_task_name,omitempty"`
+	PoCTriggered    *bool  `json:"poc_triggered,omitempty"`
+	ControlPassed   *bool  `json:"control_passed,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+}
 
 type ValidationArtifact struct {
 	Version            int                            `json:"version"`
@@ -55,6 +76,8 @@ type ValidationArtifact struct {
 	Evidence           ValidationArtifactEvidenceRefs `json:"evidence,omitempty"`
 	Severity           string                         `json:"severity,omitempty"`
 	Confidence         string                         `json:"confidence,omitempty"`
+	PoC                *ValidationPoC                 `json:"poc,omitempty"`
+	PoCVerification    *ValidationPoCVerification     `json:"poc_verification,omitempty"`
 }
 
 const validationStatusValidated = "validated"
@@ -767,6 +790,9 @@ func BuildValidationResultPrompt(scan *corev1alpha1.RepositoryScan, finding *sto
 	prompt.WriteString("Use status=validated when the code path and validation strongly support the issue.\n")
 	prompt.WriteString("Use status=failed when the original claim does not hold after review or reproduction attempts.\n")
 	prompt.WriteString("Use status=skipped when the environment or safety constraints prevent meaningful validation.\n")
+	if scan != nil && scan.Spec.PoCExecution != nil {
+		prompt.WriteString("When status=validated and a deterministic command can reproduce the issue on the pinned commit, include validation.poc with harness (go-test, pytest, or sh), command (must exit non-zero on the vulnerable commit), optional control_command (must exit 0 for a benign control), and optional expected_exit_code (1-124). Orka will replay it independently in an egress-denied container.\n")
+	}
 	prompt.WriteString("If you create additional evidence or transcript artifacts, reference them in the evidence array.\n")
 	return prompt.String()
 }

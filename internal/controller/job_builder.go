@@ -482,7 +482,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	}
 
 	validationTask := opts.RepositoryMonitorValidation || isRepositoryMonitorValidationTask(task)
-	patchVerifyTask := isRepositoryScanPatchVerifyTask(task)
+	patchVerifyTask := isRepositoryScanPatchVerifyTask(task) || isRepositoryScanPoCVerifyTask(task)
 	confinedTask := validationTask || patchVerifyTask
 	readOnlyWorkspace := confinedTask
 	jobName := buildTaskJobName(task)
@@ -674,7 +674,7 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 				}
 				container.TerminationMessagePath = corev1.TerminationMessagePathDefault
 				container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
-			} else if isRepositoryScanPatchVerifyTask(task) {
+			} else if isRepositoryScanPatchVerifyTask(task) || isRepositoryScanPoCVerifyTask(task) {
 				wrapped := make([]string, 0, 1+len(container.Command)+len(container.Args))
 				wrapped = append(wrapped, repositoryMonitorValidationSandboxWorkerMode)
 				wrapped = append(wrapped, container.Command...)

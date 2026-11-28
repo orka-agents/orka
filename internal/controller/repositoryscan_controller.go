@@ -1751,7 +1751,7 @@ func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *c
 		if task.Status.Phase == corev1alpha1.TaskPhaseCancelled && !isScanPipelineStage(stage) {
 			continue
 		}
-		if stage == security.StagePatchVerify {
+		if stage == security.StagePatchVerify || stage == security.StagePoCVerify {
 			continue
 		}
 		if stage == security.StagePatch {
@@ -4763,6 +4763,18 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 			recordValidationError(finding, validationProblem)
 			validationMetricStatus = findingValidationStatusError
 		} else if artifact != nil {
+			if existing := preservedValidationPoCVerification(scan, finding, artifact); existing != nil {
+				artifact.PoCVerification = existing
+			} else {
+				pendingPoC, pocVerification, pocErr := r.evaluateControllerPoCVerification(ctx, scan, task, finding, artifact)
+				if pocErr != nil {
+					return pocErr
+				}
+				if pendingPoC {
+					return nil
+				}
+				artifact.PoCVerification = pocVerification
+			}
 			finding.ValidationStatus = strings.TrimSpace(artifact.Status)
 			validationMetricStatus = finding.ValidationStatus
 			data, err := json.Marshal(artifact)
