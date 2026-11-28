@@ -191,6 +191,10 @@ vet: ensure-ui-embed ## Run go vet against code.
 	go vet ./...
 	go -C $(STORAGE_MODULE) vet ./...
 
+.PHONY: notice
+notice: ensure-ui-embed ## Regenerate THIRD-PARTY-NOTICES.txt from ClearlyDefined license data.
+	go run ./cmd/build/notice
+
 
 .PHONY: repository-monitor-fake-e2e
 repository-monitor-fake-e2e: ensure-ui-embed ## Run fake-GitHub RepositoryMonitor issue-to-PR E2E scenarios
