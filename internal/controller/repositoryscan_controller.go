@@ -808,18 +808,9 @@ func (r *RepositoryScanReconciler) mapperCrossComponentEnv(ctx context.Context, 
 	default:
 		return nil, err
 	}
-	var variantInvestigations []security.SecurityInvestigation
-	if existingFindings, _, listErr := r.SecurityStore.ListFindings(ctx, store.FindingFilter{
-		Namespace:        scan.Namespace,
-		RepositoryScan:   scan.Name,
-		ValidationStatus: findingValidationStatusValidated,
-		Limit:            10,
-	}); listErr == nil {
-		for i := range existingFindings {
-			if inv, ok := security.BuildVariantInvestigation(&existingFindings[i]); ok {
-				variantInvestigations = append(variantInvestigations, inv)
-			}
-		}
+	variantInvestigations, err := r.collectVariantInvestigationsForRun(ctx, scan, run)
+	if err != nil {
+		return nil, err
 	}
 	investigations := combineMapperInvestigations(threatModelInvestigations, variantInvestigations)
 	if len(investigations) > 0 {
@@ -830,6 +821,62 @@ func (r *RepositoryScanReconciler) mapperCrossComponentEnv(ctx context.Context, 
 		env = append(env, corev1.EnvVar{Name: security.EnvInvestigations, Value: strings.ReplaceAll(string(data), "$", "$$")})
 	}
 	return env, nil
+}
+
+func (r *RepositoryScanReconciler) collectVariantInvestigationsForRun(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	run *store.ScanRun,
+) ([]security.SecurityInvestigation, error) {
+	if r.SecurityStore == nil || scan == nil || run == nil {
+		return nil, nil
+	}
+	targetScan, err := r.repositoryScanWithFrozenRunTarget(ctx, scan, run)
+	if err != nil {
+		targetScan = scan
+	}
+	target := trustedFindingsRepository(targetScan, run)
+	targetKey := security.FindingV2TargetKey(target.RepoURL, target.Branch, target.SubPath)
+	targetKeysByRun := make(map[string]findingRunTargetKey)
+	var variantInvestigations []security.SecurityInvestigation
+	cursor := ""
+	const maxVariantCandidates = 8
+	for len(variantInvestigations) < maxVariantCandidates {
+		page, next, listErr := r.SecurityStore.ListFindings(ctx, store.FindingFilter{
+			Namespace:        scan.Namespace,
+			RepositoryScan:   scan.Name,
+			ValidationStatus: findingValidationStatusValidated,
+			Limit:            50,
+			Cursor:           cursor,
+		})
+		if listErr != nil {
+			return nil, listErr
+		}
+		for i := range page {
+			candidate := page[i]
+			if findingUserFinalState(candidate.State) {
+				continue
+			}
+			matched, matchErr := r.findingTargetKeyMatches(ctx, targetScan, target, targetKey, &candidate, targetKeysByRun)
+			if matchErr != nil {
+				return nil, matchErr
+			}
+			if !matched {
+				continue
+			}
+			if inv, ok := security.BuildVariantInvestigation(&candidate); ok {
+				variantInvestigations = append(variantInvestigations, inv)
+				if len(variantInvestigations) >= maxVariantCandidates {
+					break
+				}
+			}
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	return variantInvestigations, nil
 }
 
 func combineMapperInvestigations(threatModel, variants []security.SecurityInvestigation) []security.SecurityInvestigation {
